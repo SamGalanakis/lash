@@ -1257,6 +1257,7 @@ async fn seed_runtime_state(
                     lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(
                         RlmGlobalsPatchPluginBody {
                             set,
+                            set_default: serde_json::Map::new(),
                             unset: Vec::new(),
                         },
                     )),
@@ -1330,6 +1331,7 @@ async fn prepare_turn(
             nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
                 lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(RlmGlobalsPatchPluginBody {
                     set,
+                    set_default: serde_json::Map::new(),
                     unset: Vec::new(),
                 })),
             ))],

@@ -978,6 +978,7 @@ fn build_globals_patch(question: &LongCoTQuestion) -> RlmGlobalsPatchPluginBody 
     );
     RlmGlobalsPatchPluginBody {
         set,
+        set_default: serde_json::Map::new(),
         unset: Vec::new(),
     }
 }

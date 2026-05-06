@@ -1570,6 +1570,7 @@ mod tests {
                     "topic".to_string(),
                     serde_json::json!("read-model"),
                 )]),
+                set_default: serde_json::Map::new(),
                 unset: Vec::new(),
             }),
         )));
@@ -1646,6 +1647,7 @@ mod tests {
                     "topic".to_string(),
                     serde_json::json!("chronology"),
                 )]),
+                set_default: serde_json::Map::new(),
                 unset: Vec::new(),
             }),
         )));

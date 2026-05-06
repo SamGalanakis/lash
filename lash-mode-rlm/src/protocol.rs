@@ -62,7 +62,7 @@ submit "The bound version is 0.2.61."
 
 "#;
 
-pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
+pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
 - Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
@@ -74,8 +74,22 @@ pub const LASHLANG_LANGUAGE_REFERENCE: &str = r#"### Language
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
+"#;
 
-### Builtins
+pub const LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION: &str = r#"### Language
+
+- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
+- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
+- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
+- Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
+- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
+- Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
+- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
+- Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
+- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
+"#;
+
+pub const LASHLANG_BUILTINS_SECTION: &str = r#"### Builtins
 
 Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
 
@@ -92,8 +106,28 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `json_parse(s)` — parse a JSON string into a value
 - `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format("It is {}.", trim(now.output))`, not `format("It is {}.", [trim(now.output)])`.
 - `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
+"#;
 
-### Common patterns
+pub const LASHLANG_BUILTINS_NO_IMAGES_SECTION: &str = r#"### Builtins
+
+Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bounds mean start/end; negative bounds count from the end.
+
+- `len(x)` — length of string/list/record (0 for null)
+- `empty(x)` — true if length is 0
+- `slice(s, start, end)` — substring or sublist
+- `range(end)` / `range(start, end)` — integer list, end-exclusive
+- `push(list, item)` — new list with one item appended
+- `split(s, sep)` / `join(list, sep)` — string split/join
+- `trim(s)` — strip whitespace
+- `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
+- `keys(record)` / `values(record)`
+- `to_string(x)` / `to_int(x)` / `to_float(x)`
+- `json_parse(s)` — parse a JSON string into a value
+- `format(template, arg0, arg1, ...)` — positional interpolation: `{}` auto-numbers, `{0}` / `{1}` pick a specific arg, `{{` / `}}` escape literal braces. Do not wrap args in a list: use `format("It is {}.", trim(now.output))`, not `format("It is {}.", [trim(now.output)])`.
+- `validate(value, Type { ... })` — check an intermediate value against a Type literal and return it unchanged, or abort with a validation error
+"#;
+
+pub const LASHLANG_COMMON_PATTERNS_SECTION: &str = r#"### Common patterns
 
 Tool-level errors are different from successful tool results that contain domain errors. `?` unwraps the lash tool wrapper and aborts the block only when the tool call itself failed:
 
@@ -132,8 +166,9 @@ if contains(to_string(second), "needs_more_work") {
   submit second
 }
 ```
+"#;
 
-### Type literals
+pub const LASHLANG_TYPE_LITERALS_SECTION: &str = r#"### Type literals
 
 `Type { field: shape, ... }` describes a record shape. Field separators are commas (trailing comma OK).
 
@@ -169,10 +204,53 @@ results = parallel { one: (await a)?, two: (await b)? }
 submit [results.one, results.two]
 ```"#;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RlmPromptFeatures {
+    pub images: bool,
+    pub common_patterns: bool,
+    pub type_literals: bool,
+    pub decomposition: bool,
+}
+
+impl Default for RlmPromptFeatures {
+    fn default() -> Self {
+        Self {
+            images: true,
+            common_patterns: true,
+            type_literals: true,
+            decomposition: true,
+        }
+    }
+}
+
 pub fn rlm_execution_section() -> String {
-    format!(
-        "{RLM_EXECUTION_SECTION}\n\n{LASHLANG_LANGUAGE_REFERENCE}\n\n{RLM_DECOMPOSITION_SECTION}"
-    )
+    rlm_execution_section_with_features(RlmPromptFeatures::default())
+}
+
+pub fn rlm_execution_section_with_features(features: RlmPromptFeatures) -> String {
+    let mut sections = Vec::new();
+    sections.push(RLM_EXECUTION_SECTION);
+    sections.push(if features.images {
+        LASHLANG_LANGUAGE_VALUES_SECTION
+    } else {
+        LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION
+    });
+    sections.push(if features.images {
+        LASHLANG_BUILTINS_SECTION
+    } else {
+        LASHLANG_BUILTINS_NO_IMAGES_SECTION
+    });
+    if features.common_patterns {
+        sections.push(LASHLANG_COMMON_PATTERNS_SECTION);
+    }
+    if features.type_literals {
+        sections.push(LASHLANG_TYPE_LITERALS_SECTION);
+    }
+    if features.decomposition {
+        sections.push(RLM_DECOMPOSITION_SECTION);
+    }
+    sections.join("\n\n")
 }
 
 pub struct RlmDriver;
@@ -457,9 +535,6 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                     text: rendered.clone(),
                     kind: "final".to_string(),
                 }));
-                actions.push(DriverAction::AppendEvents(vec![conversation_event(
-                    assistant_prose_message(rendered),
-                )]));
             }
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
@@ -659,10 +734,6 @@ fn combine_reasoning_and_text(reasoning: &str, text: &str) -> String {
     }
 }
 
-fn assistant_prose_message(content: String) -> Message {
-    prose_message(content, None)
-}
-
 fn internal_assistant_prose_message(content: String) -> Message {
     prose_message(
         content,
@@ -800,6 +871,21 @@ mod tests {
                 "core RLM prompt should not mention tool-specific example `{tool_name}`"
             );
         }
+    }
+
+    #[test]
+    fn execution_section_can_disable_image_guidance() {
+        let section = rlm_execution_section_with_features(RlmPromptFeatures {
+            images: false,
+            ..RlmPromptFeatures::default()
+        });
+
+        assert!(!section.contains("Image"));
+        assert!(!section.contains("image.size"));
+        assert!(section.contains("### Language"));
+        assert!(section.contains("### Builtins"));
+        assert!(section.contains("### Common patterns"));
+        assert!(section.contains("### Type literals"));
     }
 
     #[test]

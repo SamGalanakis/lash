@@ -102,13 +102,15 @@ pub enum RlmHistoryItem {
 pub struct RlmGlobalsPatchPluginBody {
     #[serde(default)]
     pub set: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub set_default: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub unset: Vec<String>,
 }
 
 impl RlmGlobalsPatchPluginBody {
     pub fn is_empty(&self) -> bool {
-        self.set.is_empty() && self.unset.is_empty()
+        self.set.is_empty() && self.set_default.is_empty() && self.unset.is_empty()
     }
 }
 
@@ -232,10 +234,15 @@ mod tests {
                 ("alpha".to_string(), serde_json::json!(1)),
                 ("beta".to_string(), serde_json::json!("old")),
             ]),
+            set_default: serde_json::Map::new(),
             unset: Vec::new(),
         };
         let second = RlmGlobalsPatchPluginBody {
             set: serde_json::Map::from_iter([("beta".to_string(), serde_json::json!("new"))]),
+            set_default: serde_json::Map::from_iter([(
+                "executor_only".to_string(),
+                serde_json::json!("ignored by projection"),
+            )]),
             unset: vec!["alpha".to_string()],
         };
         let entry = RlmTrajectoryEntry {

@@ -186,7 +186,11 @@ fn resolve_rlm_globals_patch(
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
 
-    let patch = lash_rlm_types::RlmGlobalsPatchPluginBody { set, unset };
+    let patch = lash_rlm_types::RlmGlobalsPatchPluginBody {
+        set,
+        set_default: serde_json::Map::new(),
+        unset,
+    };
     if patch.is_empty() {
         return Ok(None);
     }

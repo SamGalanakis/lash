@@ -8,7 +8,7 @@ use lash::plugin::{
 };
 use lash::session_model::context::PreparedContext;
 use lash::{
-    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError, SessionToolAccess,
+    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
     ToolResultProjectionPluginConfig,
 };
 use lash_rlm_types::RlmCreateExtras;
@@ -26,6 +26,8 @@ const BUDGET_WARNING_STATUS: &str = "rlm_context_budget_warning";
 #[serde(default)]
 pub struct RlmModePluginConfig {
     pub observe_projection: ToolResultProjectionPluginConfig,
+    #[serde(default)]
+    pub prompt_features: crate::protocol::RlmPromptFeatures,
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
     #[serde(default = "default_continue_as_soft_warn_tokens")]
@@ -44,6 +46,7 @@ impl Default for RlmModePluginConfig {
     fn default() -> Self {
         Self {
             observe_projection: ToolResultProjectionPluginConfig::default(),
+            prompt_features: crate::protocol::RlmPromptFeatures::default(),
             max_output_chars: default_max_output_chars(),
             continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
         }
@@ -75,7 +78,6 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
         Ok(Arc::new(RlmModePlugin {
             active: ctx.execution_mode == ExecutionMode::new("rlm"),
             config: self.config.clone(),
-            tool_access: ctx.tool_access.clone(),
             last_prompt_usage: Arc::new(RwLock::new(None)),
         }))
     }
@@ -84,7 +86,6 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 struct RlmModePlugin {
     active: bool,
     config: RlmModePluginConfig,
-    tool_access: SessionToolAccess,
     last_prompt_usage: SharedPromptUsage,
 }
 
@@ -127,13 +128,6 @@ impl SessionPlugin for RlmModePlugin {
             }),
         );
 
-        let control_contributions = crate::control_tools::prompt_contributions(&self.tool_access);
-        let control_hook: lash::plugin::PromptContributor = Arc::new(move |_ctx| {
-            let contributions = control_contributions.clone();
-            Box::pin(async move { Ok(contributions) })
-        });
-        reg.prompt().contribute(control_hook);
-
         let warn_session = mode_session.clone();
         reg.turn().checkpoint(Arc::new(move |ctx| {
             let session = warn_session.clone();
@@ -162,6 +156,7 @@ impl ModeProtocolDriverPlugin for RlmProtocolDriver {
                 max_output_chars: self.config.max_output_chars,
                 max_budget_tokens: self.config.continue_as_soft_warn_tokens,
                 last_prompt_usage: Arc::clone(&self.last_prompt_usage),
+                prompt_features: self.config.prompt_features,
             },
         )
     }
@@ -259,15 +254,25 @@ impl ModeSessionPlugin for RlmModeSession {
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+        let read_view = state.read_view();
+        let projected_globals = read_view.shared_rlm_globals();
         if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
             execution.restore_execution_state(&snapshot)?;
+            execution.prune_projected_globals(projected_globals.as_ref());
         }
         for event in state.read_view().active_events() {
             if let lash::SessionEventRecord::Mode(event) = event
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     event.rlm_event()
             {
-                execution.patch_globals(&patch)?;
+                execution.prune_projected_names(
+                    patch
+                        .set
+                        .keys()
+                        .map(String::as_str)
+                        .chain(patch.unset.iter().map(String::as_str)),
+                );
+                execution.patch_globals(&patch, projected_globals.as_ref())?;
             }
         }
         Ok(())
@@ -275,13 +280,14 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn append_session_nodes(
         &self,
-        _ctx: ModeSessionContext<'_>,
+        ctx: ModeSessionContext<'_>,
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
         let mut execution = self.execution.lock().await;
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
+        execution.prune_projected_globals(ctx.projected_rlm_globals());
         for node in nodes {
             if let lash::SessionAppendNode::Event {
                 event: lash::SessionEventRecord::Mode(event),
@@ -289,7 +295,14 @@ impl ModeSessionPlugin for RlmModeSession {
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     event.rlm_event()
             {
-                execution.patch_globals(&patch)?;
+                execution.prune_projected_names(
+                    patch
+                        .set
+                        .keys()
+                        .map(String::as_str)
+                        .chain(patch.unset.iter().map(String::as_str)),
+                );
+                execution.patch_globals(&patch, ctx.projected_rlm_globals())?;
             }
         }
         Ok(())

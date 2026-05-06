@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    PluginSpec, PluginSpecFactory, ProgressSender, PromptContribution, SessionToolAccess,
-    ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    PluginSpec, PluginSpecFactory, ProgressSender, ToolDefinition, ToolExecutionContext,
+    ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -23,21 +23,11 @@ impl PluginFactory for LlmToolsPluginFactory {
         let is_rlm = ctx.execution_mode == lash::ExecutionMode::new("rlm");
         let provider: Option<Arc<dyn ToolProvider>> =
             is_rlm.then(|| Arc::new(LlmToolsProvider) as Arc<dyn ToolProvider>);
-        let prompt_contributions =
-            if is_rlm && tool_callable_from_authority(&ctx.tool_access, "llm_query") {
-                llm_prompt_contributions()
-            } else {
-                Vec::new()
-            };
 
         PluginSpecFactory::new(
             "llm_tools",
             Arc::new(move |_ctx| {
-                let contributions = prompt_contributions.clone();
-                let mut spec = PluginSpec::new().with_prompt_contributor(Arc::new(move |_ctx| {
-                    let contributions = contributions.clone();
-                    Box::pin(async move { Ok(contributions) })
-                }));
+                let mut spec = PluginSpec::new();
                 if let Some(provider) = provider.as_ref() {
                     spec = spec.with_tool_provider(Arc::clone(provider));
                 }
@@ -206,20 +196,6 @@ fn llm_query_input_schema() -> Value {
         "required": ["task"],
         "additionalProperties": false
     })
-}
-
-fn llm_prompt_contributions() -> Vec<PromptContribution> {
-    vec![PromptContribution::guidance(
-        "LLM tools",
-        "Use `llm_query` when you already have the relevant data in variables and need one semantic pass over it: extract information, classify, summarize, judge, or transform. Its `task` and `inputs` become a single prompt; it has no tools or follow-up loop. Shape it as `call llm_query { task: \"...\", inputs: { text: chunk }, output: { answer: \"str\" } }`. Omit `output` for plain text.",
-    )]
-}
-
-fn tool_callable_from_authority(access: &SessionToolAccess, name: &str) -> bool {
-    if access.hides(name) {
-        return false;
-    }
-    access.tools.is_empty() || access.tools.iter().any(|tool| tool.name == name)
 }
 
 fn llm_query_prompt(task: &str, inputs: &Value, output_schema: Option<&Value>) -> String {

@@ -16,7 +16,7 @@
 //! projection's tool-call payloads are the canonical view (args + result +
 //! duration + status).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
@@ -635,26 +635,30 @@ fn compute_prompt_insertions(
         .any(|e| matches!(e.payload, ChronologicalPayload::RlmStep(_)));
 
     if has_rlm_steps {
-        let by_iteration: HashMap<u64, usize> = prompts
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, p)| p.iteration.map(|it| (it, idx)))
-            .collect();
+        let mut by_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
+        for (idx, prompt) in prompts.iter().enumerate() {
+            if let Some(iteration) = prompt.iteration {
+                by_iteration.entry(iteration).or_default().push_back(idx);
+            }
+        }
 
         // Iteration 0's prompt was sent to the model alongside the
         // initial user message, so anchor it to that user message
         // rather than to the iteration's first tool/rlm output —
         // otherwise the user message would appear *above* the prompt
         // that contextualised it.
+        let mut initial_user_anchor_iteration = None;
         let first_user_idx = chronological.iter().position(|e| {
             matches!(&e.payload, ChronologicalPayload::Message(m)
                 if matches!(m.role, MessageRole::User) && !m.is_transient())
         });
-        if let (Some(idx), Some(&pi)) = (first_user_idx, by_iteration.get(&0))
+        if let (Some(idx), Some(queue)) = (first_user_idx, by_iteration.get_mut(&0))
+            && let Some(pi) = queue.pop_front()
             && !consumed[pi]
         {
             before_index[idx].push(pi);
             consumed[pi] = true;
+            initial_user_anchor_iteration = Some(0);
         }
 
         let mut run_start: Option<usize> = None;
@@ -667,11 +671,18 @@ fn compute_prompt_insertions(
                 }
                 ChronologicalPayload::RlmStep(step) => {
                     let begin = run_start.unwrap_or(i);
-                    if let Some(&pi) = by_iteration.get(&(step.iteration as u64))
-                        && !consumed[pi]
-                    {
-                        before_index[begin].push(pi);
-                        consumed[pi] = true;
+                    let iteration = step.iteration as u64;
+                    if initial_user_anchor_iteration == Some(iteration) {
+                        initial_user_anchor_iteration = None;
+                    } else if let Some(queue) = by_iteration.get_mut(&iteration) {
+                        while let Some(pi) = queue.pop_front() {
+                            if consumed[pi] {
+                                continue;
+                            }
+                            before_index[begin].push(pi);
+                            consumed[pi] = true;
+                            break;
+                        }
                     }
                     run_start = None;
                 }
@@ -2176,8 +2187,68 @@ const JS: &str = include_str!("html_assets/script.js");
 mod tests {
     use super::*;
     use crate::trace::{LlmCallUsage, LlmPromptSnapshot, RequestMessage};
+    use lash::session_model::{Part, PartKind, PruneState, shared_parts};
     use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
     use std::path::PathBuf;
+
+    fn prompt_snapshot(iteration: u64, text: &str) -> LlmPromptSnapshot {
+        LlmPromptSnapshot {
+            iteration: Some(iteration),
+            llm_call_id: Some(format!("root:{iteration}")),
+            timestamp: None,
+            model: Some("gpt-test".to_string()),
+            model_variant: None,
+            system_text: "You are lash.".to_string(),
+            system_chars: 13,
+            system_hash: "abc123".to_string(),
+            message_count: 2,
+            total_chars: 13 + text.chars().count(),
+            request_messages: vec![RequestMessage {
+                role: "user".to_string(),
+                text: text.to_string(),
+                chars: text.chars().count(),
+            }],
+            request_chars: text.chars().count(),
+            request_hash: text.to_string(),
+            usage: None,
+        }
+    }
+
+    fn user_message(id: &str, text: &str) -> lash::session_model::Message {
+        lash::session_model::Message {
+            id: id.to_string(),
+            role: lash::session_model::MessageRole::User,
+            parts: shared_parts(vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: text.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_item_id: None,
+                tool_signature: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            user_input: None,
+            origin: None,
+        }
+    }
+
+    fn rlm_step(iteration: usize, id: &str) -> RlmTrajectoryEntry {
+        RlmTrajectoryEntry {
+            id: id.to_string(),
+            iteration,
+            reasoning: "thinking".to_string(),
+            code: "x = 1".to_string(),
+            output: vec!["1".to_string()],
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            error: None,
+            final_output: None,
+        }
+    }
 
     #[test]
     fn html_export_renders_chronological_tool_and_rlm_step() {
@@ -2186,17 +2257,7 @@ mod tests {
             chronological: vec![
                 ChronologicalEntry {
                     index: 0,
-                    payload: ChronologicalPayload::RlmStep(RlmTrajectoryEntry {
-                        id: "rlm_step_0".to_string(),
-                        iteration: 0,
-                        reasoning: "thinking".to_string(),
-                        code: "x = 1".to_string(),
-                        output: vec!["1".to_string()],
-                        tool_calls: Vec::new(),
-                        images: Vec::new(),
-                        error: None,
-                        final_output: None,
-                    }),
+                    payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_0")),
                 },
                 ChronologicalEntry {
                     index: 1,
@@ -2223,12 +2284,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_rlm_trace_iterations_are_anchored_in_prompt_order() {
+        let chronological = vec![
+            ChronologicalEntry {
+                index: 0,
+                payload: ChronologicalPayload::Message(user_message("m0", "turn 1")),
+            },
+            ChronologicalEntry {
+                index: 1,
+                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_0")),
+            },
+            ChronologicalEntry {
+                index: 2,
+                payload: ChronologicalPayload::Message(user_message("m1", "turn 2")),
+            },
+            ChronologicalEntry {
+                index: 3,
+                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_1")),
+            },
+            ChronologicalEntry {
+                index: 4,
+                payload: ChronologicalPayload::Message(user_message("m2", "turn 3")),
+            },
+            ChronologicalEntry {
+                index: 5,
+                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_2")),
+            },
+        ];
+        let prompts = vec![
+            prompt_snapshot(0, "request 1"),
+            prompt_snapshot(0, "request 2"),
+            prompt_snapshot(0, "request 3"),
+        ];
+
+        let insertions = compute_prompt_insertions(&chronological, &prompts);
+
+        assert_eq!(insertions.before_index[0], vec![0]);
+        assert_eq!(insertions.before_index[1], Vec::<usize>::new());
+        assert_eq!(insertions.before_index[3], vec![1]);
+        assert_eq!(insertions.before_index[5], vec![2]);
+        assert!(insertions.trailing.is_empty());
+    }
+
+    #[test]
     fn tool_calls_are_deduped_between_message_part_and_chronological_entry() {
         // The chronological projection emits both an assistant Message
         // containing a ToolCall part and a separate ToolCall entry. The
         // canonical record (with result + duration) should render once.
-        use lash::session_model::{Part, PartKind, PruneState, shared_parts};
-
         let tool_part = Part {
             id: "m0.p0".to_string(),
             kind: PartKind::ToolCall,
@@ -2294,9 +2396,6 @@ mod tests {
             chronological: vec![ChronologicalEntry {
                 index: 0,
                 payload: ChronologicalPayload::RlmStep(RlmTrajectoryEntry {
-                    id: "rlm_step_0".to_string(),
-                    iteration: 0,
-                    reasoning: "checking".to_string(),
                     code: "data = (call lookup { q: \"x\" })?".to_string(),
                     output: Vec::new(),
                     tool_calls: vec![ToolCallRecord {
@@ -2307,9 +2406,7 @@ mod tests {
                         success: true,
                         duration_ms: 4,
                     }],
-                    images: Vec::new(),
-                    error: None,
-                    final_output: None,
+                    ..rlm_step(0, "rlm_step_0")
                 }),
             }],
             trace_path: PathBuf::from("session.trace.jsonl"),
@@ -2332,23 +2429,6 @@ mod tests {
             trace_path: PathBuf::from("session.trace.jsonl"),
             context_window_tokens: Some(100_000),
             llm_prompts: vec![LlmPromptSnapshot {
-                iteration: Some(0),
-                llm_call_id: Some("root:0".to_string()),
-                timestamp: None,
-                model: Some("gpt-test".to_string()),
-                model_variant: None,
-                system_text: "You are lash.".to_string(),
-                system_chars: 13,
-                system_hash: "abc123".to_string(),
-                message_count: 2,
-                total_chars: 15,
-                request_messages: vec![RequestMessage {
-                    role: "user".to_string(),
-                    text: "hi".to_string(),
-                    chars: 2,
-                }],
-                request_chars: 2,
-                request_hash: "def456".to_string(),
                 usage: Some(LlmCallUsage {
                     input_tokens: 10_000,
                     output_tokens: 250,
@@ -2356,6 +2436,7 @@ mod tests {
                     reasoning_tokens: 125,
                     duration_ms: Some(3000),
                 }),
+                ..prompt_snapshot(0, "hi")
             }],
         };
 

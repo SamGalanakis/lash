@@ -2,22 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use lash::PromptContribution;
-use lash::plugin::{ModeSessionContext, PromptHookContext};
-use lash::{PromptUsage, SessionAppendNode, SessionError};
-
-pub async fn restore_execution_state_and_globals(
-    _ctx: &mut ModeSessionContext<'_>,
-    _state: &lash::runtime::PersistedSessionState,
-) -> Result<(), SessionError> {
-    Ok(())
-}
-
-pub async fn apply_globals_patch_nodes(
-    _ctx: &mut ModeSessionContext<'_>,
-    _nodes: &[SessionAppendNode],
-) -> Result<(), SessionError> {
-    Ok(())
-}
+use lash::PromptUsage;
+use lash::plugin::PromptHookContext;
 
 /// Render the "Context Budget" line for the volatile turn-tail message.
 /// Returns the formatted text (status line + optional escalation tail)
@@ -68,12 +54,6 @@ pub(crate) fn budget_prompt_contributions(
         Some(content) => vec![PromptContribution::environment("Context Budget", content)],
         None => Vec::new(),
     }
-}
-
-pub fn bound_variables_prompt_contributions(ctx: &PromptHookContext) -> Vec<PromptContribution> {
-    let globals = ctx.state.shared_rlm_globals();
-    let history_len = ctx.state.rlm_history_len();
-    vec![render_bound_variables(&globals, history_len)]
 }
 
 /// Memoizes the rendered "Bound Variables" `PromptContribution`. The

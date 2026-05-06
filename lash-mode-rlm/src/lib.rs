@@ -15,9 +15,7 @@ pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use protocol::{
-    LASHLANG_LANGUAGE_REFERENCE, RlmDriver, contains_closed_lashlang_fence, rlm_execution_section,
+    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
+    rlm_execution_section_with_features,
 };
-pub use rlm_support::{
-    BoundVariablesCache, apply_globals_patch_nodes, bound_variables_prompt_contributions,
-    format_budget_suffix, restore_execution_state_and_globals,
-};
+pub use rlm_support::{BoundVariablesCache, format_budget_suffix};
