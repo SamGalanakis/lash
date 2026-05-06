@@ -51,6 +51,22 @@ pub trait ModeSessionPlugin: Send + Sync {
         Ok(())
     }
 
+    async fn apply_session_extension(
+        &self,
+        _extension: crate::ModeSessionExtensionHandle,
+    ) -> Result<(), crate::SessionError> {
+        Err(crate::SessionError::Protocol(
+            "execution mode does not accept session extensions".to_string(),
+        ))
+    }
+
+    async fn validate_turn_extension(
+        &self,
+        _extension: &crate::ModeTurnExtensionHandle,
+    ) -> Result<(), crate::SessionError> {
+        Ok(())
+    }
+
     async fn execute_code(
         &self,
         _ctx: ModeExecutionContext,

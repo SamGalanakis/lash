@@ -186,13 +186,13 @@ pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
-    ManagedTaskStatus, ModeTurnSidecar, ModeTurnSidecarHandle, NoopEventSink, OutputState,
-    ParkedSession, PathResolver, PersistedSessionState, PromptUsage, Residency, RunMode,
-    RuntimeCoreConfig, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError,
-    SanitizerPolicy, SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory,
-    SessionTaskExecutor, SessionUsageReport, TerminationPolicy, TokenLedgerEntry,
-    TokioSessionTaskExecutor, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,
-    diff_usage_reports,
+    ManagedTaskStatus, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
+    ModeTurnExtensionHandle, NoopEventSink, OutputState, ParkedSession, PathResolver,
+    PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
+    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{

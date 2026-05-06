@@ -15,7 +15,7 @@ use lashlang::{
 };
 use serde_json::{Value, json};
 
-use crate::projected_bindings::RlmProjectionSidecar;
+use crate::projected_bindings::{RlmProjectedBindings, RlmProjectionExtension};
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
@@ -121,10 +121,18 @@ pub async fn execute_code(
     mut state: RlmExecutionState,
     ctx: ModeExecutionContext,
     request: ExecRequest,
+    session_projected_bindings: RlmProjectedBindings,
 ) -> Result<(RlmExecutionState, ExecResponse), SessionError> {
     let start = std::time::Instant::now();
     let clean_code = clean_model_code(&request.code);
-    let response = execute_code_inner(&mut state, ctx, &clean_code, start).await;
+    let response = execute_code_inner(
+        &mut state,
+        ctx,
+        &clean_code,
+        start,
+        session_projected_bindings,
+    )
+    .await;
     Ok((state, response))
 }
 
@@ -147,6 +155,7 @@ async fn execute_code_inner(
     ctx: ModeExecutionContext,
     code: &str,
     start: std::time::Instant,
+    session_projected_bindings: RlmProjectedBindings,
 ) -> ExecResponse {
     state.dirty = true;
     let compiled = match state.program_cache.get_or_compile(code) {
@@ -166,7 +175,7 @@ async fn execute_code_inner(
         }
     };
 
-    let projected = match projected_bindings(&ctx) {
+    let projected = match projected_bindings(&ctx, session_projected_bindings) {
         Ok(projected) => projected,
         Err(err) => {
             return ExecResponse {
@@ -239,22 +248,11 @@ async fn execute_code_inner(
     }
 }
 
-fn projected_bindings(ctx: &ModeExecutionContext) -> Result<ProjectedBindings, String> {
+fn projected_bindings(
+    ctx: &ModeExecutionContext,
+    session_bindings: RlmProjectedBindings,
+) -> Result<ProjectedBindings, String> {
     let mut bindings = ProjectedBindings::new();
-    if let Some(sidecar) = ctx.mode_sidecar::<RlmProjectionSidecar>() {
-        let host_bindings = sidecar.bindings.clone().into_projected_bindings();
-        for name in host_bindings.names().collect::<Vec<_>>() {
-            let value = host_bindings
-                .get(&name)
-                .expect("name came from projected bindings");
-            bindings.try_insert(name, value).map_err(|err| {
-                format!(
-                    "`{}` is already bound as an RLM projected binding",
-                    err.name()
-                )
-            })?;
-        }
-    }
     bindings
         .try_insert(
             "history",
@@ -266,7 +264,30 @@ fn projected_bindings(ctx: &ModeExecutionContext) -> Result<ProjectedBindings, S
             ),
         )
         .map_err(|err| format!("`{}` is reserved as an RLM built-in binding", err.name()))?;
+    insert_projected_bindings(&mut bindings, session_bindings)?;
+    if let Some(extension) = ctx.mode_extension::<RlmProjectionExtension>() {
+        insert_projected_bindings(&mut bindings, extension.bindings.clone())?;
+    }
     Ok(bindings)
+}
+
+fn insert_projected_bindings(
+    target: &mut ProjectedBindings,
+    bindings: RlmProjectedBindings,
+) -> Result<(), String> {
+    let host_bindings = bindings.into_projected_bindings();
+    for name in host_bindings.names().collect::<Vec<_>>() {
+        let value = host_bindings
+            .get(&name)
+            .expect("name came from projected bindings");
+        target.try_insert(name, value).map_err(|err| {
+            format!(
+                "`{}` is already bound as an RLM projected binding",
+                err.name()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 struct HistoryProjectedValue {

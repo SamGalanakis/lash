@@ -15,7 +15,9 @@ mod stream_mask;
 pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
-pub use projected_bindings::{RlmProjectedBindings, RlmTurnInputExt};
+pub use projected_bindings::{
+    RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
+};
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
     rlm_execution_section_with_features,

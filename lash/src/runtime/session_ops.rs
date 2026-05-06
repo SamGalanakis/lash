@@ -92,6 +92,32 @@ impl LashRuntime {
         })
     }
 
+    pub async fn apply_mode_session_extension(
+        &mut self,
+        extension: crate::ModeSessionExtensionHandle,
+    ) -> Result<(), SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session is not available".to_string(),
+            ));
+        };
+        let mode_session = Arc::clone(session.plugins().mode_session());
+        mode_session.apply_session_extension(extension).await
+    }
+
+    pub async fn validate_mode_turn_extension(
+        &mut self,
+        extension: &crate::ModeTurnExtensionHandle,
+    ) -> Result<(), SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session is not available".to_string(),
+            ));
+        };
+        let mode_session = Arc::clone(session.plugins().mode_session());
+        mode_session.validate_turn_extension(extension).await
+    }
+
     pub async fn branch_to_node(
         &mut self,
         node_id: Option<String>,

@@ -604,6 +604,7 @@ async fn summarize_compaction_prefix(
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
+                mode_extension: None,
             },
         )
         .await;
