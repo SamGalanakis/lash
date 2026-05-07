@@ -8,6 +8,7 @@ use super::*;
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
     dynamic_tools_enabled: bool,
+    background_tasks_available: bool,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -44,8 +45,19 @@ impl PluginHost {
         Self {
             factories: Arc::new(all_factories),
             dynamic_tools_enabled: false,
+            background_tasks_available: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn with_background_tasks(mut self) -> Self {
+        self.background_tasks_available = true;
+        self
+    }
+
+    pub fn with_background_tasks_available(mut self, available: bool) -> Self {
+        self.background_tasks_available = available;
+        self
     }
 
     pub fn with_dynamic_tools(mut self) -> Self {
@@ -57,6 +69,7 @@ impl PluginHost {
         Self {
             factories: Arc::clone(&self.factories),
             dynamic_tools_enabled: self.dynamic_tools_enabled,
+            background_tasks_available: self.background_tasks_available,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
@@ -222,6 +235,7 @@ impl PluginHost {
             standard_context_approach: standard_context_approach.clone(),
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
+            background_tasks_available: self.background_tasks_available,
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();

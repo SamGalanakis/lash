@@ -23,7 +23,8 @@ pub use lash::{
     AttachmentStore, InputItem, Message, ModeTurnOptions, PluginFactory, ProviderHandle, Residency,
     RuntimeError, RuntimePersistence, SanitizerPolicy, SessionError, SessionReadView,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, StandardContextApproach,
-    TerminationPolicy, TokenUsage, ToolCallRecord, ToolProvider, TurnIssue, TurnOutcome,
+    TerminationPolicy, TokioSessionTaskExecutor, TokenUsage, ToolCallRecord, ToolProvider,
+    TurnIssue, TurnOutcome,
 };
 pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
@@ -323,8 +324,12 @@ impl LashCoreBuilder {
         }
         factories.extend(self.plugin_factories);
 
-        let mut env_builder =
-            RuntimeEnvironment::builder().with_plugin_host(Arc::new(PluginHost::new(factories)));
+        let executor = self
+            .session_task_executor
+            .unwrap_or_else(|| Arc::new(TokioSessionTaskExecutor::default()));
+        let mut env_builder = RuntimeEnvironment::builder()
+            .with_plugin_host(Arc::new(PluginHost::new(factories).with_background_tasks()))
+            .with_session_task_executor(executor);
         if let Some(attachment_store) = self.attachment_store {
             env_builder = env_builder.with_attachment_store(attachment_store);
         }
@@ -339,9 +344,6 @@ impl LashCoreBuilder {
         }
         if let Some(residency) = self.residency {
             env_builder = env_builder.with_residency(residency);
-        }
-        if let Some(executor) = self.session_task_executor {
-            env_builder = env_builder.with_session_task_executor(executor);
         }
         if let Some(base_dir) = self.base_dir {
             env_builder = env_builder.with_base_dir(base_dir);

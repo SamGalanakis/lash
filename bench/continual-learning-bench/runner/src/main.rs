@@ -279,6 +279,7 @@ fn build_plugin_session(
         )),
     ];
     PluginHost::new(factories)
+        .with_background_tasks()
         .build_session(
             "root",
             execution_mode,

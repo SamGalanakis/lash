@@ -415,6 +415,7 @@ mod tests {
             standard_context_approach: Some(lash::StandardContextApproach::default()),
             tool_access: lash::SessionToolAccess::default(),
             subagent: None,
+            background_tasks_available: false,
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
@@ -423,6 +424,7 @@ mod tests {
             standard_context_approach: Some(lash::StandardContextApproach::default()),
             tool_access: lash::SessionToolAccess::default(),
             subagent: None,
+            background_tasks_available: false,
             parent_session_id: Some("root".into()),
         };
         assert!(root_ctx.is_root_session());

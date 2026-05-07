@@ -162,7 +162,11 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl RuntimeEnvironmentBuilder {
     pub fn with_plugin_host(mut self, host: Arc<crate::PluginHost>) -> Self {
-        self.env.plugin_host = Some(host);
+        self.env.plugin_host = Some(if self.env.session_task_executor.is_some() {
+            Arc::new(host.as_ref().clone().with_background_tasks())
+        } else {
+            host
+        });
         self
     }
 
@@ -173,6 +177,9 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_session_task_executor(mut self, executor: Arc<dyn SessionTaskExecutor>) -> Self {
         self.env.session_task_executor = Some(executor);
+        if let Some(host) = self.env.plugin_host.take() {
+            self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_background_tasks()));
+        }
         self
     }
 

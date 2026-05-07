@@ -73,7 +73,11 @@ impl EmbeddedRuntimeBuilder {
     }
 
     pub fn with_plugin_host(mut self, plugin_host: PluginHost) -> Self {
-        self.plugin_source = PluginSource::Host(plugin_host);
+        self.plugin_source = PluginSource::Host(if self.session_task_executor.is_some() {
+            plugin_host.with_background_tasks()
+        } else {
+            plugin_host
+        });
         self
     }
 
@@ -83,7 +87,12 @@ impl EmbeddedRuntimeBuilder {
     }
 
     pub fn with_plugin_factories(mut self, factories: Vec<Arc<dyn PluginFactory>>) -> Self {
-        self.plugin_source = PluginSource::Host(PluginHost::new(factories));
+        let host = PluginHost::new(factories);
+        self.plugin_source = PluginSource::Host(if self.session_task_executor.is_some() {
+            host.with_background_tasks()
+        } else {
+            host
+        });
         self
     }
 
@@ -173,6 +182,9 @@ impl EmbeddedRuntimeBuilder {
         session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Self {
         self.session_task_executor = Some(session_task_executor);
+        if let PluginSource::Host(host) = &mut self.plugin_source {
+            *host = host.clone().with_background_tasks();
+        }
         self
     }
 
@@ -311,6 +323,9 @@ impl EmbeddedRuntimeBuilder {
     pub async fn build_ephemeral(mut self) -> Result<LashRuntime, SessionError> {
         self.store = None;
         self.session_task_executor = None;
+        if let PluginSource::Host(host) = &mut self.plugin_source {
+            *host = host.clone().with_background_tasks_available(false);
+        }
         self.build().await
     }
 
@@ -320,6 +335,9 @@ impl EmbeddedRuntimeBuilder {
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);
         self.session_task_executor = None;
+        if let PluginSource::Host(host) = &mut self.plugin_source {
+            *host = host.clone().with_background_tasks_available(false);
+        }
         self.build().await
     }
 
@@ -329,7 +347,7 @@ impl EmbeddedRuntimeBuilder {
         session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);
-        self.session_task_executor = Some(session_task_executor);
+        self = self.with_session_task_executor(session_task_executor);
         self.build().await
     }
 }
