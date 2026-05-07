@@ -41,7 +41,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.105"
+version = "0.2.106"
 license = "MIT"
 
 [profile.release]
