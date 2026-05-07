@@ -1,10 +1,7 @@
-# OpenRouter Chat UI
+# RLM Plugin Chat UI
 
-SQLite-backed localhost chat example for `lash-embed`.
-
-The app owns the web server, browser protocol, chat list, message table, and
-SQLite files. Lash owns turn execution through `LashCore` and per-chat runtime
-state through a `SessionStoreFactory`.
+SQLite-backed localhost chat example for `lash-embed`, RLM mode, and typed
+session plugins.
 
 Run it:
 
@@ -21,3 +18,26 @@ OPENROUTER_CHAT_DATA_DIR=.openrouter-chat-ui
 ```
 
 Then open `http://127.0.0.1:3000`.
+
+The app installs RLM explicitly with `ModePreset::rlm()`, registers
+`DemoPlugin` on `LashCore`, and activates it per chat session with
+`SessionBuilder::use_plugin::<DemoPlugin>(...)`.
+
+The plugin demonstrates:
+
+- Typed session activation through `EmbedPlugin::SessionConfig`.
+- Typed per-turn UI inputs through `DemoTurnInput`.
+- A required `DemoPageContext` turn input validated by `TurnBuilder::run()`.
+- An optional `Tone` value selected by the composer.
+- A `demo_lookup` tool that reads the same typed turn context from
+  `ToolExecutionContext`.
+- Prompt contribution that reflects the selected tone and page context.
+
+In lashlang, the model can call the demo tool with:
+
+```lashlang
+call demo_lookup { "query": "current page" }
+```
+
+The browser streams assistant prose from `TurnEvent::TextDelta`, renders tool
+calls as compact cards, and persists only `TurnResult.final_text`.

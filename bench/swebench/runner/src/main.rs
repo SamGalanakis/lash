@@ -678,6 +678,7 @@ async fn run_instance(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
+                turn_context: lash::TurnContext::default(),
             },
             sink_trait.as_ref(),
             cancel,

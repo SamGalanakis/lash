@@ -137,6 +137,50 @@ pub struct TurnInput {
     pub trace_turn_id: Option<String>,
     #[serde(skip)]
     pub mode_extension: Option<ModeTurnExtensionHandle>,
+    #[serde(skip)]
+    pub turn_context: TurnContext,
+}
+
+#[derive(Clone, Default)]
+pub struct TurnContext {
+    plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+}
+
+impl TurnContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_plugin_input<T>(&mut self, plugin_id: &'static str, input: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.plugin_inputs.insert(plugin_id, Arc::new(input));
+    }
+
+    pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
+    where
+        T: 'static,
+    {
+        self.plugin_inputs
+            .get(plugin_id)
+            .and_then(|input| input.downcast_ref::<T>())
+    }
+
+    pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
+        self.plugin_inputs.contains_key(plugin_id)
+    }
+}
+
+impl fmt::Debug for TurnContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TurnContext")
+            .field(
+                "plugin_inputs",
+                &self.plugin_inputs.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]

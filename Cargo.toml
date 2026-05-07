@@ -32,7 +32,6 @@ members = [
     "lash-export",
     "lash-file-index",
     "lashlang",
-    "examples/mock-chat-service",
     "examples/openrouter-chat-ui",
     "bench/longcot/runner",
     "bench/longmemeval-rlm/runner",

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use lash::{
     ModeSessionExtension, ModeTurnExtension, ModeTurnExtensionHandle, PromptContribution, TurnInput,
 };
+
+pub(crate) const RLM_TURN_CONTEXT_PLUGIN_ID: &str = "rlm";
 use lashlang::{
     ProjectedBindingError, ProjectedBindings, ProjectedHostValue, ProjectedValue,
     Value as FlowValue,
@@ -153,18 +155,25 @@ impl RlmTurnInputExt for TurnInput {
         mut self,
         bindings: RlmProjectedBindings,
     ) -> Result<Self, ProjectedBindingError> {
-        let bindings = if let Some(existing) = self.mode_extension.as_ref().and_then(|extension| {
-            extension
-                .as_any()
-                .downcast_ref::<RlmProjectionExtension>()
-                .cloned()
-        }) {
+        let bindings = if let Some(existing) = self
+            .turn_context
+            .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+            .cloned()
+        {
             existing.bindings.clone().merge(bindings)?
         } else {
             bindings
         };
+        self.turn_context.insert_plugin_input(
+            RLM_TURN_CONTEXT_PLUGIN_ID,
+            RlmProjectionExtension::new(bindings),
+        );
         self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
-            bindings,
+            self.turn_context
+                .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                .expect("RLM projection was just inserted")
+                .bindings
+                .clone(),
         )));
         Ok(self)
     }
@@ -211,6 +220,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
+            turn_context: lash::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -238,6 +248,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("stable".to_string()),
             mode_extension: None,
+            turn_context: lash::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -264,6 +275,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
+            turn_context: lash::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -279,6 +291,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
+            turn_context: lash::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()

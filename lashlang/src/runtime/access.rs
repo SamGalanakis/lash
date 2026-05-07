@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use super::*;
 use super::instruction::Name;
+use super::*;
 
 pub(crate) fn read_field_ref_direct(value: &Value, field: &Name) -> Result<Value, RuntimeError> {
     match value {
@@ -212,7 +212,11 @@ pub(crate) fn next_assign_index<'a>(
     Ok(index)
 }
 
-pub(crate) fn assign_record_field(target: &mut Value, field: &Name, value: Value) -> Result<(), RuntimeError> {
+pub(crate) fn assign_record_field(
+    target: &mut Value,
+    field: &Name,
+    value: Value,
+) -> Result<(), RuntimeError> {
     match target {
         Value::Record(record) => {
             Arc::make_mut(record).insert_symbolized(field.symbol, field.text.clone(), value);
@@ -254,7 +258,11 @@ pub(crate) fn descend_record_field<'a>(
     }
 }
 
-pub(crate) fn assign_index(target: &mut Value, index: &Value, value: Value) -> Result<(), RuntimeError> {
+pub(crate) fn assign_index(
+    target: &mut Value,
+    index: &Value,
+    value: Value,
+) -> Result<(), RuntimeError> {
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
@@ -305,7 +313,10 @@ pub(crate) fn add_assign_index_number(
     }
 }
 
-pub(crate) fn add_assign_value_number(value: &mut Value, right: f64) -> Result<Value, RuntimeError> {
+pub(crate) fn add_assign_value_number(
+    value: &mut Value,
+    right: f64,
+) -> Result<Value, RuntimeError> {
     match value {
         Value::Number(left) => {
             *left += right;
@@ -319,7 +330,10 @@ pub(crate) fn add_assign_value_number(value: &mut Value, right: f64) -> Result<V
     }
 }
 
-pub(crate) fn descend_index<'a>(target: &'a mut Value, index: &Value) -> Result<&'a mut Value, RuntimeError> {
+pub(crate) fn descend_index<'a>(
+    target: &'a mut Value,
+    index: &Value,
+) -> Result<&'a mut Value, RuntimeError> {
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;

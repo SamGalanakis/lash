@@ -184,6 +184,7 @@ impl RuntimeTurnDriver {
             rlm_globals,
             rlm_chronological_projection,
             self.mode_extension.clone(),
+            self.turn_context.clone(),
         );
         let result = mode_session
             .execute_code(

@@ -11,8 +11,8 @@ use smallvec::SmallVec;
 
 use crate::ast::{BinaryOp, UnaryOp};
 
-use super::*;
 use super::instruction::{Name, PureExpr};
+use super::*;
 
 pub(crate) fn eval_pure_expr(
     expr: &PureExpr,
@@ -114,7 +114,11 @@ pub(crate) fn eval_pure_expr(
     }
 }
 
-pub(crate) fn expect_arg_count(name: &str, values: &[Value], expected: usize) -> Result<(), RuntimeError> {
+pub(crate) fn expect_arg_count(
+    name: &str,
+    values: &[Value],
+    expected: usize,
+) -> Result<(), RuntimeError> {
     if values.len() == expected {
         Ok(())
     } else {
@@ -324,7 +328,10 @@ pub(crate) fn execute_len_direct(value: &Value) -> Result<Value, RuntimeError> {
         })
 }
 
-pub(crate) async fn execute_contains_builtin(haystack: &Value, needle: &Value) -> Result<Value, RuntimeError> {
+pub(crate) async fn execute_contains_builtin(
+    haystack: &Value,
+    needle: &Value,
+) -> Result<Value, RuntimeError> {
     if !matches!(haystack, Value::Projected(_)) {
         return execute_contains_direct(haystack, needle).map(Value::Bool);
     }
@@ -339,7 +346,10 @@ pub(crate) async fn execute_contains_builtin(haystack: &Value, needle: &Value) -
     }
 }
 
-pub(crate) fn execute_contains_direct(haystack: &Value, needle: &Value) -> Result<bool, RuntimeError> {
+pub(crate) fn execute_contains_direct(
+    haystack: &Value,
+    needle: &Value,
+) -> Result<bool, RuntimeError> {
     match (haystack, needle) {
         (Value::String(haystack), needle) => Ok(haystack.contains(coerce_string(needle)?.as_ref())),
         (Value::List(items), needle) => Ok(items.contains(needle)),
@@ -471,8 +481,11 @@ pub(crate) fn validate_range_len(start: i64, end: i64) -> Result<(), RuntimeErro
     Ok(())
 }
 
-
-pub(crate) fn eval_binary_values(left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+pub(crate) fn eval_binary_values(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Add => add_values(left, right),
         BinaryOp::Subtract => numeric_binary_values(left, right, |a, b| a - b),
@@ -552,7 +565,11 @@ pub(crate) fn is_numeric_binary_op(op: BinaryOp) -> bool {
     )
 }
 
-pub(crate) fn eval_compare_values(left: Value, op: BinaryOp, right: Value) -> Result<bool, RuntimeError> {
+pub(crate) fn eval_compare_values(
+    left: Value,
+    op: BinaryOp,
+    right: Value,
+) -> Result<bool, RuntimeError> {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => {
             Ok(eval_number_compare_values(left, op, right))

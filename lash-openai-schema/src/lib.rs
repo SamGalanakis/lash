@@ -13,11 +13,7 @@ pub fn model_id(model: &str) -> &str {
 
 /// Forward a raw provider event to the trace sink, deriving an event name from
 /// the JSON `type` (or `event`) field when present.
-pub fn emit_provider_trace(
-    tx: Option<&LlmProviderTraceSender>,
-    provider: &'static str,
-    raw: &str,
-) {
+pub fn emit_provider_trace(tx: Option<&LlmProviderTraceSender>, provider: &'static str, raw: &str) {
     let Some(tx) = tx else {
         return;
     };

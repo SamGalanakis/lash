@@ -20,6 +20,7 @@ pub struct ToolExecutionContext {
     pub host: Arc<dyn ToolHookHost>,
     pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub async_task_id: Option<String>,
+    pub turn_context: crate::TurnContext,
 }
 
 impl ToolExecutionContext {

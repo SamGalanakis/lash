@@ -477,12 +477,14 @@ impl PluginSession {
             state,
             messages,
             host,
+            turn_context,
         } = request;
         let directives = self
             .before_turn(TurnHookContext {
                 session_id,
                 state,
                 host: host.clone(),
+                turn_context,
             })
             .await?;
         self.apply_turn_directives(

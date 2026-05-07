@@ -26,14 +26,13 @@ use super::{
     Builtin, COOPERATIVE_YIELD_INSTRUCTION_BUDGET, Chunk, ExecutionOutcome, ExecutionScratch,
     Instruction, InstructionProfileTag, LASH_TYPE_KEY, Name, ProfileAccumulator, ProfileReport,
     ProjectedBindings, RuntimeError, RuntimeFailure, ToolHost, Value, add_assign_index_number,
-    add_values, as_number, assign_path, eval_binary_values, eval_binary_values_async,
+    add_values, as_number, assign_path, error_value, eval_binary_values, eval_binary_values_async,
     eval_compare_values_async, eval_number_binary_values, eval_number_compare_values,
-    eval_number_numeric_binary_value, eval_pure_expr, error_value, execute_builtin,
-    execute_compiled_format, execute_compiled_format_direct, execute_join_builtin,
-    execute_len_builtin, execute_len_direct, execute_push_builtin, execute_range_builtin,
-    is_async_handle_record, is_truthy, is_truthy_async, iterable_values, materialize_value,
-    range_bounds, read_field_direct, read_field_ref_direct, read_index_direct, success,
-    unwrap_tool_result, unwrap_type_value,
+    eval_number_numeric_binary_value, eval_pure_expr, execute_builtin, execute_compiled_format,
+    execute_compiled_format_direct, execute_join_builtin, execute_len_builtin, execute_len_direct,
+    execute_push_builtin, execute_range_builtin, is_async_handle_record, is_truthy,
+    is_truthy_async, iterable_values, materialize_value, range_bounds, read_field_direct,
+    read_field_ref_direct, read_index_direct, success, unwrap_tool_result, unwrap_type_value,
 };
 
 #[derive(Clone)]

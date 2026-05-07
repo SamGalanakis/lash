@@ -219,6 +219,7 @@ impl LashRuntime {
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         let follow_mode_turn_options = input.mode_turn_options.clone();
+        let follow_turn_context = input.turn_context.clone();
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
@@ -251,6 +252,7 @@ impl LashRuntime {
             input = turn_input_from_plugin_message(seed);
             input.mode_turn_options = follow_mode_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
+            input.turn_context = follow_turn_context.clone();
             if let Some(successor) = {
                 let registry = self.managed_sessions.lock().await;
                 registry.get(&successor_session_id).cloned()
@@ -498,6 +500,7 @@ impl LashRuntime {
             previous_prompt_usage,
             input.mode_turn_options.clone(),
             input.mode_extension.clone(),
+            input.turn_context.clone(),
             trace_turn_id,
             turn_index,
             events,
@@ -523,6 +526,7 @@ impl LashRuntime {
         _previous_prompt_usage: Option<PromptUsage>,
         mode_turn_options: Option<crate::ModeTurnOptions>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
+        turn_context: crate::TurnContext,
         trace_turn_id: String,
         turn_index: usize,
         events: &dyn EventSink,
@@ -569,6 +573,7 @@ impl LashRuntime {
                 state: self.read_view(),
                 messages,
                 host: manager.clone(),
+                turn_context: turn_context.clone(),
             });
             tokio::pin!(prepare_turn);
 
@@ -688,6 +693,7 @@ impl LashRuntime {
                 .clone()
                 .unwrap_or_else(|| self.mode_turn_options.clone()),
             mode_extension,
+            turn_context,
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let mode_run_offset = 0;
@@ -968,5 +974,6 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,
+        turn_context: crate::TurnContext::default(),
     }
 }

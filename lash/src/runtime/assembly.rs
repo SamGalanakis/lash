@@ -401,14 +401,7 @@ impl TurnAssembler {
         let outcome = if interrupted {
             TurnOutcome::Stopped(TurnStop::Cancelled)
         } else if let Some(outcome) = self.outcome.take() {
-            match outcome {
-                TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
-                    TurnOutcome::Finished(TurnFinish::AssistantMessage {
-                        text: safe_output.clone(),
-                    })
-                }
-                other => other,
-            }
+            outcome
         } else if !self.saw_done && termination.treat_missing_done_as_failure {
             TurnOutcome::Stopped(TurnStop::RuntimeError)
         } else if !issues.is_empty() {

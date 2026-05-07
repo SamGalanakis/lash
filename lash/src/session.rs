@@ -235,6 +235,7 @@ pub struct ModeExecutionContext {
     rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
     rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
+    turn_context: crate::TurnContext,
 }
 
 impl ModeExecutionContext {
@@ -262,6 +263,10 @@ impl ModeExecutionContext {
         self.mode_extension
             .as_ref()
             .and_then(|extension| extension.as_any().downcast_ref::<T>())
+    }
+
+    pub fn turn_context(&self) -> &crate::TurnContext {
+        &self.turn_context
     }
 
     pub async fn call_tool(
@@ -551,6 +556,7 @@ impl ModeExecutionContext {
                 host: Arc::clone(&dispatch.host),
                 cancellation_token: None,
                 async_task_id: None,
+                turn_context: dispatch.turn_context.clone(),
             }
             .with_async_task(task_handle_id.clone(), cancellation.clone());
             let outcome = dispatch_tool_call_with_execution_context(
@@ -1131,6 +1137,10 @@ impl Session {
         self.shared_tool_catalog(session_id, mode).as_ref().clone()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mode execution bridge carries explicit per-turn runtime dependencies"
+    )]
     pub(crate) fn mode_execution_context(
         &self,
         session_id: &str,
@@ -1139,6 +1149,7 @@ impl Session {
         rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
         rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
+        turn_context: crate::TurnContext,
     ) -> ModeExecutionContext {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
@@ -1149,6 +1160,7 @@ impl Session {
             event_tx,
             turn_injection_bridge: self.turn_injection_bridge().clone(),
             attachment_store: Arc::clone(&self.services.attachment_store),
+            turn_context: turn_context.clone(),
         });
         ModeExecutionContext {
             session_id: session_id.to_string(),
@@ -1160,6 +1172,7 @@ impl Session {
             rlm_globals,
             rlm_chronological_projection,
             mode_extension,
+            turn_context,
         }
     }
 

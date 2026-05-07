@@ -5,16 +5,17 @@
 //! app state, HTTP protocols, auth, and frontend streaming; this crate
 //! owns only the ergonomic core/session/turn API.
 
-use std::collections::{BTreeMap, HashMap};
+use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use lash::plugin::StaticPluginFactory;
 use lash::{
     EventSink as RuntimeEventSink, ExecutionMode, LashRuntime, MessageRole, PersistedSessionState,
-    PluginHost, PluginSpec, RuntimeEnvironment, SessionPolicy, TurnInput,
+    PluginHost, PluginSpec, RuntimeEnvironment, SessionPolicy, TurnContext, TurnInput,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -23,11 +24,76 @@ pub use lash::{
     AttachmentStore, InputItem, Message, ModeTurnOptions, PluginFactory, ProviderHandle, Residency,
     RuntimeError, RuntimePersistence, SanitizerPolicy, SessionError, SessionReadView,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, StandardContextApproach,
-    TerminationPolicy, TokioSessionTaskExecutor, TokenUsage, ToolCallRecord, ToolProvider,
+    TerminationPolicy, TokenUsage, TokioSessionTaskExecutor, ToolCallRecord, ToolProvider,
     TurnIssue, TurnOutcome,
 };
 pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+
+pub trait EmbedPlugin: Send + Sync + 'static {
+    const ID: &'static str;
+    type SessionConfig: Clone + Send + Sync + 'static;
+    type TurnInput: Clone + Send + Sync + 'static;
+
+    fn factory(config: &Self::SessionConfig) -> Arc<dyn PluginFactory>;
+
+    fn requires_turn_input(_config: &Self::SessionConfig) -> bool {
+        false
+    }
+}
+
+type PluginConfigMap<P> = Arc<StdMutex<HashMap<String, <P as EmbedPlugin>::SessionConfig>>>;
+
+struct EmbedPluginFactory<P: EmbedPlugin> {
+    configs: PluginConfigMap<P>,
+}
+
+impl<P: EmbedPlugin> EmbedPluginFactory<P> {
+    fn new(configs: PluginConfigMap<P>) -> Self {
+        Self { configs }
+    }
+}
+
+impl<P: EmbedPlugin> lash::PluginFactory for EmbedPluginFactory<P> {
+    fn id(&self) -> &'static str {
+        P::ID
+    }
+
+    fn build(
+        &self,
+        ctx: &lash::PluginSessionContext,
+    ) -> std::result::Result<Arc<dyn lash::SessionPlugin>, lash::PluginError> {
+        let config = self
+            .configs
+            .lock()
+            .map_err(|_| {
+                lash::PluginError::Session(format!("plugin `{}` config lock poisoned", P::ID))
+            })?
+            .get(&ctx.session_id)
+            .cloned();
+        let Some(config) = config else {
+            return Ok(Arc::new(InactiveEmbedPlugin { id: P::ID }));
+        };
+        P::factory(&config).build(ctx)
+    }
+}
+
+struct InactiveEmbedPlugin {
+    id: &'static str,
+}
+
+impl lash::SessionPlugin for InactiveEmbedPlugin {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn register(
+        &self,
+        _reg: &mut lash::PluginRegistrar,
+    ) -> std::result::Result<(), lash::PluginError> {
+        Ok(())
+    }
+}
 
 /// Stable mode identifier exposed by the embedding facade.
 #[derive(
@@ -107,6 +173,15 @@ pub enum EmbedError {
     StoreFactory { session_id: String, message: String },
     #[error("RLM projected binding error: {0}")]
     RlmProjectedBinding(String),
+    #[error("embed plugin `{plugin_id}` is not registered on this LashCore")]
+    PluginNotRegistered { plugin_id: &'static str },
+    #[error("missing required turn input for plugin `{plugin_id}`")]
+    MissingPluginTurnInput { plugin_id: &'static str },
+    #[error("embed plugin `{plugin_id}` config error: {message}")]
+    PluginConfig {
+        plugin_id: &'static str,
+        message: String,
+    },
     #[error("runtime session error: {0}")]
     Session(#[from] SessionError),
     #[error("runtime turn error: {0}")]
@@ -124,6 +199,8 @@ pub struct LashCore {
     modes: Arc<BTreeMap<ModeId, ModePreset>>,
     default_mode: ModeId,
     store_factory: Option<Arc<dyn SessionStoreFactory>>,
+    embed_plugin_ids: Arc<BTreeSet<&'static str>>,
+    embed_plugin_configs: Arc<HashMap<&'static str, Arc<dyn Any + Send + Sync>>>,
 }
 
 impl LashCore {
@@ -149,6 +226,7 @@ impl LashCore {
             session_id: session_id.into(),
             mode: None,
             parent_session_id: None,
+            active_plugins: Vec::new(),
         }
     }
 
@@ -169,6 +247,8 @@ pub struct LashCoreBuilder {
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     plugin_factories: Vec<Arc<dyn PluginFactory>>,
+    embed_plugin_ids: BTreeSet<&'static str>,
+    embed_plugin_configs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
@@ -231,6 +311,16 @@ impl LashCoreBuilder {
 
     pub fn plugin(mut self, plugin: Arc<dyn PluginFactory>) -> Self {
         self.plugin_factories.push(plugin);
+        self
+    }
+
+    pub fn register_plugin<P: EmbedPlugin>(mut self) -> Self {
+        let configs: PluginConfigMap<P> = Arc::new(StdMutex::new(HashMap::new()));
+        self.embed_plugin_ids.insert(P::ID);
+        self.embed_plugin_configs
+            .insert(P::ID, configs.clone() as Arc<dyn Any + Send + Sync>);
+        self.plugin_factories
+            .push(Arc::new(EmbedPluginFactory::<P>::new(configs)) as Arc<dyn PluginFactory>);
         self
     }
 
@@ -361,8 +451,16 @@ impl LashCoreBuilder {
             modes: Arc::new(self.modes),
             default_mode,
             store_factory: self.store_factory,
+            embed_plugin_ids: Arc::new(self.embed_plugin_ids),
+            embed_plugin_configs: Arc::new(self.embed_plugin_configs),
         })
     }
+}
+
+#[derive(Clone, Debug)]
+struct ActiveEmbedPlugin {
+    id: &'static str,
+    requires_turn_input: bool,
 }
 
 pub struct SessionBuilder {
@@ -370,6 +468,7 @@ pub struct SessionBuilder {
     session_id: String,
     mode: Option<ModeId>,
     parent_session_id: Option<String>,
+    active_plugins: Vec<ActiveEmbedPlugin>,
 }
 
 impl SessionBuilder {
@@ -391,6 +490,36 @@ impl SessionBuilder {
     pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
         self.parent_session_id = Some(parent_session_id.into());
         self
+    }
+
+    pub fn use_plugin<P: EmbedPlugin>(mut self, config: P::SessionConfig) -> Result<Self> {
+        if !self.core.embed_plugin_ids.contains(P::ID) {
+            return Err(EmbedError::PluginNotRegistered { plugin_id: P::ID });
+        }
+        let configs = self
+            .core
+            .embed_plugin_configs
+            .get(P::ID)
+            .cloned()
+            .and_then(|configs| {
+                Arc::downcast::<StdMutex<HashMap<String, P::SessionConfig>>>(configs).ok()
+            })
+            .ok_or_else(|| EmbedError::PluginConfig {
+                plugin_id: P::ID,
+                message: "registered config store has an unexpected type".to_string(),
+            })?;
+        configs
+            .lock()
+            .map_err(|_| EmbedError::PluginConfig {
+                plugin_id: P::ID,
+                message: "config lock poisoned".to_string(),
+            })?
+            .insert(self.session_id.clone(), config.clone());
+        self.active_plugins.push(ActiveEmbedPlugin {
+            id: P::ID,
+            requires_turn_input: P::requires_turn_input(&config),
+        });
+        Ok(self)
     }
 
     pub async fn open(self) -> Result<LashSession> {
@@ -435,6 +564,7 @@ impl SessionBuilder {
             runtime: Arc::new(Mutex::new(runtime)),
             mode,
             parent_session_id: self.parent_session_id,
+            active_plugins: self.active_plugins,
         })
     }
 
@@ -462,6 +592,7 @@ pub struct LashSession {
     runtime: Arc<Mutex<LashRuntime>>,
     mode: ModeId,
     parent_session_id: Option<String>,
+    active_plugins: Vec<ActiveEmbedPlugin>,
 }
 
 impl LashSession {
@@ -494,6 +625,7 @@ impl LashSession {
             cancel: CancellationToken::new(),
             mode_turn_options: None,
             rlm_projected_bindings: None,
+            turn_context: TurnContext::default(),
         }
     }
 
@@ -509,6 +641,7 @@ pub struct TurnBuilder<'a> {
     cancel: CancellationToken,
     mode_turn_options: Option<ModeTurnOptions>,
     rlm_projected_bindings: Option<RlmProjectedBindings>,
+    turn_context: TurnContext,
 }
 
 impl<'a> TurnBuilder<'a> {
@@ -537,13 +670,26 @@ impl<'a> TurnBuilder<'a> {
         Ok(self)
     }
 
+    pub fn with_plugin_input<P: EmbedPlugin>(mut self, input: P::TurnInput) -> Self {
+        self.turn_context.insert_plugin_input(P::ID, input);
+        self
+    }
+
     pub async fn run(self) -> Result<TurnResult> {
         let sink = ProjectingEventSink { sink: self.events };
         let mut input = self.input.into_turn_input();
         input.mode_turn_options = self.mode_turn_options;
+        input.turn_context = self.turn_context;
         if let Some(turn_bindings) = self.rlm_projected_bindings {
             input = lash_mode_rlm::RlmTurnInputExt::rlm_project(input, turn_bindings)
                 .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
+        }
+        for plugin in &self.session.active_plugins {
+            if plugin.requires_turn_input && !input.turn_context.has_plugin_input(plugin.id) {
+                return Err(EmbedError::MissingPluginTurnInput {
+                    plugin_id: plugin.id,
+                });
+            }
         }
         let mut runtime = self.session.runtime.lock().await;
         if let Some(extension) = input.mode_extension.as_ref() {
@@ -552,8 +698,16 @@ impl<'a> TurnBuilder<'a> {
                 .await
                 .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
         }
-        let turn = runtime.stream_turn(input, &sink, self.cancel).await?;
-        Ok(TurnResult::from_assembled(turn))
+        let turn = runtime
+            .stream_turn_following_handoffs(input, &sink, self.cancel)
+            .await?;
+        let final_turn = turn.into_final_turn().ok_or_else(|| {
+            EmbedError::Runtime(lash::RuntimeError {
+                code: "empty_followed_turn".to_string(),
+                message: "runtime completed without an assembled turn".to_string(),
+            })
+        })?;
+        Ok(TurnResult::from_assembled(final_turn))
     }
 }
 
@@ -592,6 +746,7 @@ impl Input {
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
+            turn_context: lash::TurnContext::default(),
         }
     }
 }
@@ -609,14 +764,26 @@ pub struct TurnResult {
 impl TurnResult {
     fn from_assembled(turn: lash::AssembledTurn) -> Self {
         let read_view = turn.state.read_view();
+        let final_text = final_text_from_outcome(&turn.outcome);
         Self {
-            final_text: turn.assistant_output.safe_text,
+            final_text,
             outcome: turn.outcome,
             messages: read_view.messages().to_vec(),
             tool_calls: turn.tool_calls,
             usage: turn.token_usage,
             errors: turn.errors,
         }
+    }
+}
+
+fn final_text_from_outcome(outcome: &TurnOutcome) -> String {
+    match outcome {
+        TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { text }) => text.clone(),
+        TurnOutcome::Finished(lash::TurnFinish::Submission { value, .. }) => value
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| value.to_string()),
+        _ => String::new(),
     }
 }
 
@@ -1069,6 +1236,61 @@ mod tests {
         assert!(matches!(projected[2], TurnEvent::Usage { .. }));
         assert!(matches!(projected[3], TurnEvent::Error { .. }));
         assert!(matches!(projected[4], TurnEvent::Done));
+    }
+
+    #[test]
+    fn turn_result_final_text_comes_from_turn_outcome() {
+        let turn = lash::AssembledTurn {
+            state: lash::SessionStateEnvelope::default(),
+            outcome: lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
+                text: String::new(),
+            }),
+            assistant_output: lash::AssistantOutput {
+                safe_text: "streamed but not final".to_string(),
+                raw_text: "streamed but not final".to_string(),
+                state: lash::OutputState::Usable,
+            },
+            has_plugin_visible_output: false,
+            execution: lash::ExecutionSummary {
+                mode: lash::ExecutionMode::standard(),
+                had_tool_calls: true,
+                had_code_execution: false,
+            },
+            token_usage: TokenUsage::default(),
+            tool_calls: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let result = TurnResult::from_assembled(turn);
+        assert_eq!(result.final_text, "");
+    }
+
+    #[test]
+    fn turn_result_final_text_renders_submission_value() {
+        let turn = lash::AssembledTurn {
+            state: lash::SessionStateEnvelope::default(),
+            outcome: lash::TurnOutcome::Finished(lash::TurnFinish::Submission {
+                channel_id: "rlm.submit".to_string(),
+                value: serde_json::json!("semantic answer"),
+            }),
+            assistant_output: lash::AssistantOutput {
+                safe_text: "streamed buffer".to_string(),
+                raw_text: "streamed buffer".to_string(),
+                state: lash::OutputState::Usable,
+            },
+            has_plugin_visible_output: false,
+            execution: lash::ExecutionSummary {
+                mode: lash::ExecutionMode::new("rlm"),
+                had_tool_calls: true,
+                had_code_execution: true,
+            },
+            token_usage: TokenUsage::default(),
+            tool_calls: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let result = TurnResult::from_assembled(turn);
+        assert_eq!(result.final_text, "semantic answer");
     }
 
     #[tokio::test]

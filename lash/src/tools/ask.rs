@@ -370,6 +370,7 @@ mod tests {
                     host: manager.clone(),
                     cancellation_token: None,
                     async_task_id: None,
+                    turn_context: crate::TurnContext::default(),
                 },
             )
             .await;
@@ -440,6 +441,7 @@ mod tests {
                     host: manager.clone(),
                     cancellation_token: None,
                     async_task_id: None,
+                    turn_context: crate::TurnContext::default(),
                 },
             )
             .await;
@@ -486,6 +488,7 @@ mod tests {
                     host: manager.clone(),
                     cancellation_token: None,
                     async_task_id: None,
+                    turn_context: crate::TurnContext::default(),
                 },
                 None,
             )

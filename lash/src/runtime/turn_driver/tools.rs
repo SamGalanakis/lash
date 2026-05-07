@@ -46,6 +46,7 @@ async fn run_one_tool_call(
         host: Arc::clone(&dispatch.host),
         cancellation_token: Some(task_cancel),
         async_task_id: None,
+        turn_context: dispatch.turn_context.clone(),
     };
     let outcome = dispatch_tool_call_with_execution_context(
         &dispatch,
@@ -135,6 +136,7 @@ impl RuntimeTurnDriver {
             event_tx: tool_event_tx,
             turn_injection_bridge: self.session.turn_injection_bridge().clone(),
             attachment_store: Arc::clone(&self.host.core.attachment_store),
+            turn_context: self.turn_context.clone(),
         });
         // Partition pending tool calls by declared [`ToolExecutionMode`]:
         // parallel-safe tools spawn onto a JoinSet to run concurrently, while

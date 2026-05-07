@@ -147,7 +147,9 @@ pub fn from_json(value: serde_json::Value) -> Value {
     }
 }
 
-pub(crate) fn image_from_json_map(map: &serde_json::Map<String, serde_json::Value>) -> Option<ImageValue> {
+pub(crate) fn image_from_json_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ImageValue> {
     if map.get("type")?.as_str()? != "image" {
         return None;
     }

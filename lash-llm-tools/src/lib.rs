@@ -551,6 +551,7 @@ mod tests {
             host: manager.clone(),
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
 
         let result = provider
@@ -613,6 +614,7 @@ mod tests {
             host: manager,
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
 
         let result = provider

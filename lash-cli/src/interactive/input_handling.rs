@@ -306,6 +306,7 @@ pub(super) async fn process_pending_monitor_wakes(
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,
+        turn_context: lash::TurnContext::default(),
     };
     send_user_message(
         prepared_turn,

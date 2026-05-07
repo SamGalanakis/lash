@@ -1251,6 +1251,7 @@ mod tests {
             host,
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
 
         let result = provider
@@ -1330,6 +1331,7 @@ mod tests {
             host,
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
 
         let result = provider
@@ -1471,6 +1473,7 @@ mod tests {
             host: host.clone(),
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
 
         let result = provider
@@ -1531,6 +1534,7 @@ mod tests {
             host: host.clone(),
             cancellation_token: None,
             async_task_id: None,
+            turn_context: lash::TurnContext::default(),
         };
         let result = provider
             .execute_with_context(

@@ -191,8 +191,8 @@ pub use runtime::{
     PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy, SessionStateEnvelope,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, SessionUsageReport,
-    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnInput, TurnIssue,
-    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor, TurnContext, TurnInput,
+    TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use session::{
