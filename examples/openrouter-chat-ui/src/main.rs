@@ -14,8 +14,7 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use lash::{ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider};
 use lash_embed::{
-    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnBuilder, TurnEvent,
-    TurnEventSink,
+    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnEvent, TurnEventSink,
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
 use lash_rlm_types::RlmTermination;
@@ -264,9 +263,11 @@ async fn send_message(
             chat_id: chat_id.clone(),
         };
         let turn = session
-            .demo_turn(Input::text(text))
-            .tone(request.tone.unwrap_or(Tone::Plain))
-            .page_context(request.page)
+            .turn(Input::text(text))
+            .with_plugin_input::<DemoPlugin>(DemoTurnInput {
+                tone: Some(request.tone.unwrap_or(Tone::Plain)),
+                page: request.page,
+            })
             .events(&sink)
             .mode_turn_options(
                 lash::ModeTurnOptions::typed(
@@ -443,12 +444,13 @@ impl lash::SessionPlugin for DemoSessionPlugin {
                     return Ok(Vec::new());
                 };
                 let tone = input.tone.as_ref().unwrap_or(&Tone::Plain).as_prompt();
+                let context = format!(
+                    "Tone: {tone}\nPage title: {}\nPage URL: {}\nViewport: {}\nUse `call demo_lookup {{ \"query\": \"...\" }}` from lashlang when page-specific lookup helps.",
+                    input.page.title, input.page.url, input.page.viewport
+                );
                 Ok(vec![lash::PromptContribution::environment(
                     "Demo Page Context",
-                    format!(
-                        "Tone: {tone}\nPage title: {}\nPage URL: {}\nViewport: {}\nUse `call demo_lookup {{ \"query\": \"...\" }}` from lashlang when page-specific lookup helps.",
-                        input.page.title, input.page.url, input.page.viewport
-                    ),
+                    context,
                 )])
             })
         }));
@@ -508,60 +510,6 @@ impl ToolProvider for DemoTools {
             "viewport": input.page.viewport,
             "tone": input.tone.as_ref().unwrap_or(&Tone::Plain).as_prompt(),
         }))
-    }
-}
-
-trait DemoTurnExt<'a> {
-    fn demo_turn(&'a self, input: Input) -> DemoTurnBuilder<'a>;
-}
-
-impl<'a> DemoTurnExt<'a> for LashSession {
-    fn demo_turn(&'a self, input: Input) -> DemoTurnBuilder<'a> {
-        DemoTurnBuilder {
-            builder: self.turn(input),
-            tone: None,
-        }
-    }
-}
-
-struct DemoTurnBuilder<'a> {
-    builder: TurnBuilder<'a>,
-    tone: Option<Tone>,
-}
-
-impl<'a> DemoTurnBuilder<'a> {
-    fn tone(mut self, tone: Tone) -> Self {
-        self.tone = Some(tone);
-        self
-    }
-
-    fn page_context(self, page: DemoPageContext) -> DemoReadyTurnBuilder<'a> {
-        DemoReadyTurnBuilder {
-            builder: self.builder.with_plugin_input::<DemoPlugin>(DemoTurnInput {
-                tone: self.tone,
-                page,
-            }),
-        }
-    }
-}
-
-struct DemoReadyTurnBuilder<'a> {
-    builder: TurnBuilder<'a>,
-}
-
-impl<'a> DemoReadyTurnBuilder<'a> {
-    fn events(mut self, events: &'a dyn TurnEventSink) -> Self {
-        self.builder = self.builder.events(events);
-        self
-    }
-
-    fn mode_turn_options(mut self, options: lash::ModeTurnOptions) -> Self {
-        self.builder = self.builder.mode_turn_options(options);
-        self
-    }
-
-    async fn run(self) -> lash_embed::Result<lash_embed::TurnResult> {
-        self.builder.run().await
     }
 }
 

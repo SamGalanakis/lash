@@ -14,21 +14,25 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use lash::plugin::StaticPluginFactory;
 use lash::{
-    EventSink as RuntimeEventSink, ExecutionMode, LashRuntime, MessageRole, PersistedSessionState,
-    PluginHost, PluginSpec, RuntimeEnvironment, SessionPolicy, TurnContext, TurnInput,
+    ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
+    RuntimeEnvironment, SessionPolicy, TurnContext, TurnInput,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub use lash::{
-    AttachmentStore, InputItem, Message, ModeTurnOptions, PluginFactory, ProviderHandle, Residency,
-    RuntimeError, RuntimePersistence, SanitizerPolicy, SessionError, SessionReadView,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, StandardContextApproach,
-    TerminationPolicy, TokenUsage, TokioSessionTaskExecutor, ToolCallRecord, ToolProvider,
+    AssembledTurn, AttachmentStore, EventSink as RuntimeEventSink, InputItem, Message,
+    ModeTurnOptions, PluginFactory, ProviderHandle, Residency, RuntimeError, RuntimePersistence,
+    SanitizerPolicy, SessionError, SessionEvent, SessionReadView, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionTaskExecutor, StandardContextApproach, TerminationPolicy,
+    TokenUsage, TokioSessionTaskExecutor, ToolAvailability, ToolCallRecord, ToolProvider,
     TurnIssue, TurnOutcome,
 };
 pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+
+pub type ToolState = lash::DynamicStateSnapshot;
+pub type ToolSpec = lash::DynamicToolSpec;
 
 pub trait EmbedPlugin: Send + Sync + 'static {
     const ID: &'static str;
@@ -226,6 +230,7 @@ impl LashCore {
             session_id: session_id.into(),
             mode: None,
             parent_session_id: None,
+            store: None,
             active_plugins: Vec::new(),
         }
     }
@@ -418,7 +423,11 @@ impl LashCoreBuilder {
             .session_task_executor
             .unwrap_or_else(|| Arc::new(TokioSessionTaskExecutor::default()));
         let mut env_builder = RuntimeEnvironment::builder()
-            .with_plugin_host(Arc::new(PluginHost::new(factories).with_background_tasks()))
+            .with_plugin_host(Arc::new(
+                PluginHost::new(factories)
+                    .with_background_tasks()
+                    .with_dynamic_tools(),
+            ))
             .with_session_task_executor(executor);
         if let Some(attachment_store) = self.attachment_store {
             env_builder = env_builder.with_attachment_store(attachment_store);
@@ -468,6 +477,7 @@ pub struct SessionBuilder {
     session_id: String,
     mode: Option<ModeId>,
     parent_session_id: Option<String>,
+    store: Option<Arc<dyn RuntimePersistence>>,
     active_plugins: Vec<ActiveEmbedPlugin>,
 }
 
@@ -489,6 +499,11 @@ impl SessionBuilder {
 
     pub fn parent(mut self, parent_session_id: impl Into<String>) -> Self {
         self.parent_session_id = Some(parent_session_id.into());
+        self
+    }
+
+    pub fn store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -551,6 +566,10 @@ impl SessionBuilder {
                 });
                 state.session_id = self.session_id.clone();
                 state.policy = policy.clone();
+                if let Some(snapshot) = state.dynamic_state_snapshot.as_mut() {
+                    snapshot.base_generation = 1;
+                    state.dynamic_state_generation = Some(snapshot.base_generation);
+                }
                 state
             }
             None => PersistedSessionState {
@@ -569,6 +588,9 @@ impl SessionBuilder {
     }
 
     fn create_store(&self, policy: &SessionPolicy) -> Result<Option<Arc<dyn RuntimePersistence>>> {
+        if let Some(store) = self.store.as_ref() {
+            return Ok(Some(Arc::clone(store)));
+        }
         let Some(factory) = self.core.store_factory.as_ref() else {
             return Ok(None);
         };
@@ -622,6 +644,7 @@ impl LashSession {
             session: self,
             input,
             events: None,
+            runtime_events: None,
             cancel: CancellationToken::new(),
             mode_turn_options: None,
             rlm_projected_bindings: None,
@@ -632,12 +655,47 @@ impl LashSession {
     pub async fn read_view(&self) -> SessionReadView {
         self.runtime.lock().await.read_view()
     }
+
+    pub async fn tool_state(&self) -> Result<ToolState> {
+        self.runtime
+            .lock()
+            .await
+            .dynamic_tool_state()
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_tool_state(&self, state: ToolState) -> Result<u64> {
+        self.runtime
+            .lock()
+            .await
+            .apply_dynamic_tool_state(state)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn set_tool_availability(
+        &self,
+        names: &[String],
+        availability: Option<ToolAvailability>,
+    ) -> Result<u64> {
+        let mut state = self.tool_state().await?;
+        for name in names {
+            let Some(spec) = state.tools.get_mut(name) else {
+                return Err(EmbedError::Session(SessionError::Protocol(format!(
+                    "unknown dynamic tool `{name}`"
+                ))));
+            };
+            spec.definition.availability_override = availability.clone();
+        }
+        self.apply_tool_state(state).await
+    }
 }
 
 pub struct TurnBuilder<'a> {
     session: &'a LashSession,
     input: Input,
     events: Option<&'a dyn TurnEventSink>,
+    runtime_events: Option<&'a dyn RuntimeEventSink>,
     cancel: CancellationToken,
     mode_turn_options: Option<ModeTurnOptions>,
     rlm_projected_bindings: Option<RlmProjectedBindings>,
@@ -647,6 +705,11 @@ pub struct TurnBuilder<'a> {
 impl<'a> TurnBuilder<'a> {
     pub fn events(mut self, events: &'a dyn TurnEventSink) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn runtime_events(mut self, events: &'a dyn RuntimeEventSink) -> Self {
+        self.runtime_events = Some(events);
         self
     }
 
@@ -676,7 +739,10 @@ impl<'a> TurnBuilder<'a> {
     }
 
     pub async fn run(self) -> Result<TurnResult> {
-        let sink = ProjectingEventSink { sink: self.events };
+        let sink = TeeEventSink {
+            projected: self.events,
+            runtime: self.runtime_events,
+        };
         let mut input = self.input.into_turn_input();
         input.mode_turn_options = self.mode_turn_options;
         input.turn_context = self.turn_context;
@@ -753,6 +819,7 @@ impl Input {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
+    pub assembled: AssembledTurn,
     pub final_text: String,
     pub outcome: TurnOutcome,
     pub messages: Vec<Message>,
@@ -762,16 +829,17 @@ pub struct TurnResult {
 }
 
 impl TurnResult {
-    fn from_assembled(turn: lash::AssembledTurn) -> Self {
+    fn from_assembled(turn: AssembledTurn) -> Self {
         let read_view = turn.state.read_view();
         let final_text = final_text_from_outcome(&turn.outcome);
         Self {
+            assembled: turn.clone(),
             final_text,
-            outcome: turn.outcome,
+            outcome: turn.outcome.clone(),
             messages: read_view.messages().to_vec(),
-            tool_calls: turn.tool_calls,
-            usage: turn.token_usage,
-            errors: turn.errors,
+            tool_calls: turn.tool_calls.clone(),
+            usage: turn.token_usage.clone(),
+            errors: turn.errors.clone(),
         }
     }
 }
@@ -863,21 +931,24 @@ pub trait TurnEventSink: Send + Sync {
     async fn emit(&self, event: TurnEvent);
 }
 
-struct ProjectingEventSink<'a> {
-    sink: Option<&'a dyn TurnEventSink>,
+struct TeeEventSink<'a> {
+    projected: Option<&'a dyn TurnEventSink>,
+    runtime: Option<&'a dyn RuntimeEventSink>,
 }
 
 #[async_trait]
-impl RuntimeEventSink for ProjectingEventSink<'_> {
+impl RuntimeEventSink for TeeEventSink<'_> {
     fn is_noop(&self) -> bool {
-        self.sink.is_none()
+        self.projected.is_none() && self.runtime.map(|sink| sink.is_noop()).unwrap_or(true)
     }
 
-    async fn emit(&self, event: lash::SessionEvent) {
-        let Some(sink) = self.sink else {
-            return;
-        };
-        if let Some(event) = TurnEvent::from_runtime(event) {
+    async fn emit(&self, event: SessionEvent) {
+        if let Some(sink) = self.runtime {
+            sink.emit(event.clone()).await;
+        }
+        if let Some(sink) = self.projected
+            && let Some(event) = TurnEvent::from_runtime(event)
+        {
             sink.emit(event).await;
         }
     }
@@ -932,6 +1003,7 @@ mod tests {
                     checkpoint_ref: None,
                     checkpoint: Some(lash::HydratedSessionCheckpoint {
                         turn_state,
+                        dynamic_state: state.dynamic_state_snapshot,
                         ..Default::default()
                     }),
                     token_ledger: Vec::new(),
@@ -1031,6 +1103,91 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SharedEventOrder {
+        events: TokioMutex<Vec<String>>,
+    }
+
+    struct RecordingRuntimeEvents {
+        order: Arc<SharedEventOrder>,
+    }
+
+    struct RecordingProjectedEvents {
+        order: Arc<SharedEventOrder>,
+    }
+
+    impl SharedEventOrder {
+        async fn snapshot(&self) -> Vec<String> {
+            self.events.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeEventSink for RecordingRuntimeEvents {
+        async fn emit(&self, event: SessionEvent) {
+            let label = match event {
+                SessionEvent::TextDelta { .. } => "raw:text_delta",
+                SessionEvent::ReasoningDelta { .. } => "raw:reasoning_delta",
+                SessionEvent::ToolCall { .. } => "raw:tool_call",
+                SessionEvent::ToolCallStart { .. } => "raw:tool_call_start",
+                SessionEvent::Message { .. } => "raw:message",
+                SessionEvent::LlmRequest { .. } => "raw:llm_request",
+                SessionEvent::LlmResponse { .. } => "raw:llm_response",
+                SessionEvent::TokenUsage { .. } => "raw:token_usage",
+                SessionEvent::ChildTokenUsage { .. } => "raw:child_token_usage",
+                SessionEvent::RetryStatus { .. } => "raw:retry_status",
+                SessionEvent::InjectedTurnInputAccepted { .. } => {
+                    "raw:injected_turn_input_accepted"
+                }
+                SessionEvent::InjectedMessagesCommitted { .. } => "raw:injected_messages_committed",
+                SessionEvent::PluginEvent { .. } => "raw:plugin_event",
+                SessionEvent::TurnOutcome { .. } => "raw:turn_outcome",
+                SessionEvent::Done => "raw:done",
+                SessionEvent::Error { .. } => "raw:error",
+                SessionEvent::Prompt { .. } => "raw:prompt",
+            };
+            self.order.events.lock().await.push(label.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl TurnEventSink for RecordingProjectedEvents {
+        async fn emit(&self, event: TurnEvent) {
+            let label = match event {
+                TurnEvent::TextDelta { .. } => "projected:text_delta",
+                TurnEvent::ReasoningDelta { .. } => "projected:reasoning_delta",
+                TurnEvent::ToolCall { .. } => "projected:tool_call",
+                TurnEvent::Message { .. } => "projected:message",
+                TurnEvent::Usage { .. } => "projected:usage",
+                TurnEvent::Error { .. } => "projected:error",
+                TurnEvent::Done => "projected:done",
+            };
+            self.order.events.lock().await.push(label.to_string());
+        }
+    }
+
+    struct AppTools;
+
+    #[async_trait]
+    impl ToolProvider for AppTools {
+        fn definitions(&self) -> Vec<lash::ToolDefinition> {
+            vec![lash::ToolDefinition::new(
+                "app_lookup",
+                "Look up app state.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                serde_json::json!({ "type": "object" }),
+            )]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
+            lash::ToolResult::ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
     fn mock_provider() -> ProviderHandle {
         lash::testing::TestProvider::builder()
             .kind("embed-test")
@@ -1103,6 +1260,10 @@ mod tests {
             .await?;
 
         assert_eq!(result.final_text, "echo: hello");
+        assert_eq!(
+            final_text_from_outcome(&result.assembled.outcome),
+            result.final_text
+        );
         assert_eq!(result.messages.len(), 2);
         let events = events.snapshot().await;
         assert!(
@@ -1111,6 +1272,125 @@ mod tests {
                 .any(|event| matches!(event, TurnEvent::TextDelta { .. }))
         );
         assert!(events.iter().any(|event| matches!(event, TurnEvent::Done)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn embedded_sessions_always_expose_dynamic_tool_state() -> Result<()> {
+        let core = standard_core();
+        let session = core.session("dynamic-default").open().await?;
+
+        let state = session.tool_state().await?;
+
+        assert!(state.base_generation > 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
+        let core = LashCore::standard()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .tools(Arc::new(AppTools))
+            .build()?;
+        let session = core.session("static-tools").open().await?;
+
+        let state = session.tool_state().await?;
+
+        assert!(state.tools.contains_key("app_lookup"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
+        let core = LashCore::standard()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .tools(Arc::new(AppTools))
+            .build()?;
+        let session = core.session("tool-state").open().await?;
+
+        let generation = session
+            .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+            .await?;
+        let hidden = session.tool_state().await?;
+
+        assert_eq!(hidden.base_generation, generation);
+        assert_eq!(
+            hidden
+                .tools
+                .get("app_lookup")
+                .and_then(|spec| spec.definition.availability_override.clone()),
+            Some(ToolAvailability::Hidden)
+        );
+
+        let mut callable = hidden;
+        callable
+            .tools
+            .get_mut("app_lookup")
+            .expect("app tool")
+            .definition
+            .availability_override = Some(ToolAvailability::Callable);
+        let generation = session.apply_tool_state(callable).await?;
+        let callable = session.tool_state().await?;
+
+        assert_eq!(callable.base_generation, generation);
+        assert_eq!(
+            callable
+                .tools
+                .get("app_lookup")
+                .and_then(|spec| spec.definition.availability_override.clone()),
+            Some(ToolAvailability::Callable)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persisted_session_restores_tool_state() -> Result<()> {
+        let core = LashCore::standard()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .tools(Arc::new(AppTools))
+            .build()?;
+        let session = core.session("persisted-tools").open().await?;
+        session
+            .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+            .await?;
+        let persisted_tool_state = session.tool_state().await?;
+        let state = PersistedSessionState {
+            session_id: "persisted-tools".to_string(),
+            policy: lash::SessionPolicy {
+                provider: mock_provider(),
+                model: "mock-model".to_string(),
+                max_context_tokens: Some(200_000),
+                execution_mode: lash::ExecutionMode::standard(),
+                ..Default::default()
+            },
+            dynamic_state_snapshot: Some(persisted_tool_state),
+            ..Default::default()
+        };
+        let store: Arc<dyn lash::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
+        let reopened_core = LashCore::standard()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .tools(Arc::new(AppTools))
+            .store_factory(Arc::new(ReusableStoreFactory { store }))
+            .build()?;
+
+        let reopened = reopened_core.session("persisted-tools").open().await?;
+        let state = reopened.tool_state().await?;
+
+        assert_eq!(
+            state
+                .tools
+                .get("app_lookup")
+                .and_then(|spec| spec.definition.availability_override.clone()),
+            Some(ToolAvailability::Hidden)
+        );
         Ok(())
     }
 
@@ -1301,9 +1581,59 @@ mod tests {
         let result = session.run(Input::text("visible")).await?;
 
         assert_eq!(result.final_text, "echo: visible");
+        assert_eq!(result.outcome, result.assembled.outcome);
+        assert_eq!(result.tool_calls, result.assembled.tool_calls);
+        assert_eq!(
+            serde_json::to_value(&result.usage).expect("usage json"),
+            serde_json::to_value(&result.assembled.token_usage).expect("assembled usage json")
+        );
+        assert_eq!(result.errors.len(), result.assembled.errors.len());
         assert_eq!(message_role(&result.messages[0]), "user");
         assert_eq!(message_role(&result.messages[1]), "assistant");
         assert_eq!(message_text(&result.messages[1]), "echo: visible");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_runtime_events_tee_alongside_projected_events_in_order() -> Result<()> {
+        let core = standard_core();
+        let session = core.session("raw-events").open().await?;
+        let order = Arc::new(SharedEventOrder::default());
+        let raw = RecordingRuntimeEvents {
+            order: Arc::clone(&order),
+        };
+        let projected = RecordingProjectedEvents {
+            order: Arc::clone(&order),
+        };
+
+        session
+            .turn(Input::text("stream"))
+            .runtime_events(&raw)
+            .events(&projected)
+            .run()
+            .await?;
+
+        let events = order.snapshot().await;
+        assert!(events.iter().any(|event| event == "raw:llm_request"));
+        assert!(!events.iter().any(|event| event == "projected:llm_request"));
+        let raw_text = events
+            .iter()
+            .position(|event| event == "raw:text_delta")
+            .expect("raw text delta");
+        let projected_text = events
+            .iter()
+            .position(|event| event == "projected:text_delta")
+            .expect("projected text delta");
+        assert!(raw_text < projected_text);
+        let raw_done = events
+            .iter()
+            .position(|event| event == "raw:done")
+            .expect("raw done");
+        let projected_done = events
+            .iter()
+            .position(|event| event == "projected:done")
+            .expect("projected done");
+        assert!(raw_done < projected_done);
         Ok(())
     }
 
@@ -1336,6 +1666,53 @@ mod tests {
         let messages = reopened.read_view().await.messages().to_vec();
         assert_eq!(messages.len(), 1);
         assert_eq!(message_text(&messages[0]), "already stored");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Result<()> {
+        let mut explicit_state = PersistedSessionState {
+            session_id: "store-precedence".to_string(),
+            policy: lash::SessionPolicy {
+                provider: mock_provider(),
+                model: "mock-model".to_string(),
+                max_context_tokens: Some(200_000),
+                execution_mode: lash::ExecutionMode::standard(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        explicit_state.append_active_conversation_messages(&[text_message(
+            lash::MessageRole::User,
+            "explicit store",
+        )]);
+        let mut factory_state = explicit_state.clone();
+        factory_state.append_active_conversation_messages(&[text_message(
+            lash::MessageRole::Assistant,
+            "factory store",
+        )]);
+        let explicit_store: Arc<dyn lash::RuntimePersistence> =
+            Arc::new(SnapshotStore::with_state(explicit_state));
+        let factory_store: Arc<dyn lash::RuntimePersistence> =
+            Arc::new(SnapshotStore::with_state(factory_state));
+        let core = LashCore::standard()
+            .provider(mock_provider())
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .store_factory(Arc::new(ReusableStoreFactory {
+                store: factory_store,
+            }))
+            .build()?;
+
+        let reopened = core
+            .session("store-precedence")
+            .store(explicit_store)
+            .open()
+            .await?;
+        let messages = reopened.read_view().await.messages().to_vec();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(message_text(&messages[0]), "explicit store");
         Ok(())
     }
 
