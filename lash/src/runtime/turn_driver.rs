@@ -10,7 +10,72 @@ pub(in crate::runtime) use streaming::llm_response_has_content;
 
 async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: SessionEvent) {
     if !event_tx.is_closed() {
+        match &event {
+            SessionEvent::TokenUsage {
+                mode_iteration,
+                usage,
+                cumulative,
+            } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::Usage {
+                        mode_iteration: *mode_iteration,
+                        usage: usage.clone(),
+                        cumulative: cumulative.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::Error { message, .. } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::Error {
+                        message: message.clone(),
+                    },
+                )
+                .await;
+            }
+            _ => {}
+        }
         let _ = event_tx.send(RuntimeStreamEvent::Session(event)).await;
+    }
+}
+
+async fn send_turn_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: TurnEvent) {
+    if !event_tx.is_closed() {
+        let _ = event_tx.send(RuntimeStreamEvent::Turn(event)).await;
+    }
+}
+
+async fn emit_semantic_response_parts(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    response: &LlmResponse,
+) {
+    let mut emitted_text = false;
+    for part in &response.parts {
+        match part {
+            LlmOutputPart::Text { text, .. } if !text.is_empty() => {
+                emitted_text = true;
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::AssistantProseDelta { text: text.clone() },
+                )
+                .await;
+            }
+            LlmOutputPart::Reasoning { text, .. } if !text.is_empty() => {
+                send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: text.clone() }).await;
+            }
+            _ => {}
+        }
+    }
+    if !emitted_text && !response.full_text.is_empty() {
+        send_turn_event(
+            event_tx,
+            TurnEvent::AssistantProseDelta {
+                text: response.full_text.clone(),
+            },
+        )
+        .await;
     }
 }
 
@@ -88,60 +153,6 @@ impl RuntimeTurnDriver {
             &self.host.core.trace_context,
             self.trace_context(mode_iteration),
             event,
-        );
-    }
-
-    fn emit_trace_at(
-        &self,
-        mode_iteration: usize,
-        event: lash_trace::TraceEvent,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) {
-        crate::trace::emit_trace_at(
-            &self.host.core.trace_sink,
-            &self.host.core.trace_context,
-            self.trace_context(mode_iteration),
-            event,
-            timestamp,
-        );
-    }
-
-    fn emit_tool_call_trace_at(
-        &self,
-        mode_iteration: usize,
-        record: &crate::ToolCallRecord,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) {
-        self.emit_trace_at(
-            mode_iteration,
-            lash_trace::TraceEvent::ToolCallCompleted {
-                call_id: record.call_id.clone(),
-                name: record.tool.clone(),
-                args: record.args.clone(),
-                result: record.result.clone(),
-                success: record.success,
-                duration_ms: record.duration_ms,
-            },
-            timestamp,
-        );
-    }
-
-    fn emit_tool_call_started_trace_at(
-        &self,
-        mode_iteration: usize,
-        call_id: Option<String>,
-        name: String,
-        args: serde_json::Value,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) {
-        self.emit_trace_at(
-            mode_iteration,
-            lash_trace::TraceEvent::ToolCallStarted {
-                call_id,
-                name,
-                args,
-            },
-            timestamp,
         );
     }
 
@@ -291,6 +302,24 @@ impl RuntimeTurnDriver {
                             return (crate::MessageSequence::default(), run_offset);
                         }
                         let iteration = machine.mode_iteration();
+                        match self.before_llm_call(&machine, &request).await {
+                            Ok(Some(crate::ModeLlmCallAction::Handoff { session_id })) => {
+                                machine.finish_with_outcome(crate::TurnOutcome::Handoff {
+                                    session_id,
+                                });
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                machine.fail_turn(make_error_event(
+                                    "rlm_forced_context_fallback",
+                                    Some("forced_fallback_failed"),
+                                    err.to_string(),
+                                    Some(err.to_string()),
+                                ));
+                                continue;
+                            }
+                        }
                         let (result, text_streamed) = self
                             .run_llm_call(&mut machine, id, request, iteration, &event_tx, &cancel)
                             .await;
@@ -303,6 +332,9 @@ impl RuntimeTurnDriver {
                             };
                             self.turn_pipeline.state_mut().last_prompt_usage =
                                 normalize_prompt_usage(&self.policy.provider, &usage);
+                            if !text_streamed {
+                                emit_semantic_response_parts(&event_tx, response).await;
+                            }
                         }
                         machine.handle_response(Response::LlmComplete {
                             id,
@@ -398,10 +430,46 @@ impl RuntimeTurnDriver {
                                 }),
                             );
                         }
-                        let exec_started_at = chrono::Utc::now();
+                        send_turn_event(
+                            &event_tx,
+                            TurnEvent::CodeBlockStarted {
+                                language: "lashlang".to_string(),
+                                code: code.clone(),
+                            },
+                        )
+                        .await;
+                        let exec_started_at = std::time::Instant::now();
                         let result = self
                             .run_exec_code(&code, machine.message_sequence(), iteration, &event_tx)
                             .await;
+                        match &result {
+                            Ok(output) => {
+                                send_turn_event(
+                                    &event_tx,
+                                    TurnEvent::CodeBlockCompleted {
+                                        language: "lashlang".to_string(),
+                                        output: output.output.clone(),
+                                        error: output.error.clone(),
+                                        success: output.error.is_none(),
+                                        duration_ms: output.duration_ms,
+                                    },
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                send_turn_event(
+                                    &event_tx,
+                                    TurnEvent::CodeBlockCompleted {
+                                        language: "lashlang".to_string(),
+                                        output: String::new(),
+                                        error: Some(error.clone()),
+                                        success: false,
+                                        duration_ms: exec_started_at.elapsed().as_millis() as u64,
+                                    },
+                                )
+                                .await;
+                            }
+                        }
                         if let Ok(output) = &result {
                             if self.host.core.trace_sink.is_some() {
                                 self.emit_rlm_diagnostic_trace(
@@ -419,29 +487,6 @@ impl RuntimeTurnDriver {
                                         "tool_call_count": output.tool_calls.len(),
                                     }),
                                 );
-                                // Reconstruct synthetic per-tool timestamps
-                                // by walking the cumulative durations forward
-                                // from when exec started. Tools fire
-                                // sequentially within a lashlang block, so
-                                // this is a close approximation to actual
-                                // wall-clock timing — far better than
-                                // stamping every event with the post-exec
-                                // emission time.
-                                let mut cursor = exec_started_at;
-                                for record in &output.tool_calls {
-                                    let started_at = cursor;
-                                    let completed_at = started_at
-                                        + chrono::Duration::milliseconds(record.duration_ms as i64);
-                                    self.emit_tool_call_started_trace_at(
-                                        iteration,
-                                        record.call_id.clone(),
-                                        record.tool.clone(),
-                                        record.args.clone(),
-                                        started_at,
-                                    );
-                                    self.emit_tool_call_trace_at(iteration, record, completed_at);
-                                    cursor = completed_at;
-                                }
                                 if !output.observation_truncation.is_empty() {
                                     self.emit_rlm_diagnostic_trace(
                                         iteration,
@@ -662,6 +707,30 @@ impl RuntimeTurnDriver {
         let _ = machine;
         let _ = effect_id;
         self.run_standard_llm_call(request, mode_iteration, event_tx, cancel)
+            .await
+    }
+
+    async fn before_llm_call(
+        &mut self,
+        machine: &TurnMachine,
+        request: &LlmRequest,
+    ) -> Result<Option<crate::ModeLlmCallAction>, PluginError> {
+        let latest_prompt_usage = self.turn_pipeline.state_mut().last_prompt_usage.clone();
+        self.session
+            .plugins()
+            .mode_session()
+            .before_llm_call(
+                crate::ModeBeforeLlmCallContext {
+                    session_id: self.session_id.clone(),
+                    host: self.session_manager.clone(),
+                    state: self.checkpoint_state_view(
+                        machine.message_sequence(),
+                        machine.mode_iteration(),
+                    ),
+                    latest_prompt_usage,
+                },
+                request,
+            )
             .await
     }
 

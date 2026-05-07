@@ -10,102 +10,18 @@ use super::*;
 async fn run_one_tool_call(
     index: usize,
     pending_tool: crate::sansio::PendingToolCall,
-    dispatch: Arc<crate::tool_dispatch::ToolDispatchContext>,
-    plugins: Arc<crate::PluginSession>,
-    projector_manager: Arc<dyn RuntimeSessionHost>,
-    event_tx: mpsc::Sender<RuntimeStreamEvent>,
-    task_cancel: CancellationToken,
+    context: crate::ModeExecutionContext,
 ) -> (usize, crate::sansio::CompletedToolCall) {
-    let call_id = pending_tool.call_id;
-    let tool_name = pending_tool.tool_name;
-    let args = pending_tool.args;
-    let item_id = pending_tool.item_id;
-    let _ = event_tx
-        .send(RuntimeStreamEvent::Session(SessionEvent::ToolCallStart {
-            call_id: Some(call_id.clone()),
-            name: tool_name.clone(),
-            args: args.clone(),
-        }))
+    let executed = context
+        .execute_tool_call(
+            pending_tool.call_id,
+            pending_tool.tool_name,
+            pending_tool.args,
+            index,
+            pending_tool.item_id,
+        )
         .await;
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
-    let progress_event_tx = event_tx.clone();
-    let progress_handle = tokio::spawn(async move {
-        while let Some(sandbox_msg) = progress_rx.recv().await {
-            if sandbox_msg.kind != "final" {
-                let _ = progress_event_tx
-                    .send(RuntimeStreamEvent::Session(SessionEvent::Message {
-                        text: sandbox_msg.text,
-                        kind: sandbox_msg.kind,
-                    }))
-                    .await;
-            }
-        }
-    });
-    let tool_context = crate::ToolExecutionContext {
-        session_id: dispatch.session_id.clone(),
-        host: Arc::clone(&dispatch.host),
-        cancellation_token: Some(task_cancel),
-        async_task_id: None,
-        turn_context: dispatch.turn_context.clone(),
-    };
-    let outcome = dispatch_tool_call_with_execution_context(
-        &dispatch,
-        tool_name,
-        args,
-        Some(&progress_tx),
-        tool_context,
-    )
-    .await;
-    drop(progress_tx);
-    let _ = progress_handle.await;
-    let raw_result = crate::ToolResult {
-        success: outcome.record.success,
-        result: outcome.record.result.clone(),
-        images: outcome.images,
-        control: outcome.record.control.clone(),
-    };
-    let state_result = match plugins
-        .project_tool_result(crate::plugin::ToolResultProjectionContext {
-            hook: crate::plugin::ToolResultProjectionHook::BeforeState,
-            session_id: dispatch.session_id.clone(),
-            tool_name: outcome.record.tool.clone(),
-            args: outcome.record.args.clone(),
-            result: raw_result.clone(),
-            duration_ms: outcome.record.duration_ms,
-            host: projector_manager.clone(),
-        })
-        .await
-    {
-        Ok(projected) => projected,
-        Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-    };
-    let model_result = match plugins
-        .project_tool_result(crate::plugin::ToolResultProjectionContext {
-            hook: crate::plugin::ToolResultProjectionHook::BeforeModel,
-            session_id: dispatch.session_id.clone(),
-            tool_name: outcome.record.tool.clone(),
-            args: outcome.record.args.clone(),
-            result: raw_result.clone(),
-            duration_ms: outcome.record.duration_ms,
-            host: projector_manager.clone(),
-        })
-        .await
-    {
-        Ok(projected) => projected,
-        Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-    };
-    (
-        index,
-        crate::sansio::CompletedToolCall {
-            call_id,
-            tool_name: outcome.record.tool,
-            args: outcome.record.args,
-            state_result,
-            model_result,
-            duration_ms: outcome.record.duration_ms,
-            item_id,
-        },
-    )
+    (executed.index, executed.completed)
 }
 
 impl RuntimeTurnDriver {
@@ -116,28 +32,32 @@ impl RuntimeTurnDriver {
         cancel: &CancellationToken,
     ) -> Vec<crate::sansio::CompletedToolCall> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
         let runtime_event_tx = event_tx.clone();
         let tool_event_forwarder = tokio::spawn(async move {
             while let Some(event) = tool_event_rx.recv().await {
                 send_session_event(&runtime_event_tx, event).await;
             }
         });
-        let plugins = Arc::clone(self.session.plugins());
-        let manager = self.session_manager.clone();
-        let projector_manager = manager.clone();
-        let dispatch = Arc::new(ToolDispatchContext {
-            plugins: Arc::clone(&plugins),
-            tools: self.session.tools(),
-            surface: self
-                .session
-                .tool_surface(&self.session_id, self.policy.execution_mode.clone()),
-            host: manager.clone(),
-            session_id: self.session_id.clone(),
-            event_tx: tool_event_tx,
-            turn_injection_bridge: self.session.turn_injection_bridge().clone(),
-            attachment_store: Arc::clone(&self.host.core.attachment_store),
-            turn_context: self.turn_context.clone(),
+        let runtime_event_tx = event_tx.clone();
+        let turn_event_forwarder = tokio::spawn(async move {
+            while let Some(event) = turn_event_rx.recv().await {
+                send_turn_event(&runtime_event_tx, event).await;
+            }
         });
+        let manager = self.session_manager.clone();
+        let context = self
+            .session
+            .mode_execution_context(
+                &self.session_id,
+                manager,
+                tool_event_tx,
+                Arc::new(serde_json::Map::new()),
+                Arc::new(crate::ChronologicalProjection::default()),
+                self.mode_extension.clone(),
+                self.turn_context.clone(),
+            )
+            .with_turn_event_sender(turn_event_tx);
         // Partition pending tool calls by declared [`ToolExecutionMode`]:
         // parallel-safe tools spawn onto a JoinSet to run concurrently, while
         // tools declared `Serial` (apply_patch, exec_command, write_stdin,
@@ -147,10 +67,7 @@ impl RuntimeTurnDriver {
         let mut parallel_calls: Vec<(usize, crate::sansio::PendingToolCall)> = Vec::new();
         let mut serial_calls: Vec<(usize, crate::sansio::PendingToolCall)> = Vec::new();
         for (index, pending_tool) in pending_tools.into_iter().enumerate() {
-            let mode = crate::tool_dispatch::resolve_tool_execution_mode(
-                &dispatch,
-                &pending_tool.tool_name,
-            );
+            let mode = context.tool_execution_mode(&pending_tool.tool_name);
             match mode {
                 crate::ToolExecutionMode::Parallel => parallel_calls.push((index, pending_tool)),
                 crate::ToolExecutionMode::Serial => serial_calls.push((index, pending_tool)),
@@ -165,23 +82,8 @@ impl RuntimeTurnDriver {
         let tool_cancel = cancel.child_token();
         let mut join_set = tokio::task::JoinSet::new();
         for (index, pending_tool) in parallel_calls.into_iter() {
-            let dispatch = Arc::clone(&dispatch);
-            let plugins = Arc::clone(&plugins);
-            let projector_manager = projector_manager.clone();
-            let event_tx_clone = event_tx.clone();
-            let task_cancel = tool_cancel.clone();
-            join_set.spawn(async move {
-                run_one_tool_call(
-                    index,
-                    pending_tool,
-                    dispatch,
-                    plugins,
-                    projector_manager,
-                    event_tx_clone,
-                    task_cancel,
-                )
-                .await
-            });
+            let context = context.clone().with_cancellation_token(tool_cancel.clone());
+            join_set.spawn(async move { run_one_tool_call(index, pending_tool, context).await });
         }
 
         let mut cancelled = false;
@@ -210,6 +112,7 @@ impl RuntimeTurnDriver {
                                     call_id: uuid::Uuid::new_v4().to_string(),
                                     tool_name: "unknown".to_string(),
                                     args: serde_json::json!({}),
+                                    raw_result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     state_result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     duration_ms: 0,
@@ -223,6 +126,9 @@ impl RuntimeTurnDriver {
                                 call_id: uuid::Uuid::new_v4().to_string(),
                                 tool_name: "unknown".to_string(),
                                 args: serde_json::json!({}),
+                                raw_result: crate::ToolResult::err_fmt(format!(
+                                    "tool task panicked: {e}"
+                                )),
                                 state_result: crate::ToolResult::err_fmt(format!(
                                     "tool task panicked: {e}"
                                 )),
@@ -249,6 +155,7 @@ impl RuntimeTurnDriver {
                         call_id: pending_tool.call_id,
                         tool_name: pending_tool.tool_name,
                         args: pending_tool.args,
+                        raw_result: crate::ToolResult::err_fmt("tool call cancelled"),
                         state_result: crate::ToolResult::err_fmt("tool call cancelled"),
                         model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                         duration_ms: 0,
@@ -260,18 +167,15 @@ impl RuntimeTurnDriver {
             let outcome = run_one_tool_call(
                 index,
                 pending_tool,
-                Arc::clone(&dispatch),
-                Arc::clone(&plugins),
-                projector_manager.clone(),
-                event_tx.clone(),
-                tool_cancel.clone(),
+                context.clone().with_cancellation_token(tool_cancel.clone()),
             )
             .await;
             outcomes.push(outcome);
         }
 
-        drop(dispatch);
+        drop(context);
         let _ = tool_event_forwarder.await;
+        let _ = turn_event_forwarder.await;
         outcomes.sort_by_key(|(index, _)| *index);
         outcomes.into_iter().map(|(_, outcome)| outcome).collect()
     }

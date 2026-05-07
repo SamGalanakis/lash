@@ -236,7 +236,7 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
         .await
         .expect("turn");
 
-    assert_eq!(result.final_text, "done");
+    assert_eq!(result.assistant_prose, "done");
     assert_eq!(
         prompt_seen.lock().expect("prompt seen lock").as_slice(),
         ["page-a", "page-a"]
@@ -264,5 +264,5 @@ async fn optional_turn_input_can_be_absent() {
         .expect("session");
 
     let result = session.run(Input::text("hello")).await.expect("turn");
-    assert_eq!(result.final_text, "ok");
+    assert_eq!(result.assistant_prose, "ok");
 }

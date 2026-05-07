@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use super::{SessionAppendNode, SessionCreateRequest};
 use crate::runtime::PersistedSessionState;
 use crate::{
-    ExecRequest, ExecResponse, ExecutionMode, ModeExecutionContext, ToolDefinition, ToolResult,
+    ExecRequest, ExecResponse, ExecutionMode, LlmRequest, ModeExecutionContext, PromptUsage,
+    SessionReadView, ToolDefinition, ToolResult,
 };
 
 /// Session-scoped plugin that initializes, restores, and extends mode
@@ -100,6 +101,14 @@ pub trait ModeSessionPlugin: Send + Sync {
         _request: &SessionCreateRequest,
     ) {
     }
+
+    async fn before_llm_call(
+        &self,
+        _ctx: ModeBeforeLlmCallContext,
+        _request: &LlmRequest,
+    ) -> Result<Option<ModeLlmCallAction>, crate::PluginError> {
+        Ok(None)
+    }
 }
 
 /// Narrow wrapper around `Session` that mode plugins use to
@@ -143,6 +152,18 @@ impl<'a> ModeSessionContext<'a> {
     pub fn projected_rlm_globals(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.projected_rlm_globals
     }
+}
+
+pub struct ModeBeforeLlmCallContext {
+    pub session_id: String,
+    pub host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    pub state: SessionReadView,
+    pub latest_prompt_usage: Option<PromptUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModeLlmCallAction {
+    Handoff { session_id: String },
 }
 
 /// Narrow wrapper around `LashRuntime` that mode plugins use when

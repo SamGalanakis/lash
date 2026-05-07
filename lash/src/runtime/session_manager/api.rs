@@ -289,6 +289,16 @@ impl crate::plugin::DirectCompletionHost for RuntimeSessionManager {
             .direct_completion(&self.current, &self.usage, request, usage_source)
             .await
     }
+
+    async fn direct_llm_completion(
+        &self,
+        request: crate::LlmRequest,
+        usage_source: &str,
+    ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
+        self.direct
+            .direct_llm_completion(&self.current, &self.usage, request, usage_source)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

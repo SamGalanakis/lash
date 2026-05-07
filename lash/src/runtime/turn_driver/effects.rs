@@ -128,20 +128,21 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
+        let (turn_event_tx, mut turn_event_rx) = mpsc::channel::<TurnEvent>(100);
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
         let relay_tx = event_tx.clone();
         let relay_handle = tokio::spawn(async move {
-            loop {
+            let mut sandbox_closed = false;
+            let mut session_closed = false;
+            let mut turn_closed = false;
+            while !(sandbox_closed && session_closed && turn_closed) {
                 tokio::select! {
                     biased;
-                    maybe_sandbox = msg_rx.recv() => {
+                    maybe_sandbox = msg_rx.recv(), if !sandbox_closed => {
                         let Some(sandbox_msg) = maybe_sandbox else {
-                            // Sandbox channel closed; drain remaining session events.
-                            while let Some(event) = session_event_rx.recv().await {
-                                send_session_event(&relay_tx, event).await;
-                            }
-                            break;
+                            sandbox_closed = true;
+                            continue;
                         };
                         if sandbox_msg.kind != "final" && !relay_tx.is_closed() {
                             let _ = relay_tx
@@ -152,22 +153,19 @@ impl RuntimeTurnDriver {
                                 .await;
                         }
                     }
-                    maybe_event = session_event_rx.recv() => {
+                    maybe_event = session_event_rx.recv(), if !session_closed => {
                         let Some(event) = maybe_event else {
-                            // Session channel closed; drain remaining sandbox messages.
-                            while let Some(sandbox_msg) = msg_rx.recv().await {
-                                if sandbox_msg.kind != "final" && !relay_tx.is_closed() {
-                                    let _ = relay_tx
-                                        .send(RuntimeStreamEvent::Session(SessionEvent::Message {
-                                            text: sandbox_msg.text,
-                                            kind: sandbox_msg.kind,
-                                        }))
-                                        .await;
-                                }
-                            }
-                            break;
+                            session_closed = true;
+                            continue;
                         };
                         send_session_event(&relay_tx, event).await;
+                    }
+                    maybe_turn_event = turn_event_rx.recv(), if !turn_closed => {
+                        let Some(event) = maybe_turn_event else {
+                            turn_closed = true;
+                            continue;
+                        };
+                        send_turn_event(&relay_tx, event).await;
                     }
                 }
             }
@@ -177,15 +175,18 @@ impl RuntimeTurnDriver {
         let read_view = self.checkpoint_state_view(messages, mode_iteration);
         let rlm_globals = read_view.shared_rlm_globals();
         let rlm_chronological_projection = read_view.shared_chronological_projection();
-        let context = self.session.mode_execution_context(
-            &self.session_id,
-            manager,
-            session_event_tx.clone(),
-            rlm_globals,
-            rlm_chronological_projection,
-            self.mode_extension.clone(),
-            self.turn_context.clone(),
-        );
+        let context = self
+            .session
+            .mode_execution_context(
+                &self.session_id,
+                manager,
+                session_event_tx.clone(),
+                rlm_globals,
+                rlm_chronological_projection,
+                self.mode_extension.clone(),
+                self.turn_context.clone(),
+            )
+            .with_turn_event_sender(turn_event_tx.clone());
         let result = mode_session
             .execute_code(
                 context,
@@ -197,6 +198,7 @@ impl RuntimeTurnDriver {
             .await
             .map_err(|e| e.to_string());
         drop(session_event_tx);
+        drop(turn_event_tx);
         self.session.clear_message_sender();
         let _ = relay_handle.await;
         result

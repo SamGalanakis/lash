@@ -90,8 +90,8 @@ flowchart LR
   Builder --> Env["RuntimeEnvironment<br/>PluginHost + stores + tracing"]
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["LashRuntime<br/>per chat/session"]
-  Runtime --> Turn["turn(Input).events(...).run()"]
-  Turn --> Result["TurnResult<br/>text, messages, tool calls, usage, errors"]
+  Runtime --> Turn["turn(Input).stream(&sink) / .run()"]
+  Turn --> Result["TurnResult / CollectedTurnResult<br/>outcome, usage, errors (+ assistant_prose)"]
   Turn --> Events["TurnEventSink<br/>text, reasoning, tools, usage, done"]
             </div>
           </div>
@@ -103,7 +103,7 @@ flowchart LR
             <dt><code>LashSession</code></dt>
             <dd>Represents one app conversation. It wraps an <code>Arc&lt;Mutex&lt;LashRuntime&gt;&gt;</code>, exposes <code>run(Input)</code>, <code>turn(Input)</code>, <code>read_view()</code>, and <code>rlm_project(bindings)</code> for projecting host values into the session's lashlang scope, and can carry a parent session id for app-level parent/child relationships.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Lets apps attach a <code>TurnEventSink</code>, cancellation token, and per-turn mode options before running. The final <code>TurnResult</code> contains final text, outcome, messages, tool calls, token usage, and turn issues.</dd>
+            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnEventSink</code> and returns a <code>TurnResult</code> (outcome, usage, errors); <code>.run()</code> additionally collects assistant prose into a <code>CollectedTurnResult</code>.</dd>
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
@@ -115,11 +115,10 @@ flowchart LR
 let session = core.session(chat_id).standard().open().await?;
 let result = session
     .turn(Input::text(user_text))
-    .events(&events)
-    .run()
+    .stream(&events)
     .await?;</code></pre>
           <div class="two-col">
-            <article class="panel"><h3>Example shape</h3><p><code>examples/mock-chat-service</code> keeps a map of <code>LashSession</code>s keyed by conversation id and records projected <code>TurnEvent</code>s. <code>examples/openrouter-chat-ui</code> adds an app database, a <code>SessionStoreFactory</code>, Axum routes, and SSE-style browser streaming.</p></article>
+            <article class="panel"><h3>Example shape</h3><p><code>examples/openrouter-chat-ui</code> keeps a map of <code>LashSession</code>s keyed by conversation id, records projected <code>TurnEvent</code>s through a <code>TurnEventSink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and SSE-style browser streaming.</p></article>
             <article class="panel"><h3>Boundary rule</h3><p>The embed API is intentionally above <code>LashRuntime</code> but below an app framework. It should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
           </div>
         </div>

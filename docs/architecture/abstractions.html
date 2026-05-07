@@ -69,7 +69,7 @@
                 <tr><td><code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, <code>ProjectedRead</code></td><td><code>lashlang/src/runtime/mod.rs</code></td><td>Read-only bindings injected from the host into Lashlang scope. RLM uses this to expose <code>history</code> and other projected globals without copying them into VM <code>State</code>; <code>set</code>/<code>set_default</code> over a projected name is rejected at runtime.</td></tr>
                 <tr><td><code>ToolResultProjectionHook</code>, <code>BuiltinToolResultProjectionPluginFactory</code>, <code>ToolResultProjectionPluginConfig</code></td><td><code>lash/src/plugin/tool_result_projection_builtin.rs</code></td><td>Three-stage tool-result projector — <code>BeforeState</code>, <code>BeforeModel</code>, <code>BeforeHistory</code> — with <code>ToolResultProjectionMode::{Bytes, Tokens}</code> limits (defaults: 16 KiB, 400 lines).</td></tr>
                 <tr><td><code>ToolDiscoveryIndex</code>, <code>CatalogTool</code>, <code>llm_rerank_request</code></td><td><code>lash-plugin-tool-discovery/src/*</code></td><td>Search/load tool discovery pipeline split across catalog, provider, ranking, rerank, and schema-index modules.</td></tr>
-                <tr><td><code>UiTimeline</code>, <code>ActivityBlock</code>, <code>UiExtension</code></td><td><code>lash-cli</code> / <code>lash-ui</code></td><td>CLI render projection, tool activity display, and host-owned surface slots.</td></tr>
+                <tr><td><code>UiTimelineItem</code>, <code>ActivityBlock</code>, <code>UiExtensions</code></td><td><code>lash-cli</code> / <code>lash-ui</code></td><td>CLI render projection, tool activity display, and host-owned surface slots.</td></tr>
               </tbody>
             </table>
           </div>
@@ -109,7 +109,7 @@ flowchart LR
             <li>
               <div>
                 <h3>No UI vocabulary in core runtime.</h3>
-                <p><code>UiTimeline</code> and rendering stay in <code>lash-cli</code>.</p>
+                <p><code>UiTimelineItem</code> and rendering stay in <code>lash-cli</code>.</p>
               </div>
             </li>
             <li>

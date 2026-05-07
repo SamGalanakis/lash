@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex, RwLock};
 
+use lash::llm::types::{
+    LlmContentBlock, LlmJsonSchema, LlmMessage, LlmOutputSpec, LlmRequest, LlmRole, LlmToolChoice,
+};
 use lash::plugin::{
-    CheckpointHookContext, HistoryError, ModeProtocolDriverPlugin, ModeRuntimeContext,
-    ModeSessionContext, ModeSessionPlugin, PluginDirective, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, SessionPlugin, TurnContextTransform,
-    TurnTransformContext,
+    CheckpointHookContext, HistoryError, ModeBeforeLlmCallContext, ModeLlmCallAction,
+    ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
+    PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
+    SessionPlugin, TurnContextTransform, TurnTransformContext,
 };
 use lash::session_model::context::PreparedContext;
 use lash::{
@@ -20,7 +23,7 @@ use crate::projected_bindings::{
 };
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
-use crate::rlm_support::budget_prompt_contributions;
+use crate::rlm_support::format_budget_suffix;
 use crate::stream_mask;
 
 const BUDGET_WARNING_STATUS: &str = "rlm_context_budget_warning";
@@ -35,6 +38,8 @@ pub struct RlmModePluginConfig {
     pub max_output_chars: usize,
     #[serde(default = "default_continue_as_soft_warn_tokens")]
     pub continue_as_soft_warn_tokens: Option<usize>,
+    #[serde(default = "default_continue_as_forced_fallback_tokens")]
+    pub continue_as_forced_fallback_tokens: Option<usize>,
 }
 
 fn default_max_output_chars() -> usize {
@@ -45,6 +50,10 @@ fn default_continue_as_soft_warn_tokens() -> Option<usize> {
     Some(100_000)
 }
 
+fn default_continue_as_forced_fallback_tokens() -> Option<usize> {
+    Some(140_000)
+}
+
 impl Default for RlmModePluginConfig {
     fn default() -> Self {
         Self {
@@ -52,7 +61,23 @@ impl Default for RlmModePluginConfig {
             prompt_features: crate::protocol::RlmPromptFeatures::default(),
             max_output_chars: default_max_output_chars(),
             continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
+            continue_as_forced_fallback_tokens: default_continue_as_forced_fallback_tokens(),
         }
+    }
+}
+
+impl RlmModePluginConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if let (Some(soft), Some(forced)) = (
+            self.continue_as_soft_warn_tokens,
+            self.continue_as_forced_fallback_tokens,
+        ) && forced < soft
+        {
+            return Err(format!(
+                "continue_as_forced_fallback_tokens ({forced}) must be greater than or equal to continue_as_soft_warn_tokens ({soft})"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -213,6 +238,9 @@ struct RlmModeSession {
 
 impl RlmModeSession {
     fn new(config: RlmModePluginConfig) -> Result<Self, SessionError> {
+        config
+            .validate()
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
         Ok(Self {
             execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new(
                 config.observe_projection.clone(),
@@ -428,6 +456,67 @@ impl ModeSessionPlugin for RlmModeSession {
             .restore_execution_state(data)
     }
 
+    async fn before_llm_call(
+        &self,
+        ctx: ModeBeforeLlmCallContext,
+        request: &LlmRequest,
+    ) -> Result<Option<ModeLlmCallAction>, PluginError> {
+        let Some(threshold) = self.config.continue_as_forced_fallback_tokens else {
+            return Ok(None);
+        };
+        let Some(usage) = ctx.latest_prompt_usage.as_ref() else {
+            return Ok(None);
+        };
+        if usage.context_budget_tokens < threshold {
+            return Ok(None);
+        }
+
+        let observed_tokens = usage.context_budget_tokens;
+        let args = forced_continue_as_args(&ctx, request, threshold, observed_tokens).await?;
+        let seed = lash_rlm_types::classify_seed(&args)
+            .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
+        let task = args
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .filter(|task| !task.trim().is_empty())
+            .ok_or_else(|| {
+                PluginError::Session(
+                    "forced continue_as fallback returned missing or empty `task`".to_string(),
+                )
+            })?
+            .to_string();
+
+        let metadata = serde_json::Map::from_iter([
+            (
+                "trigger".to_string(),
+                serde_json::Value::String("context_budget_tokens".to_string()),
+            ),
+            ("threshold_tokens".to_string(), serde_json::json!(threshold)),
+            (
+                "observed_tokens".to_string(),
+                serde_json::json!(observed_tokens),
+            ),
+            (
+                "source".to_string(),
+                serde_json::Value::String("rlm_forced_fallback".to_string()),
+            ),
+        ]);
+        let session_id = crate::control_tools::create_continue_as_successor(
+            ctx.host.as_ref(),
+            &ctx.session_id,
+            task,
+            seed,
+            crate::control_tools::ContinueAsHandoff {
+                relation_reason: "continue_as_forced_context_fallback".to_string(),
+                usage_source: "continue_as_forced_context_fallback".to_string(),
+                metadata,
+            },
+        )
+        .await
+        .map_err(PluginError::Session)?;
+        Ok(Some(ModeLlmCallAction::Handoff { session_id }))
+    }
+
     fn configure_runtime_from_request(
         &self,
         mut ctx: ModeRuntimeContext<'_>,
@@ -511,6 +600,71 @@ fn reject_reserved_projected_binding_names(
     Ok(())
 }
 
+async fn forced_continue_as_args(
+    ctx: &ModeBeforeLlmCallContext,
+    request: &LlmRequest,
+    threshold: usize,
+    observed_tokens: usize,
+) -> Result<serde_json::Value, PluginError> {
+    let mut fallback_request = request.clone();
+    fallback_request.tools = Arc::new(Vec::new());
+    fallback_request.tool_choice = LlmToolChoice::None;
+    fallback_request.output_spec = Some(LlmOutputSpec::JsonSchema(LlmJsonSchema {
+        name: "continue_as".to_string(),
+        schema: crate::control_tools::continue_as_input_schema(),
+        strict: true,
+    }));
+    fallback_request.stream_events = None;
+    fallback_request.provider_trace = None;
+    fallback_request.messages.push(LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Text {
+            text: forced_continue_as_instruction(threshold, observed_tokens).into(),
+            response_meta: None,
+            cache_breakpoint: false,
+        }],
+    ));
+    let completion = ctx
+        .host
+        .direct_llm_completion(fallback_request, "continue_as_forced_context_fallback")
+        .await
+        .map_err(|err| {
+            PluginError::Session(format!(
+                "forced continue_as fallback LLM call failed: {err}"
+            ))
+        })?;
+    parse_forced_continue_as_args(&completion.response.full_text)
+}
+
+fn forced_continue_as_instruction(threshold: usize, observed_tokens: usize) -> String {
+    format!(
+        "Context budget is above the forced continuation threshold ({observed_tokens} observed, threshold {threshold}). Produce fresh-context continuation arguments as JSON matching the provided schema. Set out the task at hand in `task`. Put only necessary state in `seed`. Leave bulky logs, transcripts, raw command output, and repeated context behind. Prefer variable names, file paths, projected references, and compact summaries over copying large values. Omit `seed` when no extra state is needed."
+    )
+}
+
+fn parse_forced_continue_as_args(text: &str) -> Result<serde_json::Value, PluginError> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).map_err(|err| {
+        PluginError::Session(format!(
+            "forced continue_as fallback returned invalid JSON: {err}"
+        ))
+    })?;
+    let validator =
+        jsonschema::JSONSchema::compile(&crate::control_tools::continue_as_input_schema())
+            .map_err(|err| {
+                PluginError::Session(format!(
+                    "failed to compile forced continue_as fallback schema: {err}"
+                ))
+            })?;
+    if let Err(errors) = validator.validate(&value) {
+        let messages = errors.map(|err| err.to_string()).collect::<Vec<_>>();
+        return Err(PluginError::Session(format!(
+            "forced continue_as fallback returned schema-invalid JSON: {}",
+            messages.join("; ")
+        )));
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,6 +701,86 @@ mod tests {
     impl lash::DirectCompletionHost for NoopPromptManager {}
     impl lash::TraceHost for NoopPromptManager {}
 
+    fn prompt_usage(context_budget_tokens: usize) -> lash::PromptUsage {
+        lash::PromptUsage {
+            prompt_context_tokens: context_budget_tokens,
+            input_tokens: context_budget_tokens,
+            cached_input_tokens: 0,
+            context_budget_tokens,
+        }
+    }
+
+    #[test]
+    fn rlm_config_defaults_budget_thresholds() {
+        let config = RlmModePluginConfig::default();
+
+        assert_eq!(config.continue_as_soft_warn_tokens, Some(100_000));
+        assert_eq!(config.continue_as_forced_fallback_tokens, Some(140_000));
+        config.validate().expect("default config should validate");
+    }
+
+    #[test]
+    fn rlm_config_validation_accepts_equal_and_disabled_thresholds() {
+        RlmModePluginConfig {
+            continue_as_soft_warn_tokens: Some(100_000),
+            continue_as_forced_fallback_tokens: Some(100_000),
+            ..Default::default()
+        }
+        .validate()
+        .expect("equal thresholds are allowed");
+
+        RlmModePluginConfig {
+            continue_as_soft_warn_tokens: None,
+            continue_as_forced_fallback_tokens: Some(80_000),
+            ..Default::default()
+        }
+        .validate()
+        .expect("soft warning can be disabled independently");
+
+        RlmModePluginConfig {
+            continue_as_soft_warn_tokens: Some(100_000),
+            continue_as_forced_fallback_tokens: None,
+            ..Default::default()
+        }
+        .validate()
+        .expect("forced fallback can be disabled independently");
+    }
+
+    #[test]
+    fn rlm_config_validation_rejects_forced_below_soft_warn() {
+        let err = RlmModePluginConfig {
+            continue_as_soft_warn_tokens: Some(100_000),
+            continue_as_forced_fallback_tokens: Some(99_999),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("forced threshold below soft warn should fail");
+
+        assert!(err.contains("continue_as_forced_fallback_tokens"));
+    }
+
+    #[test]
+    fn forced_fallback_accepts_omitted_seed() {
+        let parsed = parse_forced_continue_as_args(r#"{"task":"continue from compact state"}"#)
+            .expect("valid fallback args");
+
+        assert_eq!(
+            parsed.get("task").and_then(serde_json::Value::as_str),
+            Some("continue from compact state")
+        );
+        assert!(parsed.get("seed").is_none());
+    }
+
+    #[test]
+    fn forced_fallback_rejects_schema_extra_fields() {
+        let err = parse_forced_continue_as_args(
+            r#"{"task":"continue from compact state","unexpected":true}"#,
+        )
+        .expect_err("extra properties should fail");
+
+        assert!(err.to_string().contains("schema-invalid"));
+    }
+
     #[async_trait::async_trait]
     impl lash::SessionLifecycleHost for NoopPromptManager {
         async fn create_session(
@@ -566,31 +800,10 @@ mod tests {
         // 23% of the configured handoff threshold — emit the status line so
         // the model has continuous context-size awareness, but no
         // `continue_as` nag.
-        let state = lash::SessionStateEnvelope {
-            policy: lash::SessionPolicy {
-                max_context_tokens: Some(1_050_000),
-                ..Default::default()
-            },
-            last_prompt_usage: Some(lash::PromptUsage {
-                prompt_context_tokens: 40_000,
-                input_tokens: 40_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 47_213,
-            }),
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(47_213);
+        let content = format_budget_suffix(0, Some(&usage), Some(200_000))
+            .expect("budget suffix should render");
 
-        let contributions = budget_prompt_contributions(&ctx, Some(200_000));
-
-        assert_eq!(contributions.len(), 1);
-        let content = &contributions[0].content;
         assert!(content.contains("Tokens: 47213 · handoff threshold: 200000 (23%)"));
         assert!(content.contains("Turn:"));
         assert!(!content.contains("Look for a clean handoff point"));
@@ -646,27 +859,10 @@ mod tests {
     #[test]
     fn budget_prompt_contribution_advisory_tier_60_to_89_pct() {
         // 75% of threshold — advisory: scout for a clean handoff point.
-        let state = lash::SessionStateEnvelope {
-            last_prompt_usage: Some(lash::PromptUsage {
-                prompt_context_tokens: 75_000,
-                input_tokens: 75_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 75_000,
-            }),
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(75_000);
+        let content = format_budget_suffix(0, Some(&usage), Some(100_000))
+            .expect("budget suffix should render");
 
-        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
-
-        assert_eq!(contributions.len(), 1);
-        let content = &contributions[0].content;
         assert!(content.contains("Tokens: 75000 · handoff threshold: 100000 (75%)"));
         assert!(content.contains("Look for a clean handoff point"));
         assert!(!content.contains("Budget tight"));
@@ -676,27 +872,10 @@ mod tests {
     #[test]
     fn budget_prompt_contribution_tight_tier_90_to_99_pct() {
         // 95% of threshold — tight: wrap the current step, then continue_as.
-        let state = lash::SessionStateEnvelope {
-            last_prompt_usage: Some(lash::PromptUsage {
-                prompt_context_tokens: 95_000,
-                input_tokens: 95_000,
-                cached_input_tokens: 0,
-                context_budget_tokens: 95_000,
-            }),
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(95_000);
+        let content = format_budget_suffix(0, Some(&usage), Some(100_000))
+            .expect("budget suffix should render");
 
-        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
-
-        assert_eq!(contributions.len(), 1);
-        let content = &contributions[0].content;
         assert!(content.contains("Tokens: 95000 · handoff threshold: 100000 (95%)"));
         assert!(content.contains("Budget tight"));
         assert!(content.contains("`continue_as`"));
@@ -706,27 +885,10 @@ mod tests {
 
     #[test]
     fn budget_prompt_contribution_over_threshold_forces_handoff() {
-        let state = lash::SessionStateEnvelope {
-            last_prompt_usage: Some(lash::PromptUsage {
-                prompt_context_tokens: 120_292,
-                input_tokens: 120_292,
-                cached_input_tokens: 0,
-                context_budget_tokens: 120_292,
-            }),
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(120_292);
+        let content = format_budget_suffix(0, Some(&usage), Some(100_000))
+            .expect("budget suffix should render");
 
-        let contributions = budget_prompt_contributions(&ctx, Some(100_000));
-
-        assert_eq!(contributions.len(), 1);
-        let content = &contributions[0].content;
         assert!(content.contains("Tokens: 120292 · handoff threshold: 100000 (120%)"));
         assert!(content.contains("Past the handoff threshold"));
         assert!(content.contains("End this block with `continue_as` now"));
@@ -781,49 +943,15 @@ mod tests {
 
     #[test]
     fn budget_prompt_contribution_omits_without_configured_budget() {
-        let state = lash::SessionStateEnvelope {
-            policy: lash::SessionPolicy {
-                max_context_tokens: Some(1_050_000),
-                ..Default::default()
-            },
-            token_usage: lash::TokenUsage {
-                input_tokens: 47_213,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(47_213);
 
-        let contributions = budget_prompt_contributions(&ctx, None);
-
-        assert!(contributions.is_empty());
+        assert!(format_budget_suffix(0, Some(&usage), None).is_none());
     }
 
     #[test]
     fn budget_prompt_contribution_omits_without_used_tokens() {
-        let state = lash::SessionStateEnvelope {
-            policy: lash::SessionPolicy {
-                max_context_tokens: Some(1_050_000),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx = lash::plugin::PromptHookContext {
-            session_id: "root".to_string(),
-            host: std::sync::Arc::new(NoopPromptManager),
-            state: lash::SessionReadView::from_exported_state(&state),
-            mode_turn_options: lash::ModeTurnOptions::default(),
-            turn_context: lash::TurnContext::default(),
-        };
+        let usage = prompt_usage(0);
 
-        let contributions = budget_prompt_contributions(&ctx, Some(200_000));
-
-        assert!(contributions.is_empty());
+        assert!(format_budget_suffix(0, Some(&usage), Some(200_000)).is_none());
     }
 }
