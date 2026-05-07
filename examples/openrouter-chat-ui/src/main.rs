@@ -17,7 +17,8 @@ use lash::{
     TurnOutcome,
 };
 use lash_embed::{
-    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnEvent, TurnEventSink,
+    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnCollector, TurnEvent,
+    TurnEventFanout, TurnEventSink,
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
 use lash_rlm_types::RlmTermination;
@@ -259,14 +260,14 @@ async fn send_message(
                 message: user_message,
             })
             .await;
-        let sink = ChannelTurnEvents {
+        let collector = TurnCollector::default();
+        let ui_sink: Arc<dyn TurnEventSink> = Arc::new(ChannelTurnEvents {
             tx: tx.clone(),
             state: run_state.clone(),
             chat_id: chat_id.clone(),
-            assistant_prose: Arc::new(Mutex::new(String::new())),
             active_code: Arc::new(Mutex::new(None)),
-        };
-        let assistant_prose = Arc::clone(&sink.assistant_prose);
+        });
+        let sink = TurnEventFanout::new(vec![collector.sink(), ui_sink]);
         let turn = session
             .turn(Input::text(text))
             .with_plugin_input::<DemoPlugin>(DemoTurnInput {
@@ -286,10 +287,7 @@ async fn send_message(
             .await;
         match turn {
             Ok(result) => {
-                let mut assistant_text = assistant_prose
-                    .lock()
-                    .expect("assistant prose lock")
-                    .clone();
+                let mut assistant_text = collector.snapshot().assistant_prose;
                 if let TurnOutcome::Finished(TurnFinish::Submission { value, .. }) = &result.outcome
                     && assistant_text.trim().is_empty()
                 {
@@ -345,19 +343,12 @@ struct ChannelTurnEvents {
     tx: mpsc::Sender<StreamItem>,
     state: AppStateData,
     chat_id: String,
-    assistant_prose: Arc<Mutex<String>>,
     active_code: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
 impl TurnEventSink for ChannelTurnEvents {
     async fn emit(&self, event: TurnEvent) {
-        if let TurnEvent::AssistantProseDelta { text } = &event {
-            self.assistant_prose
-                .lock()
-                .expect("assistant prose lock")
-                .push_str(text);
-        }
         if let TurnEvent::CodeBlockStarted { code, .. } = &event {
             *self.active_code.lock().expect("active code lock") = Some(code.clone());
         }

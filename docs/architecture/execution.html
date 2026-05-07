@@ -91,7 +91,7 @@ flowchart LR
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["LashRuntime<br/>per chat/session"]
   Runtime --> Turn["turn(Input).stream(&sink) / .run()"]
-  Turn --> Result["TurnResult / CollectedTurnResult<br/>outcome, usage, errors (+ assistant_prose)"]
+  Turn --> Result["TurnResult / CollectedTurnResult<br/>outcome, usage, errors (+ TurnTranscript)"]
   Turn --> Events["TurnEventSink<br/>text, reasoning, tools, usage, done"]
             </div>
           </div>
@@ -103,7 +103,7 @@ flowchart LR
             <dt><code>LashSession</code></dt>
             <dd>Represents one app conversation. It wraps an <code>Arc&lt;Mutex&lt;LashRuntime&gt;&gt;</code>, exposes <code>run(Input)</code>, <code>turn(Input)</code>, <code>read_view()</code>, and <code>rlm_project(bindings)</code> for projecting host values into the session's lashlang scope, and can carry a parent session id for app-level parent/child relationships.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnEventSink</code> and returns a <code>TurnResult</code> (outcome, usage, errors); <code>.run()</code> additionally collects assistant prose into a <code>CollectedTurnResult</code>.</dd>
+            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnEventSink</code> and returns a <code>TurnResult</code> (outcome, usage, errors); <code>.run()</code> uses the same event collector surface to return a <code>CollectedTurnResult</code> with a <code>TurnTranscript</code>.</dd>
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
