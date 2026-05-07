@@ -62,6 +62,12 @@ impl PluginFactory for SubagentsPluginFactory {
         let execution_mode = ctx.execution_mode.clone();
 
         let is_rlm = execution_mode == lash::ExecutionMode::new("rlm");
+        if is_rlm && !ctx.background_tasks_available {
+            return Err(PluginError::Registration(
+                "subagents require session background-task support; configure a SessionTaskExecutor before installing SubagentsPluginFactory"
+                    .to_string(),
+            ));
+        }
         let provider: Option<Arc<dyn ToolProvider>> = if is_rlm {
             Some(Arc::new(rlm::RlmSubagentToolsProvider {
                 registry: Arc::clone(&registry),
@@ -370,10 +376,42 @@ mod tests {
             standard_context_approach: None,
             tool_access: lash::SessionToolAccess::default(),
             subagent: None,
+            background_tasks_available: false,
             parent_session_id: None,
         };
         let plugin = factory.build(&ctx).expect("plugin");
         assert_eq!(plugin.id(), "subagents");
+    }
+
+    #[tokio::test]
+    async fn rlm_provider_requires_background_task_support() {
+        let factory = SubagentsPluginFactory::new(
+            SessionPolicy::default(),
+            Arc::new(default_registry(
+                &BTreeMap::new(),
+                lash::ExecutionMode::new("rlm"),
+            )),
+            Arc::new(LocalSubagentHost::default()),
+        );
+        let ctx = PluginSessionContext {
+            session_id: "parent".to_string(),
+            execution_mode: lash::ExecutionMode::new("rlm"),
+            standard_context_approach: None,
+            tool_access: lash::SessionToolAccess::default(),
+            subagent: None,
+            background_tasks_available: false,
+            parent_session_id: None,
+        };
+
+        let err = match factory.build(&ctx) {
+            Ok(_) => panic!("rlm build should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("subagents require session background-task support"),
+            "{err}"
+        );
     }
 
     fn dummy_tool(name: &str) -> ToolDefinition {
