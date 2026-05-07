@@ -452,7 +452,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                     serde_json::to_vec_pretty(&json!({
                         "submission": value,
                         "errors": turn.errors,
-                        "assistant_prose": turn.assistant_prose,
+                        "assistant_prose": turn.transcript.assistant_prose,
                     }))
                     .map_err(lash_harness_opt::HarnessOptError::Json)?,
                 )
@@ -466,7 +466,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             }
             other => Err(lash_harness_opt::HarnessOptError::Strategy(format!(
                 "GEPA RLM proposer did not submit a proposal: outcome={other:?} errors={:?} output={}",
-                turn.errors, turn.assistant_prose
+                turn.errors, turn.transcript.assistant_prose
             ))),
         }
     }
