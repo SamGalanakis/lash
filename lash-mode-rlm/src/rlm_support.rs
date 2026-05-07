@@ -38,24 +38,6 @@ pub fn format_budget_suffix(
     Some(content)
 }
 
-/// Back-compat shim used by the budget tests in `plugin.rs`. Wraps
-/// `format_budget_suffix` in a `PromptContribution` so the existing test
-/// assertions keep working while the prompt-hook registration is gone.
-#[cfg(test)]
-pub(crate) fn budget_prompt_contributions(
-    ctx: &PromptHookContext,
-    max_budget_tokens: Option<usize>,
-) -> Vec<PromptContribution> {
-    match format_budget_suffix(
-        ctx.state.turn_index(),
-        ctx.state.last_prompt_usage(),
-        max_budget_tokens,
-    ) {
-        Some(content) => vec![PromptContribution::environment("Context Budget", content)],
-        None => Vec::new(),
-    }
-}
-
 /// Memoizes the rendered "Bound Variables" `PromptContribution`. The
 /// cache hits when the defaults `Arc` identity is unchanged between LLM
 /// iterations. Saves the JSON-shape inference + the

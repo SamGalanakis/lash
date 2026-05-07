@@ -41,7 +41,6 @@ use crate::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, SessionEvent, SessionPolicy, TokenUsage,
     fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
-use crate::tool_dispatch::{ToolDispatchContext, dispatch_tool_call_with_execution_context};
 use crate::{
     CheckpointKind, ExecutionMode, ExternalInvokeError, PersistentRuntimeServices,
     PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
@@ -396,8 +395,84 @@ impl EventSink for NoopEventSink {
     async fn emit(&self, _event: SessionEvent) {}
 }
 
+/// Canonical semantic view of a completed tool result.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolResultView {
+    pub raw: serde_json::Value,
+    pub for_model: serde_json::Value,
+    pub for_state: serde_json::Value,
+}
+
+/// App-facing semantic stream for a turn.
+///
+/// Unlike [`SessionEvent`], these events are stable application signals rather
+/// than low-level runtime/debug events.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TurnEvent {
+    AssistantProseDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
+    CodeBlockStarted {
+        language: String,
+        code: String,
+    },
+    CodeBlockCompleted {
+        language: String,
+        output: String,
+        error: Option<String>,
+        success: bool,
+        duration_ms: u64,
+    },
+    ToolCallStarted {
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolCallCompleted {
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+        result: ToolResultView,
+        success: bool,
+        duration_ms: u64,
+    },
+    Usage {
+        mode_iteration: usize,
+        usage: TokenUsage,
+        cumulative: TokenUsage,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[async_trait::async_trait]
+pub trait TurnEventSink: Send + Sync {
+    fn is_noop(&self) -> bool {
+        false
+    }
+
+    async fn emit(&self, event: TurnEvent);
+}
+
+pub struct NoopTurnEventSink;
+
+#[async_trait::async_trait]
+impl TurnEventSink for NoopTurnEventSink {
+    fn is_noop(&self) -> bool {
+        true
+    }
+
+    async fn emit(&self, _event: TurnEvent) {}
+}
+
 enum RuntimeStreamEvent {
     Session(SessionEvent),
+    Turn(TurnEvent),
 }
 
 #[derive(Clone)]

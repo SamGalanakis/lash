@@ -522,7 +522,14 @@ impl RuntimeTurnDriver {
                         send_session_event(
                             event_tx,
                             SessionEvent::ReasoningDelta {
-                                content: reasoning_delta,
+                                content: reasoning_delta.clone(),
+                            },
+                        )
+                        .await;
+                        send_turn_event(
+                            event_tx,
+                            TurnEvent::ReasoningDelta {
+                                text: reasoning_delta,
                             },
                         )
                         .await;
@@ -546,7 +553,14 @@ impl RuntimeTurnDriver {
                         if state.buffer_stream_fallback {
                             state.streamed_output.push_text(&delta);
                         }
-                        send_session_event(event_tx, SessionEvent::TextDelta { content: delta })
+                        send_session_event(
+                            event_tx,
+                            SessionEvent::TextDelta {
+                                content: delta.clone(),
+                            },
+                        )
+                        .await;
+                        send_turn_event(event_tx, TurnEvent::AssistantProseDelta { text: delta })
                             .await;
                     }
                 }
@@ -575,8 +589,14 @@ impl RuntimeTurnDriver {
                             .streamed_output
                             .push_reasoning(delta.clone(), None, Vec::new(), None);
                     }
-                    send_session_event(event_tx, SessionEvent::ReasoningDelta { content: delta })
-                        .await;
+                    send_session_event(
+                        event_tx,
+                        SessionEvent::ReasoningDelta {
+                            content: delta.clone(),
+                        },
+                    )
+                    .await;
+                    send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: delta }).await;
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -605,7 +625,14 @@ impl RuntimeTurnDriver {
                         send_session_event(
                             event_tx,
                             SessionEvent::ReasoningDelta {
-                                content: reasoning_delta,
+                                content: reasoning_delta.clone(),
+                            },
+                        )
+                        .await;
+                        send_turn_event(
+                            event_tx,
+                            TurnEvent::ReasoningDelta {
+                                text: reasoning_delta,
                             },
                         )
                         .await;
@@ -629,8 +656,14 @@ impl RuntimeTurnDriver {
                         if state.buffer_stream_fallback {
                             state.streamed_output.push_text(&text);
                         }
-                        send_session_event(event_tx, SessionEvent::TextDelta { content: text })
-                            .await;
+                        send_session_event(
+                            event_tx,
+                            SessionEvent::TextDelta {
+                                content: text.clone(),
+                            },
+                        )
+                        .await;
+                        send_turn_event(event_tx, TurnEvent::AssistantProseDelta { text }).await;
                     }
                 }
             }
@@ -695,6 +728,8 @@ impl RuntimeTurnDriver {
                         },
                     )
                     .await;
+                    send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: text.clone() })
+                        .await;
                 }
                 if state.buffer_stream_fallback {
                     state

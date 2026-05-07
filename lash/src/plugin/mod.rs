@@ -58,8 +58,9 @@ pub type CommandHandler =
 
 mod mode;
 pub use mode::{
-    ModeExtras, ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeRuntimeContext,
-    ModeSessionContext, ModeSessionPlugin, StandardCreateExtras,
+    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, ModeNativeToolsPlugin,
+    ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
+    StandardCreateExtras,
 };
 
 mod history;
@@ -721,6 +722,16 @@ pub trait DirectCompletionHost: Send + Sync {
             "direct completions are unavailable in this session".to_string(),
         ))
     }
+
+    async fn direct_llm_completion(
+        &self,
+        _request: crate::LlmRequest,
+        _usage_source: &str,
+    ) -> Result<DirectLlmCompletion, PluginError> {
+        Err(PluginError::Session(
+            "direct LLM completions are unavailable in this session".to_string(),
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -878,6 +889,12 @@ impl<T> RuntimeSessionHost for T where
 #[derive(Clone, Debug)]
 pub struct DirectCompletion {
     pub text: String,
+    pub usage: crate::TokenUsage,
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectLlmCompletion {
+    pub response: crate::LlmResponse,
     pub usage: crate::TokenUsage,
 }
 
@@ -1189,11 +1206,17 @@ pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // registered by the embedder before calling `PluginHost::build_session`.
     // lash's own test suite uses an in-tree fake (`testing::test_mode_factories()`)
     // to avoid a dev-dep cycle through the mode crates.
-    #[allow(unused_mut)]
-    let mut factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(monitor::MonitorPluginFactory)];
+    let factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(monitor::MonitorPluginFactory)];
+    #[cfg(not(test))]
+    return factories;
+
     #[cfg(test)]
-    factories.extend(crate::testing::test_mode_factories());
-    factories
+    {
+        factories
+            .into_iter()
+            .chain(crate::testing::test_mode_factories())
+            .collect()
+    }
 }
 
 #[cfg(test)]

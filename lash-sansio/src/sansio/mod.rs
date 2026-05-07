@@ -60,6 +60,7 @@ pub struct CompletedToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
+    pub raw_result: ToolResult,
     pub state_result: ToolResult,
     pub model_result: ToolResult,
     pub duration_ms: u64,
@@ -540,6 +541,10 @@ impl<M: ModeProtocol> TurnMachine<M> {
     pub fn fail_turn(&mut self, event: SessionEvent) {
         self.emit(event);
         self.finish(TurnOutcome::Stopped(TurnStop::RuntimeError));
+    }
+
+    pub fn finish_with_outcome(&mut self, outcome: TurnOutcome) {
+        self.finish(outcome);
     }
 
     fn finish(&mut self, outcome: TurnOutcome) {

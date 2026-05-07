@@ -78,11 +78,25 @@
           </div>
           <div class="two-col">
             <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</p></article>
-            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. <code>continue_as { task, seed }</code> ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
+            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. <code>call continue_as { task: ..., seed: { ... } }</code> is a host tool (not a keyword) that ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
           </div>
           <pre><code>```lashlang
 text = (call read_file { path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
+```</code></pre>
+          <p>A typical handoff packs the concrete state the successor needs and ends the block. Computed expressions default to global state on the successor; values rooted at a projected binding (like <code>input.prompt</code>) stay projected.</p>
+          <pre><code>```lashlang
+findings = []
+for path in (call glob { pattern: "src/**/*.rs" })? {
+  text = (call read_file { path: path })?
+  if contains(text, "TODO") {
+    findings = push(findings, { path: path, chars: len(text) })
+  }
+}
+call continue_as {
+  task: "summarize the TODO audit and propose a follow-up plan",
+  seed: { problem: input.prompt, findings: findings }
+}
 ```</code></pre>
         </div>
 
@@ -147,6 +161,28 @@ submit counts</code></pre>
             <article class="panel"><h3><code>break</code> / <code>continue</code></h3><p><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</p></article>
             <article class="panel"><h3><code>submit</code></h3><p><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</p></article>
           </div>
+          <p>A short walkthrough that exercises iteration, <code>else if</code> chains, <code>break</code>/<code>continue</code>, and <code>format</code>. Loop variables are scoped to the loop body and the prior binding of <code>label</code> is restored on <code>break</code>.</p>
+          <pre><code>nums = [1, 2, 3, 4, 5, 6]
+seen = []
+total = 0
+for n in nums {
+  if n == 2 {
+    continue
+  }
+  if n > 4 {
+    break
+  }
+  seen = push(seen, n)
+  total = total + n
+}
+if total > 10 {
+  label = "large"
+} else if total > 5 {
+  label = "medium"
+} else {
+  label = "small"
+}
+submit format("seen={} total={} label={}", join(seen, ","), total, label)</code></pre>
         </div>
 
         <div class="section" id="projected-host-bindings">
@@ -170,9 +206,50 @@ submit counts</code></pre>
           <div class="module-grid">
             <article class="panel"><h3><code>call</code></h3><p><code>call tool { arg: expr }</code> returns <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path calls and keep the wrapper for retries or expected failures.</p></article>
             <article class="panel"><h3><code>start call</code></h3><p><code>start call tool { ... }</code> returns a handle directly. Monitors and subagents are long-lived handle-producing tools; generic async tool starts use the same shape.</p></article>
-            <article class="panel"><h3><code>await</code></h3><p><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order. <code>(await handle)?</code> unwraps the resolved result.</p></article>
+            <article class="panel"><h3><code>await</code></h3><p><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</p></article>
             <article class="panel"><h3><code>cancel</code></h3><p><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</p></article>
           </div>
+          <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome.</p>
+          <pre><code>// Fail-fast: the block aborts if the file can't be read.
+manifest = (call read_file { path: "Cargo.toml" })?
+lines = split(manifest, "\n")
+
+// Inspect-the-wrapper: we expect this read might miss.
+optional = call read_file { path: "CHANGELOG.md" }
+notes = optional.ok ? slice(optional.value, 0, 200) : format("no changelog: {}", optional.error)
+
+// Iterate over a glob and skip files that fail to read.
+items = []
+for path in (call glob { pattern: "src/**/*.rs" })? {
+  hit = call read_file { path: path }
+  if !hit.ok {
+    continue
+  }
+  items = push(items, { path: path, chars: len(hit.value) })
+}
+submit { line_count: len(lines), notes: notes, items: items }</code></pre>
+          <p>Background work uses <code>start call</code>; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to <code>(call ...)</code>.</p>
+          <pre><code>// Kick off two long-running subagents in the background.
+left = start call spawn_agent {
+  agent_name: "audit_a",
+  task: "audit module a",
+  capability: "explore"
+}
+right = start call spawn_agent {
+  agent_name: "audit_b",
+  task: "audit module b",
+  capability: "explore"
+}
+
+// Resolve both concurrently as a record of wrappers.
+results = await { a: left, b: right }
+if !results.a.ok {
+  submit { error: results.a.error }
+}
+submit {
+  a: results.a.value,
+  b: results.b.ok ? results.b.value : null
+}</code></pre>
         </div>
 
         <div class="section" id="parallel-blocks">
@@ -238,6 +315,30 @@ submit { a: results.one, b: results.two }</code></pre>
   note: str?
 }
 validated = validate(candidate, Payload)</code></pre>
+          <p>Type literals can be passed directly to tools that accept output schemas, and they double as runtime guards on JSON parsed from untrusted text. Validation errors carry a JSON-pointer-style path to the bad field.</p>
+          <pre><code>Package = Type {
+  name: str,
+  version: str,
+  labels: list[str],
+  meta: Type {
+    pages: int,
+    published: int
+  }
+}
+
+raw = (call read_file { path: "package.json" })?
+parsed = json_parse(raw)
+package = validate(parsed, Package)
+
+// Constrain a subagent's output shape via the same Type literal.
+result = (call spawn_agent {
+  agent_name: "summarizer",
+  task: format("summarize {} v{}", package.name, package.version),
+  capability: "summarize",
+  output: Type { headline: str, bullets: list[str] }
+})?
+
+submit { package: package, summary: result }</code></pre>
         </div>
 
         <div class="section" id="rlm-execution-path">
@@ -266,6 +367,53 @@ sequenceDiagram
   Runtime-->>Driver: Response::ExecResult or TurnOutcome::Handoff (continue_as)
             </div>
           </div>
+          <p>An end-to-end fanout-and-merge program. It enumerates candidate files, kicks off per-file analyses in parallel, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a successor when the budget would be exceeded.</p>
+          <pre><code>```lashlang
+paths = (call glob { pattern: "lash/src/**/*.rs" })?
+if empty(paths) {
+  submit { reviewed: 0, by_owner: {} }
+}
+
+// Fan out: one subagent per file, capped at the first eight to keep
+// the parallel batch small.
+batch = slice(paths, null, 8)
+handles = {}
+for path in batch {
+  handles[path] = start call spawn_agent {
+    agent_name: format("review:{}", path),
+    task: format("review {} for TODOs and panics", path),
+    capability: "explore",
+    output: Type { owner: str, todos: int, panics: int }
+  }
+}
+
+// Resolve the whole record concurrently, then collapse into a histogram.
+resolved = await handles
+by_owner = {}
+errors = []
+for path in keys(resolved) {
+  wrapper = resolved[path]
+  if !wrapper.ok {
+    errors = push(errors, { path: path, error: wrapper.error })
+    continue
+  }
+  report = wrapper.value
+  current = by_owner[report.owner]
+  by_owner[report.owner] = {
+    todos: (current == null ? 0 : current.todos) + report.todos,
+    panics: (current == null ? 0 : current.panics) + report.panics
+  }
+}
+
+// Hand off the rest if we only got through a slice; otherwise submit.
+if len(paths) > len(batch) {
+  call continue_as {
+    task: "continue the review over the remaining files",
+    seed: { remaining: slice(paths, 8, null), by_owner: by_owner, errors: errors }
+  }
+}
+submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
+```</code></pre>
         </div>
 
         <div class="section" id="images-and-attachments">
@@ -285,10 +433,10 @@ sequenceDiagram
             <p>The implementation compiles AST to a compact VM instruction stream, then executes async host effects without blocking the RLM runtime.</p>
           </div>
           <div class="module-grid">
-            <article class="panel"><h3>Parser</h3><p><code>lexer.rs</code> tokenizes strings, comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p></article>
-            <article class="panel"><h3>Compiler</h3><p><code>runtime/mod.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls, and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks.</p></article>
-            <article class="panel"><h3>VM</h3><p>The VM stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>.</p></article>
-            <article class="panel"><h3>Profiling</h3><p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> cover whole-language performance sweeps, including compiler and builtin hot paths.</p></article>
+            <article class="panel"><h3>Parser</h3><p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p></article>
+            <article class="panel"><h3>Compiler</h3><p><code>runtime/compiler.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p></article>
+            <article class="panel"><h3>VM</h3><p><code>runtime/vm.rs</code> stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment.</p></article>
+            <article class="panel"><h3>Profiling</h3><p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> (in <code>examples/bench_support/mod.rs</code>) cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p></article>
           </div>
         </div>
 

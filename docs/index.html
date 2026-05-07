@@ -8,6 +8,17 @@
 <link rel="stylesheet" href="./architecture/styles.css">
 <style>
   /* docs root · hero adjustments and the 2-card entry rail */
+  /* The shared .frame grid expects a sidebar in column 1; this page has none.
+     Collapse to a single-column flow so the hero, rail, and footer stack instead of
+     the rail being auto-placed into the empty sidebar cell beneath the hero. */
+  main.page > .frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "hero"
+      "content"
+      "footer";
+  }
+  .entry-rail { grid-area: content; }
   .home-hero {
     grid-template-columns: minmax(0, 1.32fr) minmax(280px, 0.68fr);
   }

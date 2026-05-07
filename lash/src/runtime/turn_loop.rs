@@ -124,13 +124,30 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
+        self.stream_turn_with_semantic_events(input, events, &NoopTurnEventSink, cancel)
+            .await
+    }
+
+    async fn stream_turn_with_semantic_events(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
         if let Some(execution_session_id) = self
             .active_handoff_leaf(&self.state.session_id)
             .await
             .filter(|session_id| session_id != &self.state.session_id)
         {
             return self
-                .stream_turn_on_handoff_successor(execution_session_id, input, events, cancel)
+                .stream_turn_on_handoff_successor(
+                    execution_session_id,
+                    input,
+                    events,
+                    turn_events,
+                    cancel,
+                )
                 .await;
         }
         // Capture lengths instead of Arcs: holding the read-model Arcs across
@@ -142,7 +159,7 @@ impl LashRuntime {
         let saved_prompt_usage = self.state.last_prompt_usage.clone();
 
         let assembled = self
-            .stream_turn_inner(input.clone(), events, cancel.clone())
+            .stream_turn_inner(input.clone(), events, turn_events, cancel.clone())
             .await?;
 
         if !self.overflow_recovery_attempted && Self::has_overflow_error(&assembled) {
@@ -161,7 +178,9 @@ impl LashRuntime {
             let _ = self
                 .rewrite_history(crate::RewriteTrigger::OverflowRecovery)
                 .await;
-            let retry = self.stream_turn_inner(input, events, cancel).await?;
+            let retry = self
+                .stream_turn_inner(input, events, turn_events, cancel)
+                .await?;
             self.overflow_recovery_attempted = false;
             return Ok(retry);
         }
@@ -187,6 +206,7 @@ impl LashRuntime {
         execution_session_id: String,
         input: TurnInput,
         events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let runtime = {
@@ -199,7 +219,9 @@ impl LashRuntime {
         })?;
         let mut runtime = runtime.lock().await;
         runtime.state.turn_index = self.state.turn_index;
-        let turn = runtime.stream_turn_inner(input, events, cancel).await?;
+        let turn = runtime
+            .stream_turn_inner(input, events, turn_events, cancel)
+            .await?;
         self.state.turn_index = turn.state.turn_index;
         Ok(turn)
     }
@@ -214,8 +236,39 @@ impl LashRuntime {
     /// turn guards.
     pub async fn stream_turn_following_handoffs(
         &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        self.stream_turn_following_handoffs_with_semantic_events(
+            input,
+            events,
+            &NoopTurnEventSink,
+            cancel,
+        )
+        .await
+    }
+
+    pub async fn stream_turn_events_following_handoffs(
+        &mut self,
+        input: TurnInput,
+        turn_events: &dyn TurnEventSink,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        self.stream_turn_following_handoffs_with_semantic_events(
+            input,
+            &NoopEventSink,
+            turn_events,
+            cancel,
+        )
+        .await
+    }
+
+    async fn stream_turn_following_handoffs_with_semantic_events(
+        &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         let follow_mode_turn_options = input.mode_turn_options.clone();
@@ -227,7 +280,9 @@ impl LashRuntime {
         input.trace_turn_id = Some(follow_trace_turn_id.clone());
         let mut turns = Vec::new();
         loop {
-            let turn = self.stream_turn(input, events, cancel.clone()).await?;
+            let turn = self
+                .stream_turn_with_semantic_events(input, events, turn_events, cancel.clone())
+                .await?;
             let successor_session_id = match &turn.outcome {
                 TurnOutcome::Handoff { session_id } => Some(session_id.clone()),
                 _ => None,
@@ -267,6 +322,7 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
@@ -293,11 +349,12 @@ impl LashRuntime {
                     envelope: Some(crate::session_model::ErrorEnvelope {
                         kind: "input_validation".to_string(),
                         code: Some("invalid_turn_input".to_string()),
-                        user_message: e,
+                        user_message: e.clone(),
                         raw: None,
                     }),
                 };
                 assembler.push(&error_event);
+                emit_turn_event_to_sink(turn_events, TurnEvent::Error { message: e }).await;
                 emit_session_event_to_sink(events, error_event).await;
                 let outcome_event = SessionEvent::TurnOutcome {
                     outcome: TurnOutcome::Stopped(TurnStop::InvalidInput),
@@ -504,6 +561,7 @@ impl LashRuntime {
             trace_turn_id,
             turn_index,
             events,
+            turn_events,
             cancel,
         )
         .await
@@ -530,6 +588,7 @@ impl LashRuntime {
         trace_turn_id: String,
         turn_index: usize,
         events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let prompt_bridge = HostPromptBridge::new();
@@ -589,12 +648,13 @@ impl LashRuntime {
                     }
                     maybe_event = event_rx.recv() => {
                         if let Some(event) = maybe_event {
-                            match event {
-                                RuntimeStreamEvent::Session(event) => {
-                                    assembler.push(&event);
-                                    emit_session_event_to_sink(events, event).await;
-                                }
-                            }
+                            emit_runtime_stream_event_to_sinks(
+                                events,
+                                turn_events,
+                                event,
+                                &mut assembler,
+                            )
+                            .await;
                         }
                     }
                     maybe_prompt = prompt_rx.recv() => {
@@ -638,6 +698,13 @@ impl LashRuntime {
                 }),
             };
             assembler.push(&error_event);
+            emit_turn_event_to_sink(
+                turn_events,
+                TurnEvent::Error {
+                    message: issue.message.clone(),
+                },
+            )
+            .await;
             emit_session_event_to_sink(events, error_event).await;
             let outcome_event = SessionEvent::TurnOutcome {
                 outcome: TurnOutcome::Stopped(TurnStop::PluginAbort),
@@ -710,12 +777,13 @@ impl LashRuntime {
             tokio::select! {
                 maybe_event = event_rx.recv() => {
                     if let Some(event) = maybe_event {
-                        match event {
-                            RuntimeStreamEvent::Session(event) => {
-                                assembler.push(&event);
-                                emit_session_event_to_sink(events, event).await;
-                            }
-                        }
+                        emit_runtime_stream_event_to_sinks(
+                            events,
+                            turn_events,
+                            event,
+                            &mut assembler,
+                        )
+                        .await;
                     }
                 }
                 maybe_prompt = prompt_rx.recv() => {
@@ -754,12 +822,7 @@ impl LashRuntime {
             }
         };
         while let Some(event) = event_rx.recv().await {
-            match event {
-                RuntimeStreamEvent::Session(event) => {
-                    assembler.push(&event);
-                    emit_session_event_to_sink(events, event).await;
-                }
-            }
+            emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
         }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         tracing::debug!(
@@ -975,5 +1038,28 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
         trace_turn_id: None,
         mode_extension: None,
         turn_context: crate::TurnContext::default(),
+    }
+}
+
+async fn emit_turn_event_to_sink(events: &dyn TurnEventSink, event: TurnEvent) {
+    if !events.is_noop() {
+        events.emit(event).await;
+    }
+}
+
+async fn emit_runtime_stream_event_to_sinks(
+    events: &dyn EventSink,
+    turn_events: &dyn TurnEventSink,
+    event: RuntimeStreamEvent,
+    assembler: &mut TurnAssembler,
+) {
+    match event {
+        RuntimeStreamEvent::Session(event) => {
+            assembler.push(&event);
+            emit_session_event_to_sink(events, event).await;
+        }
+        RuntimeStreamEvent::Turn(event) => {
+            emit_turn_event_to_sink(turn_events, event).await;
+        }
     }
 }

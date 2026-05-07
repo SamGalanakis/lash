@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use lash::session_model::{ModeEvent, SessionEventRecord};
 use lash::{
     MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
-    SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionRelation, SessionStartPoint,
-    ToolControl, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionCreateRequest, SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation,
+    SessionSnapshotHost, SessionStartPoint, ToolControl, ToolDefinition, ToolExecutionContext,
+    ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -22,47 +23,18 @@ impl RlmControlToolsProvider {
         let seed =
             lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
 
-        let current_snapshot = context
-            .host
-            .snapshot_session(&context.session_id)
-            .await
-            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let termination = current_snapshot
-            .mode_turn_options
-            .decode(&lash::ExecutionMode::new("rlm"))
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let mut policy = current_snapshot.policy.clone();
-        policy.execution_mode = lash::ExecutionMode::new("rlm");
-        normalize_context_policy(&mut policy);
-
-        let mode_extras = ModeExtras::typed(
-            lash::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras {
-                termination,
-                projected_seed: (!seed.projected.is_empty()).then(|| seed.projected.clone()),
+        let successor_session_id = create_continue_as_successor(
+            context.host.as_ref(),
+            &context.session_id,
+            task.clone(),
+            seed,
+            ContinueAsHandoff {
+                relation_reason: "continue_as".to_string(),
+                usage_source: "continue_as".to_string(),
+                metadata: serde_json::Map::new(),
             },
         )
-        .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
-        let mut request = fresh_successor_request(
-            context.session_id.clone(),
-            policy,
-            mode_extras,
-            "continue_as",
-        );
-        request.plugin_mode = SessionPluginMode::InheritCurrent;
-        let successor_session_id = request
-            .session_id
-            .clone()
-            .expect("fresh successor request sets session id");
-        request.initial_nodes = rlm_seed_initial_nodes(seed.globals);
-        request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task.clone()));
-        context
-            .host
-            .create_session(request)
-            .await
-            .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
+        .await?;
 
         Ok(ContinueAsResult {
             value: json!({
@@ -126,7 +98,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-fn continue_as_input_schema() -> Value {
+pub fn continue_as_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -145,18 +117,79 @@ fn continue_as_input_schema() -> Value {
     })
 }
 
+pub(crate) struct ContinueAsHandoff {
+    pub relation_reason: String,
+    pub usage_source: String,
+    pub metadata: serde_json::Map<String, Value>,
+}
+
+pub(crate) async fn create_continue_as_successor<H>(
+    host: &H,
+    parent_session_id: &str,
+    task: String,
+    seed: lash_rlm_types::ClassifiedSeed,
+    handoff: ContinueAsHandoff,
+) -> Result<String, String>
+where
+    H: SessionSnapshotHost + SessionLifecycleHost + ?Sized,
+{
+    let current_snapshot = host
+        .snapshot_session(parent_session_id)
+        .await
+        .map_err(|err| format!("failed to snapshot current session: {err}"))?;
+    let termination = current_snapshot
+        .mode_turn_options
+        .decode(&lash::ExecutionMode::new("rlm"))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let mut policy = current_snapshot.policy.clone();
+    policy.execution_mode = lash::ExecutionMode::new("rlm");
+    normalize_context_policy(&mut policy);
+
+    let mode_extras = ModeExtras::typed(
+        lash::ExecutionMode::new("rlm"),
+        lash_rlm_types::RlmCreateExtras {
+            termination,
+            projected_seed: (!seed.projected.is_empty()).then(|| seed.projected.clone()),
+        },
+    )
+    .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
+    let mut request = fresh_successor_request(
+        parent_session_id.to_string(),
+        policy,
+        mode_extras,
+        handoff.relation_reason,
+        handoff.metadata,
+        handoff.usage_source,
+    );
+    request.plugin_mode = SessionPluginMode::InheritCurrent;
+    let successor_session_id = request
+        .session_id
+        .clone()
+        .expect("fresh successor request sets session id");
+    request.initial_nodes = rlm_seed_initial_nodes(seed.globals);
+    request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task));
+    host.create_session(request)
+        .await
+        .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
+    Ok(successor_session_id)
+}
+
 fn fresh_successor_request(
     parent_session_id: String,
     policy: SessionPolicy,
     mode_extras: ModeExtras,
+    relation_reason: String,
+    metadata: serde_json::Map<String, Value>,
     usage_source: impl Into<String>,
 ) -> SessionCreateRequest {
     SessionCreateRequest {
         session_id: Some(uuid::Uuid::new_v4().to_string()),
         relation: SessionRelation::Handoff {
             parent_session_id,
-            reason: "continue_as".to_string(),
-            metadata: serde_json::Map::new(),
+            reason: relation_reason,
+            metadata,
         },
         start: SessionStartPoint::Empty,
         policy: Some(policy),
