@@ -24,6 +24,7 @@ pub struct ToolDispatchContext {
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ pub(crate) async fn dispatch_tool_call(
         host: Arc::clone(&context.host),
         cancellation_token: None,
         async_task_id: None,
+        turn_context: context.turn_context.clone(),
     };
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
         .await
@@ -86,6 +88,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             tool_name: tool_name.clone(),
             args: args.clone(),
             host: Arc::clone(&context.host),
+            turn_context: context.turn_context.clone(),
         })
         .await
     {
@@ -199,6 +202,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             result: result.clone(),
             duration_ms,
             host: Arc::clone(&context.host),
+            turn_context: context.turn_context.clone(),
         })
         .await
     {
@@ -540,6 +544,7 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
         }
     }
 
@@ -568,6 +573,7 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
         }
     }
 
@@ -588,6 +594,7 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
         }
     }
 
@@ -791,6 +798,7 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
         }
     }
 
@@ -911,6 +919,7 @@ mod tests {
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
         });
 
         let specs = vec![

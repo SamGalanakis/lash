@@ -175,6 +175,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                 )?),
                 trace_turn_id: Some(format!("clbench-turn-{:04}", request.iteration)),
                 mode_extension: None,
+                turn_context: lash::TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&request)?)?,
             &sink as &dyn EventSink,

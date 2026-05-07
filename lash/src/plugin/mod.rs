@@ -322,6 +322,7 @@ pub struct PrepareTurnRequest {
     pub state: SessionReadView,
     pub messages: crate::MessageSequence,
     pub host: Arc<dyn TurnHookHost>,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -905,6 +906,7 @@ pub struct PromptHookContext {
     pub host: Arc<dyn PromptHookHost>,
     pub state: SessionReadView,
     pub mode_turn_options: ModeTurnOptions,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone)]
@@ -919,6 +921,7 @@ pub struct TurnHookContext {
     pub session_id: String,
     pub state: SessionReadView,
     pub host: Arc<dyn TurnHookHost>,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone)]
@@ -975,6 +978,7 @@ pub struct ToolCallHookContext {
     pub tool_name: String,
     pub args: serde_json::Value,
     pub host: Arc<dyn ToolHookHost>,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone)]
@@ -985,6 +989,7 @@ pub struct ToolResultHookContext {
     pub result: ToolResult,
     pub duration_ms: u64,
     pub host: Arc<dyn ToolHookHost>,
+    pub turn_context: crate::TurnContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1308,6 +1313,7 @@ mod tests {
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
                 mode_turn_options: ModeTurnOptions::default(),
+                turn_context: crate::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");

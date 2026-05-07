@@ -60,6 +60,7 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
             host: Arc::new(mock_session_manager("run-session")),
             state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("prompt contributions");

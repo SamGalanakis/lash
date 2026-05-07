@@ -9,8 +9,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::*;
 use super::instruction::{CompiledFormatPart, CompiledFormatTemplate};
+use super::*;
 
 pub(crate) async fn stringify_value_async(value: &Value) -> Result<String, RuntimeError> {
     let mut output = String::new();
@@ -36,7 +36,10 @@ pub(crate) fn stringify_value_direct(value: &Value) -> Result<String, RuntimeErr
     Ok(output)
 }
 
-pub(crate) fn append_stringified_value_direct(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
+pub(crate) fn append_stringified_value_direct(
+    output: &mut String,
+    value: &Value,
+) -> Result<(), RuntimeError> {
     match value {
         Value::String(value) => output.push_str(value),
         Value::Null => output.push_str("null"),
@@ -76,10 +79,12 @@ pub(crate) fn append_stringified_value_async<'a>(
 }
 
 #[cfg(test)]
-pub(crate) fn append_stringified_value(output: &mut String, value: &Value) -> Result<(), RuntimeError> {
+pub(crate) fn append_stringified_value(
+    output: &mut String,
+    value: &Value,
+) -> Result<(), RuntimeError> {
     futures_executor::block_on(append_stringified_value_async(output, value))
 }
-
 
 pub(crate) fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Result {
     if value.is_finite() && value.fract() == 0.0 {
@@ -95,7 +100,10 @@ pub(crate) fn write_number(output: &mut impl fmt::Write, value: f64) -> fmt::Res
     write!(output, "{value}")
 }
 
-pub(crate) async fn apply_format_async(template: &str, args: &[Value]) -> Result<String, RuntimeError> {
+pub(crate) async fn apply_format_async(
+    template: &str,
+    args: &[Value],
+) -> Result<String, RuntimeError> {
     let mut output = String::with_capacity(template.len());
     let bytes = template.as_bytes();
     let mut index = 0;
@@ -235,7 +243,10 @@ pub(crate) fn compile_format_template(template: &str, argc: usize) -> CompiledFo
     }
 }
 
-pub(crate) fn parse_format_template(template: &str, argc: usize) -> Result<Vec<CompiledFormatPart>, String> {
+pub(crate) fn parse_format_template(
+    template: &str,
+    argc: usize,
+) -> Result<Vec<CompiledFormatPart>, String> {
     let mut parts = Vec::new();
     let bytes = template.as_bytes();
     let mut index = 0;

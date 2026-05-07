@@ -14,8 +14,8 @@ use lash::llm::timeouts::{
 };
 use lash::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
-    LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
+    LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
 use lash::provider::{
     AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory,

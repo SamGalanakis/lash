@@ -605,6 +605,7 @@ async fn summarize_compaction_prefix(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
+                turn_context: lash::TurnContext::default(),
             },
         )
         .await;

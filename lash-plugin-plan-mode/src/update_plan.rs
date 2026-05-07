@@ -448,6 +448,7 @@ mod tests {
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
                 mode_turn_options: lash::ModeTurnOptions::default(),
+                turn_context: lash::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");
@@ -482,6 +483,7 @@ mod tests {
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
                 mode_turn_options: lash::ModeTurnOptions::default(),
+                turn_context: lash::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");

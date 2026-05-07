@@ -251,6 +251,7 @@ mod tests {
                     &lash::SessionStateEnvelope::default(),
                 ),
                 mode_turn_options: lash::ModeTurnOptions::default(),
+                turn_context: lash::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");

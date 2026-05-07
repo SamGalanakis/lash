@@ -647,6 +647,7 @@ async fn run_question(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
+                turn_context: lash::TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&question)?)?,
             &sink,

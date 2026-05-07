@@ -28,6 +28,8 @@ mod value;
 mod vm;
 
 pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
+#[allow(unused_imports)]
+pub(crate) use compiler::*;
 pub use entry_points::{
     compile_program, compile_source, execute_compiled, execute_compiled_traced,
     execute_compiled_traced_with_projected_bindings, execute_compiled_traced_with_scratch,
@@ -40,18 +42,16 @@ pub use entry_points::{
 pub use host::{ToolHost, ToolHostCall, ToolHostError};
 #[allow(unused_imports)]
 pub(crate) use instruction::*;
-#[allow(unused_imports)]
-pub(crate) use compiler::*;
-#[allow(unused_imports)]
-pub(crate) use vm::*;
+pub use json::from_json;
+pub use record::Record;
 #[allow(unused_imports)]
 pub(crate) use record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 #[allow(unused_imports)]
 pub(crate) use schema::{
     CompiledSchema, compile_schema_value, execute_compiled_validate, execute_validate_builtin,
 };
-pub use record::Record;
-pub use json::from_json;
+#[allow(unused_imports)]
+pub(crate) use vm::*;
 // Re-exports of helpers that live in the focused submodules but need to be
 // reachable via `use super::*` from sibling submodules + via `super::name`
 // from `vm.rs` / `compiler.rs`. These look "unused" from mod.rs's POV but
@@ -65,11 +65,11 @@ pub(crate) use json::*;
 #[allow(unused_imports)]
 pub(crate) use ops::*;
 pub use state::{Snapshot, State};
-use vm::IterState;
 pub use value::{
     ImageValue, LASH_TYPE_KEY, ProjectedBindingError, ProjectedBindings, ProjectedFuture,
     ProjectedHostValue, ProjectedRead, ProjectedValue, Value,
 };
+use vm::IterState;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum RuntimeError {
@@ -204,9 +204,6 @@ pub fn unwrap_type_value(value: &Value) -> Option<&Value> {
     }
     record.get(LASH_TYPE_KEY)
 }
-
-
-
 
 #[cfg(test)]
 mod tests;

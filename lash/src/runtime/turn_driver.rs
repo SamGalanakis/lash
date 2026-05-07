@@ -28,6 +28,7 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
     pub(super) mode_extension: Option<crate::ModeTurnExtensionHandle>,
+    pub(super) turn_context: crate::TurnContext,
     pub(super) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
 }
 
@@ -633,6 +634,7 @@ impl RuntimeTurnDriver {
                     messages,
                 ),
                 mode_turn_options: self.mode_turn_options.clone(),
+                turn_context: self.turn_context.clone(),
             })
             .await?;
         let mut prompt_contributions = self.session.context_prompt_contributions().to_vec();

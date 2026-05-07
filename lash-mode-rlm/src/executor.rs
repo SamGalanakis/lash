@@ -3,12 +3,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use lash::plugin::project_observation_text;
-use lash_rlm_types::PROJECTED_JSON_TAG;
 use lash::{
     AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
     ModeToolReply, SessionError, TextProjectionMetadata, ToolImage,
     ToolResultProjectionPluginConfig,
 };
+use lash_rlm_types::PROJECTED_JSON_TAG;
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, ProjectedBindings,
     ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record as FlowRecord,
@@ -16,7 +16,9 @@ use lashlang::{
 };
 use serde_json::{Value, json};
 
-use crate::projected_bindings::{RlmProjectedBindings, RlmProjectionExtension};
+use crate::projected_bindings::{
+    RLM_TURN_CONTEXT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+};
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
@@ -266,7 +268,10 @@ fn projected_bindings(
         )
         .map_err(|err| format!("`{}` is reserved as an RLM built-in binding", err.name()))?;
     insert_projected_bindings(&mut bindings, session_bindings)?;
-    if let Some(extension) = ctx.mode_extension::<RlmProjectionExtension>() {
+    if let Some(extension) = ctx
+        .turn_context()
+        .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+    {
         insert_projected_bindings(&mut bindings, extension.bindings.clone())?;
     }
     Ok(bindings)

@@ -15,7 +15,9 @@ use lash_rlm_types::RlmCreateExtras;
 
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
-use crate::projected_bindings::{RlmProjectedBindings, RlmProjectionExtension};
+use crate::projected_bindings::{
+    RLM_TURN_CONTEXT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+};
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
 use crate::rlm_support::budget_prompt_contributions;
@@ -119,9 +121,20 @@ impl SessionPlugin for RlmModePlugin {
         reg.prompt().contribute(bound_vars_hook);
 
         let projected_session = mode_session.clone();
-        reg.prompt().contribute(Arc::new(move |_ctx| {
+        reg.prompt().contribute(Arc::new(move |ctx| {
             let session = projected_session.clone();
-            Box::pin(async move { Ok(session.projected_binding_prompt_contributions().await) })
+            Box::pin(async move {
+                let mut contributions = session.projected_binding_prompt_contributions().await;
+                if let Some(extension) = ctx
+                    .turn_context
+                    .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                {
+                    contributions.extend(RlmProjectionExtension::prompt_contributions_for(
+                        &extension.bindings,
+                    ));
+                }
+                Ok(contributions)
+            })
         }));
 
         // Per-turn `prompt_usage` is captured here and passed to the
@@ -571,6 +584,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, Some(200_000));
@@ -646,6 +660,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, Some(100_000));
@@ -675,6 +690,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, Some(100_000));
@@ -704,6 +720,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, Some(100_000));
@@ -780,6 +797,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, None);
@@ -801,6 +819,7 @@ mod tests {
             host: std::sync::Arc::new(NoopPromptManager),
             state: lash::SessionReadView::from_exported_state(&state),
             mode_turn_options: lash::ModeTurnOptions::default(),
+            turn_context: lash::TurnContext::default(),
         };
 
         let contributions = budget_prompt_contributions(&ctx, Some(200_000));

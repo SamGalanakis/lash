@@ -2323,6 +2323,7 @@ mod tests {
             host: Arc::new(MockSessionManager::default()),
             cancellation_token: Some(token.clone()),
             async_task_id: None,
+            turn_context: crate::TurnContext::default(),
         };
 
         // A long-running sleep that would otherwise hold the tool call for
@@ -2376,6 +2377,7 @@ mod tests {
             host: Arc::new(MockSessionManager::default()),
             cancellation_token: Some(token.clone()),
             async_task_id: None,
+            turn_context: crate::TurnContext::default(),
         };
 
         // Open a long-lived child. `echo $$` reports the shell's pid, then

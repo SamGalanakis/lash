@@ -417,6 +417,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_turn");
@@ -464,6 +465,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             tool_name: "exec_command".to_string(),
             args: json!({"cmd":"cargo test -q"}),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -475,6 +477,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -549,6 +552,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "path":"src/main.rs"
             }),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -562,6 +566,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "query":"surrealdb datetime best practices"
             }),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -575,6 +580,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -588,6 +594,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
             }),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -655,6 +662,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("first before_turn");
@@ -678,6 +686,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("second before_turn");
@@ -706,6 +715,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -719,6 +729,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -846,6 +857,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager_host.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_turn");
@@ -860,6 +872,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
                 host: manager_host.clone(),
                 cancellation_token: None,
                 async_task_id: None,
+                turn_context: lash::TurnContext::default(),
             },
         )
         .await;
@@ -986,6 +999,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_turn");
@@ -998,6 +1012,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
                 host: manager.clone(),
+                turn_context: lash::TurnContext::default(),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -1105,6 +1120,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("before_turn");
@@ -1117,6 +1133,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             &lash::ToolExecutionContext {
                 session_id: "root".to_string(),
                 host: manager.clone(),
+                turn_context: lash::TurnContext::default(),
                 cancellation_token: None,
                 async_task_id: None,
             },
@@ -1224,6 +1241,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
             })),
             duration_ms: 1,
             host: manager.clone(),
+            turn_context: lash::TurnContext::default(),
         })
         .await
         .expect("after_tool_call");
