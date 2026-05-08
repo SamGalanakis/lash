@@ -167,7 +167,7 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
         <div class="section">
           <div class="section-header">
             <h2>RLM And Submit</h2>
-            <p>RLM turns execute <code>lashlang</code>. A <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::Value</code>, and emits a <code>TerminalOutput</code> semantic event.</p>
+            <p>RLM turns can require <code>submit</code> or allow direct prose. With <code>SubmitRequired</code>, a <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::Value</code>, and emits a <code>TerminalOutput</code> semantic event. With <code>ProseOrSubmit</code>, a no-code prose answer finishes as <code>TurnFinish::AssistantMessage</code> and emits no <code>TerminalOutput</code>.</p>
           </div>
           <div class="two-col">
             <article class="panel">
@@ -177,10 +177,14 @@ use lash_rlm_types::RlmTermination;
 
 let options = ModeTurnOptions::typed(
     ExecutionMode::new("rlm"),
-    RlmTermination::Finish {
+    RlmTermination::SubmitRequired {
         schema: None,
-        include_submit_prompt: true,
     },
+)?;
+
+let prose_options = ModeTurnOptions::typed(
+    ExecutionMode::new("rlm"),
+    RlmTermination::ProseOrSubmit,
 )?;
 
 let result = session

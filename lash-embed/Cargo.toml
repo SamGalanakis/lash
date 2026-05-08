@@ -18,4 +18,5 @@ tokio-util = "0.7"
 
 [dev-dependencies]
 lash = { path = "../lash", features = ["testing"] }
+lash-rlm-types = { path = "../lash-rlm-types" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

@@ -301,27 +301,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_extras_reads_legacy_tagged_rlm_payload() {
-        let extras: ModeExtras = serde_json::from_value(serde_json::json!({
-            "mode": "rlm",
-            "termination": {
-                "kind": "finish",
-                "schema": null
-            }
-        }))
-        .expect("legacy extras");
-        assert_eq!(extras.mode_id, ExecutionMode::new("rlm"));
-        let decoded = extras
-            .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
-            .expect("decode")
-            .expect("matching mode");
-        assert!(matches!(
-            decoded.termination,
-            lash_rlm_types::RlmTermination::Finish { schema: None, .. }
-        ));
-    }
-
-    #[test]
     fn mode_extras_round_trips_open_payload() {
         let standard = ModeExtras::default();
         assert_eq!(standard.mode_id, ExecutionMode::standard());

@@ -137,9 +137,8 @@ pub(crate) async fn build_spawn_create_request(
     let mut mode_extras = ModeExtras::default();
     if policy.execution_mode == lash::ExecutionMode::new("rlm") {
         let termination = match output_schema.clone() {
-            Some(schema) => RlmTermination::Finish {
+            Some(schema) => RlmTermination::SubmitRequired {
                 schema: Some(schema),
-                include_submit_prompt: true,
             },
             None => RlmTermination::default(),
         };

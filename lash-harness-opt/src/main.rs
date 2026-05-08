@@ -433,9 +433,8 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .mode_turn_options(
                 ModeTurnOptions::typed(
                     lash::ExecutionMode::new("rlm"),
-                    RlmTermination::Finish {
+                    RlmTermination::SubmitRequired {
                         schema: Some(request.output_schema.clone()),
-                        include_submit_prompt: true,
                     },
                 )
                 .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?,

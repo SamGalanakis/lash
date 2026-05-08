@@ -19,6 +19,10 @@ OPENROUTER_CHAT_DATA_DIR=.openrouter-chat-ui
 
 Then open `http://127.0.0.1:3000`.
 
+The example also attaches a trace sink to `LashCore` and writes JSONL trace
+records to stderr so the RLM response, extracted lashlang, terminal output, and
+tool calls are visible while you run it.
+
 The app installs RLM explicitly with `ModePreset::rlm()`, registers
 `DemoPlugin` on `LashCore`, and activates it per chat session with
 `SessionBuilder::use_plugin::<DemoPlugin>(...)`.
@@ -36,6 +40,13 @@ The plugin demonstrates:
   RLM `submit` is streamed as `TurnEvent::TerminalOutput`.
 - Final persistence uses `TurnCollector::rendered_output()` so prose and typed
   terminal output are stored exactly through the same visible-output path.
+
+This example opts into `RlmTermination::SubmitRequired { schema: None }`, so the
+assistant's final user-facing text should be placed in `submit`. RLM also
+supports `RlmTermination::ProseOrSubmit` for turns where direct prose may finish
+without a lashlang block. `TerminalOutput` appears only when a turn finishes
+through `submit` or a tool terminal control; prose-only completion is already
+visible through assistant prose deltas.
 
 In lashlang, the model can call the demo tool with:
 

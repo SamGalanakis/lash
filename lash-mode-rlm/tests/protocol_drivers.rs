@@ -410,10 +410,7 @@ fn rlm_prose_only_response_requests_submit_by_default() {
 fn typed_rlm_prose_only_response_requests_submit() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: true,
-        },
+        RlmTermination::SubmitRequired { schema: None },
     );
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -451,14 +448,9 @@ fn typed_rlm_prose_only_response_requests_submit() {
 }
 
 #[test]
-fn typed_rlm_prose_only_response_can_suppress_submit_reminder() {
-    let config = test_config_with_termination(
-        ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: false,
-        },
-    );
+fn prose_or_submit_response_finishes_with_assistant_message() {
+    let config =
+        test_config_with_termination(ExecutionMode::new("rlm"), RlmTermination::ProseOrSubmit);
     let msgs = vec![user_message("hello")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
@@ -474,15 +466,33 @@ fn typed_rlm_prose_only_response_can_suppress_submit_reminder() {
     });
 
     let effects = drain_effects(&mut machine);
-    let (_checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
-    assert_eq!(checkpoint, CheckpointKind::AfterWork);
-    assert!(machine.messages().iter().any(|message| {
-        message.role == MessageRole::System
-            && message.parts.iter().any(|part| {
-                part.content.contains("task-specific completion path")
-                    && !part.content.contains("submit")
-            })
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
+                if text == "Hello there!" && kind == "final"
+        )
     }));
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(lash_sansio::SessionEvent::TurnOutcome {
+                outcome: lash_sansio::TurnOutcome::Finished(
+                    lash_sansio::TurnFinish::AssistantMessage { text }
+                )
+            }) if text == "Hello there!"
+        )
+    }));
+    assert!(find_done(&effects).is_some());
 }
 
 #[test]
@@ -779,10 +789,7 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
 fn typed_rlm_finish_emits_turn_outcome_and_done() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: true,
-        },
+        RlmTermination::SubmitRequired { schema: None },
     );
     let msgs = vec![user_message("return typed data")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -853,13 +860,79 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
 }
 
 #[test]
+fn prose_or_submit_allows_submit_value() {
+    let config =
+        test_config_with_termination(ExecutionMode::new("rlm"), RlmTermination::ProseOrSubmit);
+    let msgs = vec![user_message("return typed data")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nsubmit { ok: true }\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 1,
+            terminal_finish: Some(serde_json::json!({ "ok": true })),
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
+    machine.handle_response(Response::Checkpoint {
+        id: checkpoint_id,
+        messages: Vec::new(),
+        transient_messages: Vec::new(),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Emit(lash_sansio::SessionEvent::TurnOutcome {
+                outcome: lash_sansio::TurnOutcome::Finished(
+                    lash_sansio::TurnFinish::Value { source, value }
+                )
+            }) if matches!(source, lash_sansio::TerminalOutputSource::RlmSubmit)
+                && *value == serde_json::json!({ "ok": true })
+        )
+    }));
+    assert!(find_done(&effects).is_some());
+}
+
+#[test]
 fn rlm_reasoning_part_is_preserved_in_trajectory() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: true,
-        },
+        RlmTermination::SubmitRequired { schema: None },
     );
     let msgs = vec![user_message("say hi")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -931,7 +1004,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
 fn typed_rlm_schema_mismatch_loops_with_feedback() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
+        RlmTermination::SubmitRequired {
             schema: Some(serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -939,7 +1012,6 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
                 },
                 "required": ["ok"]
             })),
-            include_submit_prompt: true,
         },
     );
     let msgs = vec![user_message("return typed data")];
@@ -1007,14 +1079,13 @@ fn typed_rlm_schema_mismatch_loops_with_feedback() {
 fn typed_rlm_schema_mismatch_checks_any_of() {
     let config = test_config_with_termination(
         ExecutionMode::new("rlm"),
-        RlmTermination::Finish {
+        RlmTermination::SubmitRequired {
             schema: Some(serde_json::json!({
                 "anyOf": [
                     { "type": "string" },
                     { "type": "integer" }
                 ]
             })),
-            include_submit_prompt: true,
         },
     );
     let msgs = vec![user_message("return typed data")];

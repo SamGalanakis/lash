@@ -119,23 +119,18 @@ mod catalogue_tests {
 
     #[test]
     fn finish_finalization_prompt_defaults_to_submit_guidance() {
-        let prompt = rlm_finalization_prompt(&RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: true,
-        });
+        let prompt = rlm_finalization_prompt(&RlmTermination::default());
 
         assert!(prompt.contains("submit <value>"));
     }
 
     #[test]
-    fn finish_finalization_prompt_can_suppress_submit_guidance() {
-        let prompt = rlm_finalization_prompt(&RlmTermination::Finish {
-            schema: None,
-            include_submit_prompt: false,
-        });
+    fn prose_or_submit_finalization_prompt_allows_direct_prose() {
+        let prompt = rlm_finalization_prompt(&RlmTermination::ProseOrSubmit);
 
-        assert!(prompt.contains("task-specific completion path"));
-        assert!(!prompt.contains("submit"));
+        assert!(prompt.contains("Either finish your turn with prose only"));
+        assert!(prompt.contains("or use `submit` in lashlang"));
+        assert!(prompt.contains("Do not duplicate"));
     }
 }
 
@@ -251,9 +246,8 @@ fn build_rlm_history_messages(
 
 fn required_output_block(termination: &RlmTermination) -> Option<String> {
     match termination {
-        RlmTermination::Finish {
+        RlmTermination::SubmitRequired {
             schema: Some(schema),
-            ..
         } => Some(lash::render_value_schema_contract(schema)),
         _ => None,
     }
@@ -301,14 +295,12 @@ fn mark_last_history_text_cache_breakpoint(messages: &mut [LlmMessage]) {
 
 fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
     match termination {
-        RlmTermination::Finish {
-            include_submit_prompt: true,
-            ..
-        } => "Call `submit <value>` from lashlang when the task is complete.",
-        RlmTermination::Finish {
-            include_submit_prompt: false,
-            ..
-        } => "Continue in lashlang blocks until the task-specific completion path is satisfied.",
+        RlmTermination::SubmitRequired { .. } => {
+            "The turn must finish through `submit <value>`. Prose alone does not end the turn."
+        }
+        RlmTermination::ProseOrSubmit => {
+            "Either finish your turn with prose only, without a lashlang block, or use `submit` in lashlang. Do not duplicate the submitted answer in prose."
+        }
     }
 }
 
