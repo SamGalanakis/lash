@@ -18,8 +18,8 @@ use lash::session_model::{
 };
 use lash::{
     AttachmentRef, CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart,
-    LlmResponse, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
-    normalized_response_parts,
+    LlmResponse, TerminalOutputSource, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
+    append_assistant_text_part, normalized_response_parts, render_terminal_output_value,
 };
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
@@ -424,16 +424,10 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         match result {
             Ok(response) => {
-                let handoff_successor = response
+                let terminal_outcome = response
                     .tool_calls
                     .iter()
-                    .find_map(handoff_successor_from_tool_result);
-                let submitted_error = response
-                    .tool_calls
-                    .iter()
-                    .rev()
-                    .find(|record| record.tool == "submit_error" && record.success)
-                    .map(|record| record.args.clone());
+                    .find_map(terminal_outcome_from_tool_result);
                 for tool_call in &response.tool_calls {
                     actions.push(DriverAction::Emit(SessionEvent::ToolCall {
                         call_id: tool_call.call_id.clone(),
@@ -462,30 +456,13 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 if let Some(finish_value) = response.terminal_finish {
                     state.terminal_finish = Some(finish_value);
                 }
-                if let Some(successor_session_id) = handoff_successor {
+                if let Some(outcome) = terminal_outcome {
                     actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                         trajectory_entry(ctx.mode_iteration(), &state, None, None),
                     )]));
                     actions.push(DriverAction::StartCheckpoint {
                         checkpoint: CheckpointKind::BeforeCompletion,
-                        on_empty: CheckpointResumeAction::Finish(TurnOutcome::Handoff {
-                            session_id: successor_session_id,
-                        }),
-                    });
-                    return actions;
-                }
-                if let Some(value) = submitted_error {
-                    actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-                        trajectory_entry(ctx.mode_iteration(), &state, None, None),
-                    )]));
-                    actions.push(DriverAction::StartCheckpoint {
-                        checkpoint: CheckpointKind::BeforeCompletion,
-                        on_empty: CheckpointResumeAction::Finish(TurnOutcome::Stopped(
-                            TurnStop::SubmittedError {
-                                channel_id: "subagent.submit_error".to_string(),
-                                value,
-                            },
-                        )),
+                        on_empty: CheckpointResumeAction::Finish(outcome),
                     });
                     return actions;
                 }
@@ -522,11 +499,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
                 return actions;
             }
 
-            let rendered = match finish_value {
-                Value::Null => String::new(),
-                Value::String(text) => text.clone(),
-                other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-            };
+            let rendered = render_terminal_output_value(finish_value);
             actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                 trajectory_entry(
                     ctx.mode_iteration(),
@@ -544,8 +517,8 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
-                    TurnFinish::Submission {
-                        channel_id: "rlm.submit".to_string(),
+                    TurnFinish::Value {
+                        source: TerminalOutputSource::RlmSubmit,
                         value: finish_value.clone(),
                     },
                 )),
@@ -572,15 +545,29 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
     }
 }
 
-fn handoff_successor_from_tool_result(record: &ToolCallRecord) -> Option<String> {
+fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutcome> {
     if !record.success {
         return None;
     }
     match record.control.as_ref()? {
         lash::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
-            Some(session_id.clone())
+            Some(TurnOutcome::Handoff {
+                session_id: session_id.clone(),
+            })
         }
-        _ => None,
+        lash::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::Value {
+            source: TerminalOutputSource::Tool {
+                name: record.tool.clone(),
+            },
+            value: value.clone(),
+        })),
+        lash::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::TerminalError {
+            source: TerminalOutputSource::Tool {
+                name: record.tool.clone(),
+            },
+            value: value.clone(),
+        })),
+        lash::ToolControl::Handoff { .. } => None,
     }
 }
 

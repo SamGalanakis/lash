@@ -592,8 +592,38 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
     ) -> Vec<DriverAction> {
         let mut actions = Vec::new();
         let mut result_parts = Vec::new();
+        let mut terminal_outcome = None;
 
         for outcome in completed {
+            if terminal_outcome.is_none() && outcome.raw_result.success {
+                terminal_outcome = match outcome.raw_result.control.as_ref() {
+                    Some(lash::ToolControl::Handoff { session_id })
+                        if !session_id.trim().is_empty() =>
+                    {
+                        Some(TurnOutcome::Handoff {
+                            session_id: session_id.clone(),
+                        })
+                    }
+                    Some(lash::ToolControl::Finish { value }) => {
+                        Some(TurnOutcome::Finished(TurnFinish::Value {
+                            source: lash::TerminalOutputSource::Tool {
+                                name: outcome.tool_name.clone(),
+                            },
+                            value: value.clone(),
+                        }))
+                    }
+                    Some(lash::ToolControl::Fail { value }) => {
+                        Some(TurnOutcome::Stopped(TurnStop::TerminalError {
+                            source: lash::TerminalOutputSource::Tool {
+                                name: outcome.tool_name.clone(),
+                            },
+                            value: value.clone(),
+                        }))
+                    }
+                    _ => None,
+                };
+            }
+
             result_parts.push(Part {
                 id: String::new(),
                 kind: PartKind::ToolResult,
@@ -664,6 +694,11 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     origin: None,
                 },
             )]));
+        }
+
+        if let Some(outcome) = terminal_outcome {
+            actions.push(DriverAction::Finish(outcome));
+            return actions;
         }
 
         actions.push(DriverAction::AdvanceModeIteration);

@@ -366,7 +366,9 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
 }
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
-    ToolResult::ok(args.clone())
+    ToolResult::ok(args.clone()).with_control(lash::ToolControl::Fail {
+        value: args.clone(),
+    })
 }
 
 pub(crate) fn hidden_tools_for_spec(spec: &CapabilitySpec, child_depth: u8) -> HashSet<String> {

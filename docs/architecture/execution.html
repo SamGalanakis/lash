@@ -118,7 +118,7 @@ let result = session
     .stream(&events)
     .await?;</code></pre>
           <div class="two-col">
-            <article class="panel"><h3>Example shape</h3><p><code>examples/openrouter-chat-ui</code> keeps a map of <code>LashSession</code>s keyed by conversation id, records projected <code>TurnEvent</code>s through a <code>TurnEventSink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and SSE-style browser streaming.</p></article>
+            <article class="panel"><h3>Example shape</h3><p><code>examples/openrouter-chat-ui</code> keeps a map of <code>LashSession</code>s keyed by conversation id, records projected <code>TurnEvent</code>s through a <code>TurnEventSink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and browser streaming. The app-facing walkthrough lives in <a href="../embedding.html">Embedding API</a>.</p></article>
             <article class="panel"><h3>Boundary rule</h3><p>The embed API is intentionally above <code>LashRuntime</code> but below an app framework. It should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
           </div>
         </div>

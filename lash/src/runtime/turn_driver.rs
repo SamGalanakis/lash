@@ -35,6 +35,18 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 )
                 .await;
             }
+            SessionEvent::TurnOutcome {
+                outcome: TurnOutcome::Finished(TurnFinish::Value { source, value }),
+            } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::TerminalOutput {
+                        source: source.clone(),
+                        value: value.clone(),
+                    },
+                )
+                .await;
+            }
             _ => {}
         }
         let _ = event_tx.send(RuntimeStreamEvent::Session(event)).await;
@@ -50,15 +62,22 @@ async fn send_turn_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: Tur
 async fn emit_semantic_response_parts(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     response: &LlmResponse,
+    strip_lashlang_fences: bool,
 ) {
     let mut emitted_text = false;
     for part in &response.parts {
         match part {
             LlmOutputPart::Text { text, .. } if !text.is_empty() => {
+                let text = semantic_text_part(text, strip_lashlang_fences);
+                if text.is_empty() {
+                    continue;
+                }
                 emitted_text = true;
                 send_turn_event(
                     event_tx,
-                    TurnEvent::AssistantProseDelta { text: text.clone() },
+                    TurnEvent::AssistantProseDelta {
+                        text: text.to_string(),
+                    },
                 )
                 .await;
             }
@@ -68,15 +87,39 @@ async fn emit_semantic_response_parts(
             _ => {}
         }
     }
-    if !emitted_text && !response.full_text.is_empty() {
+    let full_text = semantic_text_part(&response.full_text, strip_lashlang_fences);
+    if !emitted_text && !full_text.is_empty() {
         send_turn_event(
             event_tx,
             TurnEvent::AssistantProseDelta {
-                text: response.full_text.clone(),
+                text: full_text.to_string(),
             },
         )
         .await;
     }
+}
+
+fn semantic_text_part(text: &str, strip_lashlang_fences: bool) -> &str {
+    if strip_lashlang_fences {
+        prose_before_lashlang_fence(text)
+    } else {
+        text
+    }
+}
+
+fn prose_before_lashlang_fence(text: &str) -> &str {
+    let Some(open) = text.find("```") else {
+        return text;
+    };
+    let after_ticks = open + 3;
+    let rest = &text[after_ticks..];
+    let Some(newline) = rest.find('\n') else {
+        return text;
+    };
+    if rest[..newline].trim() == "lashlang" {
+        return text[..open].trim_end();
+    }
+    text
 }
 
 pub(super) struct RuntimeTurnDriver {
@@ -333,7 +376,12 @@ impl RuntimeTurnDriver {
                             self.turn_pipeline.state_mut().last_prompt_usage =
                                 normalize_prompt_usage(&self.policy.provider, &usage);
                             if !text_streamed {
-                                emit_semantic_response_parts(&event_tx, response).await;
+                                emit_semantic_response_parts(
+                                    &event_tx,
+                                    response,
+                                    self.policy.execution_mode.plugin_id() == "rlm",
+                                )
+                                .await;
                             }
                         }
                         machine.handle_response(Response::LlmComplete {
@@ -395,7 +443,7 @@ impl RuntimeTurnDriver {
                                     result: outcome.state_result.result.clone(),
                                     success: outcome.state_result.success,
                                     duration_ms: outcome.duration_ms,
-                                    control: outcome.state_result.control.clone(),
+                                    control: outcome.raw_result.control.clone(),
                                 };
                                 self.emit_tool_call_trace(machine.mode_iteration(), &record);
                             }
@@ -408,7 +456,7 @@ impl RuntimeTurnDriver {
                                 result: outcome.state_result.result.clone(),
                                 success: outcome.state_result.success,
                                 duration_ms: outcome.duration_ms,
-                                control: outcome.state_result.control.clone(),
+                                control: outcome.raw_result.control.clone(),
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
                     }

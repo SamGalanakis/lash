@@ -445,12 +445,12 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
 
         match turn.outcome {
-            lash::TurnOutcome::Finished(lash::TurnFinish::Submission { value, .. }) => {
+            lash::TurnOutcome::Finished(lash::TurnFinish::Value { value, .. }) => {
                 let output_path = request.artifact_dir.join("output.json");
                 tokio::fs::write(
                     &output_path,
                     serde_json::to_vec_pretty(&json!({
-                        "submission": value,
+                        "value": value,
                         "errors": turn.errors,
                         "assistant_prose": turn.transcript.assistant_prose,
                     }))

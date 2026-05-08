@@ -105,9 +105,9 @@ flowchart TD
             <table>
               <thead><tr><th>Outcome</th><th>Shape</th><th>Meaning</th></tr></thead>
               <tbody>
-                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code> or <code>TurnFinish::Submission { channel_id, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed schema submission.</td></tr>
+                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code> or <code>TurnFinish::Value { source, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed terminal value.</td></tr>
                 <tr><td><code>TurnOutcome::Handoff</code></td><td><code>{ session_id }</code></td><td>RLM <code>continue_as</code> opened a successor session with a fresh window. The runtime queues the packed <code>{ task, seed }</code> as that session's first turn input.</td></tr>
-                <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, SubmittedError{...}}</code></td><td>The turn ended without a clean answer. <code>SubmittedError</code> carries the validator-rejected value so hosts can surface it.</td></tr>
+                <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, TerminalError{...}}</code></td><td>The turn ended without a clean answer. <code>TerminalError</code> carries the terminal value authored by a failing control path, such as <code>submit_error</code>, so hosts can surface it.</td></tr>
               </tbody>
             </table>
           </div>

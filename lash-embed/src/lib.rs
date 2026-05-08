@@ -24,8 +24,9 @@ pub use lash::{
     AttachmentStore, InputItem, Message, ModeTurnOptions, PluginFactory, ProviderHandle, Residency,
     RuntimeError, RuntimePersistence, SanitizerPolicy, SessionError, SessionReadView,
     SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor, StandardContextApproach,
-    TerminationPolicy, TokenUsage, TokioSessionTaskExecutor, ToolAvailability, ToolProvider,
-    ToolResultView, TurnEvent, TurnEventSink, TurnIssue, TurnOutcome,
+    TerminalOutputSource, TerminationPolicy, TokenUsage, TokioSessionTaskExecutor,
+    ToolAvailability, ToolProvider, ToolResultView, TurnEvent, TurnEventSink, TurnIssue,
+    TurnOutcome,
 };
 pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
@@ -853,9 +854,20 @@ struct TurnCollectorState {
 pub struct TurnTranscript {
     pub assistant_prose: String,
     pub reasoning: String,
+    pub terminal_outputs: Vec<CollectedTerminalOutput>,
+    pub visible_outputs: Vec<CollectedVisibleOutput>,
     pub tool_calls: Vec<CollectedToolCall>,
     pub code_blocks: Vec<CollectedCodeBlock>,
     pub errors: Vec<String>,
+}
+
+impl TurnTranscript {
+    pub fn rendered_output(&self) -> String {
+        self.visible_outputs
+            .iter()
+            .map(|output| output.text.as_str())
+            .collect::<String>()
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -866,6 +878,26 @@ pub struct CollectedToolCall {
     pub result: ToolResultView,
     pub success: bool,
     pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CollectedTerminalOutput {
+    pub source: TerminalOutputSource,
+    pub value: serde_json::Value,
+    pub rendered: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CollectedVisibleOutput {
+    pub kind: CollectedVisibleOutputKind,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectedVisibleOutputKind {
+    AssistantProse,
+    TerminalOutput,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -900,6 +932,14 @@ impl TurnCollector {
             .clone()
     }
 
+    pub fn rendered_output(&self) -> String {
+        self.state
+            .lock()
+            .expect("turn collector lock")
+            .transcript
+            .rendered_output()
+    }
+
     pub fn sink(&self) -> Arc<dyn TurnEventSink> {
         Arc::new(self.clone())
     }
@@ -924,6 +964,13 @@ impl TurnEventSink for TurnCollector {
         match &event {
             TurnEvent::AssistantProseDelta { text } => {
                 state.transcript.assistant_prose.push_str(text);
+                state
+                    .transcript
+                    .visible_outputs
+                    .push(CollectedVisibleOutput {
+                        kind: CollectedVisibleOutputKind::AssistantProse,
+                        text: text.clone(),
+                    });
             }
             TurnEvent::ReasoningDelta { text } => {
                 state.transcript.reasoning.push_str(text);
@@ -972,6 +1019,24 @@ impl TurnEventSink for TurnCollector {
             }
             TurnEvent::Error { message } => {
                 state.transcript.errors.push(message.clone());
+            }
+            TurnEvent::TerminalOutput { source, value } => {
+                let rendered = lash::render_terminal_output_value(value);
+                state
+                    .transcript
+                    .terminal_outputs
+                    .push(CollectedTerminalOutput {
+                        source: source.clone(),
+                        value: value.clone(),
+                        rendered: rendered.clone(),
+                    });
+                state
+                    .transcript
+                    .visible_outputs
+                    .push(CollectedVisibleOutput {
+                        kind: CollectedVisibleOutputKind::TerminalOutput,
+                        text: rendered,
+                    });
             }
             TurnEvent::ToolCallStarted { .. } | TurnEvent::Usage { .. } => {}
         }
@@ -1651,6 +1716,13 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(prose, "echo: stream");
+        assert!(
+            !events
+                .snapshot()
+                .await
+                .iter()
+                .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+        );
         Ok(())
     }
 
@@ -1713,13 +1785,25 @@ mod tests {
             .max_context_tokens(200_000)
             .build()?;
         let session = core.session("rlm-live-tool-events").open().await?;
-        let events = RecordingEvents::default();
+        let events = Arc::new(RecordingEvents::default());
+        let collector = TurnCollector::default();
+        let fanout = TurnEventFanout::new(vec![
+            collector.sink(),
+            events.clone() as Arc<dyn TurnEventSink>,
+        ]);
 
-        let _result = session
+        let result = session
             .turn(Input::text("use tool"))
-            .stream(&events)
+            .stream(&fanout)
             .await?;
 
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash::TurnFinish::Value {
+                source: lash::TerminalOutputSource::RlmSubmit,
+                ..
+            })
+        ));
         let events = events.snapshot().await;
         let code_started = events
             .iter()
@@ -1737,9 +1821,14 @@ mod tests {
             .iter()
             .position(|event| matches!(event, TurnEvent::CodeBlockCompleted { .. }))
             .expect("code completed");
+        let terminal_output = events
+            .iter()
+            .position(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+            .expect("terminal output");
         assert!(code_started < tool_started);
         assert!(tool_started < tool_completed);
         assert!(tool_completed < code_completed);
+        assert!(code_completed < terminal_output);
         assert!(!events[code_completed + 1..].iter().any(|event| matches!(
             event,
             TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallCompleted { .. }
@@ -1763,6 +1852,13 @@ mod tests {
         assert_eq!(language, "lashlang");
         assert!(*success);
         assert!(error.is_none());
+        let TurnEvent::TerminalOutput { source, value } = &events[terminal_output] else {
+            unreachable!();
+        };
+        assert!(matches!(source, lash::TerminalOutputSource::RlmSubmit));
+        assert_eq!(value, &serde_json::json!("done"));
+        assert_eq!(collector.snapshot().terminal_outputs.len(), 1);
+        assert_eq!(collector.rendered_output(), "done");
         Ok(())
     }
 

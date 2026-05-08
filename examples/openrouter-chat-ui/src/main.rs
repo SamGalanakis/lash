@@ -12,10 +12,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{
-    ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnFinish,
-    TurnOutcome,
-};
+use lash::{ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider};
 use lash_embed::{
     EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnCollector, TurnEvent,
     TurnEventFanout, TurnEventSink,
@@ -286,13 +283,8 @@ async fn send_message(
             .stream(&sink)
             .await;
         match turn {
-            Ok(result) => {
-                let mut assistant_text = collector.snapshot().assistant_prose;
-                if let TurnOutcome::Finished(TurnFinish::Submission { value, .. }) = &result.outcome
-                    && assistant_text.trim().is_empty()
-                {
-                    assistant_text = tic_tac_toe_submission_text(value);
-                }
+            Ok(_) => {
+                let assistant_text = collector.rendered_output();
                 let inserted = run_state
                     .with_db(|db| db.insert_message(&chat_id, "assistant", &assistant_text));
                 match inserted {
@@ -393,6 +385,10 @@ impl TurnEventSink for ChannelTurnEvents {
                         .await;
                 }
             }
+            return;
+        }
+        if matches!(&event, TurnEvent::TerminalOutput { .. }) {
+            let _ = self.tx.send(StreamItem::Event { event }).await;
             return;
         }
         let _ = self.tx.send(StreamItem::Event { event }).await;
@@ -1003,33 +999,6 @@ fn compact_title(text: &str) -> String {
     }
 }
 
-fn tic_tac_toe_submission_text(value: &serde_json::Value) -> String {
-    if let Some(text) = value.as_str() {
-        return text.to_string();
-    }
-    let Some(object) = value.as_object() else {
-        return value.to_string();
-    };
-    if object.get("accepted").and_then(|value| value.as_bool()) == Some(true) {
-        let cell = object
-            .get("move")
-            .and_then(|value| value.get("cell"))
-            .and_then(|value| value.as_u64())
-            .map(|cell| cell.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let status = object
-            .get("board")
-            .and_then(|value| value.get("status"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("board updated");
-        return format!("I played O in cell {cell}. {status}.");
-    }
-    if let Some(reason) = object.get("reason").and_then(|value| value.as_str()) {
-        return format!("I could not play a move: {reason}");
-    }
-    value.to_string()
-}
-
 mod anyhow_like {
     pub type Result<T> = std::result::Result<T, String>;
 }
@@ -1315,6 +1284,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       return { args: cleanArgs(event.args), result: raw };
     }
+    function renderTerminalOutput(value) {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'string') return value;
+      return JSON.stringify(value, null, 2);
+    }
 
     async function api(url, options = {}) {
       const res = await fetch(url, { headers: { 'content-type': 'application/json' }, ...options });
@@ -1481,6 +1455,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           if (item.type === 'event' && item.event.type === 'code_block_started') appendCodeBlock({ ...item.event, phase:'started' });
           if (item.type === 'event' && item.event.type === 'tool_call_started') appendTool({ ...item.event, phase:'started' });
           if (item.type === 'event' && item.event.type === 'tool_call_completed') appendTool({ ...item.event, phase:'completed' });
+          if (item.type === 'event' && item.event.type === 'terminal_output') appendStreamText(renderTerminalOutput(item.event.value));
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }

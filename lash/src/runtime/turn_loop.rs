@@ -7,7 +7,7 @@ fn trace_fields_from_outcome(
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
             ("completed", "assistant_message", None)
         }
-        TurnOutcome::Finished(TurnFinish::Submission { .. }) => ("completed", "submission", None),
+        TurnOutcome::Finished(TurnFinish::Value { .. }) => ("completed", "value", None),
         TurnOutcome::Handoff { session_id } => (
             "completed",
             "handoff",
@@ -28,7 +28,7 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
         TurnStop::ProviderError => "provider_error",
         TurnStop::PluginAbort => "plugin_abort",
         TurnStop::RuntimeError => "runtime_error",
-        TurnStop::SubmittedError { .. } => "submitted_error",
+        TurnStop::TerminalError { .. } => "terminal_error",
     }
 }
 
@@ -128,7 +128,7 @@ impl LashRuntime {
             .await
     }
 
-    async fn stream_turn_with_semantic_events(
+    pub(crate) async fn stream_turn_with_semantic_events(
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,

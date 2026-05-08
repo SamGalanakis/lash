@@ -27,17 +27,24 @@ The plugin demonstrates:
 
 - Typed session activation through `EmbedPlugin::SessionConfig`.
 - Typed per-turn UI inputs through `DemoTurnInput`.
-- A required `DemoPageContext` turn input validated by `TurnBuilder::run()`.
-- An optional `Tone` value selected by the composer.
-- A `demo_lookup` tool that reads the same typed turn context from
+- A required tic-tac-toe board input validated before the turn runs.
+- `read_board` and `play_move` tools that read the same typed turn context from
   `ToolExecutionContext`.
-- Prompt contribution that reflects the selected tone and page context.
+- Prompt contribution that reflects the current board state.
+- Additive semantic streaming: assistant prose is streamed as
+  `TurnEvent::AssistantProseDelta`, code/tool activity is rendered as cards, and
+  RLM `submit` is streamed as `TurnEvent::TerminalOutput`.
+- Final persistence uses `TurnCollector::rendered_output()` so prose and typed
+  terminal output are stored exactly through the same visible-output path.
 
 In lashlang, the model can call the demo tool with:
 
 ```lashlang
-call demo_lookup { "query": "current page" }
+board = (call read_board {})?
+move = (call play_move { cell: 4 })?
+submit "I played the center."
 ```
 
-The browser streams assistant prose from `TurnEvent::TextDelta`, renders tool
-calls as compact cards, and persists only `TurnResult.final_text`.
+The browser also listens for `terminal_output` stream events and renders their
+JSON-shaped value with the same display rule as Lash: strings pass through,
+`null` is empty, and other values pretty-print.
