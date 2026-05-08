@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>lash TUI Design System</title>
 <link rel="stylesheet" href="./architecture/styles.css">
+<script src="./architecture/mermaid.js" defer></script>
 <style>
   /* design-language · page-specific components */
 
@@ -490,13 +491,6 @@
 
   /* principle-list itself lives in the canonical sheet */
 
-  .mermaid-wrap {
-    border: 1px solid var(--line);
-    background: var(--form);
-    padding: var(--space-sm);
-    overflow: auto;
-  }
-
   @media (max-width: 1100px) {
     .hero,
     .mock-grid,
@@ -517,28 +511,7 @@
     .glyph-grid { grid-template-columns: 1fr; }
   }
 </style>
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-
-  mermaid.initialize({
-    startOnLoad: true,
-    theme: 'base',
-    themeVariables: {
-      primaryColor: '#141412',
-      primaryTextColor: '#e8e4d0',
-      primaryBorderColor: '#e8a33c',
-      lineColor: '#7a7a70',
-      secondaryColor: '#2a2a28',
-      tertiaryColor: '#0e0d0b',
-      background: '#141412',
-      mainBkg: '#141412',
-      nodeBorder: '#e8a33c',
-      clusterBkg: '#0e0d0b',
-      clusterBorder: '#4a4a44',
-      fontFamily: 'Chivo Mono'
-    }
-  });
-
+<script>
   // Mark the in-view section in the sticky nav.
   window.addEventListener('DOMContentLoaded', () => {
     const links = [...document.querySelectorAll('.nav a[data-section]')];
@@ -713,7 +686,8 @@
         </div>
         <div class="panel" style="margin-top:18px">
           <h3>Token cascade</h3>
-          <div class="mermaid-wrap">
+          <div class="diagram">
+            <div class="diagram-title">Token cascade</div>
             <div class="mermaid">
 flowchart LR
   A[FORM / FORM_DEEP] --> B[ASH rail system]
@@ -1041,7 +1015,8 @@ flowchart LR
         </div>
         <div class="panel" style="margin-top:18px">
           <h3>Layout stack</h3>
-          <div class="mermaid-wrap">
+          <div class="diagram">
+            <div class="diagram-title">Layout stack</div>
             <div class="mermaid">
 flowchart TD
   A[Status Bar] --> B[History Stream]

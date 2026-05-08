@@ -87,6 +87,7 @@ impl LlmToolsProvider {
                     output,
                     stream_events: None,
                     session_id: Some(format!("{}-llm-query", context.session_id)),
+                    originating_tool_call_id: None,
                 },
                 "llm_query",
             )
@@ -552,6 +553,7 @@ mod tests {
             cancellation_token: None,
             async_task_id: None,
             turn_context: lash::TurnContext::default(),
+            tool_call_id: None,
         };
 
         let result = provider
@@ -615,6 +617,7 @@ mod tests {
             cancellation_token: None,
             async_task_id: None,
             turn_context: lash::TurnContext::default(),
+            tool_call_id: None,
         };
 
         let result = provider

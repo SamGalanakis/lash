@@ -290,6 +290,7 @@ mod tests {
             cancellation_token: None,
             async_task_id: None,
             turn_context: lash::TurnContext::default(),
+            tool_call_id: None,
         };
 
         let request =

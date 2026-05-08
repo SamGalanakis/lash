@@ -80,6 +80,9 @@ fn merge_context(base: &mut TraceContext, overlay: TraceContext) {
     if overlay.llm_call_id.is_some() {
         base.llm_call_id = overlay.llm_call_id;
     }
+    if overlay.originating_tool_call_id.is_some() {
+        base.originating_tool_call_id = overlay.originating_tool_call_id;
+    }
     base.metadata.extend(overlay.metadata);
 }
 

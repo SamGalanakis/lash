@@ -59,6 +59,7 @@ pub(crate) async fn dispatch_tool_call(
         cancellation_token: None,
         async_task_id: None,
         turn_context: context.turn_context.clone(),
+        tool_call_id: None,
     };
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
         .await

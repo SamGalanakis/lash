@@ -50,6 +50,11 @@ pub struct DirectRequest {
     pub output: DirectOutputSpec,
     pub stream_events: Option<LlmEventSender>,
     pub session_id: Option<String>,
+    /// Set this when issuing a direct completion from inside a tool's
+    /// `execute_with_context`. Carries the calling tool's call id all
+    /// the way to the trace event so the renderer can group fan-outs
+    /// (e.g. tournament_rerank's batch reranks) under their parent.
+    pub originating_tool_call_id: Option<String>,
 }
 
 impl DirectRequest {
@@ -65,6 +70,7 @@ impl DirectRequest {
             output: DirectOutputSpec::Text,
             stream_events: None,
             session_id: None,
+            originating_tool_call_id: None,
         }
     }
 
@@ -251,6 +257,7 @@ pub(crate) fn build_llm_request(
         output,
         stream_events: _,
         session_id,
+        originating_tool_call_id: _,
     } = request;
 
     let output_spec = match output {

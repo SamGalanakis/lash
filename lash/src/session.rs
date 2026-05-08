@@ -347,6 +347,7 @@ impl ModeExecutionContext {
             cancellation_token: self.cancellation_token.clone(),
             async_task_id: None,
             turn_context: self.dispatch.turn_context.clone(),
+            tool_call_id: Some(call_id.clone()),
         };
         let mut outcome = dispatch_tool_call_with_execution_context(
             &self.dispatch,
@@ -709,6 +710,7 @@ impl ModeExecutionContext {
         let task_tool_name = tool_name.clone();
         let task_args = args.clone();
         let dispatch = Arc::clone(&self.dispatch);
+        let async_call_id = handle_id.clone();
         let join_handle = tokio::spawn(async move {
             let tool_context = ToolExecutionContext {
                 session_id: dispatch.session_id.clone(),
@@ -716,6 +718,7 @@ impl ModeExecutionContext {
                 cancellation_token: None,
                 async_task_id: None,
                 turn_context: dispatch.turn_context.clone(),
+                tool_call_id: Some(async_call_id),
             }
             .with_async_task(task_handle_id.clone(), cancellation.clone());
             let outcome = dispatch_tool_call_with_execution_context(

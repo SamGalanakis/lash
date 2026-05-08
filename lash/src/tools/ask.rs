@@ -371,6 +371,7 @@ mod tests {
                     cancellation_token: None,
                     async_task_id: None,
                     turn_context: crate::TurnContext::default(),
+                    tool_call_id: None,
                 },
             )
             .await;
@@ -442,6 +443,7 @@ mod tests {
                     cancellation_token: None,
                     async_task_id: None,
                     turn_context: crate::TurnContext::default(),
+                    tool_call_id: None,
                 },
             )
             .await;
@@ -489,6 +491,7 @@ mod tests {
                     cancellation_token: None,
                     async_task_id: None,
                     turn_context: crate::TurnContext::default(),
+                    tool_call_id: None,
                 },
                 None,
             )
