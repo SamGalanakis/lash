@@ -168,9 +168,8 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                 mode: None,
                 mode_turn_options: Some(lash::ModeTurnOptions::typed(
                     ExecutionMode::new("rlm"),
-                    RlmTermination::Finish {
+                    RlmTermination::SubmitRequired {
                         schema: Some(request.response_schema.clone()),
-                        include_submit_prompt: true,
                     },
                 )?),
                 trace_turn_id: Some(format!("clbench-turn-{:04}", request.iteration)),

@@ -368,13 +368,12 @@ mod tests {
                 },
                 mode_turn_options: lash::ModeTurnOptions::typed(
                     lash::ExecutionMode::new("rlm"),
-                    RlmTermination::Finish {
+                    RlmTermination::SubmitRequired {
                         schema: Some(json!({
                             "type": "object",
                             "properties": { "answer": { "type": "string" } },
                             "required": ["answer"]
                         })),
-                        include_submit_prompt: true,
                     },
                 )
                 .expect("valid rlm turn options"),
@@ -452,10 +451,7 @@ mod tests {
             .expect("rlm extras");
         assert!(matches!(
             extras.termination,
-            RlmTermination::Finish {
-                schema: Some(_),
-                ..
-            }
+            RlmTermination::SubmitRequired { schema: Some(_) }
         ));
         assert!(
             extras.projected_seed.is_none(),

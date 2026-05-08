@@ -1863,6 +1863,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
+        let core = LashCore::rlm()
+            .provider(queued_text_provider(vec!["done in prose"]))
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .build()?;
+        let session = core.session("rlm-prose-completion").open().await?;
+        let events = Arc::new(RecordingEvents::default());
+        let collector = TurnCollector::default();
+        let fanout = TurnEventFanout::new(vec![
+            collector.sink(),
+            events.clone() as Arc<dyn TurnEventSink>,
+        ]);
+
+        let result = session
+            .turn(Input::text("answer directly"))
+            .mode_turn_options(
+                ModeTurnOptions::typed(
+                    lash::ExecutionMode::new("rlm"),
+                    lash_rlm_types::RlmTermination::ProseOrSubmit,
+                )
+                .expect("rlm termination options serialize"),
+            )
+            .stream(&fanout)
+            .await?;
+
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
+        ));
+        let events = events.snapshot().await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+        );
+        assert_eq!(collector.rendered_output(), "done in prose");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
+        let core = LashCore::rlm()
+            .provider(queued_text_provider(vec![
+                "```lashlang\nsubmit \"done via submit\"\n```",
+            ]))
+            .model("mock-model")
+            .max_context_tokens(200_000)
+            .build()?;
+        let session = core
+            .session("rlm-submit-required-completion")
+            .open()
+            .await?;
+        let events = Arc::new(RecordingEvents::default());
+        let collector = TurnCollector::default();
+        let fanout = TurnEventFanout::new(vec![
+            collector.sink(),
+            events.clone() as Arc<dyn TurnEventSink>,
+        ]);
+
+        let result = session
+            .turn(Input::text("submit"))
+            .mode_turn_options(
+                ModeTurnOptions::typed(
+                    lash::ExecutionMode::new("rlm"),
+                    lash_rlm_types::RlmTermination::SubmitRequired { schema: None },
+                )
+                .expect("rlm termination options serialize"),
+            )
+            .stream(&fanout)
+            .await?;
+
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash::TurnFinish::Value {
+                source: lash::TerminalOutputSource::RlmSubmit,
+                ..
+            })
+        ));
+        let events = events.snapshot().await;
+        let terminal_output = events
+            .iter()
+            .find(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+            .expect("terminal output");
+        let TurnEvent::TerminalOutput { source, value } = terminal_output else {
+            unreachable!();
+        };
+        assert!(matches!(source, lash::TerminalOutputSource::RlmSubmit));
+        assert_eq!(value, &serde_json::json!("done via submit"));
+        assert_eq!(collector.rendered_output(), "done via submit");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rlm_tool_completed_uses_standard_projection_view() -> Result<()> {
         let projection = Arc::new(lash::BuiltinToolResultProjectionPluginFactory::new(
             lash::ToolResultProjectionPluginConfig {

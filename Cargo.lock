@@ -2322,6 +2322,7 @@ dependencies = [
  "lash",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-rlm-types",
  "lash-trace",
  "serde",
  "serde_json",

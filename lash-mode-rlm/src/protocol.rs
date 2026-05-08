@@ -338,10 +338,40 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
 
         let extraction = extract_first_lashlang_fence(&assistant_text);
         let Some(fence) = extraction else {
-            let RlmTermination::Finish {
-                schema,
-                include_submit_prompt,
-            } = rlm_termination(ctx.termination());
+            let termination = rlm_termination(ctx.termination());
+            if matches!(termination, RlmTermination::ProseOrSubmit) {
+                actions.push(DriverAction::AppendEvents(vec![
+                    diagnostic_event(
+                        "llm_extraction",
+                        serde_json::json!({
+                            "found_lashlang_fence": false,
+                            "prose_only_ends_turn": true,
+                            "assistant_text_chars": assistant_text.chars().count(),
+                            "reasoning_chars": reasoning_text.chars().count(),
+                            "finalization_reason": "prose_or_submit",
+                        }),
+                    ),
+                    conversation_event(internal_assistant_prose_message(assistant_text.clone())),
+                ]));
+                if !assistant_text.trim().is_empty() {
+                    actions.push(DriverAction::Emit(SessionEvent::Message {
+                        text: assistant_text.clone(),
+                        kind: "final".to_string(),
+                    }));
+                }
+                actions.push(DriverAction::StartCheckpoint {
+                    checkpoint: CheckpointKind::BeforeCompletion,
+                    on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
+                        TurnFinish::AssistantMessage {
+                            text: assistant_text.clone(),
+                        },
+                    )),
+                });
+                return actions;
+            }
+            let RlmTermination::SubmitRequired { schema } = termination else {
+                unreachable!("ProseOrSubmit returned above");
+            };
             actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
                 "llm_extraction",
                 serde_json::json!({
@@ -360,7 +390,6 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             }
             events.push(conversation_event(submit_required_reminder_message(
                 schema.is_some(),
-                include_submit_prompt,
             )));
             actions.push(DriverAction::AppendEvents(events));
             actions.push(DriverAction::AdvanceModeIteration);
@@ -476,9 +505,8 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             // Typed-RLM: validate against the declared schema. If it fails,
             // surface the error to the model and loop; otherwise fall
             // through to the shared terminate-with-value path below.
-            if let RlmTermination::Finish {
+            if let RlmTermination::SubmitRequired {
                 schema: Some(schema),
-                ..
             } = rlm_termination(ctx.termination())
                 && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
@@ -759,11 +787,9 @@ fn prose_message(content: String, origin: Option<lash::MessageOrigin>) -> Messag
     }
 }
 
-fn submit_required_reminder_message(requires_schema: bool, include_submit_prompt: bool) -> Message {
+fn submit_required_reminder_message(requires_schema: bool) -> Message {
     let id = fresh_message_id();
-    let content = if !include_submit_prompt {
-        "Continue from a fenced ```lashlang block until the task-specific completion path is satisfied. Plain text outside a fence is not delivered."
-    } else if requires_schema {
+    let content = if requires_schema {
         "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>` with a value matching the required output schema. Plain text outside a fence is not delivered."
     } else {
         "Deliver the final answer from a fenced ```lashlang block by calling `submit <value>`. Plain text outside a fence is not delivered."

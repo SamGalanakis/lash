@@ -143,6 +143,23 @@ enum StreamItem {
     Done,
 }
 
+#[derive(Default)]
+struct StderrTraceSink {
+    lock: Mutex<()>,
+}
+
+impl lash::TraceSink for StderrTraceSink {
+    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+        let line = serde_json::to_string(record)?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| lash::TraceSinkError::LockPoisoned)?;
+        eprintln!("{line}");
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
     let api_key = std::env::var("OPENROUTER_API_KEY")
@@ -170,6 +187,8 @@ async fn main() -> anyhow_like::Result<()> {
         .model(model.clone())
         .max_context_tokens(200_000)
         .store_factory(store_factory)
+        .trace_sink(Some(Arc::new(StderrTraceSink::default())))
+        .trace_level(lash::TraceLevel::Extended)
         .build()
         .map_err(|err| err.to_string())?;
 
@@ -273,10 +292,7 @@ async fn send_message(
             .mode_turn_options(
                 lash::ModeTurnOptions::typed(
                     ExecutionMode::new("rlm"),
-                    RlmTermination::Finish {
-                        schema: None,
-                        include_submit_prompt: true,
-                    },
+                    RlmTermination::SubmitRequired { schema: None },
                 )
                 .expect("RLM termination options serialize"),
             )
@@ -530,7 +546,7 @@ impl ToolProvider for DemoTools {
 fn board_prompt(board: &BoardState) -> String {
     let status = board_status(board);
     format!(
-        "You are O. The human is X.\nCurrent turn: {}.\nIndex map:\n0 top-left | 1 top-middle | 2 top-right\n3 middle-left | 4 center | 5 middle-right\n6 bottom-left | 7 bottom-middle | 8 bottom-right\nCurrent marks by index:\n{}\nVisual board:\n{}\nLegal moves: {:?}\nStatus: {}.\nIf it is O's turn and the game is not over, call `play_move` exactly once before answering. Only choose one of the legal move indexes. Use `read_board` only when needed. After you move, respond conversationally in one short sentence. If your move ended the game, clearly say that you won or that the game ended in a draw; otherwise say it is the human's turn. Do not explain your strategy, do not describe threats, do not print an ASCII board, do not narrate every cell, and do not return JSON to the user.",
+        "You are O. The human is X.\nCurrent turn: {}.\nIndex map:\n0 top-left | 1 top-middle | 2 top-right\n3 middle-left | 4 center | 5 middle-right\n6 bottom-left | 7 bottom-middle | 8 bottom-right\nCurrent marks by index:\n{}\nVisual board:\n{}\nLegal moves: {:?}\nStatus: {}.\nIf it is O's turn and the game is not over, call `play_move` exactly once before answering. Only choose one of the legal move indexes. Use `read_board` only when needed. Finish with `submit \"<one short user-facing sentence>\"`; do not repeat that sentence as prose outside the lashlang block. If your move ended the game, clearly say that you won or that the game ended in a draw; otherwise say it is the human's turn. Do not explain your strategy, do not describe threats, do not print an ASCII board, do not narrate every cell, and do not return JSON to the user.",
         board.turn,
         indexed_marks(board),
         board_rows(board),
