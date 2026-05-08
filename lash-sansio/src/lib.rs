@@ -11,6 +11,21 @@ pub mod turn;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TerminalOutputSource {
+    RlmSubmit,
+    Tool { name: String },
+}
+
+pub fn render_terminal_output_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
 pub use attachment::{AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType};
 pub use mode::{
     ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
@@ -2419,6 +2434,8 @@ where
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolControl {
     Handoff { session_id: String },
+    Finish { value: serde_json::Value },
+    Fail { value: serde_json::Value },
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

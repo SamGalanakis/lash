@@ -90,6 +90,24 @@ impl RecordingSink {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingTurnEvents {
+    events: Arc<Mutex<Vec<TurnEvent>>>,
+}
+
+#[async_trait::async_trait]
+impl TurnEventSink for RecordingTurnEvents {
+    async fn emit(&self, event: TurnEvent) {
+        self.events.lock().expect("lock turn events").push(event);
+    }
+}
+
+impl RecordingTurnEvents {
+    fn snapshot(&self) -> Vec<TurnEvent> {
+        self.events.lock().expect("lock turn events").clone()
+    }
+}
+
 #[derive(Default)]
 struct RecordingStore {
     session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
@@ -849,6 +867,60 @@ impl crate::ToolProvider for EchoTool {
         crate::ToolResult::ok(serde_json::json!({
             "payload": format!("raw:{value}")
         }))
+    }
+}
+
+struct TerminalControlTool {
+    controls: Vec<crate::ToolControl>,
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for TerminalControlTool {
+    fn definitions(&self) -> Vec<crate::ToolDefinition> {
+        (0..self.controls.len())
+            .map(|index| {
+                crate::ToolDefinition::new(
+                    format!("terminal_tool_{index}"),
+                    "Return a terminal control result",
+                    crate::ToolDefinition::default_input_schema(),
+                    serde_json::json!({ "type": "object", "additionalProperties": true }),
+                )
+            })
+            .collect()
+    }
+
+    async fn execute(&self, name: &str, _args: &serde_json::Value) -> crate::ToolResult {
+        self.result_for(name)
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        _args: &serde_json::Value,
+        _context: &crate::ToolExecutionContext,
+    ) -> crate::ToolResult {
+        self.result_for(name)
+    }
+
+    async fn execute_streaming_with_context(
+        &self,
+        name: &str,
+        _args: &serde_json::Value,
+        _context: &crate::ToolExecutionContext,
+        _progress: Option<&crate::ProgressSender>,
+    ) -> crate::ToolResult {
+        self.result_for(name)
+    }
+}
+
+impl TerminalControlTool {
+    fn result_for(&self, name: &str) -> crate::ToolResult {
+        let index = name
+            .strip_prefix("terminal_tool_")
+            .and_then(|value| value.parse::<usize>().ok())
+            .expect("known terminal test tool");
+        crate::ToolResult::ok(serde_json::json!({ "tool": name }))
+            .with_control(self.controls[index].clone())
     }
 }
 
@@ -3086,6 +3158,191 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
     assert!(
         observed_cancel.load(Ordering::SeqCst),
         "slow tool did not observe cancellation token through ToolExecutionContext"
+    );
+}
+
+#[tokio::test]
+async fn standard_runtime_tool_control_finish_emits_terminal_output() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![
+                    LlmOutputPart::ToolCall {
+                        call_id: "tool-1".to_string(),
+                        tool_name: "terminal_tool_0".to_string(),
+                        input_json: "{}".to_string(),
+                        item_id: None,
+                        signature: None,
+                    },
+                    LlmOutputPart::ToolCall {
+                        call_id: "tool-2".to_string(),
+                        tool_name: "terminal_tool_1".to_string(),
+                        input_json: "{}".to_string(),
+                        item_id: None,
+                        signature: None,
+                    },
+                ],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "unexpected follow-up".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "unexpected follow-up".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(TerminalControlTool {
+        controls: vec![
+            crate::ToolControl::Finish {
+                value: json!("first"),
+            },
+            crate::ToolControl::Finish {
+                value: json!("second"),
+            },
+        ],
+    });
+    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+    let turn_events = RecordingTurnEvents::default();
+
+    let turn = runtime
+        .stream_turn_with_semantic_events(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "run terminal tools".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+                trace_turn_id: None,
+                mode_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            &NoopEventSink,
+            &turn_events,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(
+        matches!(
+        turn.outcome,
+        TurnOutcome::Finished(TurnFinish::Value {
+            source: crate::TerminalOutputSource::Tool { ref name },
+            ref value,
+        }) if name == "terminal_tool_0" && value == &json!("first")
+        ),
+        "outcome={:?} calls={:?}",
+        turn.outcome,
+        turn.tool_calls
+    );
+    assert_eq!(turn.tool_calls.len(), 2);
+    let events = turn_events.snapshot();
+    let first_completed = events
+        .iter()
+        .position(|event| matches!(event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_0"))
+        .expect("first completed");
+    let second_completed = events
+        .iter()
+        .position(|event| matches!(event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_1"))
+        .expect("second completed");
+    let terminal = events
+        .iter()
+        .position(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+        .expect("terminal output");
+    assert!(first_completed < terminal);
+    assert!(second_completed < terminal);
+    assert!(matches!(
+        &events[terminal],
+        TurnEvent::TerminalOutput {
+            source: crate::TerminalOutputSource::Tool { name },
+            value,
+        } if name == "terminal_tool_0" && value == &json!("first")
+    ));
+}
+
+#[tokio::test]
+async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event() {
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "tool-1".to_string(),
+                    tool_name: "terminal_tool_0".to_string(),
+                    input_json: "{}".to_string(),
+                    item_id: None,
+                    signature: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "unexpected follow-up".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "unexpected follow-up".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let tools: Arc<dyn crate::ToolProvider> = Arc::new(TerminalControlTool {
+        controls: vec![crate::ToolControl::Fail {
+            value: json!({ "reason": "failed" }),
+        }],
+    });
+    let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
+    let turn_events = RecordingTurnEvents::default();
+
+    let turn = runtime
+        .stream_turn_with_semantic_events(
+            TurnInput {
+                items: vec![InputItem::Text {
+                    text: "run failing terminal tool".to_string(),
+                }],
+                image_blobs: HashMap::new(),
+                user_input: None,
+                mode: None,
+                mode_turn_options: None,
+                trace_turn_id: None,
+                mode_extension: None,
+                turn_context: crate::TurnContext::default(),
+            },
+            &NoopEventSink,
+            &turn_events,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(
+        matches!(
+        turn.outcome,
+        TurnOutcome::Stopped(TurnStop::TerminalError {
+            source: crate::TerminalOutputSource::Tool { ref name },
+            ref value,
+        }) if name == "terminal_tool_0" && value == &json!({ "reason": "failed" })
+        ),
+        "outcome={:?} calls={:?}",
+        turn.outcome,
+        turn.tool_calls
+    );
+    assert!(
+        !turn_events
+            .snapshot()
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
     );
 }
 

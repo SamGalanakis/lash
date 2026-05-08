@@ -7,7 +7,7 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./architecture/styles.css">
 <style>
-  /* docs root · hero adjustments and the 2-card entry rail */
+  /* docs root · hero adjustments and the 3-card entry rail */
   /* The shared .frame grid expects a sidebar in column 1; this page has none.
      Collapse to a single-column flow so the hero, rail, and footer stack instead of
      the rail being auto-placed into the empty sidebar cell beneath the hero. */
@@ -31,7 +31,7 @@
   }
   .entry-rail {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--space-md);
     padding: var(--space-xl);
   }
@@ -113,9 +113,14 @@
         <div>
           <div class="eyebrow">lash · documentation</div>
           <h1>system<span class="slash">/</span>manual</h1>
-          <p>Two views of the same terminal agent. Architecture for how the runtime is built. Design language for how the interface should feel in long working sessions.</p>
+          <p>Three views of the same terminal agent. Embedding API for app hosts, architecture for how the runtime is built, and design language for how the interface should feel in long working sessions.</p>
         </div>
         <div class="hero-meta">
+          <article class="card">
+            <div class="micro-label">Embedding</div>
+            <strong>LashCore, sessions, streams, plugins</strong>
+            <span class="stat-note">App-facing guide for using Lash inside a product.</span>
+          </article>
           <article class="card">
             <div class="micro-label">Architecture</div>
             <strong>Runtime, modes, providers, graph, tools</strong>
@@ -135,6 +140,17 @@
       </header>
 
       <section class="entry-rail" aria-label="Documentation sections">
+        <a class="entry" href="./embedding.html">
+          <div class="micro-label">Build an app</div>
+          <div>
+            <h2>Embedding API<span class="accent">.</span></h2>
+            <p>How to configure <code>LashCore</code>, open sessions, stream semantic turn events, collect visible output, pass typed plugin input, and wire app tools.</p>
+          </div>
+          <div class="entry-foot">
+            <span>Guide</span>
+            <span class="entry-arrow">→</span>
+          </div>
+        </a>
         <a class="entry" href="./architecture/">
           <div class="micro-label">Read the system</div>
           <div>

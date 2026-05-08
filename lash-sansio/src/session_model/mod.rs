@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
 use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, UserInputProvenance};
-use crate::{MessageOrigin, ToolCallRecord};
+use crate::{MessageOrigin, TerminalOutputSource, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SessionEventRecord<ME = ()> {
@@ -225,8 +225,8 @@ pub enum TurnFinish {
     AssistantMessage {
         text: String,
     },
-    Submission {
-        channel_id: String,
+    Value {
+        source: TerminalOutputSource,
         value: serde_json::Value,
     },
 }
@@ -241,8 +241,8 @@ pub enum TurnStop {
     ProviderError,
     PluginAbort,
     RuntimeError,
-    SubmittedError {
-        channel_id: String,
+    TerminalError {
+        source: TerminalOutputSource,
         value: serde_json::Value,
     },
 }

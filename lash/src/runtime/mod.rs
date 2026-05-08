@@ -440,6 +440,10 @@ pub enum TurnEvent {
         success: bool,
         duration_ms: u64,
     },
+    TerminalOutput {
+        source: crate::TerminalOutputSource,
+        value: serde_json::Value,
+    },
     Usage {
         mode_iteration: usize,
         usage: TokenUsage,

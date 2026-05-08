@@ -1027,7 +1027,36 @@ mod test_mode_fakes {
             };
             let mut actions = Vec::new();
             let mut result_parts = Vec::new();
+            let mut terminal_outcome = None;
             for outcome in completed {
+                if terminal_outcome.is_none() && outcome.raw_result.success {
+                    terminal_outcome = match outcome.raw_result.control.as_ref() {
+                        Some(crate::ToolControl::Handoff { session_id })
+                            if !session_id.trim().is_empty() =>
+                        {
+                            Some(TurnOutcome::Handoff {
+                                session_id: session_id.clone(),
+                            })
+                        }
+                        Some(crate::ToolControl::Finish { value }) => {
+                            Some(TurnOutcome::Finished(TurnFinish::Value {
+                                source: crate::TerminalOutputSource::Tool {
+                                    name: outcome.tool_name.clone(),
+                                },
+                                value: value.clone(),
+                            }))
+                        }
+                        Some(crate::ToolControl::Fail { value }) => {
+                            Some(TurnOutcome::Stopped(TurnStop::TerminalError {
+                                source: crate::TerminalOutputSource::Tool {
+                                    name: outcome.tool_name.clone(),
+                                },
+                                value: value.clone(),
+                            }))
+                        }
+                        _ => None,
+                    };
+                }
                 result_parts.push(Part {
                     id: String::new(),
                     kind: PartKind::ToolResult,
@@ -1057,6 +1086,10 @@ mod test_mode_fakes {
                         origin: None,
                     })),
                 ]));
+            }
+            if let Some(outcome) = terminal_outcome {
+                actions.push(DriverAction::Finish(outcome));
+                return actions;
             }
             actions.push(DriverAction::AdvanceModeIteration);
             let next_mode_iteration = ctx.mode_iteration() + 1;

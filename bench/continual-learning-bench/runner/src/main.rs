@@ -189,7 +189,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .context("handoff chain did not produce a turn")?;
 
     let action = match &turn.outcome {
-        TurnOutcome::Finished(TurnFinish::Submission { value, .. }) => value.clone(),
+        TurnOutcome::Finished(TurnFinish::Value { value, .. }) => value.clone(),
         other => bail!(
             "turn did not submit an action: status={} reason={} errors={:?} output={}",
             turn_status_label(other),
@@ -392,7 +392,7 @@ fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
 fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => "assistant_message",
-        TurnOutcome::Finished(TurnFinish::Submission { .. }) => "submission",
+        TurnOutcome::Finished(TurnFinish::Value { .. }) => "value",
         TurnOutcome::Handoff { .. } => "handoff",
         TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
         TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
@@ -401,7 +401,7 @@ fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
         TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
         TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(lash::TurnStop::TerminalError { .. }) => "terminal_error",
     }
 }
 

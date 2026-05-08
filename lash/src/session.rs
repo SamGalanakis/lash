@@ -422,7 +422,7 @@ impl ModeExecutionContext {
             result: state_result.result.clone(),
             success: state_result.success,
             duration_ms: outcome.record.duration_ms,
-            control: state_result.control.clone(),
+            control: raw_result.control.clone(),
         };
         CompletedModeToolCall {
             index,
