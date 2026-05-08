@@ -57,6 +57,12 @@ pub struct TraceContext {
     pub effect_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_call_id: Option<String>,
+    /// When the LLM call was issued from inside a tool's
+    /// `execute_with_context` via `direct_completion`, this carries the
+    /// originating tool's call id so the renderer can group fan-outs
+    /// (e.g. tournament_rerank's batch reranks) under their parent tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub originating_tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, Value>,
 }
@@ -84,6 +90,11 @@ impl TraceContext {
 
     pub fn for_llm_call(mut self, llm_call_id: impl Into<String>) -> Self {
         self.llm_call_id = Some(llm_call_id.into());
+        self
+    }
+
+    pub fn for_originating_tool_call(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.originating_tool_call_id = Some(tool_call_id.into());
         self
     }
 }

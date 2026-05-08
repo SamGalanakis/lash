@@ -26,15 +26,25 @@ impl DirectCompletionCapability {
             .ensure_ready()
             .await
             .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
+        let originating_tool_call_id = request.originating_tool_call_id.clone();
+        let trace_context = |id: Option<&str>| {
+            let mut ctx =
+                lash_trace::TraceContext::default().for_session(current.session_id.clone());
+            if let Some(id) = id {
+                ctx = ctx.for_llm_call(id.to_string());
+            }
+            if let Some(tcid) = &originating_tool_call_id {
+                ctx = ctx.for_originating_tool_call(tcid.clone());
+            }
+            ctx
+        };
         let llm_request = crate::direct::build_llm_request(&provider, request, model.clone());
         let llm_call_id = if current.host.core.trace_sink.is_some() {
             let id = uuid::Uuid::new_v4().to_string();
             crate::trace::emit_trace(
                 &current.host.core.trace_sink,
                 &current.host.core.trace_context,
-                lash_trace::TraceContext::default()
-                    .for_session(current.session_id.clone())
-                    .for_llm_call(id.clone()),
+                trace_context(Some(&id)),
                 lash_trace::TraceEvent::LlmCallStarted {
                     request: crate::trace::trace_llm_request(&llm_request),
                 },
@@ -50,9 +60,7 @@ impl DirectCompletionCapability {
                     crate::trace::emit_trace(
                         &current.host.core.trace_sink,
                         &current.host.core.trace_context,
-                        lash_trace::TraceContext::default()
-                            .for_session(current.session_id.clone())
-                            .for_llm_call(llm_call_id),
+                        trace_context(Some(&llm_call_id)),
                         lash_trace::TraceEvent::LlmCallFailed {
                             error: lash_trace::TraceError {
                                 message: err.message.clone(),
@@ -71,9 +79,7 @@ impl DirectCompletionCapability {
             crate::trace::emit_trace(
                 &current.host.core.trace_sink,
                 &current.host.core.trace_context,
-                lash_trace::TraceContext::default()
-                    .for_session(current.session_id.clone())
-                    .for_llm_call(llm_call_id),
+                trace_context(Some(&llm_call_id)),
                 lash_trace::TraceEvent::LlmCallCompleted {
                     response: crate::trace::trace_llm_response(
                         response.full_text.clone(),

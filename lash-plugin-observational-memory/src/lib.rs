@@ -1379,6 +1379,7 @@ async fn run_worker_turn(
                 output: DirectOutputSpec::Text,
                 stream_events: None,
                 session_id: Some(format!("{session_id}-om-{worker_kind}")),
+                originating_tool_call_id: None,
             },
             worker_kind,
         )

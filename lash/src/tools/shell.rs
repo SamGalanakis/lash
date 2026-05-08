@@ -2324,6 +2324,7 @@ mod tests {
             cancellation_token: Some(token.clone()),
             async_task_id: None,
             turn_context: crate::TurnContext::default(),
+            tool_call_id: None,
         };
 
         // A long-running sleep that would otherwise hold the tool call for
@@ -2378,6 +2379,7 @@ mod tests {
             cancellation_token: Some(token.clone()),
             async_task_id: None,
             turn_context: crate::TurnContext::default(),
+            tool_call_id: None,
         };
 
         // Open a long-lived child. `echo $$` reports the shell's pid, then

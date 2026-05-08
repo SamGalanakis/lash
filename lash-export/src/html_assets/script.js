@@ -50,7 +50,7 @@
   // ─── filters ────────────────────────────────────────────────────────────
 
   const state = {
-    role: new Set(['user', 'assistant', 'tool', 'rlm', 'prompt', 'system']),
+    role: new Set(['user', 'assistant', 'tool', 'rlm', 'llm_call', 'system']),
     tool: new Set(),
     toolKnown: new Set(),
     search: '',
@@ -97,6 +97,35 @@
     if (meta) {
       if (q) meta.textContent = `${hits} match${hits === 1 ? '' : 'es'}`;
       else meta.textContent = `${visible} / ${entries.length}`;
+    }
+    let empty = $('#filter-empty');
+    if (!empty && transcript) {
+      empty = document.createElement('div');
+      empty.id = 'filter-empty';
+      empty.className = 'filter-empty';
+      empty.innerHTML = `<div class="filter-empty-text"></div><button type="button" class="chip" id="filter-empty-reset">reset filters</button>`;
+      transcript.appendChild(empty);
+      const reset = empty.querySelector('#filter-empty-reset');
+      if (reset) {
+        reset.addEventListener('click', () => {
+          state.role = new Set(['user', 'assistant', 'tool', 'rlm', 'llm_call', 'system']);
+          state.tool = new Set(state.toolKnown);
+          if ($$('.chip[data-filter="tool"][data-value="__other__"]').length) state.tool.add('__other__');
+          state.search = '';
+          const input = $('#q'); if (input) input.value = '';
+          $$('.chip[data-filter]').forEach((c) => c.classList.add('is-on'));
+          $$('.chip[data-toggle]').forEach((c) => c.classList.remove('is-on'));
+          applyFilters();
+        });
+      }
+    }
+    if (empty) {
+      const showEmpty = entries.length > 0 && visible === 0;
+      empty.classList.toggle('is-on', showEmpty);
+      if (showEmpty) {
+        const txt = empty.querySelector('.filter-empty-text');
+        if (txt) txt.textContent = `0 of ${entries.length} entries match the current filters.`;
+      }
     }
     if (q) highlightMatches(q);
     else clearHighlights();
@@ -386,6 +415,14 @@
         <dt><kbd>/</kbd></dt><dd>focus search</dd>
         <dt><kbd>Esc</kbd></dt><dd>clear search · close help</dd>
         <dt><kbd>?</kbd></dt><dd>toggle this help</dd>
+      </dl>
+      <h2>Terms</h2>
+      <dl class="help-terms">
+        <dt>llm call</dt><dd>one outbound request to the model. Renders the system block and request messages.</dd>
+        <dt>tool call</dt><dd>the agent invoked a registered tool. The result is rendered inline.</dd>
+        <dt>direct completion</dt><dd>an LLM call issued from inside a tool (e.g. tournament_rerank's batch reranks). Folded under the parent tool call.</dd>
+        <dt>RLM step</dt><dd>one iteration of the recursive language-model mode: model emits a lashlang block, runtime executes it.</dd>
+        <dt>system hash</dt><dd>short fingerprint of the system prompt; identical hashes mean the same system text. Repeats are coalesced.</dd>
       </dl>
       <div class="help-foot">click a chip to filter · click an entry's id (e.g. e23) to copy a permalink</div>
     </div>`;

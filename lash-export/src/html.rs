@@ -48,6 +48,7 @@ pub fn render(session: &LoadedSession) -> String {
 
     out.push_str("<div class=\"page\"><div class=\"frame\">\n");
     write_hero(&mut out, session, &stats);
+    write_run_summary(&mut out, session, &stats);
     write_session_bar(&mut out, session, &stats);
     write_usage_overview(&mut out, session);
     write_controls(&mut out, &stats);
@@ -86,6 +87,37 @@ struct SessionStats {
     max_context_percent: Option<f64>,
     tool_freq: Vec<(String, usize)>,
     tool_names_set: Vec<String>,
+    /// Best-effort dollar cost estimate from per-model pricing. Conservative
+    /// when the model is unknown.
+    est_cost_usd: f64,
+    /// Number of LLM calls where reasoning_tokens > 0 but no reasoning text
+    /// was returned by the provider — surfaced so the renderer can show
+    /// "≈Nk reasoning tokens · content not returned".
+    reasoning_only_calls: usize,
+    reasoning_only_tokens: i64,
+}
+
+/// Coarse per-million-token pricing in USD. Falls back to a conservative
+/// "frontier reasoning model" estimate when the model is unknown.
+fn model_pricing_per_million(model: Option<&str>) -> (f64, f64, f64) {
+    // (input, cached_input, output)
+    let m = model.unwrap_or("").to_ascii_lowercase();
+    if m.starts_with("gpt-5") {
+        (1.25, 0.125, 10.0)
+    } else if m.starts_with("gpt-4.1") || m.starts_with("gpt-4o") {
+        (2.50, 0.50, 10.0)
+    } else if m.contains("claude-opus") {
+        (15.0, 1.50, 75.0)
+    } else if m.contains("claude-sonnet") || m.contains("claude-3-7") {
+        (3.0, 0.30, 15.0)
+    } else if m.contains("claude-haiku") {
+        (0.80, 0.08, 4.0)
+    } else if m.contains("gemini-2") {
+        (1.25, 0.30, 10.0)
+    } else {
+        // Conservative frontier-reasoning default
+        (3.0, 0.30, 15.0)
+    }
 }
 
 fn compute_stats(session: &LoadedSession) -> SessionStats {
@@ -162,6 +194,18 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
             .cached_input_tokens
             .saturating_add(usage.cached_input_tokens);
         s.reasoning_tokens = s.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+        if usage.reasoning_tokens > 0 {
+            s.reasoning_only_calls += 1;
+            s.reasoning_only_tokens = s
+                .reasoning_only_tokens
+                .saturating_add(usage.reasoning_tokens);
+        }
+        let (in_per_m, cached_per_m, out_per_m) =
+            model_pricing_per_million(prompt.model.as_deref());
+        let billed_input = (usage.input_tokens.saturating_sub(usage.cached_input_tokens)).max(0);
+        s.est_cost_usd += billed_input as f64 * in_per_m / 1_000_000.0;
+        s.est_cost_usd += usage.cached_input_tokens.max(0) as f64 * cached_per_m / 1_000_000.0;
+        s.est_cost_usd += usage.output_tokens.max(0) as f64 * out_per_m / 1_000_000.0;
         if let Some(context_window) = session.context_window_tokens
             && context_window > 0
         {
@@ -277,6 +321,51 @@ fn write_hero(out: &mut String, session: &LoadedSession, _stats: &SessionStats) 
     out.push_str("    </div>\n");
     out.push_str("  </div>\n");
     out.push_str("</header>\n");
+}
+
+fn write_run_summary(out: &mut String, session: &LoadedSession, stats: &SessionStats) {
+    let llm_calls = session.llm_prompts.len();
+    let total_calls = stats.tool_calls_ok + stats.tool_calls_err;
+    let top_tools = stats
+        .tool_freq
+        .iter()
+        .take(3)
+        .map(|(name, count)| format!("{name} × {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cost_label = if stats.est_cost_usd >= 0.01 {
+        format!("${:.2}", stats.est_cost_usd)
+    } else if stats.est_cost_usd > 0.0 {
+        format!("${:.4}", stats.est_cost_usd)
+    } else {
+        "n/a".to_string()
+    };
+    out.push_str("<section class=\"run-summary\" aria-label=\"run summary\">\n");
+    let _ = writeln!(
+        out,
+        "  <span><span class=\"run-summary-key\">turns</span><span class=\"run-summary-val\">{}</span></span>",
+        stats.rlm_iterations.max(stats.assistant_messages),
+    );
+    if !top_tools.is_empty() {
+        let _ = writeln!(
+            out,
+            "  <span><span class=\"run-summary-key\">top tools</span><span class=\"run-summary-val\">{}</span></span>",
+            escape(&top_tools),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  <span><span class=\"run-summary-key\">tool calls</span><span class=\"run-summary-val\">{total_calls}</span></span>"
+    );
+    let _ = writeln!(
+        out,
+        "  <span><span class=\"run-summary-key\">llm calls</span><span class=\"run-summary-val\">{llm_calls}</span></span>"
+    );
+    let _ = writeln!(
+        out,
+        "  <span><span class=\"run-summary-key\">est cost</span><span class=\"run-summary-val run-summary-cost\" title=\"estimated from per-model pricing\">{cost_label}</span></span>",
+    );
+    out.push_str("</section>\n");
 }
 
 fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &SessionStats) {
@@ -408,7 +497,7 @@ fn write_controls(out: &mut String, stats: &SessionStats) {
         ("assistant", "assistant"),
         ("tool", "tool"),
         ("rlm", "rlm"),
-        ("prompt", "prompt"),
+        ("llm_call", "llm call"),
         ("system", "system"),
     ] {
         let _ = writeln!(
@@ -496,6 +585,30 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
     let mut last_hash: Option<String> = None;
     let mut first_seen: HashMap<String, PromptAnchor> = HashMap::new();
 
+    // Build fan-out index: any LLM call that carries an originating tool
+    // call id is rendered as a child of that tool entry, NOT as a peer
+    // in the chronological flow. This collapses tournament_rerank-style
+    // batches under their parent tool.
+    let mut fanout_index: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut fanout_consumed: HashSet<usize> = HashSet::new();
+    for (idx, prompt) in session.llm_prompts.iter().enumerate() {
+        if let Some(tcid) = &prompt.originating_tool_call_id {
+            fanout_index.entry(tcid.clone()).or_default().push(idx);
+            fanout_consumed.insert(idx);
+        }
+    }
+
+    // Coalesce runs of consecutive identical-system-hash main-flow prompts
+    // into one banner instead of N stub rows.
+    let main_indices: Vec<usize> = (0..session.llm_prompts.len())
+        .filter(|i| !fanout_consumed.contains(i))
+        .collect();
+    let coalesce: HashMap<usize, CoalesceState> = compute_coalesce_states(
+        &session.llm_prompts,
+        &main_indices,
+        /* threshold (run length) = */ 3,
+    );
+
     // Identify assistant messages that just echo the prior RlmStep's submit
     // value — they're a runtime side-effect of `submit`, not a separate
     // model utterance. Suppressing avoids showing the same text twice.
@@ -526,28 +639,67 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                        first_seen: &mut HashMap<String, PromptAnchor>,
                        usage_chart: &mut String,
                        prompt_idx: usize| {
+        if fanout_consumed.contains(&prompt_idx) {
+            // Rendered under its parent tool call below, not in the main flow.
+            return;
+        }
         let prompt = &session.llm_prompts[prompt_idx];
-        let anchor = first_seen.get(&prompt.system_hash).cloned();
-        let id = render_system_prompt(
-            entries,
-            spine,
-            ctx,
-            prompt,
-            session.context_window_tokens,
-            last_hash.as_deref(),
-            anchor.as_ref(),
-        );
-        write_usage_chart_bar(usage_chart, &id, prompt, session.context_window_tokens);
-        first_seen
-            .entry(prompt.system_hash.clone())
-            .or_insert(PromptAnchor {
-                entry_id: id,
-                iter_label: prompt
-                    .mode_iteration
-                    .map(|i| format!("iter {i}"))
-                    .unwrap_or_else(|| "first call".to_string()),
-            });
-        *last_hash = Some(prompt.system_hash.clone());
+        match coalesce.get(&prompt_idx) {
+            Some(CoalesceState::BannerStart {
+                run_count,
+                anchor_idx,
+            }) => {
+                let anchor = first_seen
+                    .get(&prompt.system_hash)
+                    .cloned()
+                    .or_else(|| {
+                        // fallback: derive from the prompt at anchor_idx
+                        let anchor_prompt = &session.llm_prompts[*anchor_idx];
+                        Some(PromptAnchor {
+                            entry_id: String::new(),
+                            iter_label: anchor_prompt
+                                .mode_iteration
+                                .map(|i| format!("iter {i}"))
+                                .unwrap_or_else(|| "first call".to_string()),
+                        })
+                    });
+                let id =
+                    render_system_prompt_banner(entries, spine, ctx, prompt, *run_count, anchor.as_ref());
+                // Don't emit individual usage bars for suppressed siblings —
+                // they would have nowhere to anchor. Keep the banner one
+                // anchored to the banner row.
+                write_usage_chart_bar(usage_chart, &id, prompt, session.context_window_tokens);
+                *last_hash = Some(prompt.system_hash.clone());
+            }
+            Some(CoalesceState::Suppress) => {
+                // Skip transcript entirely. Do not advance last_hash so the
+                // post-run prompt still sees the same hash and can render
+                // a stub if needed.
+            }
+            Some(CoalesceState::Show) | None => {
+                let anchor = first_seen.get(&prompt.system_hash).cloned();
+                let id = render_system_prompt(
+                    entries,
+                    spine,
+                    ctx,
+                    prompt,
+                    session.context_window_tokens,
+                    last_hash.as_deref(),
+                    anchor.as_ref(),
+                );
+                write_usage_chart_bar(usage_chart, &id, prompt, session.context_window_tokens);
+                first_seen
+                    .entry(prompt.system_hash.clone())
+                    .or_insert(PromptAnchor {
+                        entry_id: id,
+                        iter_label: prompt
+                            .mode_iteration
+                            .map(|i| format!("iter {i}"))
+                            .unwrap_or_else(|| "first call".to_string()),
+                    });
+                *last_hash = Some(prompt.system_hash.clone());
+            }
+        }
     };
 
     for (i, entry) in session.chronological.iter().enumerate() {
@@ -571,9 +723,30 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
             }
             ChronologicalPayload::ToolCall(record) => {
                 render_tool_call_entry(&mut entries, &mut spine, ctx, record, None);
+                if let Some(call_id) = record.call_id.as_deref()
+                    && let Some(children) = fanout_index.get(call_id)
+                {
+                    render_tool_fanout(
+                        &mut entries,
+                        &mut spine,
+                        ctx,
+                        record,
+                        &session.llm_prompts,
+                        children,
+                        session.context_window_tokens,
+                    );
+                }
             }
             ChronologicalPayload::RlmStep(step) => {
-                render_rlm_step(&mut entries, &mut spine, ctx, step);
+                render_rlm_step_with_fanout(
+                    &mut entries,
+                    &mut spine,
+                    ctx,
+                    step,
+                    &fanout_index,
+                    &session.llm_prompts,
+                    session.context_window_tokens,
+                );
             }
         }
     }
@@ -610,6 +783,260 @@ struct PromptInsertions {
     /// Prompts with no chronological anchor — rendered at the end so a
     /// snapshot is never silently dropped.
     trailing: Vec<usize>,
+}
+
+/// Rendering disposition for a system-prompt entry when collapsing runs of
+/// repeated identical hashes.
+#[derive(Clone, Debug)]
+enum CoalesceState {
+    /// Render normally — either as the full system prompt or as a single
+    /// "unchanged since previous call" stub. Default.
+    Show,
+    /// First repeat after the anchor: emit one banner row standing in for
+    /// `run_count` suppressed siblings. `anchor_idx` points to the prompt
+    /// that carries the full system text.
+    BannerStart {
+        run_count: usize,
+        anchor_idx: usize,
+    },
+    /// Suppress entirely — already represented by the banner.
+    Suppress,
+}
+
+/// For each main-flow prompt, decide whether it renders normally, becomes a
+/// banner, or is suppressed. Walks consecutive same-hash runs in
+/// `main_indices` order and coalesces the tail when a run reaches
+/// `min_run_len` (so `min_run_len = 3` means "≥ 2 stubs after the anchor
+/// triggers coalescing").
+fn compute_coalesce_states(
+    prompts: &[LlmPromptSnapshot],
+    main_indices: &[usize],
+    min_run_len: usize,
+) -> HashMap<usize, CoalesceState> {
+    let mut out = HashMap::new();
+    let mut i = 0;
+    while i < main_indices.len() {
+        let anchor = main_indices[i];
+        let hash = &prompts[anchor].system_hash;
+        let mut j = i + 1;
+        while j < main_indices.len() && prompts[main_indices[j]].system_hash == *hash {
+            j += 1;
+        }
+        let run_len = j - i;
+        if run_len >= min_run_len {
+            // i = anchor (rendered Show — full system text)
+            // i+1 = banner start (replaces the first stub)
+            // i+2..j = suppressed
+            out.insert(anchor, CoalesceState::Show);
+            out.insert(
+                main_indices[i + 1],
+                CoalesceState::BannerStart {
+                    run_count: run_len - 1,
+                    anchor_idx: anchor,
+                },
+            );
+            for k in (i + 2)..j {
+                out.insert(main_indices[k], CoalesceState::Suppress);
+            }
+        }
+        // run_len < min_run_len → leave entries with implicit Show (default).
+        i = j;
+    }
+    out
+}
+
+fn render_system_prompt_banner(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx<'_>,
+    prompt: &LlmPromptSnapshot,
+    run_count: usize,
+    anchor: Option<&PromptAnchor>,
+) -> String {
+    let id = ctx.next_id();
+    let hash_short = prompt.system_hash.chars().take(12).collect::<String>();
+    let _ = writeln!(
+        out,
+        "    <article class=\"entry entry--system entry--system-coalesce\" id=\"{id}\" data-role=\"llm_call\" data-kind=\"system_prompt\" data-search=\"system prompt unchanged {short} ×{n}\">",
+        short = escape_attr(&hash_short),
+        n = run_count + 1,
+    );
+    out.push_str("      <div class=\"entry-rail\">\n");
+    let _ = writeln!(
+        out,
+        "        <a class=\"entry-num\" href=\"#{id}\" title=\"permalink\">{id}</a>"
+    );
+    out.push_str("        <span class=\"entry-glyph\">⋯</span>\n");
+    out.push_str("      </div>\n");
+    out.push_str("      <div class=\"entry-body\">\n");
+    out.push_str("        <div class=\"system-coalesce-banner\">\n");
+    out.push_str(
+        "          <span class=\"entry-tag entry-tag--system\">system prompt</span>\n",
+    );
+    let _ = writeln!(
+        out,
+        "          <span>unchanged across the next <span class=\"system-coalesce-banner-count\">{n}</span> calls</span>",
+        n = run_count + 1,
+    );
+    if let Some(anchor) = anchor
+        && !anchor.entry_id.is_empty()
+    {
+        let _ = writeln!(
+            out,
+            "          <a href=\"#{anchor_id}\" title=\"jump to full prompt body at {anchor_label}\">view full at {anchor_label} →</a>",
+            anchor_id = escape_attr(&anchor.entry_id),
+            anchor_label = escape(&anchor.iter_label),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "          <span class=\"entry-meta entry-meta--repeat\" title=\"hash {full}\">↺ {short}</span>",
+        full = escape_attr(&prompt.system_hash),
+        short = escape(&hash_short),
+    );
+    out.push_str("        </div>\n");
+    out.push_str("      </div>\n");
+    out.push_str("    </article>\n");
+
+    let _ = writeln!(
+        spine,
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"llm_call\" title=\"system prompt unchanged across {n} calls\"></a>",
+        n = run_count + 1,
+    );
+    id
+}
+
+/// Render a folded summary of LLM calls that fan out from a single tool
+/// invocation (e.g. tournament_rerank's batch reranks). Inserts a
+/// `entry--child entry--fanout` block after the parent tool entry.
+fn render_tool_fanout(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx<'_>,
+    record: &ToolCallRecord,
+    prompts: &[LlmPromptSnapshot],
+    children: &[usize],
+    context_window_tokens: Option<u64>,
+) {
+    if children.is_empty() {
+        return;
+    }
+    let id = ctx.next_id();
+    let n = children.len();
+    let mut input = 0i64;
+    let mut output = 0i64;
+    let mut cached = 0i64;
+    let mut reasoning = 0i64;
+    let mut ok = 0usize;
+    let mut errs = 0usize;
+    for &idx in children {
+        let p = &prompts[idx];
+        if let Some(u) = &p.usage {
+            input += u.input_tokens.max(0);
+            output += u.output_tokens.max(0);
+            cached += u.cached_input_tokens.max(0);
+            reasoning += u.reasoning_tokens.max(0);
+            ok += 1;
+        } else {
+            errs += 1;
+        }
+    }
+    let parent_attr = record
+        .call_id
+        .as_deref()
+        .map(|p| format!(" data-parent=\"{}\"", escape_attr(p)))
+        .unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "    <article class=\"entry entry--child entry--fanout\" id=\"{id}\" data-role=\"llm_call\" data-kind=\"tool_fanout\" data-tool=\"{tool}\"{parent_attr}>",
+        tool = escape_attr(&record.tool),
+    );
+    out.push_str("      <div class=\"entry-rail\"><span class=\"entry-glyph\">├─</span></div>\n");
+    out.push_str("      <div class=\"entry-body\">\n");
+    out.push_str("        <details class=\"tool-fanout\">\n");
+    let _ = writeln!(
+        out,
+        "          <summary class=\"tool-fanout-summary\"><span class=\"entry-tag entry-tag--system\">fan-out</span><span><span class=\"tool-fanout-count\">{n}</span> direct llm calls · {in_k} in / {out_k} out · reasoning {r_k} · {ok}/{n} ok</span></summary>",
+        in_k = format_tokens(input),
+        out_k = format_tokens(output),
+        r_k = format_tokens(reasoning),
+    );
+    let _ = ok; // consumed in summary above
+    let _ = errs;
+    let _ = cached;
+    out.push_str("          <div class=\"tool-fanout-children\">\n");
+    let mut inner_usage = String::new();
+    let mut inner_spine = String::new();
+    let mut inner_last_hash: Option<String> = None;
+    let mut inner_first_seen: HashMap<String, PromptAnchor> = HashMap::new();
+    for &idx in children {
+        let prompt = &prompts[idx];
+        let anchor = inner_first_seen.get(&prompt.system_hash).cloned();
+        let child_id = render_system_prompt(
+            out,
+            &mut inner_spine,
+            ctx,
+            prompt,
+            context_window_tokens,
+            inner_last_hash.as_deref(),
+            anchor.as_ref(),
+        );
+        write_usage_chart_bar(&mut inner_usage, &child_id, prompt, context_window_tokens);
+        inner_first_seen
+            .entry(prompt.system_hash.clone())
+            .or_insert(PromptAnchor {
+                entry_id: child_id,
+                iter_label: prompt
+                    .mode_iteration
+                    .map(|i| format!("iter {i}"))
+                    .unwrap_or_else(|| "fan-out".to_string()),
+            });
+        inner_last_hash = Some(prompt.system_hash.clone());
+    }
+    out.push_str("          </div>\n");
+    out.push_str("        </details>\n");
+    out.push_str("      </div>\n");
+    out.push_str("    </article>\n");
+    // The fan-out summary tick replaces N peer ticks — one summary tick on
+    // the spine per fan-out (instead of 25 noisy ones).
+    let _ = writeln!(
+        spine,
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"llm_call\" title=\"{tool} fan-out · {n} direct calls\"></a>",
+        tool = escape_attr(&record.tool),
+    );
+}
+
+/// Wraps render_rlm_step so its inline tool calls also receive fan-out
+/// children (RLM mode invokes tools from inside a lashlang block; if any
+/// of those tools issue direct_completion calls, those should fold under
+/// the inline tool entry, not appear as flat peers).
+fn render_rlm_step_with_fanout(
+    out: &mut String,
+    spine: &mut String,
+    ctx: &mut RenderCtx<'_>,
+    step: &RlmTrajectoryEntry,
+    fanout_index: &HashMap<String, Vec<usize>>,
+    prompts: &[LlmPromptSnapshot],
+    context_window_tokens: Option<u64>,
+) {
+    render_rlm_step(out, spine, ctx, step);
+    // After the RLM step's body, render fan-outs for any of its inline
+    // tool calls that have direct_completion children.
+    for record in &step.tool_calls {
+        if let Some(call_id) = record.call_id.as_deref()
+            && let Some(children) = fanout_index.get(call_id)
+        {
+            render_tool_fanout(
+                out,
+                spine,
+                ctx,
+                record,
+                prompts,
+                children,
+                context_window_tokens,
+            );
+        }
+    }
 }
 
 /// Decide where each per-LLM-call system prompt belongs in the rendered
@@ -1556,7 +1983,7 @@ fn render_system_prompt(
 
     let _ = writeln!(
         out,
-        "    <article class=\"entry entry--system{repeat_class}\" id=\"{id}\" data-role=\"prompt\" data-kind=\"system_prompt\" data-search=\"{search}\">",
+        "    <article class=\"entry entry--system{repeat_class}\" id=\"{id}\" data-role=\"llm_call\" data-kind=\"system_prompt\" data-search=\"{search}\">",
         search = escape_attr(&search)
     );
     out.push_str("      <div class=\"entry-rail\">\n");
@@ -1713,6 +2140,19 @@ fn render_system_prompt(
         out.push_str("        </details>\n");
     }
 
+    // Reasoning-tokens-without-content: when the provider charged for
+    // reasoning but didn't return reasoning content, surface the absence
+    // explicitly instead of letting the user infer it from token math.
+    if let Some(usage) = prompt.usage.as_ref()
+        && usage.reasoning_tokens > 0
+    {
+        let _ = writeln!(
+            out,
+            "        <div class=\"reasoning-missing\" title=\"the provider returned a reasoning_tokens count but no reasoning content blocks\"><span class=\"reasoning-missing-tokens\">≈{} reasoning tokens</span> · content not returned by provider</div>",
+            format_tokens(usage.reasoning_tokens),
+        );
+    }
+
     out.push_str("      </div>\n");
     out.push_str("    </article>\n");
 
@@ -1728,7 +2168,7 @@ fn render_system_prompt(
     };
     let _ = writeln!(
         spine,
-        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"prompt\" title=\"{}\"></a>",
+        "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"llm_call\" title=\"{}\"></a>",
         escape_attr(&title)
     );
 
@@ -3032,6 +3472,7 @@ mod tests {
             turn_index: Some(1),
             mode_iteration: Some(mode_iteration),
             llm_call_id: Some(format!("root:1:{mode_iteration}:0")),
+            originating_tool_call_id: None,
             timestamp: None,
             model: Some("gpt-test".to_string()),
             model_variant: None,
@@ -3281,9 +3722,9 @@ mod tests {
         };
 
         let rendered = render(&session);
-        assert!(rendered.contains("data-role=\"prompt\""));
+        assert!(rendered.contains("data-role=\"llm_call\""));
         assert!(rendered.contains("data-kind=\"system_prompt\""));
-        assert!(rendered.contains(">prompt</button>"));
+        assert!(rendered.contains(">llm call</button>"));
         assert!(rendered.contains("usage-chart"));
         assert!(rendered.contains("ctx 10.0%"));
         assert!(rendered.contains("75.000%"));

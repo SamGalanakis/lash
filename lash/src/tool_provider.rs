@@ -21,6 +21,11 @@ pub struct ToolExecutionContext {
     pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub async_task_id: Option<String>,
     pub turn_context: crate::TurnContext,
+    /// The id of the in-flight tool call that is invoking this tool. Set by
+    /// the runtime tool dispatcher; tools should propagate it onto any
+    /// `DirectRequest::originating_tool_call_id` they issue so the trace
+    /// renderer can group fan-out LLM calls under the parent tool entry.
+    pub tool_call_id: Option<String>,
 }
 
 impl ToolExecutionContext {

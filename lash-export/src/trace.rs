@@ -26,6 +26,11 @@ pub struct LlmPromptSnapshot {
     pub turn_index: Option<u64>,
     pub mode_iteration: Option<u64>,
     pub llm_call_id: Option<String>,
+    /// When this LLM call was issued from inside a tool's
+    /// `direct_completion`, carries the originating tool's call id.
+    /// The renderer uses this to fold fan-out reranks (tournament_rerank,
+    /// llm_query batches, etc.) under their parent tool call.
+    pub originating_tool_call_id: Option<String>,
     pub timestamp: Option<String>,
     pub model: Option<String>,
     pub model_variant: Option<String>,
@@ -127,6 +132,10 @@ fn snapshot_from_record(record: &Value) -> Option<LlmPromptSnapshot> {
             .and_then(Value::as_u64),
         llm_call_id: context
             .and_then(|c| c.get("llm_call_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        originating_tool_call_id: context
+            .and_then(|c| c.get("originating_tool_call_id"))
             .and_then(Value::as_str)
             .map(str::to_string),
         timestamp: record

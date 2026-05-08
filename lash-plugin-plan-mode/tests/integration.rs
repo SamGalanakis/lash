@@ -873,6 +873,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
                 cancellation_token: None,
                 async_task_id: None,
                 turn_context: lash::TurnContext::default(),
+                tool_call_id: None,
             },
         )
         .await;
@@ -1015,6 +1016,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
                 turn_context: lash::TurnContext::default(),
                 cancellation_token: None,
                 async_task_id: None,
+                tool_call_id: None,
             },
         )
         .await;
@@ -1136,6 +1138,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
                 turn_context: lash::TurnContext::default(),
                 cancellation_token: None,
                 async_task_id: None,
+                tool_call_id: None,
             },
         )
         .await;

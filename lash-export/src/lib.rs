@@ -121,12 +121,19 @@ pub fn export(
 ) -> Result<String> {
     let rendered = match format {
         ExportFormat::Html => {
-            let tree = load_tree_from_paths(store_path, trace_path)?;
-            if tree.nodes.len() > 1 {
-                render_tree(&tree, format)
-            } else {
-                let session = load_session_from_paths(store_path, trace_path)?;
-                render(&session, format)
+            // Try multi-session first; fall back to single-session for
+            // sessions whose .db isn't co-located in a sessions dir
+            // (e.g. ad-hoc per-run artifacts under .benchmarks/...).
+            match load_tree_from_paths(store_path, trace_path) {
+                Ok(tree) if tree.nodes.len() > 1 => render_tree(&tree, format),
+                Ok(_) => {
+                    let session = load_session_from_paths(store_path, trace_path)?;
+                    render(&session, format)
+                }
+                Err(_) => {
+                    let session = load_session_from_paths(store_path, trace_path)?;
+                    render(&session, format)
+                }
             }
         }
         ExportFormat::Json => {
