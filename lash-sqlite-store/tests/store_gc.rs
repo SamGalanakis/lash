@@ -1,8 +1,8 @@
 use lash::{
-    DynamicStateSnapshot, ExecutionMode, HydratedSessionCheckpoint, PersistedSessionConfig,
-    PersistedSessionState, PersistedTurnState, PluginSessionSnapshot, RuntimeCommit,
-    RuntimePersistence, SessionGraph, SessionHead, SessionReadScope, StandardContextApproach,
-    TokenLedgerEntry, TokenUsage,
+    ExecutionMode, HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState,
+    PersistedTurnState, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, SessionGraph,
+    SessionHead, SessionReadScope, StandardContextApproach, TokenLedgerEntry, TokenUsage,
+    ToolState,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, Store, StoreGcPolicy, StoreOptions,
@@ -18,11 +18,8 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
             last_prompt_usage: None,
             mode_turn_options: Default::default(),
         },
-        dynamic_state_ref: None,
-        dynamic_state: Some(DynamicStateSnapshot {
-            tools: Default::default(),
-            base_generation: 7,
-        }),
+        tool_state_ref: None,
+        tool_state: Some(ToolState::default().with_generation(7)),
         plugin_snapshot_ref: None,
         plugin_snapshot_revision: Some(11),
         plugin_snapshot: Some(PluginSessionSnapshot {
@@ -55,7 +52,7 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
     let checkpoint = store
         .get_checkpoint(&stored.checkpoint_ref)
         .expect("checkpoint manifest");
-    let dynamic_ref = checkpoint.dynamic_state_ref.expect("dynamic state ref");
+    let dynamic_ref = checkpoint.tool_state_ref.expect("dynamic state ref");
     let plugin_ref = checkpoint.plugin_snapshot_ref.expect("plugin snapshot ref");
     assert!(store.get_blob(&stored.checkpoint_ref).is_some());
     assert!(store.get_blob(&dynamic_ref).is_some());
@@ -91,10 +88,7 @@ async fn load_session_hydrates_checkpoint_and_usage_without_reentrant_locking() 
     let store = Store::memory().expect("store");
     let state = PersistedSessionState {
         session_id: "hydrated".to_string(),
-        dynamic_state_snapshot: Some(DynamicStateSnapshot {
-            tools: Default::default(),
-            base_generation: 9,
-        }),
+        tool_state_snapshot: Some(ToolState::default().with_generation(9)),
         plugin_snapshot_revision: Some(12),
         plugin_snapshot: Some(PluginSessionSnapshot {
             plugins: Default::default(),
@@ -126,9 +120,9 @@ async fn load_session_hydrates_checkpoint_and_usage_without_reentrant_locking() 
     assert_eq!(read.session_id, "hydrated");
     assert_eq!(
         checkpoint
-            .dynamic_state
+            .tool_state
             .expect("dynamic snapshot")
-            .base_generation,
+            .generation(),
         9
     );
     assert_eq!(checkpoint.plugin_snapshot_revision, Some(12));

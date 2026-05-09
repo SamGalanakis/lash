@@ -32,7 +32,7 @@ impl RuntimeTurnDriver {
         cancel: &CancellationToken,
     ) -> Vec<crate::sansio::CompletedToolCall> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
-        let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
+        let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
         let tool_event_forwarder = tokio::spawn(async move {
             while let Some(event) = tool_event_rx.recv().await {
@@ -42,7 +42,7 @@ impl RuntimeTurnDriver {
         let runtime_event_tx = event_tx.clone();
         let turn_event_forwarder = tokio::spawn(async move {
             while let Some(event) = turn_event_rx.recv().await {
-                send_turn_event(&runtime_event_tx, event).await;
+                let _ = runtime_event_tx.send(RuntimeStreamEvent::Turn(event)).await;
             }
         });
         let manager = self.session_manager.clone();

@@ -18,8 +18,8 @@ use lash::session_model::{
 };
 use lash::{
     AttachmentRef, CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart,
-    LlmResponse, TerminalOutputSource, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
-    append_assistant_text_part, normalized_response_parts, render_terminal_output_value,
+    LlmResponse, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
+    normalized_response_parts,
 };
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
@@ -61,6 +61,14 @@ submit "The bound version is 0.2.61."
 ````
 
 "#;
+
+fn render_terminal_output_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
 
 pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
 
@@ -545,8 +553,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
-                    TurnFinish::Value {
-                        source: TerminalOutputSource::RlmSubmit,
+                    TurnFinish::SubmittedValue {
                         value: finish_value.clone(),
                     },
                 )),
@@ -583,16 +590,12 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
                 session_id: session_id.clone(),
             })
         }
-        lash::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::Value {
-            source: TerminalOutputSource::Tool {
-                name: record.tool.clone(),
-            },
+        lash::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::ToolValue {
+            tool_name: record.tool.clone(),
             value: value.clone(),
         })),
-        lash::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::TerminalError {
-            source: TerminalOutputSource::Tool {
-                name: record.tool.clone(),
-            },
+        lash::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::ToolError {
+            tool_name: record.tool.clone(),
             value: value.clone(),
         })),
         lash::ToolControl::Handoff { .. } => None,
@@ -782,7 +785,6 @@ fn prose_message(content: String, origin: Option<lash::MessageOrigin>) -> Messag
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin,
     }
 }
@@ -810,7 +812,6 @@ fn submit_required_reminder_message(requires_schema: bool) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: Some(lash::MessageOrigin::Plugin {
             plugin_id: "mode_rlm".to_string(),
             transient: false,
@@ -838,7 +839,6 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: Some(lash::MessageOrigin::Plugin {
             plugin_id: "mode_rlm".to_string(),
             transient: false,

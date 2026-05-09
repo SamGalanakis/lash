@@ -131,15 +131,31 @@ impl<'de> Deserialize<'de> for RequestTimeout {
 pub struct ProviderOptions {
     #[serde(default)]
     pub reliability: ProviderReliability,
+    #[serde(default, skip_serializing_if = "ProviderThinkingPolicy::is_default")]
+    pub thinking: ProviderThinkingPolicy,
 }
 
 impl ProviderOptions {
     pub fn is_default(&self) -> bool {
         self.reliability == ProviderReliability::default_llm()
+            && self.thinking == ProviderThinkingPolicy::default()
     }
 
     pub fn llm_timeouts(&self) -> LlmTimeouts {
         self.reliability.timeouts.llm_timeouts()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderThinkingPolicy {
+    #[serde(default)]
+    pub expose: bool,
+}
+
+impl ProviderThinkingPolicy {
+    pub fn is_default(&self) -> bool {
+        !self.expose
     }
 }
 
@@ -880,7 +896,7 @@ impl ProviderHandle {
             return Err(format!(
                 "Model `{}` on {} does not expose configurable variants.",
                 model,
-                provider_cli_label(self.kind())
+                self.kind()
             ));
         }
         if variants.contains(&variant) {
@@ -890,7 +906,7 @@ impl ProviderHandle {
             "Unsupported variant `{}` for `{}` on {}. Available: {}",
             variant,
             model,
-            provider_cli_label(self.kind()),
+            self.kind(),
             variants.join(", ")
         ))
     }
@@ -1014,7 +1030,7 @@ impl ProviderHandle {
             return Err(format!(
                 "model `{}` has no context-window entry in the supplied model catalog for {}. Provide an explicit model spec or choose a cataloged model.",
                 configured_model,
-                provider_cli_label(self.kind()),
+                self.kind(),
             ));
         };
         Ok(ResolvedModelSpec {
@@ -1180,20 +1196,6 @@ impl<'de> Deserialize<'de> for ProviderSpec {
 pub trait ProviderFactory: Send + Sync {
     fn kind(&self) -> &'static str;
 
-    /// Human-readable label shown in `/provider` and setup UI.
-    fn cli_label(&self) -> &'static str;
-
-    /// Short name used in the setup menu header.
-    fn setup_name(&self) -> &'static str;
-
-    /// One-line description shown next to the setup menu option.
-    fn setup_description(&self) -> &'static str;
-
-    /// Suggested default base URL (shown as placeholder in setup).
-    fn default_base_url(&self) -> Option<&'static str> {
-        None
-    }
-
     /// Instantiate a provider from its [`ProviderSpec::config`] blob.
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String>;
 }
@@ -1244,19 +1246,9 @@ pub fn build_provider(spec: &ProviderSpec) -> Result<ProviderComponents, String>
 }
 
 /// Look up a registered provider factory by kind. Returns `None` if no
-/// factory with that kind is registered. Hosts use this to render UI
-/// labels / descriptions (`cli_label`, `setup_name`, …) without
-/// hard-coding per-kind strings.
+/// factory with that kind is registered.
 pub fn provider_factory(kind: &str) -> Option<Arc<dyn ProviderFactory>> {
     PROVIDER_REGISTRY.read().unwrap().factory(kind).cloned()
-}
-
-/// Human-readable label for a provider kind when its factory is registered.
-/// Falls back to the stable kind string for unregistered test/internal providers.
-pub fn provider_cli_label(kind: &'static str) -> &'static str {
-    provider_factory(kind)
-        .map(|factory| factory.cli_label())
-        .unwrap_or(kind)
 }
 
 /// Stored configuration: provider credentials + service API keys.
@@ -1676,6 +1668,7 @@ mod tests {
                 .stream_chunk_timeout_ms(Some(567))
                 .max_attempts(2)
                 .build(),
+            ..ProviderOptions::default()
         };
 
         let value = serde_json::to_value(options).expect("serialize");
@@ -1819,6 +1812,7 @@ mod tests {
                     .base_delay_ms(0)
                     .max_delay_ms(0)
                     .build(),
+                ..ProviderOptions::default()
             },
             attempts: Arc::clone(&attempts),
             fail_until: 2,
@@ -1844,6 +1838,7 @@ mod tests {
                     .base_delay_ms(0)
                     .max_delay_ms(0)
                     .build(),
+                ..ProviderOptions::default()
             },
             attempts: Arc::clone(&attempts),
             fail_until: 3,
@@ -1866,6 +1861,7 @@ mod tests {
         let provider = FailingProvider {
             options: ProviderOptions {
                 reliability: ProviderReliability::disabled(),
+                ..ProviderOptions::default()
             },
             attempts: Arc::clone(&attempts),
             fail_until: 1,
@@ -1878,6 +1874,7 @@ mod tests {
                 .base_delay_ms(0)
                 .max_delay_ms(0)
                 .build(),
+            ..ProviderOptions::default()
         });
 
         handle

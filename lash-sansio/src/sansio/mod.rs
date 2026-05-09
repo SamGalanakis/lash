@@ -839,7 +839,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     id: message_id.clone(),
                     role: message.role,
                     parts: Arc::new(parts),
-                    user_input: message.user_input.clone(),
                     origin: Some(MessageOrigin::Plugin {
                         plugin_id: "plugin".to_string(),
                         transient,

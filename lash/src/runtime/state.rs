@@ -96,11 +96,11 @@ pub struct PersistedSessionState {
     #[serde(default)]
     pub mode_turn_options: crate::ModeTurnOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_state_ref: Option<crate::store::BlobRef>,
+    pub tool_state_ref: Option<crate::store::BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_state_generation: Option<u64>,
+    pub tool_state_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_state_snapshot: Option<crate::DynamicStateSnapshot>,
+    pub tool_state_snapshot: Option<crate::ToolState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot_ref: Option<crate::store::BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,9 +141,9 @@ impl PersistedSessionState {
             token_usage: state.token_usage,
             last_prompt_usage: state.last_prompt_usage,
             mode_turn_options: state.mode_turn_options,
-            dynamic_state_ref: None,
-            dynamic_state_generation: None,
-            dynamic_state_snapshot: None,
+            tool_state_ref: None,
+            tool_state_generation: None,
+            tool_state_snapshot: None,
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
@@ -180,11 +180,11 @@ impl PersistedSessionState {
 
     pub fn stamp_runtime_state(
         &mut self,
-        dynamic_state: Option<&crate::DynamicStateSnapshot>,
+        tool_state: Option<&crate::ToolState>,
         plugin_snapshot: Option<&crate::PluginSessionSnapshot>,
     ) {
-        self.dynamic_state_snapshot = dynamic_state.cloned();
-        self.dynamic_state_generation = dynamic_state.map(|snapshot| snapshot.base_generation);
+        self.tool_state_snapshot = tool_state.cloned();
+        self.tool_state_generation = tool_state.map(|snapshot| snapshot.generation());
         self.plugin_snapshot = plugin_snapshot.cloned();
     }
 
@@ -253,23 +253,23 @@ impl PersistedSessionState {
     pub fn apply_persisted_commit_result(&mut self, result: crate::store::RuntimeCommitResult) {
         self.head_revision = Some(result.head_revision);
         self.checkpoint_ref = Some(result.checkpoint_ref);
-        self.dynamic_state_ref = result.manifest.dynamic_state_ref;
-        if let Some(snapshot) = self.dynamic_state_snapshot.as_ref() {
-            self.dynamic_state_generation = Some(snapshot.base_generation);
-        } else if self.dynamic_state_ref.is_none() {
-            self.dynamic_state_generation = None;
+        self.tool_state_ref = result.manifest.tool_state_ref;
+        if let Some(snapshot) = self.tool_state_snapshot.as_ref() {
+            self.tool_state_generation = Some(snapshot.generation());
+        } else if self.tool_state_ref.is_none() {
+            self.tool_state_generation = None;
         }
         self.plugin_snapshot_ref = result.manifest.plugin_snapshot_ref;
         self.plugin_snapshot_revision = result.manifest.plugin_snapshot_revision;
         self.execution_state_ref = result.manifest.execution_state_ref;
         self.graph_replace_required = false;
-        self.dynamic_state_snapshot = None;
+        self.tool_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
     }
 
     pub fn discard_runtime_snapshots(&mut self) {
-        self.dynamic_state_snapshot = None;
+        self.tool_state_snapshot = None;
         self.plugin_snapshot = None;
         self.execution_state_snapshot = None;
     }
@@ -286,14 +286,12 @@ impl PersistedSessionState {
     }
 
     pub fn refresh_plugin_snapshots(&mut self, plugins: &crate::PluginSession) {
-        if let Some(dynamic_tools) = plugins.dynamic_tools() {
-            let generation = dynamic_tools.generation();
-            if self.dynamic_state_ref.is_none() || self.dynamic_state_generation != Some(generation)
-            {
-                let snapshot = dynamic_tools.export_state();
-                self.dynamic_state_generation = Some(snapshot.base_generation);
-                self.dynamic_state_snapshot = Some(snapshot);
-            }
+        let tool_registry = plugins.tool_registry();
+        let generation = tool_registry.generation();
+        if self.tool_state_ref.is_none() || self.tool_state_generation != Some(generation) {
+            let snapshot = tool_registry.export_state();
+            self.tool_state_generation = Some(snapshot.generation());
+            self.tool_state_snapshot = Some(snapshot);
         }
 
         let revision = plugins.snapshot_revision_fingerprint();
@@ -314,9 +312,9 @@ impl Default for PersistedSessionState {
             token_usage: TokenUsage::default(),
             last_prompt_usage: None,
             mode_turn_options: crate::ModeTurnOptions::default(),
-            dynamic_state_ref: None,
-            dynamic_state_generation: None,
-            dynamic_state_snapshot: None,
+            tool_state_ref: None,
+            tool_state_generation: None,
+            tool_state_snapshot: None,
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
@@ -350,9 +348,9 @@ pub(super) fn apply_session_checkpoint(
     checkpoint: Option<crate::store::HydratedSessionCheckpoint>,
 ) {
     let Some(checkpoint) = checkpoint else {
-        state.dynamic_state_ref = None;
-        state.dynamic_state_generation = None;
-        state.dynamic_state_snapshot = None;
+        state.tool_state_ref = None;
+        state.tool_state_generation = None;
+        state.tool_state_snapshot = None;
         state.plugin_snapshot_ref = None;
         state.plugin_snapshot_revision = None;
         state.plugin_snapshot = None;
@@ -364,12 +362,12 @@ pub(super) fn apply_session_checkpoint(
     state.token_usage = checkpoint.turn_state.token_usage;
     state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
     state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
-    state.dynamic_state_ref = checkpoint.dynamic_state_ref.clone();
-    state.dynamic_state_generation = checkpoint
-        .dynamic_state
+    state.tool_state_ref = checkpoint.tool_state_ref.clone();
+    state.tool_state_generation = checkpoint
+        .tool_state
         .as_ref()
-        .map(|snapshot| snapshot.base_generation);
-    state.dynamic_state_snapshot = checkpoint.dynamic_state;
+        .map(|snapshot| snapshot.generation());
+    state.tool_state_snapshot = checkpoint.tool_state;
     state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref.clone();
     state.plugin_snapshot_revision = checkpoint.plugin_snapshot_revision;
     state.plugin_snapshot = checkpoint.plugin_snapshot;
@@ -384,9 +382,9 @@ pub(super) fn apply_session_head(
     state.session_graph = head.graph.clone();
     state.checkpoint_ref = head.checkpoint_ref.clone();
     state.token_ledger = head.token_ledger.clone();
-    state.dynamic_state_ref = None;
-    state.dynamic_state_generation = None;
-    state.dynamic_state_snapshot = None;
+    state.tool_state_ref = None;
+    state.tool_state_generation = None;
+    state.tool_state_snapshot = None;
     state.plugin_snapshot_ref = None;
     state.plugin_snapshot_revision = None;
     state.plugin_snapshot = None;
@@ -405,7 +403,7 @@ pub(super) fn append_session_nodes_to_state(
     for node in nodes {
         match node {
             crate::SessionAppendNode::Message { message } => {
-                let message = plugin_message_to_message(message, None);
+                let message = plugin_message_to_message(message);
                 node_ids.push(
                     state
                         .session_graph

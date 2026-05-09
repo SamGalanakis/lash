@@ -26,19 +26,6 @@ impl StandardContextApproach {
             Self::ObservationalMemory(_) => StandardContextApproachKind::ObservationalMemory,
         }
     }
-
-    pub fn label(&self) -> &'static str {
-        self.kind().label()
-    }
-}
-
-impl StandardContextApproachKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RollingHistory => "rolling_history",
-            Self::ObservationalMemory => "observational_memory",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

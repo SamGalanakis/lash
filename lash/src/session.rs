@@ -15,7 +15,7 @@ use crate::tool_dispatch::{
 use crate::{
     PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost, SandboxMessage,
     SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider, ToolResultView,
-    TurnEvent,
+    TurnActivity, TurnActivityId, TurnEvent,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +23,7 @@ struct ToolSurfaceCacheKey {
     mode: crate::ExecutionMode,
     include_base_tools: bool,
     context_surface_revision: u64,
-    dynamic_generation: u64,
+    tool_generation: u64,
     plugin_revision: u64,
 }
 
@@ -52,7 +52,7 @@ impl ToolSurfaceHandle {
 
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
-            Arc::new(crate::tools::project_tool_catalog(
+            Arc::new(crate::tool_registry::project_tool_catalog(
                 self.0.surface.discoverable_tools_iter().cloned(),
             ))
         }))
@@ -247,7 +247,7 @@ pub struct ModeExecutionContext {
     rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
     turn_context: crate::TurnContext,
-    turn_event_tx: Option<Sender<TurnEvent>>,
+    turn_event_tx: Option<Sender<TurnActivity>>,
     cancellation_token: Option<CancellationToken>,
 }
 
@@ -282,13 +282,13 @@ impl ModeExecutionContext {
         &self.turn_context
     }
 
-    async fn emit_turn_event(&self, event: TurnEvent) {
+    async fn emit_turn_activity(&self, correlation_id: TurnActivityId, event: TurnEvent) {
         if let Some(tx) = &self.turn_event_tx {
-            let _ = tx.send(event).await;
+            let _ = tx.send(TurnActivity::new(correlation_id, event)).await;
         }
     }
 
-    pub(crate) fn with_turn_event_sender(mut self, turn_event_tx: Sender<TurnEvent>) -> Self {
+    pub(crate) fn with_turn_event_sender(mut self, turn_event_tx: Sender<TurnActivity>) -> Self {
         self.turn_event_tx = Some(turn_event_tx);
         self
     }
@@ -319,11 +319,15 @@ impl ModeExecutionContext {
                 args: args.clone(),
             })
             .await;
-        self.emit_turn_event(TurnEvent::ToolCallStarted {
-            call_id: Some(call_id.clone()),
-            name: name.clone(),
-            args: args.clone(),
-        })
+        let tool_correlation_id = TurnActivityId::new(format!("tool:{call_id}"));
+        self.emit_turn_activity(
+            tool_correlation_id.clone(),
+            TurnEvent::ToolCallStarted {
+                call_id: Some(call_id.clone()),
+                name: name.clone(),
+                args: args.clone(),
+            },
+        )
         .await;
 
         let (progress_tx, mut progress_rx) =
@@ -403,18 +407,21 @@ impl ModeExecutionContext {
             Err(err) => crate::ToolResult::err_fmt(err.to_string()),
         };
 
-        self.emit_turn_event(TurnEvent::ToolCallCompleted {
-            call_id: Some(call_id.clone()),
-            name: outcome.record.tool.clone(),
-            args: outcome.record.args.clone(),
-            result: ToolResultView {
-                raw: raw_result.result.clone(),
-                for_model: model_result.result.clone(),
-                for_state: state_result.result.clone(),
+        self.emit_turn_activity(
+            tool_correlation_id,
+            TurnEvent::ToolCallCompleted {
+                call_id: Some(call_id.clone()),
+                name: outcome.record.tool.clone(),
+                args: outcome.record.args.clone(),
+                result: ToolResultView {
+                    raw: raw_result.result.clone(),
+                    for_model: model_result.result.clone(),
+                    for_state: state_result.result.clone(),
+                },
+                success: state_result.success,
+                duration_ms: outcome.record.duration_ms,
             },
-            success: state_result.success,
-            duration_ms: outcome.record.duration_ms,
-        })
+        )
         .await;
 
         let record = ToolCallRecord {
@@ -539,7 +546,6 @@ impl ModeExecutionContext {
     fn background_task_status_value(status: &crate::ManagedTaskStatus) -> serde_json::Value {
         json!({
             "task_id": status.id,
-            "label": status.label,
             "kind": status.kind.as_str(),
             "producer": status.producer,
             "run_state": match status.run_state {
@@ -777,14 +783,6 @@ impl ModeExecutionContext {
                 Some(task_id) => {
                     let status = crate::ManagedTaskStatus {
                         id: task_id.clone(),
-                        label: executed
-                            .completed
-                            .raw_result
-                            .result
-                            .get("description")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("monitor")
-                            .to_string(),
                         kind: crate::ManagedTaskKind::Monitor,
                         producer: "monitor".to_string(),
                         run_state: crate::ManagedRunState::Running,
@@ -1131,7 +1129,7 @@ impl Session {
             providers.push(self.services.plugins.tools());
         }
         providers.extend(self.context_tools.iter().cloned());
-        Arc::new(crate::tools::CompositeToolProvider::from_providers(
+        Arc::new(crate::tool_provider::CompositeToolProvider::from_providers(
             providers,
         ))
     }
@@ -1185,7 +1183,7 @@ impl Session {
             mode: mode.clone(),
             include_base_tools: self.include_base_tools,
             context_surface_revision: self.context_surface_revision,
-            dynamic_generation: self.tools().dynamic_generation().unwrap_or(0),
+            tool_generation: self.plugins().tool_registry().generation(),
             plugin_revision: self.plugins().snapshot_revision_fingerprint(),
         }
     }

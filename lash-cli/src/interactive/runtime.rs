@@ -107,7 +107,6 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
         content: turn.effective_text.clone(),
         parts,
         images: Vec::new(),
-        user_input: Some(turn.input_provenance.clone()),
     }
 }
 
@@ -132,25 +131,25 @@ pub(super) fn parse_kv_args(raw: &str) -> HashMap<String, String> {
 }
 
 pub(super) async fn apply_pending_reconfigure(
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     runtime: &mut Option<LashSession>,
 ) -> Result<u64, String> {
     if !*pending_reconfigure {
-        return Ok(desired_dynamic.base_generation);
+        return Ok(desired_tool_state.generation());
     }
 
     let Some(session) = runtime.as_ref().cloned() else {
         return Err("runtime session is unavailable while a turn is running".to_string());
     };
     let generation = session
-        .apply_tool_state(desired_dynamic.clone())
+        .apply_tool_state(desired_tool_state.clone())
         .await
         .map_err(|err| err.to_string())?;
 
     sync_runtime_tool_surface(runtime).await?;
 
-    *desired_dynamic = session.tool_state().await.map_err(|err| err.to_string())?;
+    *desired_tool_state = session.tool_state().await.map_err(|err| err.to_string())?;
     *pending_reconfigure = false;
     Ok(generation)
 }
@@ -173,20 +172,21 @@ pub(super) async fn send_user_message(
     turn_input: TurnInput,
     app: &mut App,
     ui_trace: Option<&mut UiTraceRecorder>,
-    _logger: &mut SessionLogger,
+    logger: &mut SessionLogger,
     runtime: &mut Option<LashSession>,
     _history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &AppEventTx,
-    _dynamic_state: &DynamicStateSnapshot,
+    _tool_state: &ToolState,
 ) {
     let mut ui_trace = ui_trace;
     if !prepared_turn.display_text.is_empty() {
         if let Some(recorder) = ui_trace.as_deref_mut() {
             recorder.record_user_turn(&prepared_turn);
         }
+        let _ = logger.record_host_input(&prepared_turn);
         app.push_prepared_user_input(&prepared_turn);
     }
     if let Some(recorder) = ui_trace {

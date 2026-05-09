@@ -421,7 +421,6 @@ impl TurnCommitPipeline {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     use super::*;
@@ -530,7 +529,7 @@ mod tests {
             let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
             let manifest = crate::store::SessionCheckpoint {
                 turn_state: commit.checkpoint.turn_state,
-                dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
+                tool_state_ref: commit.checkpoint.tool_state_ref,
                 plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
                 plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
                 execution_state_ref: commit.checkpoint.execution_state_ref,
@@ -597,7 +596,6 @@ mod tests {
                 reasoning_meta: None,
                 response_meta: None,
             }]),
-            user_input: None,
             origin: None,
         }
     }
@@ -829,10 +827,7 @@ mod tests {
         let usage = vec![usage_entry("turn", "model", 5)];
         let mut state = state_with_graph(graph.clone());
         state.token_ledger = usage.clone();
-        state.dynamic_state_snapshot = Some(crate::DynamicStateSnapshot {
-            base_generation: 1,
-            tools: BTreeMap::new(),
-        });
+        state.tool_state_snapshot = Some(crate::ToolState::default());
         state.plugin_snapshot = Some(crate::PluginSessionSnapshot::default());
         state.execution_state_snapshot = Some(b"runtime".to_vec());
         let mut pipeline = TurnCommitPipeline::from_state(state);
@@ -846,7 +841,7 @@ mod tests {
         let state = pipeline.state_mut();
         assert_eq!(state.session_graph.nodes.len(), graph.nodes.len());
         assert_eq!(state.token_ledger.len(), usage.len());
-        assert!(state.dynamic_state_snapshot.is_none());
+        assert!(state.tool_state_snapshot.is_none());
         assert!(state.plugin_snapshot.is_none());
         assert!(state.execution_state_snapshot.is_none());
     }

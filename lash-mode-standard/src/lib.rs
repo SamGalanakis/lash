@@ -33,7 +33,9 @@ use lash::session_model::{
 use lash::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
-use lash::tools::batch::batch_tool_definition;
+
+mod batch;
+use batch::batch_tool_definition;
 use lash::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
     ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
@@ -492,7 +494,6 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     id: asst_id,
                     role: MessageRole::Assistant,
                     parts: shared_parts(parts_out),
-                    user_input: None,
                     origin: None,
                 },
             )]));
@@ -575,7 +576,6 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     id: asst_id,
                     role: MessageRole::Assistant,
                     parts: shared_parts(assistant_parts),
-                    user_input: None,
                     origin: None,
                 },
             )]));
@@ -605,18 +605,14 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                         })
                     }
                     Some(lash::ToolControl::Finish { value }) => {
-                        Some(TurnOutcome::Finished(TurnFinish::Value {
-                            source: lash::TerminalOutputSource::Tool {
-                                name: outcome.tool_name.clone(),
-                            },
+                        Some(TurnOutcome::Finished(TurnFinish::ToolValue {
+                            tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
                         }))
                     }
                     Some(lash::ToolControl::Fail { value }) => {
-                        Some(TurnOutcome::Stopped(TurnStop::TerminalError {
-                            source: lash::TerminalOutputSource::Tool {
-                                name: outcome.tool_name.clone(),
-                            },
+                        Some(TurnOutcome::Stopped(TurnStop::ToolError {
+                            tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
                         }))
                     }
@@ -690,7 +686,6 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     id: user_id,
                     role: MessageRole::User,
                     parts: shared_parts(result_parts),
-                    user_input: None,
                     origin: None,
                 },
             )]));

@@ -812,7 +812,7 @@ impl TuiExtension for MonitorTuiExtension {
                 } else if event.message.contains("failed") || event.message.contains("exited") {
                     effects.push(TuiHostEffect::PushSystemMessage(format!(
                         "Monitor {}: {}",
-                        event.monitor_label, event.message
+                        event.monitor_id, event.message
                     )));
                 }
             }
@@ -916,7 +916,7 @@ impl TuiExtension for MonitorTuiExtension {
                 "{} [{}] {}",
                 status.spec.id,
                 monitor_state_label(status),
-                status.spec.label
+                status.spec.command
             );
             viewport.write_text(0, y, &line, Style::default(), width);
             y = y.saturating_add(1);
@@ -1037,7 +1037,7 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
             "- {} [{}] {}",
             status.spec.id,
             monitor_state_label(status),
-            status.spec.label
+            status.spec.command
         ));
     }
     lines.join("\n")

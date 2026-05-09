@@ -45,6 +45,18 @@ pub fn surface_key(plugin_id: &str, key: &str) -> String {
     format!("{plugin_id}:{key}")
 }
 
+pub(crate) fn event_renders_visible_output(event: &PluginSurfaceEvent) -> bool {
+    match event {
+        PluginSurfaceEvent::PanelUpsert { .. } => true,
+        PluginSurfaceEvent::PanelAppend { content, .. } => !content.is_empty(),
+        PluginSurfaceEvent::ModeIndicatorUpsert { .. }
+        | PluginSurfaceEvent::ModeIndicatorClear { .. }
+        | PluginSurfaceEvent::Status { .. }
+        | PluginSurfaceEvent::PanelClear { .. }
+        | PluginSurfaceEvent::Custom { .. } => false,
+    }
+}
+
 /// True when a `PanelUpsert` event targets the bottom plan dock rather
 /// than the inline transcript. Only `update_plan` owns the dock — the
 /// legacy `plan_mode` plugin's `panel` key is a file-path breadcrumb

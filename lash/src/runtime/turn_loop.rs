@@ -7,7 +7,10 @@ fn trace_fields_from_outcome(
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
             ("completed", "assistant_message", None)
         }
-        TurnOutcome::Finished(TurnFinish::Value { .. }) => ("completed", "value", None),
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => {
+            ("completed", "submitted_value", None)
+        }
+        TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => ("completed", "tool_value", None),
         TurnOutcome::Handoff { session_id } => (
             "completed",
             "handoff",
@@ -28,7 +31,8 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
         TurnStop::ProviderError => "provider_error",
         TurnStop::PluginAbort => "plugin_abort",
         TurnStop::RuntimeError => "runtime_error",
-        TurnStop::TerminalError { .. } => "terminal_error",
+        TurnStop::SubmittedError { .. } => "submitted_error",
+        TurnStop::ToolError { .. } => "tool_error",
     }
 }
 
@@ -76,7 +80,7 @@ impl LashRuntime {
         events: &dyn EventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn_with_semantic_events(input, events, &NoopTurnEventSink, cancel)
+        self.stream_turn_with_semantic_events(input, events, &NoopTurnActivitySink, cancel)
             .await
     }
 
@@ -84,7 +88,7 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         if let Some(execution_session_id) = self
@@ -158,7 +162,7 @@ impl LashRuntime {
         execution_session_id: String,
         input: TurnInput,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let runtime = {
@@ -195,7 +199,7 @@ impl LashRuntime {
         self.stream_turn_following_handoffs_with_semantic_events(
             input,
             events,
-            &NoopTurnEventSink,
+            &NoopTurnActivitySink,
             cancel,
         )
         .await
@@ -204,7 +208,7 @@ impl LashRuntime {
     pub async fn stream_turn_events_following_handoffs(
         &mut self,
         input: TurnInput,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         self.stream_turn_following_handoffs_with_semantic_events(
@@ -220,7 +224,7 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         self.stream_turn_following_handoffs_with_semantic_events(input, events, turn_events, cancel)
@@ -231,7 +235,7 @@ impl LashRuntime {
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         let follow_mode_turn_options = input.mode_turn_options.clone();
@@ -285,7 +289,7 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
@@ -317,7 +321,11 @@ impl LashRuntime {
                     }),
                 };
                 assembler.push(&error_event);
-                emit_turn_event_to_sink(turn_events, TurnEvent::Error { message: e }).await;
+                emit_turn_activity_to_sink(
+                    turn_events,
+                    TurnActivity::independent(TurnEvent::Error { message: e }),
+                )
+                .await;
                 emit_session_event_to_sink(events, error_event).await;
                 let outcome_event = SessionEvent::TurnOutcome {
                     outcome: TurnOutcome::Stopped(TurnStop::InvalidInput),
@@ -345,10 +353,6 @@ impl LashRuntime {
             trace_metadata.insert(
                 "input_item_count".to_string(),
                 serde_json::json!(normalized.len()),
-            );
-            trace_metadata.insert(
-                "has_user_input".to_string(),
-                serde_json::json!(input.user_input.is_some()),
             );
             crate::trace::emit_trace(
                 &self.host.core.trace_sink,
@@ -389,7 +393,6 @@ impl LashRuntime {
                     reasoning_meta: None,
                     response_meta: None,
                 }]),
-                user_input: None,
                 origin: None,
             });
         }
@@ -455,7 +458,6 @@ impl LashRuntime {
             id: user_id.clone(),
             role: MessageRole::User,
             parts: shared_parts(user_parts),
-            user_input: input.user_input.clone(),
             origin: None,
         });
 
@@ -551,7 +553,7 @@ impl LashRuntime {
         trace_turn_id: String,
         turn_index: usize,
         events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
@@ -657,11 +659,11 @@ impl LashRuntime {
                 }),
             };
             assembler.push(&error_event);
-            emit_turn_event_to_sink(
+            emit_turn_activity_to_sink(
                 turn_events,
-                TurnEvent::Error {
+                TurnActivity::independent(TurnEvent::Error {
                     message: issue.message.clone(),
-                },
+                }),
             )
             .await;
             emit_session_event_to_sink(events, error_event).await;
@@ -872,8 +874,8 @@ impl LashRuntime {
             let mut returned_turn = finalized.turn;
             tracing::debug!(
                 rss_kb = debug_rss_kb(),
-                dynamic_state_present = turn_pipeline.state_mut().dynamic_state_ref.is_some()
-                    || turn_pipeline.state_mut().dynamic_state_snapshot.is_some(),
+                tool_state_present = turn_pipeline.state_mut().tool_state_ref.is_some()
+                    || turn_pipeline.state_mut().tool_state_snapshot.is_some(),
                 plugin_snapshot_present = turn_pipeline.state_mut().plugin_snapshot_ref.is_some()
                     || turn_pipeline.state_mut().plugin_snapshot.is_some(),
                 "runtime before stamp_runtime_state"
@@ -977,7 +979,6 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
     TurnInput {
         items,
         image_blobs,
-        user_input: message.user_input,
         mode: None,
         mode_turn_options: None,
         trace_turn_id: None,
@@ -986,15 +987,15 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
     }
 }
 
-async fn emit_turn_event_to_sink(events: &dyn TurnEventSink, event: TurnEvent) {
+async fn emit_turn_activity_to_sink(events: &dyn TurnActivitySink, activity: TurnActivity) {
     if !events.is_noop() {
-        events.emit(event).await;
+        events.emit(activity).await;
     }
 }
 
 async fn emit_runtime_stream_event_to_sinks(
     events: &dyn EventSink,
-    turn_events: &dyn TurnEventSink,
+    turn_events: &dyn TurnActivitySink,
     event: RuntimeStreamEvent,
     assembler: &mut TurnAssembler,
 ) {
@@ -1003,8 +1004,8 @@ async fn emit_runtime_stream_event_to_sinks(
             assembler.push(&event);
             emit_session_event_to_sink(events, event).await;
         }
-        RuntimeStreamEvent::Turn(event) => {
-            emit_turn_event_to_sink(turn_events, event).await;
+        RuntimeStreamEvent::Turn(activity) => {
+            emit_turn_activity_to_sink(turn_events, activity).await;
         }
     }
 }

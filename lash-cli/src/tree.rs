@@ -1,4 +1,4 @@
-use lash::{DynamicStateSnapshot, Message, MessageRole, SessionMessageTreeNode};
+use lash::{Message, MessageRole, SessionMessageTreeNode, ToolState};
 use lash_embed::LashSession;
 
 use crate::app::{App, timeline_from_read_view};
@@ -17,7 +17,7 @@ pub async fn switch_to_tree_selection(
     app: &mut App,
     history: &mut Vec<Message>,
     selection: TreeSelection,
-    _dynamic_state: &DynamicStateSnapshot,
+    _tool_state: &ToolState,
 ) -> Result<(), String> {
     let target_leaf = if matches!(selection.message.role, MessageRole::User) {
         selection.parent_node_id.clone()
@@ -25,13 +25,7 @@ pub async fn switch_to_tree_selection(
         Some(selection.node_id.clone())
     };
     let seeded_input = if matches!(selection.message.role, MessageRole::User) {
-        selection
-            .message
-            .user_input
-            .as_ref()
-            .map(|input| input.display_text.clone())
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| crate::overlay::tree_message_preview(&selection.message))
+        crate::overlay::tree_message_preview(&selection.message)
     } else {
         String::new()
     };

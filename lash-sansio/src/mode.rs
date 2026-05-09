@@ -132,7 +132,6 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: None,
     }
 }

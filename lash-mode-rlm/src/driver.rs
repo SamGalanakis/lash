@@ -248,9 +248,63 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
     match termination {
         RlmTermination::SubmitRequired {
             schema: Some(schema),
-        } => Some(lash::render_value_schema_contract(schema)),
+        } => Some(render_value_schema_contract(schema)),
         _ => None,
     }
+}
+
+fn render_value_schema_contract(schema: &serde_json::Value) -> String {
+    let input_contract =
+        lash::ToolDefinition::new("submit", "", schema.clone(), serde_json::json!({}))
+            .compact_contract();
+
+    if input_contract.parameters.is_empty() {
+        return lash::ToolDefinition::new(
+            "submit",
+            "",
+            lash::ToolDefinition::default_input_schema(),
+            schema.clone(),
+        )
+        .compact_contract()
+        .returns;
+    }
+
+    let head = format!(
+        "{{ {} }}",
+        input_contract
+            .parameters
+            .iter()
+            .filter_map(|value| value.get("signature").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let lines = input_contract
+        .parameters
+        .iter()
+        .filter_map(compact_doc_line)
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        head
+    } else {
+        format!("{head}\nFields:\n{}", lines.join("\n"))
+    }
+}
+
+fn compact_doc_line(value: &serde_json::Value) -> Option<String> {
+    let signature = value.get("signature")?.as_str()?.trim();
+    if signature.is_empty() {
+        return None;
+    }
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match description {
+        Some(description) => format!("- `{signature}` — {description}"),
+        None => format!("- `{signature}`"),
+    })
 }
 
 fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBlock {
@@ -583,11 +637,6 @@ fn append_history_message(
 }
 
 fn message_history_text(message: &lash::Message) -> String {
-    if let Some(user_input) = message.effective_user_text()
-        && !user_input.trim().is_empty()
-    {
-        return user_input.to_string();
-    }
     let chunks = message
         .parts
         .iter()
@@ -786,7 +835,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         })
     }
@@ -910,7 +958,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: Some(lash::MessageOrigin::Plugin {
                 plugin_id: "test".to_string(),
                 transient: false,
@@ -1036,7 +1083,7 @@ mod tests {
             1000,
             1,
             "Call submit",
-            Some(&lash::render_value_schema_contract(&schema)),
+            Some(&render_value_schema_contract(&schema)),
             None,
             &mut attachments,
         );
@@ -1052,6 +1099,40 @@ mod tests {
         assert!(tail.contains("=== REQUIRED OUTPUT ==="));
         assert!(tail.contains("{ action: enum[\"call\", \"fold\"], amount?: int >= 0 }"));
         assert!(tail.contains("Fields:"));
+    }
+
+    #[test]
+    fn render_value_schema_contract_renders_object_shape_with_field_table() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["call", "fold"] },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "required": ["action"]
+        });
+
+        let rendered = render_value_schema_contract(&schema);
+        let head = rendered.lines().next().expect("at least one line");
+        assert_eq!(
+            head,
+            "{ action: enum[\"call\", \"fold\"], confidence?: float >= 0 <= 1 }"
+        );
+        assert!(rendered.contains("Fields:"));
+        assert!(rendered.contains("- `action: enum[\"call\", \"fold\"]`"));
+        assert!(rendered.contains("- `confidence?: float >= 0 <= 1`"));
+    }
+
+    #[test]
+    fn render_value_schema_contract_falls_back_to_compact_label_for_scalars() {
+        let scalar = serde_json::json!({ "type": "string" });
+        assert_eq!(render_value_schema_contract(&scalar), "str");
+
+        let array = serde_json::json!({ "type": "array", "items": { "type": "integer" } });
+        assert_eq!(render_value_schema_contract(&array), "list[int]");
+
+        let nullable_string = serde_json::json!({ "type": ["string", "null"] });
+        assert_eq!(render_value_schema_contract(&nullable_string), "str | null");
     }
 
     #[test]

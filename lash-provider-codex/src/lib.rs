@@ -530,6 +530,7 @@ impl CodexProvider {
             account_id: None,
             options: ProviderOptions {
                 reliability: ProviderReliability::codex(),
+                ..ProviderOptions::default()
             },
             client: build_http_client(),
         }
@@ -615,6 +616,36 @@ impl CodexProvider {
         Some(format!(
             "You have hit your ChatGPT usage limit{plan}.{when}"
         ))
+    }
+
+    fn responses_error_is_retryable(value: &Value) -> bool {
+        let numeric_code =
+            value
+                .get("code")
+                .or_else(|| value.get("status"))
+                .and_then(|v| match v {
+                    Value::Number(n) => n.as_i64(),
+                    Value::String(s) => s.trim().parse().ok(),
+                    _ => None,
+                });
+        matches!(numeric_code, Some(429))
+            || matches!(numeric_code, Some(status) if status >= 500)
+            || value
+                .get("code")
+                .or_else(|| value.get("type"))
+                .or_else(|| value.get("status"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|code| {
+                    matches!(
+                        code,
+                        "server_error"
+                            | "internal_server_error"
+                            | "service_unavailable"
+                            | "temporarily_unavailable"
+                            | "overloaded"
+                            | "rate_limit_exceeded"
+                    )
+                })
     }
 
     fn should_parse_stream(stream_requested: bool, content_type: Option<&str>) -> bool {
@@ -1074,7 +1105,11 @@ impl CodexProvider {
         effort.to_string()
     }
 
-    fn build_request_body(req: &LlmRequest, stream: bool) -> Result<Value, LlmTransportError> {
+    fn build_request_body(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<Value, LlmTransportError> {
         let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
         let mut body = json!({
@@ -1101,10 +1136,13 @@ impl CodexProvider {
             body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
         }
         if let Some(effort) = req.model_variant.as_deref() {
-            body["reasoning"] = json!({
+            let mut reasoning = json!({
                 "effort": Self::clamp_reasoning_effort(&req.model, effort),
-                "summary": "auto",
             });
+            if self.options.thinking.expose {
+                reasoning["summary"] = json!("auto");
+            }
+            body["reasoning"] = reasoning;
         }
         if let Some(session_id) = req.session_id.as_deref() {
             body["prompt_cache_key"] = json!(session_id);
@@ -1415,13 +1453,19 @@ impl CodexProvider {
                 }
             }
             "response.failed" => {
-                let msg = event
+                let error_value = event
                     .get("response")
                     .and_then(|r| r.get("error"))
-                    .and_then(|e| e.get("message"))
+                    .or_else(|| event.get("error"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let msg = error_value
+                    .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Codex response failed");
-                return Err(LlmTransportError::new(msg).with_raw(event.to_string()));
+                return Err(LlmTransportError::new(msg)
+                    .retryable(Self::responses_error_is_retryable(&error_value))
+                    .with_raw(event.to_string()));
             }
             _ => {}
         }
@@ -1754,7 +1798,7 @@ impl ProviderTransport for CodexProvider {
         let account_id = self.account_id.clone();
         let timeouts = self.options.llm_timeouts();
 
-        let body = Self::build_request_body(&req, stream_events.is_some())?;
+        let body = self.build_request_body(&req, stream_events.is_some())?;
 
         let request_body = serde_json::to_string(&body).ok();
 
@@ -1862,7 +1906,9 @@ impl ProviderTransport for CodexProvider {
                             LlmOutputPart::ToolCall { .. } => {
                                 tx.send(LlmStreamEvent::Part(part.clone()));
                             }
-                            LlmOutputPart::Reasoning { text, .. } if !text.is_empty() => {
+                            LlmOutputPart::Reasoning { text, .. }
+                                if !text.is_empty() && self.options.thinking.expose =>
+                            {
                                 tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
                             }
                             _ => {}
@@ -1913,6 +1959,7 @@ impl ProviderTransport for CodexProvider {
         }
 
         let mut state = CodexStreamState::default();
+        let expose_thinking = self.options.thinking.expose;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,
@@ -1932,9 +1979,14 @@ impl ProviderTransport for CodexProvider {
                 );
                 if let Some(tx) = &stream_events {
                     for piece in state.take_reasoning_deltas() {
-                        tx.send(LlmStreamEvent::ReasoningDelta(piece));
+                        if expose_thinking {
+                            tx.send(LlmStreamEvent::ReasoningDelta(piece));
+                        }
                     }
                     for part in emitted_parts {
+                        if matches!(part, LlmOutputPart::Reasoning { .. }) && !expose_thinking {
+                            continue;
+                        }
                         tx.send(LlmStreamEvent::Part(part));
                     }
                 }
@@ -1982,6 +2034,7 @@ struct CodexProviderConfig {
 fn default_codex_options() -> ProviderOptions {
     ProviderOptions {
         reliability: ProviderReliability::codex(),
+        ..ProviderOptions::default()
     }
 }
 
@@ -1998,15 +2051,6 @@ impl CodexProviderFactory {
 impl ProviderFactory for CodexProviderFactory {
     fn kind(&self) -> &'static str {
         "codex"
-    }
-    fn cli_label(&self) -> &'static str {
-        "OpenAI Codex OAuth"
-    }
-    fn setup_name(&self) -> &'static str {
-        "Codex"
-    }
-    fn setup_description(&self) -> &'static str {
-        "ChatGPT Plus/Pro/Team"
     }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: CodexProviderConfig =
@@ -2083,6 +2127,40 @@ mod tests {
     }
 
     #[test]
+    fn codex_request_body_exposes_reasoning_summary_only_when_configured() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model_variant = Some("medium".to_string());
+
+        let hidden = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, true)
+            .unwrap();
+        assert_eq!(hidden["reasoning"], json!({ "effort": "medium" }));
+
+        let exposed = CodexProvider::new("access", "refresh", 0)
+            .with_options(ProviderOptions {
+                thinking: lash::ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
+            })
+            .build_request_body(&req, true)
+            .unwrap();
+        assert_eq!(exposed["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn response_failed_server_error_is_retryable() {
+        let mut state = CodexStreamState::default();
+        let err = CodexProvider::process_sse_event(
+            r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"internal stream ended unexpectedly"}}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.retryable);
+        assert_eq!(err.message, "internal stream ended unexpectedly");
+    }
+
+    #[test]
     fn gpt_55_variant_match_ignores_provider_prefix() {
         let provider = CodexModelPolicy;
 
@@ -2112,7 +2190,9 @@ mod tests {
             strict: true,
         }));
 
-        let body = CodexProvider::build_request_body(&req, false).unwrap();
+        let body = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, false)
+            .unwrap();
         assert_eq!(body["tools"][0]["parameters"]["properties"], json!({}));
         assert_eq!(
             body["text"]["format"]["schema"]["required"],
@@ -2133,7 +2213,9 @@ mod tests {
             strict: true,
         }));
 
-        let err = CodexProvider::build_request_body(&req, false).unwrap_err();
+        let err = CodexProvider::new("access", "refresh", 0)
+            .build_request_body(&req, false)
+            .unwrap_err();
         assert_eq!(err.kind, ProviderFailureKind::Validation);
         assert!(err.message.contains("allOf"));
     }

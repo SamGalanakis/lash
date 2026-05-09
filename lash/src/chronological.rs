@@ -351,11 +351,6 @@ fn history_item_from_tool_call(record: &ToolCallRecord) -> RlmHistoryItem {
 }
 
 fn message_history_text(message: &Message) -> String {
-    if let Some(user_input) = message.effective_user_text()
-        && !user_input.trim().is_empty()
-    {
-        return user_input.to_string();
-    }
     let chunks = message
         .parts
         .iter()

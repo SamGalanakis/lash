@@ -14,8 +14,8 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use lash::{ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider};
 use lash_embed::{
-    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnCollector, TurnEvent,
-    TurnEventFanout, TurnEventSink,
+    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnActivity, TurnActivitySink,
+    TurnEvent,
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
 use lash_rlm_types::RlmTermination;
@@ -137,7 +137,7 @@ struct SendMessageRequest {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamItem {
-    Event { event: TurnEvent },
+    Event { event: TurnActivity },
     Message { message: ChatMessage },
     Error { message: String },
     Done,
@@ -160,12 +160,26 @@ impl lash::TraceSink for StderrTraceSink {
     }
 }
 
+struct FanoutTraceSink {
+    sinks: Vec<Arc<dyn lash::TraceSink>>,
+}
+
+impl lash::TraceSink for FanoutTraceSink {
+    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+        for sink in &self.sinks {
+            sink.append(record)?;
+        }
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY is required".to_string())?;
-    let model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.6".to_string());
+    let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
+    let model_variant =
+        std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "medium".to_string());
     let addr: SocketAddr = std::env::var("OPENROUTER_CHAT_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()
@@ -174,9 +188,18 @@ async fn main() -> anyhow_like::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".openrouter-chat-ui"));
     std::fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
+    let trace_path = std::env::var("OPENROUTER_CHAT_TRACE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("trace.jsonl"));
+    eprintln!("rlm-plugin-chat trace: {}", trace_path.display());
 
     let provider = ProviderHandle::new(
-        OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
+        OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
+            .with_options(lash::ProviderOptions {
+                thinking: lash::ProviderThinkingPolicy { expose: true },
+                ..lash::ProviderOptions::default()
+            })
+            .into_components(),
     );
     let store_factory = Arc::new(ChatStoreFactory::new(data_dir.join("lash-sessions")));
     let core = LashCore::builder()
@@ -184,15 +207,24 @@ async fn main() -> anyhow_like::Result<()> {
         .default_mode(ModeId::rlm())
         .register_plugin::<DemoPlugin>()
         .provider(provider)
-        .model(model.clone(), None)
+        .model(model.clone(), Some(model_variant.clone()))
         .max_context_tokens(200_000)
         .store_factory(store_factory)
-        .trace_sink(Some(Arc::new(StderrTraceSink::default())))
+        .trace_sink(Some(Arc::new(FanoutTraceSink {
+            sinks: vec![
+                Arc::new(StderrTraceSink::default()),
+                Arc::new(lash::JsonlTraceSink::new(trace_path)),
+            ],
+        })))
         .trace_level(lash::TraceLevel::Extended)
         .build()
         .map_err(|err| err.to_string())?;
 
-    let app_db = AppDb::open(&data_dir.join("app.db"), model).map_err(|err| err.to_string())?;
+    let app_db = AppDb::open(
+        &data_dir.join("app.db"),
+        format!("{model} ({model_variant})"),
+    )
+    .map_err(|err| err.to_string())?;
     let state = AppStateData {
         core,
         db: Arc::new(Mutex::new(app_db)),
@@ -261,10 +293,18 @@ async fn send_message(
         return Err(AppError::bad_request("message text is required"));
     }
 
+    // Persist the submitted board with the user message so reload can replay
+    // human-only terminal states, including a final X move that ends in draw.
+    let user_board = request.board.clone();
     let user_message = state.with_db(|db| {
         db.require_chat(&chat_id)?;
         db.maybe_title_from_first_message(&chat_id, &text)?;
-        db.insert_message(&chat_id, "user", &text)
+        db.insert_message_with_payload(
+            &chat_id,
+            "user",
+            &text,
+            Some(json!({ "board": user_board })),
+        )
     })?;
 
     let session = state.session_for(&chat_id).await?;
@@ -276,14 +316,13 @@ async fn send_message(
                 message: user_message,
             })
             .await;
-        let collector = TurnCollector::default();
-        let ui_sink: Arc<dyn TurnEventSink> = Arc::new(ChannelTurnEvents {
+        let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
+        let ui_sink: Arc<dyn TurnActivitySink> = Arc::new(ChannelTurnEvents {
             tx: tx.clone(),
             state: run_state.clone(),
             chat_id: chat_id.clone(),
-            active_code: Arc::new(Mutex::new(None)),
+            turn_state: Arc::clone(&turn_state),
         });
-        let sink = TurnEventFanout::new(vec![collector.sink(), ui_sink]);
         let turn = session
             .turn(Input::text(text))
             .with_plugin_input::<DemoPlugin>(DemoTurnInput {
@@ -296,11 +335,15 @@ async fn send_message(
                 )
                 .expect("RLM termination options serialize"),
             )
-            .stream(&sink)
+            .stream(ui_sink.as_ref())
             .await;
         match turn {
             Ok(_) => {
-                let assistant_text = collector.rendered_output();
+                let assistant_text = turn_state
+                    .lock()
+                    .expect("turn state lock")
+                    .assistant_prose
+                    .clone();
                 let inserted = run_state
                     .with_db(|db| db.insert_message(&chat_id, "assistant", &assistant_text));
                 match inserted {
@@ -351,26 +394,104 @@ struct ChannelTurnEvents {
     tx: mpsc::Sender<StreamItem>,
     state: AppStateData,
     chat_id: String,
-    active_code: Arc<Mutex<Option<String>>>,
+    turn_state: Arc<Mutex<TurnPersistenceState>>,
+}
+
+#[derive(Default)]
+struct TurnPersistenceState {
+    reasoning: Option<(i64, String)>,
+    assistant_prose: String,
+    code: Option<String>,
+    code_message: Option<i64>,
+    tools: HashMap<String, i64>,
 }
 
 #[async_trait]
-impl TurnEventSink for ChannelTurnEvents {
-    async fn emit(&self, event: TurnEvent) {
-        if let TurnEvent::CodeBlockStarted { code, .. } = &event {
-            *self.active_code.lock().expect("active code lock") = Some(code.clone());
-        }
-        if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
-            let _ = self.tx.send(StreamItem::Event { event }).await;
+impl TurnActivitySink for ChannelTurnEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        let event = &activity.event;
+        if let TurnEvent::AssistantProseDelta { text } = &event {
+            self.turn_state
+                .lock()
+                .expect("turn state lock")
+                .assistant_prose
+                .push_str(text);
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
             return;
         }
-        if matches!(&event, TurnEvent::ToolCallCompleted { .. }) {
+        // Keep persisted message order tied to event start order. The browser
+        // only renders completed code/tool rows, but reload should still
+        // reconstruct "thinking -> lashlang -> tools -> assistant".
+        if let TurnEvent::ReasoningDelta { text } = &event {
+            let update = {
+                let mut state = self.turn_state.lock().expect("turn state lock");
+                match state.reasoning.as_mut() {
+                    Some((id, existing)) => {
+                        existing.push_str(text);
+                        Some((*id, existing.clone(), false))
+                    }
+                    None => Some((0, text.clone(), true)),
+                }
+            };
+            if let Some((id, reasoning, insert)) = update {
+                let result = if insert {
+                    self.state
+                        .with_db(|db| db.insert_reasoning(&self.chat_id, &reasoning))
+                        .map(|message| {
+                            self.turn_state.lock().expect("turn state lock").reasoning =
+                                Some((message.id, reasoning));
+                        })
+                } else {
+                    self.state
+                        .with_db(|db| db.update_reasoning(id, &reasoning))
+                        .map(|_| ())
+                };
+                if let Err(err) = result {
+                    let _ = self
+                        .tx
+                        .send(StreamItem::Error {
+                            message: err.message,
+                        })
+                        .await;
+                }
+            }
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            return;
+        }
+        if let TurnEvent::CodeBlockStarted { code, .. } = &event {
+            self.turn_state.lock().expect("turn state lock").code = Some(code.clone());
+            match self.state.with_db(|db| {
+                db.insert_code_block(&self.chat_id, event.clone(), Some(code.clone()))
+            }) {
+                Ok(message) => {
+                    self.turn_state
+                        .lock()
+                        .expect("turn state lock")
+                        .code_message = Some(message.id);
+                }
+                Err(err) => {
+                    let _ = self
+                        .tx
+                        .send(StreamItem::Error {
+                            message: err.message,
+                        })
+                        .await;
+                }
+            }
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            return;
+        }
+        if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
             match self
                 .state
                 .with_db(|db| db.insert_tool_call(&self.chat_id, event.clone()))
             {
                 Ok(message) => {
-                    let _ = self.tx.send(StreamItem::Message { message }).await;
+                    self.turn_state
+                        .lock()
+                        .expect("turn state lock")
+                        .tools
+                        .insert(activity.correlation_id.0.clone(), message.id);
                 }
                 Err(err) => {
                     let _ = self
@@ -381,33 +502,65 @@ impl TurnEventSink for ChannelTurnEvents {
                         .await;
                 }
             }
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            return;
+        }
+        if matches!(&event, TurnEvent::ToolCallCompleted { .. }) {
+            let existing = self
+                .turn_state
+                .lock()
+                .expect("turn state lock")
+                .tools
+                .remove(&activity.correlation_id.0);
+            let result = self.state.with_db(|db| {
+                if let Some(id) = existing {
+                    db.update_tool_call(id, event.clone())
+                } else {
+                    db.insert_tool_call(&self.chat_id, event.clone())
+                }
+            });
+            if let Err(err) = result {
+                let _ = self
+                    .tx
+                    .send(StreamItem::Error {
+                        message: err.message,
+                    })
+                    .await;
+            }
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
             return;
         }
         if matches!(&event, TurnEvent::CodeBlockCompleted { .. }) {
-            let code = self.active_code.lock().expect("active code lock").take();
-            match self
-                .state
-                .with_db(|db| db.insert_code_block(&self.chat_id, event.clone(), code.clone()))
-            {
-                Ok(message) => {
-                    let _ = self.tx.send(StreamItem::Message { message }).await;
+            let (code, existing) = {
+                let mut state = self.turn_state.lock().expect("turn state lock");
+                (state.code.take(), state.code_message.take())
+            };
+            let result = self.state.with_db(|db| {
+                if let Some(id) = existing {
+                    db.update_code_block(id, event.clone(), code.clone())
+                } else {
+                    db.insert_code_block(&self.chat_id, event.clone(), code.clone())
                 }
-                Err(err) => {
-                    let _ = self
-                        .tx
-                        .send(StreamItem::Error {
-                            message: err.message,
-                        })
-                        .await;
-                }
+            });
+            if let Err(err) = result {
+                let _ = self
+                    .tx
+                    .send(StreamItem::Error {
+                        message: err.message,
+                    })
+                    .await;
             }
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
             return;
         }
-        if matches!(&event, TurnEvent::TerminalOutput { .. }) {
-            let _ = self.tx.send(StreamItem::Event { event }).await;
+        if matches!(
+            &event,
+            TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        ) {
+            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
             return;
         }
-        let _ = self.tx.send(StreamItem::Event { event }).await;
+        let _ = self.tx.send(StreamItem::Event { event: activity }).await;
     }
 }
 
@@ -480,7 +633,8 @@ impl lash::SessionPlugin for DemoSessionPlugin {
                 )])
             })
         }));
-        reg.tools().provider(Arc::new(DemoTools))
+        reg.tools().provider(Arc::new(DemoTools))?;
+        Ok(())
     }
 }
 
@@ -489,33 +643,11 @@ struct DemoTools;
 #[async_trait]
 impl ToolProvider for DemoTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::new(
-                "read_board",
-                "Read the app-owned Tic Tac Toe board. Returns the 0..8 index map, current marks by index, legal moves, winner, and whose turn it is.",
-                json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }),
-                json!({ "type": "object" }),
-            ),
-            ToolDefinition::new(
-                "play_move",
-                "Play one O move for the agent when it is O's turn. The move is a zero-based cell index: 0 top-left, 1 top-middle, 2 top-right, 3 middle-left, 4 center, 5 middle-right, 6 bottom-left, 7 bottom-middle, 8 bottom-right.",
-                json!({
-                    "type": "object",
-                    "properties": { "cell": { "type": "integer", "minimum": 0, "maximum": 8 } },
-                    "required": ["cell"],
-                    "additionalProperties": false
-                }),
-                json!({ "type": "object" }),
-            ),
-        ]
+        vec![read_board_tool(), play_move_tool()]
     }
 
     async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
-        lash::ToolResult::err_fmt("Tic Tac Toe tools require turn context")
+        lash::ToolResult::err_fmt("demo tools require turn context")
     }
 
     async fn execute_with_context(
@@ -530,6 +662,7 @@ impl ToolProvider for DemoTools {
         else {
             return lash::ToolResult::err_fmt("missing board turn input");
         };
+
         match name {
             "read_board" => lash::ToolResult::ok(board_snapshot(&input.board)),
             "play_move" => {
@@ -538,9 +671,36 @@ impl ToolProvider for DemoTools {
                 };
                 lash::ToolResult::ok(apply_agent_move(&input.board, cell as usize))
             }
-            _ => lash::ToolResult::err_fmt(format!("unknown tool `{name}`")),
+            _ => lash::ToolResult::err_fmt(format!("unknown demo tool `{name}`")),
         }
     }
+}
+
+fn read_board_tool() -> ToolDefinition {
+    ToolDefinition::new(
+        "read_board",
+        "Read the app-owned Tic Tac Toe board. Returns the 0..8 index map, current marks by index, legal moves, winner, and whose turn it is.",
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        json!({ "type": "object" }),
+    )
+}
+
+fn play_move_tool() -> ToolDefinition {
+    ToolDefinition::new(
+        "play_move",
+        "Play one O move for the agent when it is O's turn. The move is a zero-based cell index: 0 top-left, 1 top-middle, 2 top-right, 3 middle-left, 4 center, 5 middle-right, 6 bottom-left, 7 bottom-middle, 8 bottom-right.",
+        json!({
+            "type": "object",
+            "properties": { "cell": { "type": "integer", "minimum": 0, "maximum": 8 } },
+            "required": ["cell"],
+            "additionalProperties": false
+        }),
+        json!({ "type": "object" }),
+    )
 }
 
 fn board_prompt(board: &BoardState) -> String {
@@ -789,11 +949,22 @@ impl AppDb {
     }
 
     fn insert_message(&mut self, chat_id: &str, role: &str, text: &str) -> AppResult<ChatMessage> {
+        self.insert_message_with_payload(chat_id, role, text, None)
+    }
+
+    fn insert_message_with_payload(
+        &mut self,
+        chat_id: &str,
+        role: &str,
+        text: &str,
+        payload: Option<serde_json::Value>,
+    ) -> AppResult<ChatMessage> {
         let created_at = now();
+        let payload_text = payload.as_ref().map(serde_json::Value::to_string);
         self.conn.execute(
             "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
-             VALUES (?1, 'message', ?2, ?3, NULL, ?4)",
-            params![chat_id, role, text, created_at],
+             VALUES (?1, 'message', ?2, ?3, ?4, ?5)",
+            params![chat_id, role, text, payload_text, created_at],
         )?;
         self.conn.execute(
             "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
@@ -806,41 +977,44 @@ impl AppDb {
             kind: "message".to_string(),
             role: role.to_string(),
             text: text.to_string(),
+            payload,
+            created_at,
+        })
+    }
+
+    fn insert_reasoning(&mut self, chat_id: &str, text: &str) -> AppResult<ChatMessage> {
+        let created_at = now();
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
+             VALUES (?1, 'reasoning', 'assistant', ?2, NULL, ?3)",
+            params![chat_id, text, created_at],
+        )?;
+        self.conn.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now(), chat_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(ChatMessage {
+            id,
+            chat_id: chat_id.to_string(),
+            kind: "reasoning".to_string(),
+            role: "assistant".to_string(),
+            text: text.to_string(),
             payload: None,
             created_at,
         })
     }
 
+    fn update_reasoning(&mut self, id: i64, text: &str) -> AppResult<ChatMessage> {
+        self.conn.execute(
+            "UPDATE messages SET text = ?1 WHERE id = ?2 AND kind = 'reasoning'",
+            params![text, id],
+        )?;
+        self.message_by_id(id)
+    }
+
     fn insert_tool_call(&mut self, chat_id: &str, event: TurnEvent) -> AppResult<ChatMessage> {
-        let payload = match event {
-            TurnEvent::ToolCallStarted {
-                call_id,
-                name,
-                args,
-            } => json!({
-                "phase": "started",
-                "call_id": call_id,
-                "name": name,
-                "args": args,
-            }),
-            TurnEvent::ToolCallCompleted {
-                call_id,
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-            } => json!({
-                "phase": "completed",
-                "call_id": call_id,
-                "name": name,
-                "args": args,
-                "result": result,
-                "success": success,
-                "duration_ms": duration_ms,
-            }),
-            _ => return Err(AppError::internal("expected tool-call event")),
-        };
+        let payload = tool_payload(event)?;
         let created_at = now();
         let tool_name = payload["name"].as_str().unwrap_or("tool").to_string();
         self.conn.execute(
@@ -864,6 +1038,17 @@ impl AppDb {
         })
     }
 
+    fn update_tool_call(&mut self, id: i64, event: TurnEvent) -> AppResult<ChatMessage> {
+        let payload = tool_payload(event)?;
+        let tool_name = payload["name"].as_str().unwrap_or("tool").to_string();
+        self.conn.execute(
+            "UPDATE messages SET text = ?1, payload = ?2
+             WHERE id = ?3 AND kind = 'tool_call'",
+            params![tool_name, payload.to_string(), id],
+        )?;
+        self.message_by_id(id)
+    }
+
     fn insert_code_block(
         &mut self,
         chat_id: &str,
@@ -871,6 +1056,11 @@ impl AppDb {
         code: Option<String>,
     ) -> AppResult<ChatMessage> {
         let payload = match event {
+            TurnEvent::CodeBlockStarted { language, code } => json!({
+                "phase": "started",
+                "language": language,
+                "code": code,
+            }),
             TurnEvent::CodeBlockCompleted {
                 language,
                 output,
@@ -911,6 +1101,39 @@ impl AppDb {
         })
     }
 
+    fn update_code_block(
+        &mut self,
+        id: i64,
+        event: TurnEvent,
+        code: Option<String>,
+    ) -> AppResult<ChatMessage> {
+        let payload = match event {
+            TurnEvent::CodeBlockCompleted {
+                language,
+                output,
+                error,
+                success,
+                duration_ms,
+            } => json!({
+                "phase": "completed",
+                "language": language,
+                "output": output,
+                "error": error,
+                "success": success,
+                "duration_ms": duration_ms,
+                "code": code,
+            }),
+            _ => return Err(AppError::internal("expected code-block event")),
+        };
+        let language = payload["language"].as_str().unwrap_or("code").to_string();
+        self.conn.execute(
+            "UPDATE messages SET text = ?1, payload = ?2
+             WHERE id = ?3 AND kind = 'code_block'",
+            params![language, payload.to_string(), id],
+        )?;
+        self.message_by_id(id)
+    }
+
     fn list_messages(&mut self, chat_id: &str) -> AppResult<Vec<ChatMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, kind, role, text, payload, created_at
@@ -919,6 +1142,49 @@ impl AppDb {
         let rows = stmt.query_map(params![chat_id], chat_message_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(AppError::from)
+    }
+
+    fn message_by_id(&mut self, id: i64) -> AppResult<ChatMessage> {
+        self.conn
+            .query_row(
+                "SELECT id, chat_id, kind, role, text, payload, created_at
+                 FROM messages WHERE id = ?1",
+                params![id],
+                chat_message_from_row,
+            )
+            .map_err(AppError::from)
+    }
+}
+
+fn tool_payload(event: TurnEvent) -> AppResult<serde_json::Value> {
+    match event {
+        TurnEvent::ToolCallStarted {
+            call_id,
+            name,
+            args,
+        } => Ok(json!({
+            "phase": "started",
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+        })),
+        TurnEvent::ToolCallCompleted {
+            call_id,
+            name,
+            args,
+            result,
+            success,
+            duration_ms,
+        } => Ok(json!({
+            "phase": "completed",
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+            "result": result,
+            "success": success,
+            "duration_ms": duration_ms,
+        })),
+        _ => Err(AppError::internal("expected tool-call event")),
     }
 }
 
@@ -1097,6 +1363,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .badge { border:1px solid var(--line); border-radius:999px; padding:2px 7px; color:var(--muted); background:oklch(0.16 0.018 78); font:12px "Chivo Mono", monospace; }
     .tool-summary { color:var(--ink); }
     .reasoning, .code-block { max-width:min(820px, 82%); border:1px dashed var(--line); border-radius:5px; padding:9px 11px; background:oklch(0.16 0.018 78); color:var(--muted); }
+    .reasoning { border-color:color-mix(in oklch, var(--sun), var(--line)); }
     .reasoning summary, .code-block summary { cursor:pointer; font-family:"Chivo Mono", monospace; font-size:12px; color:var(--sun); }
     .reasoning pre, .code-block pre { white-space:pre-wrap; margin:8px 0 0; font-size:12px; line-height:1.45; overflow:auto; }
     .code-block.fail summary { color:var(--bad); }
@@ -1167,9 +1434,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let activeChat = null;
     let streaming = null;
     let reasoning = null;
-    let liveCodeBlock = null;
+    let pendingCodeBlock = null;
+    let pendingTools = [];
     let busy = false;
-    const liveTools = new Map();
     const boards = new Map();
 
     function emptyBoard() {
@@ -1267,9 +1534,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (board.cells.every(Boolean)) return 'The round ended in a draw.';
       return null;
     }
-    function callKey(event) {
-      return event.call_id || `${event.name}:${JSON.stringify(event.args || {})}`;
-    }
     function cleanArgs(args) {
       const out = { ...(args || {}) };
       delete out.__session_id__;
@@ -1277,7 +1541,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function compactToolPayload(event) {
       const raw = event?.result?.raw;
-      if (event.phase !== 'completed') return { args: cleanArgs(event.args) };
       if (event.name === 'play_move') {
         return {
           args: cleanArgs(event.args),
@@ -1336,22 +1599,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
       chats.unshift(chat); activeChat = chat.id; boards.set(chat.id, emptyBoard()); renderChats(); renderBoard(); messagesEl.innerHTML = '';
     }
     async function loadMessages(id) {
-      if (!boards.has(id)) boards.set(id, emptyBoard());
+      boards.set(id, emptyBoard());
       const messages = await (await api(`/api/chats/${id}/messages`)).json();
       messagesEl.innerHTML = '';
+      // Replay persisted board snapshots in message order. User messages carry
+      // the human move; tool rows carry accepted agent moves.
       for (const message of messages) appendMessage(message);
       renderBoard();
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     function appendMessage(message) {
+      if (message.kind === 'reasoning') {
+        appendReasoningMessage(message.text);
+        return;
+      }
       if (message.kind === 'tool_call' && message.payload) {
+        if (message.payload.phase !== 'completed') return;
         appendTool(message.payload);
         return;
       }
       if (message.kind === 'code_block' && message.payload) {
+        if (message.payload.phase !== 'completed') return;
         appendCodeBlock(message.payload);
         return;
       }
+      if (message.payload?.board?.cells) setBoard(message.payload.board);
       const el = document.createElement('div');
       el.className = `msg ${message.role}`;
       el.innerHTML = `<div class="meta"></div><div></div>`;
@@ -1360,25 +1632,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       messagesEl.appendChild(el);
     }
     function appendTool(event) {
-      if (event.phase === 'completed') applyToolBoard(event);
-      const key = callKey(event);
-      const existing = liveTools.get(key);
-      const el = existing || document.createElement('div');
-      const completed = event.phase === 'completed';
-      el.className = 'tool' + (completed && event.success === false ? ' fail' : '');
+      if (event.phase !== 'completed') return;
+      applyToolBoard(event);
+      const el = document.createElement('div');
+      el.className = 'tool' + (event.success === false ? ' fail' : '');
       el.innerHTML = `<div class="tool-head"><strong></strong><span class="badge"></span><span></span></div><div class="tool-summary"></div><details><summary>JSON payload</summary><pre></pre></details>`;
       el.querySelector('strong').textContent = event.name;
-      el.querySelector('.badge').textContent = completed ? 'completed' : 'started';
-      el.querySelector('.tool-head span:last-child').textContent = completed
-        ? `${event.success ? 'ok' : 'failed'} in ${event.duration_ms}ms`
-        : 'waiting for result';
+      el.querySelector('.badge').textContent = 'completed';
+      el.querySelector('.tool-head span:last-child').textContent = `${event.success ? 'ok' : 'failed'} in ${event.duration_ms}ms`;
       const summary = el.querySelector('.tool-summary');
       const raw = event?.result?.raw;
-      if (!completed) {
-        summary.textContent = event.name === 'play_move'
-          ? `Agent is attempting cell ${event.args?.cell ?? '?'}`
-          : 'Agent is inspecting the board state';
-      } else if (event.name === 'play_move') {
+      if (event.name === 'play_move') {
         const terminal = terminalToolSummary(raw?.board);
         summary.textContent = raw?.accepted
           ? `Agent played O in ${cellName(raw.move?.cell)}. ${terminal || raw.board?.status || ''}`
@@ -1386,44 +1650,70 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } else if (event.name === 'read_board') {
         summary.textContent = `${raw?.status || 'Board read'} · legal moves: ${(raw?.legal_moves || []).join(', ') || 'none'}`;
       } else {
-        summary.textContent = completed ? 'Tool completed' : 'Tool started';
+        summary.textContent = 'Tool completed';
       }
       el.querySelector('pre').textContent = JSON.stringify(
         compactToolPayload(event),
         null,
         2
       );
-      if (!existing) messagesEl.appendChild(el);
-      if (completed) liveTools.delete(key); else liveTools.set(key, el);
+      messagesEl.appendChild(el);
     }
     function appendCodeBlock(event) {
-      const el = event.phase === 'completed' && liveCodeBlock
-        ? liveCodeBlock
-        : document.createElement('details');
+      if (event.phase !== 'completed') return;
+      const el = document.createElement('details');
       el.className = 'code-block' + (event.success === false ? ' fail' : '');
-      el.open = event.phase !== 'completed';
+      el.open = false;
       el.innerHTML = '<summary></summary><pre></pre>';
-      const label = event.phase === 'completed'
-        ? `${event.language || 'code'} ${event.success ? 'completed' : 'failed'} in ${event.duration_ms || 0}ms`
-        : `${event.language || 'code'} running`;
+      const label = `${event.language || 'code'} ${event.success ? 'completed' : 'failed'} in ${event.duration_ms || 0}ms`;
       el.querySelector('summary').textContent = label;
       const code = event.code || el.querySelector('pre').textContent || '';
       el.querySelector('pre').textContent = code;
-      if (!el.parentNode) messagesEl.appendChild(el);
-      liveCodeBlock = event.phase === 'completed' ? null : el;
+      messagesEl.appendChild(el);
+    }
+    function appendCompletedTool(event) {
+      if (pendingCodeBlock) {
+        pendingTools.push(event);
+      } else {
+        appendTool(event);
+      }
+    }
+    function completeCodeBlock(event) {
+      appendCodeBlock({ ...event, phase:'completed', code: event.code || pendingCodeBlock?.code || '' });
+      pendingCodeBlock = null;
+      for (const tool of pendingTools) appendTool(tool);
+      pendingTools = [];
+    }
+    function thinkingPanel(label) {
+      const el = document.createElement('details');
+      el.className = 'reasoning';
+      el.open = true;
+      el.innerHTML = '<summary></summary><pre></pre>';
+      el.querySelector('summary').textContent = label;
+      return el;
     }
     function appendReasoning(delta) {
       if (!reasoning) {
-        reasoning = document.createElement('details');
-        reasoning.className = 'reasoning';
-        reasoning.open = true;
-        reasoning.innerHTML = '<summary>reasoning</summary><pre></pre>';
+        reasoning = thinkingPanel('thinking');
         messagesEl.appendChild(reasoning);
       }
       reasoning.querySelector('pre').textContent += delta;
     }
-    function collapseReasoning() {
-      if (reasoning) reasoning.open = false;
+    function appendReasoningMessage(text) {
+      if (!text) return;
+      if (reasoning) {
+        reasoning.open = true;
+        reasoning.querySelector('summary').textContent = 'thinking';
+        reasoning.querySelector('pre').textContent = text;
+        reasoning.dataset.persisted = 'true';
+        reasoning = null;
+        return;
+      }
+      const el = thinkingPanel('thinking');
+      el.querySelector('pre').textContent = text;
+      messagesEl.appendChild(el);
+    }
+    function finishReasoning() {
       reasoning = null;
     }
     function appendStreamText(delta) {
@@ -1442,8 +1732,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.querySelector('#text').value = '';
       streaming = null;
       reasoning = null;
-      liveCodeBlock = null;
-      liveTools.clear();
+      pendingCodeBlock = null;
+      pendingTools = [];
       busy = true;
       renderBoard();
       const res = await api(`/api/chats/${activeChat}/messages`, {
@@ -1468,16 +1758,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
           if (item.type === 'message') appendMessage(item.message);
           if (item.type === 'event' && item.event.type === 'assistant_prose_delta') appendStreamText(item.event.text);
           if (item.type === 'event' && item.event.type === 'reasoning_delta') appendReasoning(item.event.text);
-          if (item.type === 'event' && item.event.type === 'code_block_started') appendCodeBlock({ ...item.event, phase:'started' });
-          if (item.type === 'event' && item.event.type === 'tool_call_started') appendTool({ ...item.event, phase:'started' });
-          if (item.type === 'event' && item.event.type === 'tool_call_completed') appendTool({ ...item.event, phase:'completed' });
+          if (item.type === 'event' && item.event.type === 'code_block_started') pendingCodeBlock = item.event;
+          if (item.type === 'event' && item.event.type === 'code_block_completed') completeCodeBlock(item.event);
+          if (item.type === 'event' && item.event.type === 'tool_call_completed') appendCompletedTool({ ...item.event, phase:'completed' });
           if (item.type === 'event' && item.event.type === 'terminal_output') appendStreamText(renderTerminalOutput(item.event.value));
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }
       }
       streaming = null;
-      collapseReasoning();
+      for (const tool of pendingTools) appendTool(tool);
+      pendingCodeBlock = null;
+      pendingTools = [];
+      finishReasoning();
       busy = false;
       renderBoard();
       await loadChats();

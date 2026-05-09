@@ -160,17 +160,18 @@ impl RuntimeTurnDriver {
 
         let mut text_streamed = false;
         let mut streamed_usage = LlmUsage::default();
-        let mut streamed_output = StandardStreamFallback::default();
+        let mut stream_accumulator = StandardStreamAccumulator::default();
         let mut abort_requested = false;
-        let buffer_stream_fallback = self.policy.provider.requires_streaming()
-            || self.session.plugins().has_assistant_stream_hooks();
+        let mut assistant_prose_correlation = None;
+        let mut reasoning_correlation = None;
         let mut stream_state = StandardStreamState {
             text_streamed: &mut text_streamed,
             streamed_usage: &mut streamed_usage,
-            streamed_output: &mut streamed_output,
-            buffer_stream_fallback,
+            stream_accumulator: &mut stream_accumulator,
             debug: &mut debug,
             mode_iteration,
+            assistant_prose_correlation: &mut assistant_prose_correlation,
+            reasoning_correlation: &mut reasoning_correlation,
             abort_requested: &mut abort_requested,
         };
         let result = loop {
@@ -216,14 +217,14 @@ impl RuntimeTurnDriver {
 
                         let mut resp = LlmResponse {
                             deltas: Vec::new(),
-                            full_text: streamed_output.full_text(),
+                            full_text: stream_accumulator.full_text(),
                             parts: Vec::new(),
                             usage: streamed_usage.clone(),
                             provider_usage: None,
                             request_body: None,
                             http_summary: None,
                         };
-                        streamed_output.apply_to_response(&mut resp);
+                        stream_accumulator.apply_to_response(&mut resp);
                         let resp = match self.transform_assistant_response(event_tx, resp).await {
                             Ok(resp) => resp,
                             Err(err) => break Err(err),
@@ -255,7 +256,7 @@ impl RuntimeTurnDriver {
                             if response_usage_is_empty(&resp.usage) {
                                 resp.usage = streamed_usage.clone();
                             }
-                            streamed_output.apply_to_response(&mut resp);
+                            stream_accumulator.apply_to_response(&mut resp);
                             let resp = match self.transform_assistant_response(event_tx, resp).await {
                                 Ok(resp) => resp,
                                 Err(err) => break Err(err),
@@ -511,14 +512,12 @@ impl RuntimeTurnDriver {
                         *state.abort_requested = true;
                     }
                     for reasoning_delta in outcome.reasoning_deltas {
-                        if state.buffer_stream_fallback {
-                            state.streamed_output.push_reasoning(
-                                reasoning_delta.clone(),
-                                None,
-                                Vec::new(),
-                                None,
-                            );
-                        }
+                        state.stream_accumulator.push_reasoning(
+                            reasoning_delta.clone(),
+                            None,
+                            Vec::new(),
+                            None,
+                        );
                         send_session_event(
                             event_tx,
                             SessionEvent::ReasoningDelta {
@@ -526,8 +525,11 @@ impl RuntimeTurnDriver {
                             },
                         )
                         .await;
-                        send_turn_event(
+                        let correlation_id =
+                            stream_correlation_id(state.reasoning_correlation, None);
+                        send_turn_activity(
                             event_tx,
+                            correlation_id,
                             TurnEvent::ReasoningDelta {
                                 text: reasoning_delta,
                             },
@@ -550,9 +552,7 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !delta.is_empty() {
-                        if state.buffer_stream_fallback {
-                            state.streamed_output.push_text(&delta);
-                        }
+                        state.stream_accumulator.push_text(&delta);
                         send_session_event(
                             event_tx,
                             SessionEvent::TextDelta {
@@ -560,8 +560,14 @@ impl RuntimeTurnDriver {
                             },
                         )
                         .await;
-                        send_turn_event(event_tx, TurnEvent::AssistantProseDelta { text: delta })
-                            .await;
+                        let correlation_id =
+                            stream_correlation_id(state.assistant_prose_correlation, None);
+                        send_turn_activity(
+                            event_tx,
+                            correlation_id,
+                            TurnEvent::AssistantProseDelta { text: delta },
+                        )
+                        .await;
                     }
                 }
             }
@@ -584,11 +590,9 @@ impl RuntimeTurnDriver {
                     // Delta-only streaming path (fix 1.3a display). No
                     // encrypted content yet — that arrives with the full
                     // item on `output_item.done` (fix 1.3b).
-                    if state.buffer_stream_fallback {
-                        state
-                            .streamed_output
-                            .push_reasoning(delta.clone(), None, Vec::new(), None);
-                    }
+                    state
+                        .stream_accumulator
+                        .push_reasoning(delta.clone(), None, Vec::new(), None);
                     send_session_event(
                         event_tx,
                         SessionEvent::ReasoningDelta {
@@ -596,7 +600,13 @@ impl RuntimeTurnDriver {
                         },
                     )
                     .await;
-                    send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: delta }).await;
+                    let correlation_id = stream_correlation_id(state.reasoning_correlation, None);
+                    send_turn_activity(
+                        event_tx,
+                        correlation_id,
+                        TurnEvent::ReasoningDelta { text: delta },
+                    )
+                    .await;
                 }
             }
             LlmStreamEvent::Part(LlmOutputPart::Text {
@@ -614,14 +624,12 @@ impl RuntimeTurnDriver {
                         *state.abort_requested = true;
                     }
                     for reasoning_delta in outcome.reasoning_deltas {
-                        if state.buffer_stream_fallback {
-                            state.streamed_output.push_reasoning(
-                                reasoning_delta.clone(),
-                                None,
-                                Vec::new(),
-                                None,
-                            );
-                        }
+                        state.stream_accumulator.push_reasoning(
+                            reasoning_delta.clone(),
+                            None,
+                            Vec::new(),
+                            None,
+                        );
                         send_session_event(
                             event_tx,
                             SessionEvent::ReasoningDelta {
@@ -629,8 +637,11 @@ impl RuntimeTurnDriver {
                             },
                         )
                         .await;
-                        send_turn_event(
+                        let correlation_id =
+                            stream_correlation_id(state.reasoning_correlation, None);
+                        send_turn_activity(
                             event_tx,
+                            correlation_id,
                             TurnEvent::ReasoningDelta {
                                 text: reasoning_delta,
                             },
@@ -653,9 +664,7 @@ impl RuntimeTurnDriver {
                         },
                     );
                     if !text.is_empty() {
-                        if state.buffer_stream_fallback {
-                            state.streamed_output.push_text(&text);
-                        }
+                        state.stream_accumulator.push_text(&text);
                         send_session_event(
                             event_tx,
                             SessionEvent::TextDelta {
@@ -663,7 +672,14 @@ impl RuntimeTurnDriver {
                             },
                         )
                         .await;
-                        send_turn_event(event_tx, TurnEvent::AssistantProseDelta { text }).await;
+                        let correlation_id =
+                            stream_correlation_id(state.assistant_prose_correlation, item_id);
+                        send_turn_activity(
+                            event_tx,
+                            correlation_id,
+                            TurnEvent::AssistantProseDelta { text },
+                        )
+                        .await;
                     }
                 }
             }
@@ -692,11 +708,9 @@ impl RuntimeTurnDriver {
                         }),
                     },
                 );
-                if state.buffer_stream_fallback {
-                    state
-                        .streamed_output
-                        .push_tool_call(call_id, tool_name, input_json, item_id, signature);
-                }
+                state
+                    .stream_accumulator
+                    .push_tool_call(call_id, tool_name, input_json, item_id, signature);
             }
             LlmStreamEvent::Part(LlmOutputPart::Reasoning {
                 text,
@@ -728,14 +742,18 @@ impl RuntimeTurnDriver {
                         },
                     )
                     .await;
-                    send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: text.clone() })
-                        .await;
+                    let correlation_id =
+                        stream_correlation_id(state.reasoning_correlation, item_id.as_deref());
+                    send_turn_activity(
+                        event_tx,
+                        correlation_id,
+                        TurnEvent::ReasoningDelta { text: text.clone() },
+                    )
+                    .await;
                 }
-                if state.buffer_stream_fallback {
-                    state
-                        .streamed_output
-                        .push_reasoning(text, item_id, summary, encrypted_content);
-                }
+                state
+                    .stream_accumulator
+                    .push_reasoning(text, item_id, summary, encrypted_content);
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(
@@ -818,17 +836,16 @@ fn provider_output_index(value: &serde_json::Value) -> Option<i64> {
         .and_then(|value| value.as_i64())
 }
 
-pub(in crate::runtime) fn llm_response_has_content(response: &LlmResponse) -> bool {
-    if !response.full_text.is_empty() {
-        return true;
+fn stream_correlation_id(
+    fallback_slot: &mut Option<TurnActivityId>,
+    provider_item_id: Option<&str>,
+) -> TurnActivityId {
+    if let Some(provider_item_id) = provider_item_id {
+        return TurnActivityId::new(provider_item_id.to_string());
     }
-    response.parts.iter().any(|part| match part {
-        LlmOutputPart::Text { text, .. } => !text.is_empty(),
-        // Reasoning-only responses still count as "has content" so the
-        // adapter's stream-fallback buffer is preserved for replay.
-        LlmOutputPart::Reasoning { .. } => true,
-        LlmOutputPart::ToolCall { .. } => true,
-    })
+    fallback_slot
+        .get_or_insert_with(TurnActivityId::fresh)
+        .clone()
 }
 
 /// Wait up to 2s for a late `Usage` event from the provider after an

@@ -6,11 +6,33 @@ license.workspace = true
 
 [features]
 default = []
-fff-zlob = ["lash/fff-zlob"]
+fff-zlob = ["fff-search/zlob"]
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash = { path = "../lash", default-features = false }
+lash-rlm-types = { path = "../lash-rlm-types" }
 lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory" }
 lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history" }
 lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery" }
+
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+tempfile = "3"
+chrono = "0.4"
+similar = "2"
+libc = "0.2"
+
+globset = "0.4"
+ignore = "0.4"
+pdf-extract = "0.7"
+portable-pty = "0.9"
+fff-search = { version = "0.6.2-nightly.a677d64", default-features = false }
+
+[dev-dependencies]
+lash = { path = "../lash", default-features = false, features = ["testing"] }

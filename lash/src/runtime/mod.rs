@@ -60,7 +60,7 @@ pub use lash_sansio::PromptUsage;
 
 use assembly::{
     LlmDebugText, LlmDebugToolCall, LlmStreamDebugState, LlmStreamEventLog, LlmStreamSummary,
-    StandardStreamFallback, StandardStreamState, TurnAssembler,
+    StandardStreamAccumulator, StandardStreamState, TurnAssembler,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -123,8 +123,6 @@ pub struct TurnInput {
     pub items: Vec<InputItem>,
     #[serde(default)]
     pub image_blobs: HashMap<String, Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_input: Option<crate::UserInputProvenance>,
     #[serde(default)]
     pub mode: Option<RunMode>,
     /// Per-turn override for mode-owned turn options.
@@ -354,8 +352,6 @@ pub struct AssembledTurn {
     pub state: SessionStateEnvelope,
     pub outcome: crate::TurnOutcome,
     pub assistant_output: AssistantOutput,
-    #[serde(default)]
-    pub has_plugin_visible_output: bool,
     pub execution: ExecutionSummary,
     #[serde(default)]
     pub token_usage: TokenUsage,
@@ -462,10 +458,54 @@ pub struct ToolResultView {
     pub for_state: serde_json::Value,
 }
 
-/// App-facing semantic stream for a turn.
+/// Stable identifier for a semantic turn activity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct TurnActivityId(pub String);
+
+impl TurnActivityId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+}
+
+/// App-facing semantic activity emitted during a turn.
+///
+/// `id` is unique per emitted activity event. `correlation_id` groups related
+/// events in the same logical activity, such as code start/completion, tool
+/// start/completion, or text deltas from one output block.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TurnActivity {
+    pub id: TurnActivityId,
+    pub correlation_id: TurnActivityId,
+    #[serde(flatten)]
+    pub event: TurnEvent,
+}
+
+impl TurnActivity {
+    pub fn new(correlation_id: TurnActivityId, event: TurnEvent) -> Self {
+        Self {
+            id: TurnActivityId::fresh(),
+            correlation_id,
+            event,
+        }
+    }
+
+    pub fn independent(event: TurnEvent) -> Self {
+        let correlation_id = TurnActivityId::fresh();
+        Self::new(correlation_id, event)
+    }
+}
+
+/// App-facing semantic event payload for a turn activity.
 ///
 /// Unlike [`SessionEvent`], these events are stable application signals rather
-/// than low-level runtime/debug events.
+/// than low-level runtime/debug events. Public streams carry these payloads
+/// inside [`TurnActivity`] so every emitted item has identity.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
@@ -502,8 +542,11 @@ pub enum TurnEvent {
         success: bool,
         duration_ms: u64,
     },
-    TerminalOutput {
-        source: crate::TerminalOutputSource,
+    SubmittedValue {
+        value: serde_json::Value,
+    },
+    ToolValue {
+        tool_name: String,
         value: serde_json::Value,
     },
     Usage {
@@ -535,28 +578,28 @@ pub enum TurnEvent {
 }
 
 #[async_trait::async_trait]
-pub trait TurnEventSink: Send + Sync {
+pub trait TurnActivitySink: Send + Sync {
     fn is_noop(&self) -> bool {
         false
     }
 
-    async fn emit(&self, event: TurnEvent);
+    async fn emit(&self, activity: TurnActivity);
 }
 
-pub struct NoopTurnEventSink;
+pub struct NoopTurnActivitySink;
 
 #[async_trait::async_trait]
-impl TurnEventSink for NoopTurnEventSink {
+impl TurnActivitySink for NoopTurnActivitySink {
     fn is_noop(&self) -> bool {
         true
     }
 
-    async fn emit(&self, _event: TurnEvent) {}
+    async fn emit(&self, _activity: TurnActivity) {}
 }
 
 enum RuntimeStreamEvent {
     Session(SessionEvent),
-    Turn(TurnEvent),
+    Turn(TurnActivity),
 }
 
 #[derive(Clone)]

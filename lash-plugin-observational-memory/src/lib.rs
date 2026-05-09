@@ -1106,7 +1106,6 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string(),
             transient: true,
@@ -1532,7 +1531,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
         }

@@ -44,6 +44,21 @@ fn sanitize_surrogates(s: &str) -> &str {
     s
 }
 
+fn emit_provider_request_trace(
+    provider_trace: Option<&lash::llm::types::LlmProviderTraceSender>,
+    endpoint: &str,
+    body: &Value,
+) {
+    let raw = json!({
+        "type": "openai_compatible.request_body",
+        "endpoint": endpoint,
+        "body": body,
+    });
+    if let Ok(raw) = serde_json::to_string(&raw) {
+        emit_provider_trace(provider_trace, "openai_compatible", &raw);
+    }
+}
+
 fn extract_error_detail(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -943,9 +958,13 @@ impl OpenAiGenericProvider {
                     .request_variant_config(&req.model, variant)
             && effort != "none"
         {
-            body["reasoning"] = json!({
+            let mut reasoning = json!({
                 "effort": Self::clamp_reasoning_effort(&req.model, &effort),
             });
+            if self.options.thinking.expose {
+                reasoning["summary"] = json!("auto");
+            }
+            body["reasoning"] = reasoning;
         }
         if let Some(output_spec) = &req.output_spec {
             let format = match output_spec {
@@ -1577,6 +1596,22 @@ impl OpenAiGenericProvider {
     fn responses_error_is_retryable(value: &Value) -> bool {
         matches!(Self::retryable_error_code(value), Some(429))
             || matches!(Self::retryable_error_code(value), Some(status) if status >= 500)
+            || value
+                .get("code")
+                .or_else(|| value.get("type"))
+                .or_else(|| value.get("status"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|code| {
+                    matches!(
+                        code,
+                        "server_error"
+                            | "internal_server_error"
+                            | "service_unavailable"
+                            | "temporarily_unavailable"
+                            | "overloaded"
+                            | "rate_limit_exceeded"
+                    )
+                })
     }
 
     fn error_message_from_response_failed(event: &Value) -> String {
@@ -1848,6 +1883,7 @@ impl OpenAiGenericProvider {
         let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
         let body = self.build_responses_request_body(&req, stream_events.is_some())?;
+        emit_provider_request_trace(provider_trace.as_ref(), "responses", &body);
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Responses body: {e}"))
         })?;
@@ -1940,11 +1976,13 @@ impl OpenAiGenericProvider {
                 if state.usage != LlmUsage::default() {
                     tx.send(LlmStreamEvent::Usage(state.usage.clone()));
                 }
-                for part in &parts {
-                    if let LlmOutputPart::Reasoning { text, .. } = part
-                        && !text.is_empty()
-                    {
-                        tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
+                if self.options.thinking.expose {
+                    for part in &parts {
+                        if let LlmOutputPart::Reasoning { text, .. } = part
+                            && !text.is_empty()
+                        {
+                            tx.send(LlmStreamEvent::ReasoningDelta(text.clone()));
+                        }
                     }
                 }
                 if !state.full_text.is_empty() {
@@ -1967,6 +2005,7 @@ impl OpenAiGenericProvider {
 
         let mut state = ResponsesStreamState::default();
         let mut emitted_parts = Vec::new();
+        let expose_thinking = self.options.thinking.expose;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,
@@ -1985,9 +2024,14 @@ impl OpenAiGenericProvider {
                 );
                 if let Some(tx) = &stream_events {
                     for delta in state.take_reasoning_deltas() {
-                        tx.send(LlmStreamEvent::ReasoningDelta(delta));
+                        if expose_thinking {
+                            tx.send(LlmStreamEvent::ReasoningDelta(delta));
+                        }
                     }
                     for part in emitted_parts.drain(..) {
+                        if matches!(part, LlmOutputPart::Reasoning { .. }) && !expose_thinking {
+                            continue;
+                        }
                         tx.send(LlmStreamEvent::Part(part));
                     }
                 } else {
@@ -2028,6 +2072,7 @@ impl OpenAiGenericProvider {
         let provider_trace = req.provider_trace.clone();
         let timeouts = self.options.llm_timeouts();
         let body = self.build_chat_request_body(&req, stream_events.is_some())?;
+        emit_provider_request_trace(provider_trace.as_ref(), "chat/completions", &body);
         let body_bytes = serde_json::to_vec(&body).map_err(|e| {
             LlmTransportError::new(format!("Failed to serialize Chat Completions body: {e}"))
         })?;
@@ -2134,11 +2179,13 @@ impl OpenAiGenericProvider {
                 if !state.full_text.is_empty() {
                     tx.send(LlmStreamEvent::Delta(state.full_text.clone()));
                 }
-                for part in parts
-                    .iter()
-                    .filter(|part| matches!(part, LlmOutputPart::Reasoning { .. }))
-                {
-                    tx.send(LlmStreamEvent::Part(part.clone()));
+                if self.options.thinking.expose {
+                    for part in parts
+                        .iter()
+                        .filter(|part| matches!(part, LlmOutputPart::Reasoning { .. }))
+                    {
+                        tx.send(LlmStreamEvent::Part(part.clone()));
+                    }
                 }
                 for part in parts
                     .iter()
@@ -2162,6 +2209,7 @@ impl OpenAiGenericProvider {
         }
 
         let mut state = ChatStreamState::default();
+        let expose_thinking = self.options.thinking.expose;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,
@@ -2180,7 +2228,9 @@ impl OpenAiGenericProvider {
                 );
                 if let Some(tx) = &stream_events {
                     for delta in state.take_reasoning_deltas() {
-                        tx.send(LlmStreamEvent::ReasoningDelta(delta));
+                        if expose_thinking {
+                            tx.send(LlmStreamEvent::ReasoningDelta(delta));
+                        }
                     }
                 } else {
                     state.take_reasoning_deltas();
@@ -2378,15 +2428,6 @@ impl ProviderFactory for OpenAiGenericProviderFactory {
     fn kind(&self) -> &'static str {
         "openai-compatible"
     }
-    fn cli_label(&self) -> &'static str {
-        "OpenAI-compatible (API key)"
-    }
-    fn setup_name(&self) -> &'static str {
-        "OpenAI-compatible"
-    }
-    fn setup_description(&self) -> &'static str {
-        "Any OpenAI-compatible API endpoint"
-    }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: OpenAiProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
@@ -2439,6 +2480,34 @@ mod tests {
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn responses_body_does_not_request_reasoning_summaries_by_default() {
+        let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model = "openai/gpt-5.5".to_string();
+        req.model_variant = Some("medium".to_string());
+
+        let body = provider.build_responses_request_body(&req, true).unwrap();
+
+        assert_eq!(body["reasoning"], json!({ "effort": "medium" }));
+    }
+
+    #[test]
+    fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() {
+        let provider =
+            OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL).with_options(ProviderOptions {
+                thinking: lash::provider::ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
+            });
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.model = "openai/gpt-5.5".to_string();
+        req.model_variant = Some("medium".to_string());
+
+        let body = provider.build_responses_request_body(&req, true).unwrap();
+
+        assert_eq!(body["reasoning"]["summary"], "auto");
     }
 
     #[test]
@@ -3014,5 +3083,19 @@ mod tests {
                 ..
             } if id == "fc_1" && input_json == "{\"x\":1}"
         ));
+    }
+
+    #[test]
+    fn response_failed_server_error_is_retryable() {
+        let mut state = ResponsesStreamState::default();
+        let err = OpenAiGenericProvider::process_sse_event(
+            r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"internal stream ended unexpectedly"}}}"#,
+            &mut state,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.retryable);
+        assert_eq!(err.message, "internal stream ended unexpectedly");
     }
 }

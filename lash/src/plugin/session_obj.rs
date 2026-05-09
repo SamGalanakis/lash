@@ -108,7 +108,7 @@ fn append_plugin_messages(
     let new_messages = plugin_messages
         .iter()
         .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
-        .map(|message| plugin_message_to_message(message, message.user_input.clone()))
+        .map(plugin_message_to_message)
         .collect::<Vec<_>>();
     if !new_messages.is_empty() {
         messages.extend(new_messages);
@@ -129,7 +129,7 @@ pub struct PluginSession {
     pub(super) execution_mode: ExecutionMode,
     pub(super) plugins: Vec<Arc<dyn SessionPlugin>>,
     pub(super) tools: Arc<dyn ToolProvider>,
-    pub(super) dynamic_tools: Option<Arc<crate::DynamicToolProvider>>,
+    pub(super) tool_registry: Arc<crate::ToolRegistry>,
     pub(super) tool_surface_overlay: ToolSurfaceContribution,
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionAuthority>,
@@ -180,8 +180,8 @@ impl PluginSession {
         Arc::clone(&self.tools)
     }
 
-    pub fn dynamic_tools(&self) -> Option<Arc<crate::DynamicToolProvider>> {
-        self.dynamic_tools.clone()
+    pub fn tool_registry(&self) -> Arc<crate::ToolRegistry> {
+        Arc::clone(&self.tool_registry)
     }
 
     pub(crate) fn mode_session(&self) -> &Arc<dyn ModeSessionPlugin> {
@@ -229,7 +229,7 @@ impl PluginSession {
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
         let surface = self.tool_surface(session_id, mode.clone());
         let mut catalog =
-            crate::tools::project_tool_catalog(surface.discoverable_tools_iter().cloned());
+            crate::tool_registry::project_tool_catalog(surface.discoverable_tools_iter().cloned());
         let contributions = collect_owned_sync(
             &self.tool_discovery_contributors,
             ToolDiscoveryContext {
@@ -860,7 +860,7 @@ impl PluginSession {
             standard_context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
-            self.tools.dynamic_snapshot(),
+            Some(self.tool_registry.export_state()),
         )
     }
 
@@ -880,7 +880,7 @@ impl PluginSession {
             standard_context_approach,
             Some(&snapshot),
             self.tool_surface_overlay.clone(),
-            self.tools.dynamic_snapshot(),
+            Some(self.tool_registry.export_state()),
             authority,
         )
     }
@@ -899,7 +899,7 @@ impl PluginSession {
             standard_context_approach,
             Some(&snapshot),
             tool_surface_overlay,
-            self.tools.dynamic_snapshot(),
+            Some(self.tool_registry.export_state()),
         )
     }
 

@@ -417,9 +417,7 @@ pub(super) async fn handle_change_provider(
 }
 
 fn kind_cli_label(kind: &str) -> &'static str {
-    lash::provider_factory(kind)
-        .map(|f| f.cli_label())
-        .unwrap_or("Provider")
+    crate::provider_metadata::provider_cli_label(kind)
 }
 
 pub(super) fn handle_logout(app: &mut App, provider: &ProviderHandle) -> anyhow::Result<bool> {

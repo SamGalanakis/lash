@@ -15,16 +15,114 @@ fn default_state() -> PersistedSessionState {
 }
 
 #[test]
-fn stream_fallback_merges_adjacent_display_reasoning_chunks() {
-    let mut fallback = StandardStreamFallback::default();
-    fallback.push_reasoning("I'll".to_string(), None, Vec::new(), None);
-    fallback.push_reasoning(" check".to_string(), None, Vec::new(), None);
-    fallback.push_reasoning(" the time.".to_string(), None, Vec::new(), None);
+fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
+    let mut accumulator = StandardStreamAccumulator::default();
+    accumulator.push_reasoning("I'll".to_string(), None, Vec::new(), None);
+    accumulator.push_reasoning(" check".to_string(), None, Vec::new(), None);
+    accumulator.push_reasoning(" the time.".to_string(), None, Vec::new(), None);
 
-    assert_eq!(fallback.parts.len(), 1);
+    assert_eq!(accumulator.parts.len(), 1);
     assert!(matches!(
-        &fallback.parts[0],
+        &accumulator.parts[0],
         LlmOutputPart::Reasoning { text, .. } if text == "I'll check the time."
+    ));
+}
+
+#[test]
+fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
+    let mut accumulator = StandardStreamAccumulator::default();
+    accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
+    accumulator.push_reasoning(
+        "I'll check the time.".to_string(),
+        Some("rs_1".to_string()),
+        vec!["I'll check the time.".to_string()],
+        Some("encrypted".to_string()),
+    );
+
+    assert_eq!(accumulator.parts.len(), 1);
+    assert!(matches!(
+        &accumulator.parts[0],
+        LlmOutputPart::Reasoning {
+            text,
+            item_id: Some(item_id),
+            encrypted_content: Some(encrypted),
+            ..
+        } if text == "I'll check the time." && item_id == "rs_1" && encrypted == "encrypted"
+    ));
+}
+
+#[test]
+fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
+    let mut accumulator = StandardStreamAccumulator::default();
+    accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
+    accumulator.push_tool_call(
+        "call_1".to_string(),
+        "exec_command".to_string(),
+        "{\"cmd\":\"date\"}".to_string(),
+        Some("item_1".to_string()),
+        Some("sig".to_string()),
+    );
+
+    let mut response = LlmResponse {
+        full_text: String::new(),
+        parts: vec![LlmOutputPart::ToolCall {
+            call_id: "call_1".to_string(),
+            tool_name: "exec_command".to_string(),
+            input_json: "{\"cmd\":\"date\"}".to_string(),
+            item_id: Some("item_1".to_string()),
+            signature: Some("sig".to_string()),
+        }],
+        ..Default::default()
+    };
+
+    accumulator.apply_to_response(&mut response);
+
+    assert_eq!(response.parts.len(), 2);
+    assert!(matches!(
+        &response.parts[0],
+        LlmOutputPart::Reasoning { text, .. } if text == "I'll check the time."
+    ));
+    assert!(matches!(
+        &response.parts[1],
+        LlmOutputPart::ToolCall { tool_name, .. } if tool_name == "exec_command"
+    ));
+}
+
+#[test]
+fn stream_accumulator_does_not_duplicate_complete_final_response() {
+    let mut accumulator = StandardStreamAccumulator::default();
+    accumulator.push_reasoning("I'll answer.".to_string(), None, Vec::new(), None);
+    accumulator.push_text("Done.");
+
+    let mut response = LlmResponse {
+        full_text: "Done.".to_string(),
+        parts: vec![
+            LlmOutputPart::Reasoning {
+                text: "I'll answer.".to_string(),
+                signature: None,
+                redacted: false,
+                item_id: None,
+                encrypted_content: None,
+                summary: Vec::new(),
+            },
+            LlmOutputPart::Text {
+                text: "Done.".to_string(),
+                response_meta: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    accumulator.apply_to_response(&mut response);
+
+    assert_eq!(response.parts.len(), 2);
+    assert!(matches!(
+        &response.parts[0],
+        LlmOutputPart::Reasoning { text, .. } if text == "I'll answer."
+    ));
+    assert!(matches!(
+        &response.parts[1],
+        LlmOutputPart::Text { text, .. } if text == "Done."
     ));
 }
 
@@ -92,18 +190,18 @@ impl RecordingSink {
 
 #[derive(Clone, Default)]
 struct RecordingTurnEvents {
-    events: Arc<Mutex<Vec<TurnEvent>>>,
+    events: Arc<Mutex<Vec<TurnActivity>>>,
 }
 
 #[async_trait::async_trait]
-impl TurnEventSink for RecordingTurnEvents {
-    async fn emit(&self, event: TurnEvent) {
-        self.events.lock().expect("lock turn events").push(event);
+impl TurnActivitySink for RecordingTurnEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        self.events.lock().expect("lock turn events").push(activity);
     }
 }
 
 impl RecordingTurnEvents {
-    fn snapshot(&self) -> Vec<TurnEvent> {
+    fn snapshot(&self) -> Vec<TurnActivity> {
         self.events.lock().expect("lock turn events").clone()
     }
 }
@@ -201,7 +299,7 @@ impl crate::store::RuntimePersistence for RecordingStore {
         let checkpoint_ref = crate::BlobRef(format!("recording-checkpoint-{}", actual + 1));
         let manifest = crate::store::SessionCheckpoint {
             turn_state: commit.checkpoint.turn_state.clone(),
-            dynamic_state_ref: commit.checkpoint.dynamic_state_ref.clone(),
+            tool_state_ref: commit.checkpoint.tool_state_ref.clone(),
             plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref.clone(),
             plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
             execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
@@ -363,54 +461,6 @@ fn plugin_session_with_tools(
         .expect("plugins")
 }
 
-#[cfg(feature = "tool-impls")]
-fn default_tool_session(
-    session_id: &str,
-    mode: ExecutionMode,
-    enable_user_prompts: bool,
-) -> Arc<crate::PluginSession> {
-    let mut factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
-        Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::rolling_history()),
-        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::observational_memory()),
-        Arc::new(StaticPluginFactory::new(
-            "shell",
-            crate::PluginSpec::new()
-                .with_tool_provider(Arc::new(crate::tools::StandardShell::new()))
-                .with_prompt_contributor(Arc::new(move |_ctx| {
-                    Box::pin(async move { Ok(crate::tools::shell_prompt_contributions()) })
-                })),
-        )),
-        Arc::new(StaticPluginFactory::new(
-            "apply_patch",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::ApplyPatchTool)),
-        )),
-        Arc::new(crate::tools::ReadFilePluginFactory::new(None)),
-        Arc::new(StaticPluginFactory::new(
-            "glob",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Glob)),
-        )),
-        Arc::new(StaticPluginFactory::new(
-            "grep",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Grep::new())),
-        )),
-        Arc::new(StaticPluginFactory::new(
-            "ls",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Ls)),
-        )),
-    ];
-    let _ = enable_user_prompts;
-    crate::PluginHost::new(factories)
-        .build_session(
-            session_id,
-            mode.clone(),
-            (mode == crate::ExecutionMode::standard())
-                .then(crate::StandardContextApproach::default),
-            None,
-        )
-        .expect("plugins")
-}
-
 struct EmptyTools;
 
 #[async_trait::async_trait]
@@ -461,7 +511,7 @@ fn plugin_host_rejects_observational_memory_without_supporting_plugin() {
     };
     assert!(
         err.to_string().contains(
-            "standard context approach `observational_memory` requires a supporting plugin factory"
+            "standard context approach `ObservationalMemory` requires a supporting plugin factory"
         ),
         "unexpected error: {err}"
     );
@@ -581,108 +631,6 @@ async fn runtime_requires_explicit_max_context_tokens() {
         Err(other) => panic!("unexpected session error: {other}"),
         Ok(_) => panic!("runtime should reject implicit model metadata"),
     }
-}
-
-#[cfg(feature = "tool-impls")]
-fn rlm_test_policy() -> SessionPolicy {
-    SessionPolicy {
-        execution_mode: ExecutionMode::new("rlm"),
-        provider: mock_provider(Vec::new()).into_handle(),
-        model: "mock-model".to_string(),
-        max_context_tokens: Some(200_000),
-        standard_context_approach: None,
-        ..SessionPolicy::default()
-    }
-}
-
-#[cfg(feature = "tool-impls")]
-async fn rlm_mode_with_transport(transport: TestProvider) -> LashRuntime {
-    let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
-    let mut runtime = LashRuntime::from_embedded_state(
-        rlm_test_policy(),
-        test_host_config(),
-        crate::RuntimeServices::new_with_bridges(
-            plugins,
-            crate::TurnInjectionBridge::new(),
-            crate::TurnInputInjectionBridge::new(),
-        ),
-        PersistedSessionState::from_state(SessionStateEnvelope {
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::new("rlm"),
-                standard_context_approach: None,
-                ..Default::default()
-            },
-            ..SessionStateEnvelope::default()
-        }),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
-}
-
-#[cfg(feature = "tool-impls")]
-async fn rlm_mode_with_transport_and_store(
-    transport: TestProvider,
-    store: Arc<dyn crate::store::RuntimePersistence>,
-) -> LashRuntime {
-    let plugins = default_tool_session("root", ExecutionMode::new("rlm"), true);
-    let mut runtime = LashRuntime::from_persistent_embedded_state(
-        rlm_test_policy(),
-        test_host_config(),
-        crate::PersistentRuntimeServices::new_with_bridges(
-            plugins,
-            crate::TurnInjectionBridge::new(),
-            crate::TurnInputInjectionBridge::new(),
-            store,
-        ),
-        PersistedSessionState::from_state(SessionStateEnvelope {
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::new("rlm"),
-                standard_context_approach: None,
-                ..Default::default()
-            },
-            ..SessionStateEnvelope::default()
-        }),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
-}
-
-#[cfg(feature = "tool-impls")]
-#[tokio::test]
-async fn active_tool_catalog_uses_runtime_execution_mode() {
-    let runtime = LashRuntime::from_embedded_state(
-        rlm_test_policy(),
-        test_host_config(),
-        crate::RuntimeServices::new(default_tool_session(
-            "root",
-            ExecutionMode::new("rlm"),
-            false,
-        )),
-        PersistedSessionState::from_state(SessionStateEnvelope {
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::new("rlm"),
-                standard_context_approach: None,
-                ..Default::default()
-            },
-            ..SessionStateEnvelope::default()
-        }),
-    )
-    .await
-    .expect("runtime");
-    let catalog = runtime.active_tool_catalog();
-    let names: Vec<&str> = catalog
-        .iter()
-        .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
-        .collect();
-    assert!(names.contains(&"exec_command"));
-    assert!(names.contains(&"start_command"));
-    assert!(names.contains(&"write_stdin"));
-    assert!(!names.contains(&"shell_wait"));
-    assert!(!names.contains(&"shell_read"));
 }
 
 async fn standard_runtime_with_bridge(
@@ -1058,7 +1006,6 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1089,7 +1036,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
 }
 
 #[tokio::test]
-async fn normal_turn_preserves_user_input_provenance_in_state() {
+async fn normal_turn_stores_effective_user_text_in_state() {
     let transport = mock_provider(vec![MockCall {
         stream_events: Vec::new(),
         response: Ok(LlmResponse {
@@ -1110,14 +1057,6 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
                     text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: Some(crate::UserInputProvenance {
-                    display_text: "/yolopush".to_string(),
-                    effective_text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
-                    transforms: vec![crate::UserInputTransform::SkillBlockAppend {
-                        skill_name: "yolopush".to_string(),
-                        skill_path: "/tmp/yolopush/SKILL.md".to_string(),
-                    }],
-                }),
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1136,17 +1075,7 @@ async fn normal_turn_preserves_user_input_provenance_in_state() {
         .find(|message| message.role == MessageRole::User)
         .expect("user message");
     assert_eq!(
-        user_message
-            .user_input
-            .as_ref()
-            .map(|input| input.display_text.as_str()),
-        Some("/yolopush")
-    );
-    assert_eq!(
-        user_message
-            .user_input
-            .as_ref()
-            .map(|input| input.effective_text.as_str()),
+        user_message.parts.first().map(|part| part.content.as_str()),
         Some("/yolopush\n\n<skill>\nbody\n</skill>")
     );
 }
@@ -1196,7 +1125,6 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1263,7 +1191,6 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1344,7 +1271,6 @@ async fn bridge_checkpoint_injection_preserves_images() {
                 },
             ],
             images: Vec::new(),
-            user_input: None,
         }])
         .expect("enqueue");
     let transport = mock_provider(vec![
@@ -1380,7 +1306,6 @@ async fn bridge_checkpoint_injection_preserves_images() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1463,7 +1388,6 @@ async fn checkpoint_hook_can_inject_messages() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1500,11 +1424,6 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                 content: "follow up".to_string(),
                 parts: Vec::new(),
                 images: Vec::new(),
-                user_input: Some(crate::UserInputProvenance {
-                    display_text: "follow up".to_string(),
-                    effective_text: "follow up".to_string(),
-                    transforms: Vec::new(),
-                }),
             },
         }])
         .expect("enqueue injected turn input");
@@ -1529,7 +1448,6 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1667,7 +1585,6 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -1745,7 +1662,6 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1808,7 +1724,6 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -1893,7 +1808,6 @@ async fn child_relation_does_not_replace_active_session() {
                     text: "parent turn".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -1954,7 +1868,6 @@ async fn handoff_relation_routes_original_session_to_successor() {
                     text: "next external turn".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -2066,7 +1979,6 @@ async fn runtime_can_activate_managed_child_session() {
                         text: "old manager should not own activated child".to_string(),
                     }],
                     image_blobs: HashMap::new(),
-                    user_input: None,
                     mode: None,
                     mode_turn_options: None,
                     trace_turn_id: None,
@@ -2154,7 +2066,6 @@ impl crate::ToolProvider for ChildSessionTool {
                         text: "child turn".to_string(),
                     }],
                     image_blobs: HashMap::new(),
-                    user_input: None,
                     mode: None,
                     mode_turn_options: None,
                     trace_turn_id: None,
@@ -2230,12 +2141,11 @@ async fn session_manager_create_session_accepts_custom_context_surface() {
 }
 
 #[tokio::test]
-async fn inherited_child_session_carries_parent_dynamic_tool_state() {
+async fn inherited_child_session_carries_parent_tool_state() {
     let plugin_host = crate::PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
         "memory_probe",
         crate::PluginSpec::new().with_tool_provider(Arc::new(MemoryProbeTool)),
-    ))])
-    .with_dynamic_tools();
+    ))]);
     let plugin_session = plugin_host
         .build_standard_session("root", None)
         .expect("plugins");
@@ -2249,13 +2159,10 @@ async fn inherited_child_session_carries_parent_dynamic_tool_state() {
     .expect("runtime");
     runtime.policy.provider = mock_provider(Vec::new()).into_handle();
     let manager = runtime.session_manager().expect("session manager");
-    let mut snapshot = manager
-        .dynamic_tool_state("root")
-        .await
-        .expect("dynamic tool state");
-    assert!(snapshot.tools.remove("memory_probe").is_some());
+    let mut snapshot = manager.tool_state("root").await.expect("tool state");
+    assert!(snapshot.remove("memory_probe").is_some());
     manager
-        .apply_dynamic_tool_state("root", snapshot)
+        .apply_tool_state("root", snapshot)
         .await
         .expect("apply dynamic state");
 
@@ -2353,7 +2260,6 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                     text: "run child".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -2462,7 +2368,6 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                     text: "run child".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -2528,7 +2433,6 @@ fn assembler_prefers_final_message() {
     assert_eq!(out.assistant_output.safe_text, "final");
     assert_eq!(out.assistant_output.raw_text, "final");
     assert_eq!(out.assistant_output.state, OutputState::Usable);
-    assert!(!out.has_plugin_visible_output);
 }
 
 #[test]
@@ -2553,7 +2457,6 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -2580,7 +2483,7 @@ fn assembler_falls_back_to_last_assistant_message_when_stream_output_is_empty() 
 }
 
 #[test]
-fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
+fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_message() {
     let mut state = default_state();
     append_message(
         &mut state,
@@ -2601,7 +2504,6 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -2624,11 +2526,6 @@ fn interrupted_assembler_does_not_reuse_assistant_before_latest_user_input() {
                 response_meta: None,
             }]
             .into(),
-            user_input: Some(crate::UserInputProvenance {
-                display_text: "new prompt".to_string(),
-                effective_text: "new prompt".to_string(),
-                transforms: Vec::new(),
-            }),
             origin: None,
         },
     );
@@ -2671,7 +2568,6 @@ fn assembler_prefers_state_output_when_streamed_text_is_a_truncated_prefix() {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -2744,7 +2640,6 @@ fn assembler_state_output_excludes_tool_call_payload() {
                 },
             ]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -2840,7 +2735,6 @@ fn assembler_detects_max_turn_message() {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         },
     );
@@ -2857,32 +2751,6 @@ fn assembler_detects_max_turn_message() {
         &out.outcome,
         TurnOutcome::Stopped(TurnStop::MaxTurns)
     ));
-}
-
-#[test]
-fn assembler_tracks_plugin_panel_output() {
-    let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::PluginEvent {
-        plugin_id: "demo".to_string(),
-        event: crate::PluginSurfaceEvent::PanelUpsert {
-            key: "panel:1".to_string(),
-            title: "TASK BOARD".to_string(),
-            content: "1. Inspect\n2. Patch".to_string(),
-        },
-    });
-    assembler.push(&SessionEvent::Done);
-    let out = assembler.finish(
-        default_state().export_state(),
-        false,
-        None,
-        &SanitizerPolicy::default(),
-        &TerminationPolicy::default(),
-    );
-    assert!(matches!(
-        &out.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
-    ));
-    assert!(out.has_plugin_visible_output);
 }
 
 #[test]
@@ -2983,7 +2851,6 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                     text: "hi".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3041,7 +2908,6 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                     text: "continue".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3135,7 +3001,6 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
                     text: "trigger slow tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3218,7 +3083,6 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                     text: "run terminal tools".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3235,10 +3099,10 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
     assert!(
         matches!(
         turn.outcome,
-        TurnOutcome::Finished(TurnFinish::Value {
-            source: crate::TerminalOutputSource::Tool { ref name },
+        TurnOutcome::Finished(TurnFinish::ToolValue {
+            ref tool_name,
             ref value,
-        }) if name == "terminal_tool_0" && value == &json!("first")
+        }) if tool_name == "terminal_tool_0" && value == &json!("first")
         ),
         "outcome={:?} calls={:?}",
         turn.outcome,
@@ -3248,22 +3112,22 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
     let events = turn_events.snapshot();
     let first_completed = events
         .iter()
-        .position(|event| matches!(event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_0"))
+        .position(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_0"))
         .expect("first completed");
     let second_completed = events
         .iter()
-        .position(|event| matches!(event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_1"))
+        .position(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { name, .. } if name == "terminal_tool_1"))
         .expect("second completed");
     let terminal = events
         .iter()
-        .position(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+        .position(|event| matches!(&event.event, TurnEvent::ToolValue { .. }))
         .expect("terminal output");
     assert!(first_completed < terminal);
     assert!(second_completed < terminal);
     assert!(matches!(
-        &events[terminal],
-        TurnEvent::TerminalOutput {
-            source: crate::TerminalOutputSource::Tool { name },
+        &events[terminal].event,
+        TurnEvent::ToolValue {
+            tool_name: name,
             value,
         } if name == "terminal_tool_0" && value == &json!("first")
     ));
@@ -3312,7 +3176,6 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                     text: "run failing terminal tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3329,21 +3192,19 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
     assert!(
         matches!(
         turn.outcome,
-        TurnOutcome::Stopped(TurnStop::TerminalError {
-            source: crate::TerminalOutputSource::Tool { ref name },
+        TurnOutcome::Stopped(TurnStop::ToolError {
+            ref tool_name,
             ref value,
-        }) if name == "terminal_tool_0" && value == &json!({ "reason": "failed" })
+        }) if tool_name == "terminal_tool_0" && value == &json!({ "reason": "failed" })
         ),
         "outcome={:?} calls={:?}",
         turn.outcome,
         turn.tool_calls
     );
-    assert!(
-        !turn_events
-            .snapshot()
-            .iter()
-            .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
-    );
+    assert!(!turn_events.snapshot().iter().any(|event| matches!(
+        &event.event,
+        TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+    )));
 }
 
 #[tokio::test]
@@ -3389,7 +3250,6 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
                     text: "run the tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3444,7 +3304,6 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                     text: "hi".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3504,7 +3363,6 @@ async fn standard_runtime_uses_streamed_usage_when_final_usage_missing() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3557,7 +3415,6 @@ async fn standard_runtime_prefers_final_usage_over_streamed_usage() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3620,7 +3477,6 @@ async fn standard_runtime_trace_records_stream_event_entries() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3788,7 +3644,6 @@ async fn extended_runtime_trace_records_provider_stream_events() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3875,7 +3730,6 @@ async fn standard_runtime_trace_omits_stream_event_entries_by_default() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -3950,7 +3804,6 @@ async fn standard_runtime_trace_records_failed_llm_calls() {
                     text: "hello".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -4116,7 +3969,6 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
                     text: "run the tool".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -4206,7 +4058,6 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                     text: "where did this go?".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -4334,7 +4185,6 @@ async fn completed_turns_are_persisted_in_session_graph() {
                     text: "where did this go?".to_string(),
                 }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -4368,172 +4218,6 @@ async fn completed_turns_are_persisted_in_session_graph() {
     assert_eq!(ledger[0].usage.output_tokens, 4);
     assert_eq!(ledger[0].usage.cached_input_tokens, 1);
     assert_eq!(ledger[0].usage.reasoning_tokens, 2);
-}
-
-#[cfg(feature = "tool-impls")]
-#[tokio::test]
-async fn resumed_rlm_turns_refresh_turn_state_and_token_ledger() {
-    let first_usage = LlmUsage {
-        input_tokens: 12,
-        output_tokens: 4,
-        cached_input_tokens: 1,
-        reasoning_tokens: 2,
-    };
-    let second_usage = LlmUsage {
-        input_tokens: 30,
-        output_tokens: 7,
-        cached_input_tokens: 5,
-        reasoning_tokens: 6,
-    };
-    let transport = mock_provider(vec![
-        MockCall {
-            stream_events: vec![
-                LlmStreamEvent::Delta("stored".to_string()),
-                LlmStreamEvent::Usage(first_usage.clone()),
-            ],
-            response: Ok(LlmResponse {
-                full_text: "stored".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "stored".to_string(),
-                    response_meta: None,
-                }],
-                usage: first_usage.clone(),
-                ..LlmResponse::default()
-            }),
-        },
-        MockCall {
-            stream_events: vec![
-                LlmStreamEvent::Delta("stored again".to_string()),
-                LlmStreamEvent::Usage(second_usage.clone()),
-            ],
-            response: Ok(LlmResponse {
-                full_text: "stored again".to_string(),
-                parts: vec![LlmOutputPart::Text {
-                    text: "stored again".to_string(),
-                    response_meta: None,
-                }],
-                usage: second_usage.clone(),
-                ..LlmResponse::default()
-            }),
-        },
-    ]);
-
-    let store = Arc::new(RecordingStore::default());
-    let store_trait = store.clone() as Arc<dyn crate::store::RuntimePersistence>;
-
-    let mut runtime = rlm_mode_with_transport_and_store(transport.clone(), store_trait).await;
-    let first_turn = runtime
-        .run_turn_assembled(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "remember this".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                user_input: None,
-                mode: None,
-                mode_turn_options: None,
-                trace_turn_id: None,
-                mode_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("first turn");
-    assert_eq!(first_turn.token_usage.input_tokens, 12);
-    assert_eq!(first_turn.token_usage.output_tokens, 4);
-    assert_eq!(first_turn.token_usage.cached_input_tokens, 1);
-    assert_eq!(first_turn.token_usage.reasoning_tokens, 2);
-
-    let resumed_read = crate::store::RuntimePersistence::load_session(
-        store.as_ref(),
-        crate::store::SessionReadScope::FullGraph,
-    )
-    .await
-    .expect("load resumed session")
-    .expect("resumed head");
-    let resumed_checkpoint = resumed_read.checkpoint.clone().expect("resumed checkpoint");
-    let mut resumed = LashRuntime::from_persistent_embedded_state(
-        rlm_test_policy(),
-        test_host_config(),
-        crate::PersistentRuntimeServices::new_with_bridges(
-            default_tool_session("root", ExecutionMode::new("rlm"), true),
-            crate::TurnInjectionBridge::new(),
-            crate::TurnInputInjectionBridge::new(),
-            store.clone() as Arc<dyn crate::store::RuntimePersistence>,
-        ),
-        PersistedSessionState {
-            policy: SessionPolicy {
-                execution_mode: ExecutionMode::new("rlm"),
-                standard_context_approach: None,
-                ..Default::default()
-            },
-            session_graph: resumed_read.graph,
-            turn_index: resumed_checkpoint.turn_state.turn_index,
-            token_usage: resumed_checkpoint.turn_state.token_usage.clone(),
-            last_prompt_usage: resumed_checkpoint.turn_state.last_prompt_usage.clone(),
-            dynamic_state_ref: resumed_checkpoint.dynamic_state_ref.clone(),
-            dynamic_state_generation: resumed_checkpoint
-                .dynamic_state
-                .as_ref()
-                .map(|snapshot| snapshot.base_generation),
-            dynamic_state_snapshot: resumed_checkpoint.dynamic_state.clone(),
-            plugin_snapshot_ref: resumed_checkpoint.plugin_snapshot_ref.clone(),
-            plugin_snapshot: resumed_checkpoint.plugin_snapshot.clone(),
-            execution_state_snapshot: None,
-            token_ledger: resumed_read.token_ledger.clone(),
-            checkpoint_ref: resumed_read.checkpoint_ref.clone(),
-            ..PersistedSessionState::default()
-        },
-    )
-    .await
-    .expect("resumed runtime");
-    resumed.policy.provider = transport.clone().into_handle();
-
-    let second_turn = resumed
-        .run_turn_assembled(
-            TurnInput {
-                items: vec![InputItem::Text {
-                    text: "what did you store?".to_string(),
-                }],
-                image_blobs: HashMap::new(),
-                user_input: None,
-                mode: None,
-                mode_turn_options: None,
-                trace_turn_id: None,
-                mode_extension: None,
-                turn_context: crate::TurnContext::default(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("second turn");
-    assert_eq!(second_turn.token_usage.input_tokens, 30);
-    assert_eq!(second_turn.token_usage.output_tokens, 7);
-    assert_eq!(second_turn.token_usage.cached_input_tokens, 5);
-    assert_eq!(second_turn.token_usage.reasoning_tokens, 6);
-
-    let read = crate::store::RuntimePersistence::load_session(
-        store.as_ref(),
-        crate::store::SessionReadScope::FullGraph,
-    )
-    .await
-    .expect("load session")
-    .expect("session head");
-    let checkpoint = read.checkpoint.expect("checkpoint");
-    let turn_state = checkpoint.turn_state;
-    assert_eq!(turn_state.token_usage.input_tokens, 30);
-    assert_eq!(turn_state.token_usage.output_tokens, 7);
-    assert_eq!(turn_state.token_usage.cached_input_tokens, 5);
-    assert_eq!(turn_state.token_usage.reasoning_tokens, 6);
-
-    let ledger = read.token_ledger;
-    assert_eq!(ledger.len(), 1);
-    assert_eq!(ledger[0].source, "turn");
-    assert_eq!(ledger[0].usage.input_tokens, 42);
-    assert_eq!(ledger[0].usage.output_tokens, 11);
-    assert_eq!(ledger[0].usage.cached_input_tokens, 6);
-    assert_eq!(ledger[0].usage.reasoning_tokens, 8);
 }
 
 #[test]
@@ -4677,77 +4361,4 @@ async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical
         .await
         .expect("first runtime await background work");
     assert!(observed.load(Ordering::SeqCst));
-}
-
-#[cfg(feature = "tool-impls")]
-#[tokio::test]
-async fn environment_park_resume_preserves_active_path() {
-    // Build a RuntimeEnvironment with the usual test tool factories +
-    // Residency::ActivePathOnly (webserver pattern; host owns disk).
-    let factories: Vec<Arc<dyn crate::PluginFactory>> = vec![
-        Arc::new(crate::BuiltinToolResultProjectionPluginFactory::default()),
-        Arc::new(crate::testing::FakeStandardContextApproachPluginFactory::rolling_history()),
-        Arc::new(StaticPluginFactory::new(
-            "shell",
-            crate::PluginSpec::new()
-                .with_tool_provider(Arc::new(crate::tools::StandardShell::new())),
-        )),
-    ];
-    let plugin_host = Arc::new(crate::PluginHost::new(factories));
-
-    let env = crate::RuntimeEnvironment::builder()
-        .with_plugin_host(plugin_host)
-        .with_residency(crate::Residency::ActivePathOnly)
-        .build();
-
-    // In-memory SQLite store — shared across park/resume.
-    let store: Arc<dyn crate::store::RuntimePersistence> = Arc::new(RecordingStore::default());
-
-    // Initial state: one user message. Force the active leaf to this
-    // node so later reads find it.
-    let mut initial_state = PersistedSessionState {
-        session_id: "integration-park-resume".to_string(),
-        policy: rlm_test_policy(),
-        ..PersistedSessionState::default()
-    };
-    // Borrow the existing plugin-message helper to construct a
-    // minimal Message without touching sansio's Message struct
-    // directly (its shape may change).
-    let first_msg = crate::session_model::plugin_message_to_message(
-        &crate::PluginMessage::text(crate::session_model::MessageRole::User, "hello"),
-        None,
-    );
-    let first_id = initial_state.session_graph.append_message(first_msg);
-
-    // Build runtime via from_environment.
-    let runtime = LashRuntime::from_environment(
-        &env,
-        rlm_test_policy(),
-        initial_state,
-        Some(Arc::clone(&store)),
-    )
-    .await
-    .expect("runtime from environment");
-
-    // Under ActivePathOnly, the resident graph is already trimmed to
-    // the active path. The leaf node must still be there.
-    assert!(runtime.state.session_graph.find_node(&first_id).is_some());
-
-    // Park — flushes to store, returns a lightweight handle.
-    let parked = runtime.park().await.expect("park");
-    assert_eq!(parked.session_id(), "integration-park-resume");
-
-    // Resume — loads from the same store.
-    let resumed = LashRuntime::resume(parked, &env).await.expect("resume");
-    assert_eq!(resumed.state.session_id, "integration-park-resume");
-    // Active path preserved through park/resume.
-    assert!(resumed.state.session_graph.find_node(&first_id).is_some());
-
-    // Host-driven cleanup primitives: orphaned_node_ids() + vacuum().
-    // No orphans in this test (only one node on active path), so both
-    // paths return empty / zero.
-    let orphans = resumed.orphaned_node_ids().await.expect("orphans");
-    assert!(orphans.is_empty());
-    let report = store.vacuum().await.expect("vacuum");
-    assert_eq!(report.removed_node_count, 0);
 }

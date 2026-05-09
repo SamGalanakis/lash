@@ -218,7 +218,6 @@ impl MonitorPlugin {
     fn queue_update(
         state: &mut MonitorPluginState,
         monitor_id: &str,
-        monitor_label: &str,
         message: String,
         queue_turn_input: Option<String>,
     ) {
@@ -226,7 +225,6 @@ impl MonitorPlugin {
         state.updates.push(MonitorEvent {
             sequence: state.snapshot.sequence,
             monitor_id: monitor_id.to_string(),
-            monitor_label: monitor_label.to_string(),
             message,
             queue_turn_input,
         });
@@ -253,9 +251,6 @@ impl MonitorPlugin {
             return Err(PluginError::Session(
                 "monitor command must be a non-empty string".to_string(),
             ));
-        }
-        if spec.label.trim().is_empty() {
-            spec.label = spec.id.clone();
         }
         let default_armed = matches!(spec.arm_on, MonitorArmOn::SessionStart);
         let spec_id = spec.id.clone();
@@ -326,7 +321,6 @@ impl MonitorPlugin {
         let task_host = host.clone();
         let managed_spec = crate::ManagedTaskSpec {
             id: task_id.clone(),
-            label: spec.label.clone(),
             kind: crate::ManagedTaskKind::Monitor,
             producer: "monitor",
         };
@@ -369,7 +363,6 @@ impl MonitorPlugin {
                 Self::queue_update(
                     &mut state,
                     &spec.id,
-                    &spec.label,
                     format!("Failed to start monitor: {err}"),
                     None,
                 );
@@ -509,7 +502,7 @@ impl MonitorPlugin {
             Ok(parsed) => parsed,
             Err(err) => return ToolResult::err_fmt(format_args!("invalid stop payload: {err}")),
         };
-        let (monitor_id, monitor_label, runtime_pid) = {
+        let (monitor_id, runtime_pid) = {
             let state = match self.lock_state() {
                 Ok(state) => state,
                 Err(err) => return ToolResult::err_fmt(err.to_string()),
@@ -517,11 +510,7 @@ impl MonitorPlugin {
             let Some(entry) = state.snapshot.monitors.get(&parsed.id) else {
                 return ToolResult::err_fmt(format_args!("unknown monitor `{}`", parsed.id));
             };
-            (
-                entry.status.spec.id.clone(),
-                entry.status.spec.label.clone(),
-                entry.runtime_pid,
-            )
+            (entry.status.spec.id.clone(), entry.runtime_pid)
         };
 
         if let Err(err) = terminate_monitor_process_tree(runtime_pid).await {
@@ -549,13 +538,7 @@ impl MonitorPlugin {
         entry.runtime_pid = None;
         entry.status.last_error = None;
         entry.status.last_exit_status = None;
-        MonitorPlugin::queue_update(
-            &mut state,
-            &monitor_id,
-            &monitor_label,
-            "Monitor stopped".to_string(),
-            None,
-        );
+        MonitorPlugin::queue_update(&mut state, &monitor_id, "Monitor stopped".to_string(), None);
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 }
@@ -749,7 +732,6 @@ async fn run_monitor_task(
     let mut timeout = timeout_deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
     let mut timed_out = false;
 
-    let label = spec.label.clone();
     let id = spec.id.clone();
     let wake_policy = spec.wake_policy;
 
@@ -761,13 +743,20 @@ async fn run_monitor_task(
             }
             line = stdout_lines.next_line(), if !stdout_done => {
                 match line.map_err(|err| PluginError::Session(format!("monitor stdout read failed: {err}")))? {
-                    Some(line) => record_monitor_line(&state, &spec, &id, &label, wake_policy, line, true)?,
+                    Some(line) => record_monitor_line(&state, &spec, &id, wake_policy, line, true)?,
                     None => stdout_done = true,
                 }
             }
             line = stderr_lines.next_line(), if !stderr_done => {
                 match line.map_err(|err| PluginError::Session(format!("monitor stderr read failed: {err}")))? {
-                    Some(line) => record_monitor_line(&state, &spec, &id, &label, MonitorWakePolicy::Notify, line, false)?,
+                    Some(line) => record_monitor_line(
+                        &state,
+                        &spec,
+                        &id,
+                        MonitorWakePolicy::Notify,
+                        line,
+                        false,
+                    )?,
                     None => stderr_done = true,
                 }
             }
@@ -839,7 +828,6 @@ async fn run_monitor_task(
         MonitorPlugin::queue_update(
             &mut state,
             &id,
-            &label,
             if timed_out {
                 format!("Monitor timed out after {}ms", spec.timeout_ms)
             } else if exit.success() {
@@ -922,7 +910,6 @@ fn record_monitor_line(
     state: &Arc<Mutex<MonitorPluginState>>,
     spec: &MonitorSpec,
     id: &str,
-    label: &str,
     wake_policy: MonitorWakePolicy,
     line: String,
     from_stdout: bool,
@@ -942,11 +929,11 @@ fn record_monitor_line(
     let queue_turn_input =
         if from_stdout && wake_policy == MonitorWakePolicy::QueueTurn && !entry.pending_wake {
             entry.pending_wake = true;
-            Some(format!("Monitor event \"{}\": {}", spec.label, message))
+            Some(format!("Monitor event \"{}\": {}", spec.id, message))
         } else {
             None
         };
-    MonitorPlugin::queue_update(&mut state, id, label, message, queue_turn_input);
+    MonitorPlugin::queue_update(&mut state, id, message, queue_turn_input);
     Ok(())
 }
 
@@ -988,7 +975,6 @@ mod tests {
     async fn non_persistent_monitor_times_out_and_records_failure() {
         let spec = MonitorSpec {
             id: "slow".to_string(),
-            label: "slow".to_string(),
             command: "sleep 5".to_string(),
             persistent: false,
             timeout_ms: 50,

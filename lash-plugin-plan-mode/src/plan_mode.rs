@@ -11,12 +11,12 @@ use lash::plugin::{
     SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride, TypedExternalOp,
     TypedExternalOpError,
 };
-use lash::tools::{PatchAction, inspect_patch_ops};
 use lash::{
     JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
     SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
     ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
+use lash_default_tools::tools::{PatchAction, inspect_patch_ops};
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
 const PLAN_MODE_BADGE_LABEL: &str = "plan";
@@ -427,8 +427,8 @@ where
     read_plan_report(&path).map_err(PluginError::Session)
 }
 
-fn dynamic_tool_state_unavailable(err: &PluginError) -> bool {
-    matches!(err, PluginError::Session(message) if message.contains("dynamic tool state"))
+fn tool_state_unavailable(err: &PluginError) -> bool {
+    matches!(err, PluginError::Session(message) if message.contains("tool state"))
 }
 
 async fn sync_plan_exit_tool_state<H>(
@@ -437,7 +437,7 @@ async fn sync_plan_exit_tool_state<H>(
     enabled: bool,
 ) -> Result<(), PluginError>
 where
-    H: lash::DynamicToolHost + ?Sized,
+    H: lash::ToolStateHost + ?Sized,
 {
     let availability = if enabled {
         Some(lash::ToolAvailability::Documented)
@@ -449,7 +449,7 @@ where
         .await
     {
         Ok(_) => Ok(()),
-        Err(err) if dynamic_tool_state_unavailable(&err) => Ok(()),
+        Err(err) if tool_state_unavailable(&err) => Ok(()),
         Err(err) => Err(err),
     }
 }
@@ -461,7 +461,7 @@ async fn set_plan_mode_enabled_state<H>(
     enabled: bool,
 ) -> Result<bool, PluginError>
 where
-    H: lash::DynamicToolHost + ?Sized,
+    H: lash::ToolStateHost + ?Sized,
 {
     let previous = {
         let mut guard = state

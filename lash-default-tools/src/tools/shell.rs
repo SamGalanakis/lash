@@ -17,10 +17,10 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::{
+use lash::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
-use crate::{
+use lash::{
     ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolDefinition,
     ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
@@ -1290,7 +1290,7 @@ impl ToolProvider for StandardShell {
                 r#"exec_command(cmd="cargo test -p lash-mode-rlm", timeout_ms=600000)"#.into(),
                 r#"exec_command(cmd="test -f Cargo.lock", allow_nonzero_exit=true)"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata("shell", &["shell", "bash"]))
+            .with_discovery(super::discovery_metadata("shell", &["shell", "bash"]))
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::new(
                 "start_command",
@@ -1310,7 +1310,7 @@ impl ToolProvider for StandardShell {
             .with_examples(vec![
                 r#"start_command(cmd="python -m http.server 8000", poll_ms=1000)"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata(
+            .with_discovery(super::discovery_metadata(
                 "shell",
                 &["long_running_command", "pty"],
             ))
@@ -1359,7 +1359,7 @@ impl ToolProvider for StandardShell {
                 r#"write_stdin(session_id=1, chars="status\n", poll_ms=1000)"#.into(),
                 r#"write_stdin(session_id=1, chars="", close_stdin=true)"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata(
+            .with_discovery(super::discovery_metadata(
                 "shell",
                 &["send_stdin", "poll_command"],
             ))
@@ -2312,7 +2312,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_cancel_token_kills_running_child() {
-        use crate::testing::MockSessionManager;
+        use lash::testing::MockSessionManager;
         use std::sync::Arc;
         use std::time::Instant;
 
@@ -2323,7 +2323,7 @@ mod tests {
             host: Arc::new(MockSessionManager::default()),
             cancellation_token: Some(token.clone()),
             async_task_id: None,
-            turn_context: crate::TurnContext::default(),
+            turn_context: lash::TurnContext::default(),
             tool_call_id: None,
         };
 
@@ -2360,7 +2360,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_write_stdin_wait_kills_child_by_pid() {
-        use crate::testing::MockSessionManager;
+        use lash::testing::MockSessionManager;
         use std::sync::Arc;
         use std::time::Instant;
 
@@ -2378,7 +2378,7 @@ mod tests {
             host: Arc::new(MockSessionManager::default()),
             cancellation_token: Some(token.clone()),
             async_task_id: None,
-            turn_context: crate::TurnContext::default(),
+            turn_context: lash::TurnContext::default(),
             tool_call_id: None,
         };
 

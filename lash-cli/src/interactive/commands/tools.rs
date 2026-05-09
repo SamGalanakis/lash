@@ -65,7 +65,7 @@ pub(super) async fn handle_tools(
     raw: Option<String>,
     app: &mut App,
     _runtime: &Option<lash_embed::LashSession>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     current_execution_mode: ExecutionMode,
 ) -> anyhow::Result<bool> {
@@ -73,28 +73,24 @@ pub(super) async fn handle_tools(
     let raw_trim = raw.trim();
     if raw_trim.is_empty() {
         let mut lines = vec![
-            format!(
-                "Dynamic tools (generation {}):",
-                desired_dynamic.base_generation
-            ),
+            format!("Tools (generation {}):", desired_tool_state.generation()),
             format!(
                 "Pending reconfigure: {}",
                 if *pending_reconfigure { "yes" } else { "no" }
             ),
         ];
-        for (name, spec) in &desired_dynamic.tools {
+        for (name, spec) in desired_tool_state.iter() {
             let availability = spec
-                .definition
+                .definition()
                 .effective_availability(&current_execution_mode);
             lines.push(format!(
-                "  - {} [{}] adapter={} availability={}",
+                "  - {} [{}] availability={}",
                 name,
-                output_schema_label(&spec.definition.output_schema),
-                spec.adapter_id,
+                output_schema_label(&spec.definition().output_schema),
                 availability_label(availability)
             ));
         }
-        if desired_dynamic.tools.is_empty() {
+        if desired_tool_state.is_empty() {
             lines.push("  (none)".to_string());
         }
         push_system_message(app, lines.join("\n"));
@@ -109,7 +105,7 @@ pub(super) async fn handle_tools(
                 push_system_message(app, "Usage: /tools rm <name>");
                 return Ok(false);
             };
-            if desired_dynamic.tools.remove(name).is_some() {
+            if desired_tool_state.remove(name).is_some() {
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for removal."));
             } else {
@@ -125,15 +121,15 @@ pub(super) async fn handle_tools(
             };
             let kv_raw = update_parts.next().unwrap_or_default();
             let kv = parse_kv_args(kv_raw);
-            let Some(spec) = desired_dynamic.tools.get_mut(name) else {
+            let Some(definition) = desired_tool_state.definition_mut(name) else {
                 push_system_message(app, format!("Tool `{name}` not found."));
                 return Ok(false);
             };
             if let Some(desc) = kv.get("description") {
-                spec.definition.description = desc.clone();
+                definition.description = desc.clone();
             }
             if let Some(returns) = kv.get("returns") {
-                spec.definition.output_schema = output_schema_from_hint(returns);
+                definition.output_schema = output_schema_from_hint(returns);
             }
             if let Some(raw) = kv.get("availability") {
                 let Some(availability) = parse_availability(raw) else {
@@ -143,14 +139,12 @@ pub(super) async fn handle_tools(
                     );
                     return Ok(false);
                 };
-                spec.definition.availability_override = Some(availability);
+                definition.availability_override = Some(availability);
             }
             if let Some(inject) = kv.get("injected") {
                 let injected = inject == "true";
-                let availability = spec
-                    .definition
-                    .effective_availability(&current_execution_mode);
-                spec.definition.availability_override =
+                let availability = definition.effective_availability(&current_execution_mode);
+                definition.availability_override =
                     Some(update_documentation_state(availability, injected));
             }
             *pending_reconfigure = true;
@@ -161,13 +155,10 @@ pub(super) async fn handle_tools(
                 push_system_message(app, "Usage: /tools enable <name>");
                 return Ok(false);
             };
-            if desired_dynamic.tools.contains_key(name) {
-                desired_dynamic
-                    .tools
-                    .get_mut(name)
-                    .expect("checked contains_key")
-                    .definition
-                    .availability_override = Some(ToolAvailability::Callable);
+            if desired_tool_state.contains(name) {
+                desired_tool_state
+                    .set_availability(name, Some(ToolAvailability::Callable))
+                    .expect("checked contains");
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for enable."));
             } else {
@@ -179,13 +170,10 @@ pub(super) async fn handle_tools(
                 push_system_message(app, "Usage: /tools disable <name>");
                 return Ok(false);
             };
-            if desired_dynamic.tools.contains_key(name) {
-                desired_dynamic
-                    .tools
-                    .get_mut(name)
-                    .expect("checked contains_key")
-                    .definition
-                    .availability_override = Some(ToolAvailability::Hidden);
+            if desired_tool_state.contains(name) {
+                desired_tool_state
+                    .set_availability(name, Some(ToolAvailability::Hidden))
+                    .expect("checked contains");
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for disable."));
             } else {
@@ -204,7 +192,7 @@ pub(super) async fn handle_reconfigure(
     raw: Option<String>,
     app: &mut App,
     runtime: &mut Option<LashSession>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     toolset_hash: &mut String,
 ) -> anyhow::Result<bool> {
@@ -214,44 +202,44 @@ pub(super) async fn handle_reconfigure(
             push_system_message(
                 app,
                 format!(
-                    "Reconfigure status: pending={} current_generation={} base_generation={}",
+                    "Reconfigure status: pending={} current_generation={} generation={}",
                     pending_reconfigure,
-                    desired_dynamic.base_generation,
-                    desired_dynamic.base_generation
+                    desired_tool_state.generation(),
+                    desired_tool_state.generation()
                 ),
             );
         }
         "clear" => {
             if let Some(session) = runtime.as_ref() {
-                *desired_dynamic = session.tool_state().await?;
+                *desired_tool_state = session.tool_state().await?;
             }
             *pending_reconfigure = false;
-            push_system_message(app, "Cleared pending dynamic runtime changes.");
+            push_system_message(app, "Cleared pending tool registry changes.");
         }
-        "apply" => match apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime)
-            .await
-        {
-            Ok(generation) => {
-                let definitions = match runtime.as_ref() {
-                    Some(session) => session.active_tool_definitions().await.unwrap_or_default(),
-                    None => desired_dynamic
-                        .tools
-                        .values()
-                        .map(|spec| spec.definition.clone())
-                        .collect(),
-                };
-                *toolset_hash =
-                    hash12(&serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()));
-                push_system_message(
-                    app,
-                    format!(
-                        "Dynamic runtime reconfigured successfully (generation {}).",
-                        generation
-                    ),
-                )
+        "apply" => {
+            match apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
+            {
+                Ok(generation) => {
+                    let definitions = match runtime.as_ref() {
+                        Some(session) => {
+                            session.active_tool_definitions().await.unwrap_or_default()
+                        }
+                        None => desired_tool_state.definitions(),
+                    };
+                    *toolset_hash = hash12(
+                        &serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()),
+                    );
+                    push_system_message(
+                        app,
+                        format!(
+                            "Tool registry reconfigured successfully (generation {}).",
+                            generation
+                        ),
+                    )
+                }
+                Err(e) => push_system_message(app, format!("Reconfigure failed: {e}")),
             }
-            Err(e) => push_system_message(app, format!("Reconfigure failed: {e}")),
-        },
+        }
         _ => push_system_message(
             app,
             "Unknown /reconfigure action. Try: status, apply, clear",

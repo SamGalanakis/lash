@@ -20,7 +20,6 @@ use lash::{
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-pub use lash::InProcessToolHandler;
 pub use lash::{
     AcceptedInjectedTurnInput, AckWakeArgs, AssembledTurn, AttachmentStore, EventSink,
     ExternalInvokeError, InputItem, ManagedTaskStatus, McpServerConfig, Message, ModeTurnOptions,
@@ -31,10 +30,10 @@ pub use lash::{
     RuntimeSessionHost, SanitizerPolicy, SessionCreateRequest, SessionError, SessionEvent,
     SessionHandle, SessionReadView, SessionStoreCreateRequest, SessionStoreFactory,
     SessionTaskExecutor, SessionTurnHandle, SessionUsageReport, StandardContextApproach,
-    StartMonitorArgs, StopMonitorArgs, TerminalOutputSource, TerminationPolicy, TokenUsage,
-    TokioSessionTaskExecutor, ToolAvailability, ToolDefinition, ToolProvider, ToolResult,
-    ToolResultView, TurnEvent, TurnEventSink, TurnInput, TurnIssue, TurnOutcome, TypedExternalOp,
-    default_prompt_template,
+    StartMonitorArgs, StopMonitorArgs, TerminationPolicy, TokenUsage, TokioSessionTaskExecutor,
+    ToolAvailability, ToolDefinition, ToolProvider, ToolResult, ToolResultView, ToolSourceHandle,
+    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, TurnIssue, TurnOutcome,
+    TypedExternalOp, default_prompt_template,
 };
 pub use lash::{
     PromptBuiltin, PromptContribution, PromptContributionGate, PromptLayer, PromptSlot,
@@ -43,8 +42,7 @@ pub use lash::{
 pub use lash_mode_rlm::RlmProjectedBindings;
 pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
-pub type ToolState = lash::DynamicStateSnapshot;
-pub type ToolSpec = lash::DynamicToolSpec;
+pub type ToolState = lash::ToolState;
 
 pub trait EmbedPlugin: Send + Sync + 'static {
     const ID: &'static str;
@@ -281,6 +279,7 @@ pub struct LashCoreBuilder {
     provider: Option<ProviderHandle>,
     model: Option<ModelSelection>,
     max_context_tokens: Option<usize>,
+    max_turns: Option<usize>,
     store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
@@ -371,6 +370,11 @@ impl LashCoreBuilder {
 
     pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
         self.max_context_tokens = Some(max_context_tokens);
+        self
+    }
+
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = Some(max_turns);
         self
     }
 
@@ -486,6 +490,7 @@ impl LashCoreBuilder {
             model: model.model,
             model_variant: model.variant,
             max_context_tokens: Some(max_context_tokens),
+            max_turns: self.max_turns,
             execution_mode: default_mode.execution_mode(),
             standard_context_approach: default_preset.standard_context_approach.clone(),
             ..SessionPolicy::default()
@@ -516,9 +521,7 @@ impl LashCoreBuilder {
             .session_task_executor
             .unwrap_or_else(|| Arc::new(TokioSessionTaskExecutor::default()));
         let mut env_builder = RuntimeEnvironment::builder()
-            .with_plugin_host(Arc::new(
-                plugin_host.with_background_tasks().with_dynamic_tools(),
-            ))
+            .with_plugin_host(Arc::new(plugin_host.with_background_tasks()))
             .with_session_task_executor(executor)
             .with_prompt_layer(self.prompt);
         if let Some(attachment_store) = self.attachment_store {
@@ -706,7 +709,7 @@ impl SessionBuilder {
             });
         }
         state.policy = policy.clone();
-        Self::normalize_dynamic_state(&mut state);
+        Self::normalize_tool_state(&mut state);
         self.open_resolved(policy, mode, state, store).await
     }
 
@@ -758,7 +761,7 @@ impl SessionBuilder {
                     });
                 }
                 state.policy = policy.clone();
-                Self::normalize_dynamic_state(&mut state);
+                Self::normalize_tool_state(&mut state);
                 state
             }
             None => PersistedSessionState {
@@ -770,10 +773,11 @@ impl SessionBuilder {
         Ok(state)
     }
 
-    fn normalize_dynamic_state(state: &mut PersistedSessionState) {
-        if let Some(snapshot) = state.dynamic_state_snapshot.as_mut() {
-            snapshot.base_generation = 1;
-            state.dynamic_state_generation = Some(snapshot.base_generation);
+    fn normalize_tool_state(state: &mut PersistedSessionState) {
+        if let Some(snapshot) = state.tool_state_snapshot.as_mut() {
+            let normalized = snapshot.clone().with_generation(1);
+            state.tool_state_generation = Some(normalized.generation());
+            *snapshot = normalized;
         }
     }
 
@@ -909,10 +913,6 @@ impl LashSession {
     pub async fn reset_session(&self) -> Result<()> {
         self.runtime.lock().await.reset_session().await?;
         Ok(())
-    }
-
-    pub async fn apply_dynamic_tool_state(&self, state: ToolState) -> Result<u64> {
-        self.apply_tool_state(state).await
     }
 
     pub async fn refresh_session_tool_surface(&self) -> Result<()> {
@@ -1076,18 +1076,8 @@ impl LashSession {
         &self,
         servers: &BTreeMap<String, McpServerConfig>,
     ) -> Result<()> {
-        let dynamic_tools = self
-            .runtime
-            .lock()
-            .await
-            .plugin_session()
-            .and_then(|session| session.dynamic_tools())
-            .ok_or_else(|| {
-                EmbedError::Session(SessionError::Protocol(
-                    "dynamic tools are unavailable in this runtime session".to_string(),
-                ))
-            })?;
-        lash::attach_mcp_servers(&dynamic_tools, servers).await?;
+        let tool_registry = self.tool_registry().await?;
+        lash::attach_mcp_servers(&tool_registry, servers).await?;
         Ok(())
     }
 
@@ -1153,18 +1143,14 @@ impl LashSession {
     }
 
     pub async fn tool_state(&self) -> Result<ToolState> {
-        self.runtime
-            .lock()
-            .await
-            .dynamic_tool_state()
-            .map_err(Into::into)
+        self.runtime.lock().await.tool_state().map_err(Into::into)
     }
 
     pub async fn apply_tool_state(&self, state: ToolState) -> Result<u64> {
         self.runtime
             .lock()
             .await
-            .apply_dynamic_tool_state(state)
+            .apply_tool_state(state)
             .await
             .map_err(Into::into)
     }
@@ -1176,52 +1162,47 @@ impl LashSession {
     ) -> Result<u64> {
         let mut state = self.tool_state().await?;
         for name in names {
-            let Some(spec) = state.tools.get_mut(name) else {
-                return Err(EmbedError::Session(SessionError::Protocol(format!(
-                    "unknown dynamic tool `{name}`"
-                ))));
-            };
-            spec.definition.availability_override = availability;
+            state
+                .set_availability(name, availability)
+                .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         }
         self.apply_tool_state(state).await
     }
 
     pub async fn active_tool_definitions(&self) -> Result<Vec<ToolDefinition>> {
-        let state = self.tool_state().await?;
-        Ok(state
-            .tools
-            .into_values()
-            .map(|spec| spec.definition)
-            .collect())
+        Ok(self.tool_state().await?.definitions())
     }
 
-    pub async fn register_inprocess_tool(
+    pub async fn add_tool_provider(
         &self,
-        definition: ToolDefinition,
-        handler: InProcessToolHandler,
-    ) -> Result<u64> {
-        let dynamic_tools = self.dynamic_tools().await?;
-        dynamic_tools.upsert_inprocess_handler(definition, handler);
+        provider: Arc<dyn ToolProvider>,
+    ) -> Result<ToolSourceHandle> {
+        let tool_registry = self.tool_registry().await?;
+        let handle = tool_registry
+            .add_tool_provider(provider)
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         self.refresh_tool_surface().await?;
-        Ok(dynamic_tools.generation())
+        Ok(handle)
     }
 
-    pub async fn remove_inprocess_tool(&self, name: &str) -> Result<u64> {
-        let dynamic_tools = self.dynamic_tools().await?;
-        dynamic_tools.remove_inprocess_handler(name);
+    pub async fn remove_tool_source(&self, handle: &ToolSourceHandle) -> Result<u64> {
+        let tool_registry = self.tool_registry().await?;
+        let generation = tool_registry
+            .remove_source(handle)
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         self.refresh_tool_surface().await?;
-        Ok(dynamic_tools.generation())
+        Ok(generation)
     }
 
-    async fn dynamic_tools(&self) -> Result<Arc<lash::DynamicToolProvider>> {
+    async fn tool_registry(&self) -> Result<Arc<lash::ToolRegistry>> {
         self.runtime
             .lock()
             .await
             .plugin_session()
-            .and_then(|session| session.dynamic_tools())
+            .map(|session| session.tool_registry())
             .ok_or_else(|| {
                 EmbedError::Session(SessionError::Protocol(
-                    "dynamic tools are unavailable in this runtime session".to_string(),
+                    "tool registry is unavailable in this runtime session".to_string(),
                 ))
             })
     }
@@ -1304,17 +1285,17 @@ impl<'a> TurnBuilder<'a> {
     }
 
     pub async fn run(self) -> Result<CollectedTurnResult> {
-        let collector = TurnCollector::default();
+        let collector = RunActivityCollector::default();
         let result = self.stream(&collector).await?;
         Ok(CollectedTurnResult {
-            transcript: collector.snapshot(),
+            activities: collector.into_activities(),
             outcome: result.outcome,
             usage: result.usage,
             errors: result.errors,
         })
     }
 
-    pub async fn stream(self, events: &dyn TurnEventSink) -> Result<TurnResult> {
+    pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
         let mut input = self.input.into_turn_input();
         input.mode_turn_options = self.mode_turn_options;
         input.turn_context = self.turn_context;
@@ -1421,17 +1402,17 @@ impl RawTurnBuilder {
     }
 
     pub async fn run(self) -> Result<CollectedTurnResult> {
-        let collector = TurnCollector::default();
+        let collector = RunActivityCollector::default();
         let result = self.stream(&collector).await?;
         Ok(CollectedTurnResult {
-            transcript: collector.snapshot(),
+            activities: collector.into_activities(),
             outcome: result.outcome,
             usage: result.usage,
             errors: result.errors,
         })
     }
 
-    pub async fn stream(mut self, events: &dyn TurnEventSink) -> Result<TurnResult> {
+    pub async fn stream(mut self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
         if let Some(options) = self.mode_turn_options {
             self.input.mode_turn_options = Some(options);
         }
@@ -1510,7 +1491,7 @@ impl SessionControl {
         &self,
         input: TurnInput,
         session_events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
         let turn = self
@@ -1523,7 +1504,7 @@ impl SessionControl {
         &self,
         input: TurnInput,
         session_events: &dyn EventSink,
-        turn_events: &dyn TurnEventSink,
+        turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn> {
         stream_prepared_assembled(
@@ -1641,7 +1622,6 @@ fn queued_input_message(input: Input) -> Result<PluginMessage> {
         content,
         parts: Vec::new(),
         images,
-        user_input: None,
     })
 }
 
@@ -1663,7 +1643,7 @@ async fn stream_prepared_turn(
     runtime: &Arc<Mutex<LashRuntime>>,
     input: TurnInput,
     session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnEventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
     let turn =
@@ -1675,7 +1655,7 @@ async fn stream_prepared_assembled(
     runtime: &Arc<Mutex<LashRuntime>>,
     input: TurnInput,
     session_events: Option<&dyn EventSink>,
-    turn_events: Option<&dyn TurnEventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let mut runtime = runtime.lock().await;
@@ -1708,7 +1688,7 @@ async fn stream_prepared_assembled(
         }
         (None, None) => {
             runtime
-                .stream_turn_events_following_handoffs(input, &lash::NoopTurnEventSink, cancel)
+                .stream_turn_events_following_handoffs(input, &lash::NoopTurnActivitySink, cancel)
                 .await?
         }
     };
@@ -1750,7 +1730,6 @@ impl Input {
         TurnInput {
             items: self.items,
             image_blobs: self.image_blobs,
-            user_input: None,
             mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
@@ -1779,120 +1758,50 @@ impl TurnResult {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CollectedTurnResult {
-    pub transcript: TurnTranscript,
+    pub activities: Vec<TurnActivity>,
     pub outcome: TurnOutcome,
     pub usage: TokenUsage,
     pub errors: Vec<TurnIssue>,
 }
 
 #[derive(Default)]
-struct TurnCollectorState {
-    transcript: TurnTranscript,
-    events: Vec<TurnEvent>,
-    active_code: Vec<(String, String)>,
+struct RunActivityCollector {
+    activities: Arc<StdMutex<Vec<TurnActivity>>>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct TurnTranscript {
-    pub assistant_prose: String,
-    pub reasoning: String,
-    pub terminal_outputs: Vec<CollectedTerminalOutput>,
-    pub visible_outputs: Vec<CollectedVisibleOutput>,
-    pub tool_calls: Vec<CollectedToolCall>,
-    pub code_blocks: Vec<CollectedCodeBlock>,
-    pub errors: Vec<String>,
-}
-
-impl TurnTranscript {
-    pub fn rendered_output(&self) -> String {
-        self.visible_outputs
-            .iter()
-            .map(|output| output.text.as_str())
-            .collect::<String>()
-    }
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectedToolCall {
-    pub call_id: Option<String>,
-    pub name: String,
-    pub args: serde_json::Value,
-    pub result: ToolResultView,
-    pub success: bool,
-    pub duration_ms: u64,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectedTerminalOutput {
-    pub source: TerminalOutputSource,
-    pub value: serde_json::Value,
-    pub rendered: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectedVisibleOutput {
-    pub kind: CollectedVisibleOutputKind,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CollectedVisibleOutputKind {
-    AssistantProse,
-    TerminalOutput,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectedCodeBlock {
-    pub language: String,
-    pub code: String,
-    pub output: String,
-    pub error: Option<String>,
-    pub success: bool,
-    pub duration_ms: u64,
-}
-
-#[derive(Clone, Default)]
-pub struct TurnCollector {
-    state: Arc<StdMutex<TurnCollectorState>>,
-}
-
-impl TurnCollector {
-    pub fn snapshot(&self) -> TurnTranscript {
-        self.state
+impl RunActivityCollector {
+    fn into_activities(self) -> Vec<TurnActivity> {
+        self.activities
             .lock()
-            .expect("turn collector lock")
-            .transcript
+            .expect("run activity collector lock")
             .clone()
     }
 
-    pub fn events(&self) -> Vec<TurnEvent> {
-        self.state
+    #[cfg(test)]
+    fn snapshot(&self) -> Vec<TurnActivity> {
+        self.activities
             .lock()
-            .expect("turn collector lock")
-            .events
+            .expect("run activity collector lock")
             .clone()
     }
+}
 
-    pub fn rendered_output(&self) -> String {
-        self.state
+#[async_trait]
+impl TurnActivitySink for RunActivityCollector {
+    async fn emit(&self, activity: TurnActivity) {
+        self.activities
             .lock()
-            .expect("turn collector lock")
-            .transcript
-            .rendered_output()
-    }
-
-    pub fn sink(&self) -> Arc<dyn TurnEventSink> {
-        Arc::new(self.clone())
+            .expect("run activity collector lock")
+            .push(activity);
     }
 }
 
-pub struct TurnEventFanout {
-    sinks: Vec<Arc<dyn TurnEventSink>>,
+pub struct TurnActivityFanout {
+    sinks: Vec<Arc<dyn TurnActivitySink>>,
 }
 
-impl TurnEventFanout {
-    pub fn new(sinks: impl IntoIterator<Item = Arc<dyn TurnEventSink>>) -> Self {
+impl TurnActivityFanout {
+    pub fn new(sinks: impl IntoIterator<Item = Arc<dyn TurnActivitySink>>) -> Self {
         Self {
             sinks: sinks.into_iter().collect(),
         }
@@ -1900,103 +1809,10 @@ impl TurnEventFanout {
 }
 
 #[async_trait]
-impl TurnEventSink for TurnCollector {
-    async fn emit(&self, event: TurnEvent) {
-        let mut state = self.state.lock().expect("turn collector lock");
-        match &event {
-            TurnEvent::AssistantProseDelta { text } => {
-                state.transcript.assistant_prose.push_str(text);
-                state
-                    .transcript
-                    .visible_outputs
-                    .push(CollectedVisibleOutput {
-                        kind: CollectedVisibleOutputKind::AssistantProse,
-                        text: text.clone(),
-                    });
-            }
-            TurnEvent::ReasoningDelta { text } => {
-                state.transcript.reasoning.push_str(text);
-            }
-            TurnEvent::ToolCallCompleted {
-                call_id,
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-            } => {
-                state.transcript.tool_calls.push(CollectedToolCall {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    args: args.clone(),
-                    result: result.clone(),
-                    success: *success,
-                    duration_ms: *duration_ms,
-                });
-            }
-            TurnEvent::CodeBlockStarted { language, code } => {
-                state.active_code.push((language.clone(), code.clone()));
-            }
-            TurnEvent::CodeBlockCompleted {
-                language,
-                output,
-                error,
-                success,
-                duration_ms,
-            } => {
-                let code = state
-                    .active_code
-                    .iter()
-                    .rposition(|(active_language, _)| active_language == language)
-                    .map(|index| state.active_code.remove(index).1)
-                    .unwrap_or_default();
-                state.transcript.code_blocks.push(CollectedCodeBlock {
-                    language: language.clone(),
-                    code,
-                    output: output.clone(),
-                    error: error.clone(),
-                    success: *success,
-                    duration_ms: *duration_ms,
-                });
-            }
-            TurnEvent::Error { message } => {
-                state.transcript.errors.push(message.clone());
-            }
-            TurnEvent::TerminalOutput { source, value } => {
-                let rendered = lash::render_terminal_output_value(value);
-                state
-                    .transcript
-                    .terminal_outputs
-                    .push(CollectedTerminalOutput {
-                        source: source.clone(),
-                        value: value.clone(),
-                        rendered: rendered.clone(),
-                    });
-                state
-                    .transcript
-                    .visible_outputs
-                    .push(CollectedVisibleOutput {
-                        kind: CollectedVisibleOutputKind::TerminalOutput,
-                        text: rendered,
-                    });
-            }
-            TurnEvent::ToolCallStarted { .. }
-            | TurnEvent::ModelRequestStarted { .. }
-            | TurnEvent::Usage { .. }
-            | TurnEvent::RetryStatus { .. }
-            | TurnEvent::PluginSurface { .. }
-            | TurnEvent::QueuedInputAccepted { .. }
-            | TurnEvent::QueuedMessagesCommitted { .. } => {}
-        }
-        state.events.push(event);
-    }
-}
-
-#[async_trait]
-impl TurnEventSink for TurnEventFanout {
-    async fn emit(&self, event: TurnEvent) {
+impl TurnActivitySink for TurnActivityFanout {
+    async fn emit(&self, activity: TurnActivity) {
         for sink in &self.sinks {
-            sink.emit(event.clone()).await;
+            sink.emit(activity.clone()).await;
         }
     }
 }
@@ -2053,7 +1869,7 @@ mod tests {
                     checkpoint_ref: None,
                     checkpoint: Some(lash::HydratedSessionCheckpoint {
                         turn_state,
-                        dynamic_state: state.dynamic_state_snapshot,
+                        tool_state: state.tool_state_snapshot,
                         ..Default::default()
                     }),
                     token_ledger: Vec::new(),
@@ -2197,20 +2013,34 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingEvents {
-        events: TokioMutex<Vec<TurnEvent>>,
+        events: TokioMutex<Vec<TurnActivity>>,
     }
 
     impl RecordingEvents {
-        async fn snapshot(&self) -> Vec<TurnEvent> {
+        async fn snapshot(&self) -> Vec<TurnActivity> {
             self.events.lock().await.clone()
         }
     }
 
     #[async_trait]
-    impl TurnEventSink for RecordingEvents {
-        async fn emit(&self, event: TurnEvent) {
-            self.events.lock().await.push(event);
+    impl TurnActivitySink for RecordingEvents {
+        async fn emit(&self, activity: TurnActivity) {
+            self.events.lock().await.push(activity);
         }
+    }
+
+    fn test_activity(correlation_id: &str, event: TurnEvent) -> TurnActivity {
+        TurnActivity::new(TurnActivityId::new(correlation_id.to_string()), event)
+    }
+
+    fn assistant_prose(events: &[TurnActivity]) -> String {
+        events
+            .iter()
+            .filter_map(|activity| match &activity.event {
+                TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[derive(Default)]
@@ -2557,6 +2387,7 @@ mod tests {
                     .base_delay_ms(0)
                     .max_delay_ms(0)
                     .build(),
+                ..lash::ProviderOptions::default()
             })
             .complete(move |_request| {
                 let attempts = Arc::clone(&attempts);
@@ -2639,12 +2470,12 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, TurnEvent::AssistantProseDelta { .. }))
+                .any(|event| matches!(&event.event, TurnEvent::AssistantProseDelta { .. }))
         );
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. }))
+                .any(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { .. }))
         );
         Ok(())
     }
@@ -2669,14 +2500,14 @@ mod tests {
             .snapshot()
             .await
             .into_iter()
-            .find(|event| matches!(event, TurnEvent::RetryStatus { .. }))
+            .find(|event| matches!(&event.event, TurnEvent::RetryStatus { .. }))
             .expect("retry status event");
         let TurnEvent::RetryStatus {
             wait_seconds,
             attempt,
             max_attempts,
             reason,
-        } = retry
+        } = retry.event
         else {
             unreachable!();
         };
@@ -2704,9 +2535,9 @@ mod tests {
             .snapshot()
             .await
             .into_iter()
-            .find(|event| matches!(event, TurnEvent::PluginSurface { .. }))
+            .find(|event| matches!(&event.event, TurnEvent::PluginSurface { .. }))
             .expect("plugin surface event");
-        let TurnEvent::PluginSurface { plugin_id, event } = surface else {
+        let TurnEvent::PluginSurface { plugin_id, event } = surface.event else {
             unreachable!();
         };
         assert_eq!(plugin_id, "surface_test");
@@ -2727,7 +2558,7 @@ mod tests {
 
         let result = session.control().raw_turn(input).run().await?;
 
-        assert_eq!(result.transcript.assistant_prose, "echo: raw input");
+        assert_eq!(assistant_prose(&result.activities), "echo: raw input");
         Ok(())
     }
 
@@ -2765,7 +2596,7 @@ mod tests {
         ));
         let events = events.snapshot().await;
         assert!(events.iter().any(|event| matches!(
-            event,
+            &event.event,
             TurnEvent::QueuedInputAccepted {
                 checkpoint: lash::CheckpointKind::BeforeCompletion,
                 inputs,
@@ -2774,7 +2605,7 @@ mod tests {
         )));
         let prose = events
             .into_iter()
-            .filter_map(|event| match event {
+            .filter_map(|event| match event.event {
                 TurnEvent::AssistantProseDelta { text } => Some(text),
                 _ => None,
             })
@@ -2816,7 +2647,7 @@ mod tests {
                 .snapshot()
                 .await
                 .iter()
-                .any(|event| matches!(event, TurnEvent::AssistantProseDelta { .. }))
+                .any(|event| matches!(&event.event, TurnEvent::AssistantProseDelta { .. }))
         );
         Ok(())
     }
@@ -2934,17 +2765,17 @@ mod tests {
             .await?;
 
         let session_result = session.run(Input::text("hello")).await?;
-        assert_eq!(session_result.transcript.rendered_output(), "session");
+        assert_eq!(assistant_prose(&session_result.activities), "session");
 
         let turn_result = session
             .turn(Input::text("hello"))
             .provider(text_provider("turn-provider", "turn-model", "turn"))
             .run()
             .await?;
-        assert_eq!(turn_result.transcript.rendered_output(), "turn");
+        assert_eq!(assistant_prose(&turn_result.activities), "turn");
 
         let after_turn = session.run(Input::text("hello")).await?;
-        assert_eq!(after_turn.transcript.rendered_output(), "session");
+        assert_eq!(assistant_prose(&after_turn.activities), "session");
 
         session
             .update_config(SessionConfigPatch {
@@ -2959,7 +2790,7 @@ mod tests {
             .await?;
 
         let updated = session.run(Input::text("hello")).await?;
-        assert_eq!(updated.transcript.rendered_output(), "updated");
+        assert_eq!(assistant_prose(&updated.activities), "updated");
         Ok(())
     }
 
@@ -3049,13 +2880,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_sessions_always_expose_dynamic_tool_state() -> Result<()> {
+    async fn embedded_sessions_always_expose_tool_state() -> Result<()> {
         let core = standard_core();
         let session = core.session("dynamic-default").open().await?;
 
         let state = session.tool_state().await?;
 
-        assert!(state.base_generation > 0);
+        assert!(state.generation() > 0);
         Ok(())
     }
 
@@ -3071,7 +2902,7 @@ mod tests {
 
         let state = session.tool_state().await?;
 
-        assert!(state.tools.contains_key("app_lookup"));
+        assert!(state.contains("app_lookup"));
         Ok(())
     }
 
@@ -3090,31 +2921,26 @@ mod tests {
             .await?;
         let hidden = session.tool_state().await?;
 
-        assert_eq!(hidden.base_generation, generation);
+        assert_eq!(hidden.generation(), generation);
         assert_eq!(
             hidden
-                .tools
                 .get("app_lookup")
-                .and_then(|spec| spec.definition.availability_override.clone()),
+                .and_then(|spec| spec.definition().availability_override),
             Some(ToolAvailability::Hidden)
         );
 
         let mut callable = hidden;
         callable
-            .tools
-            .get_mut("app_lookup")
-            .expect("app tool")
-            .definition
-            .availability_override = Some(ToolAvailability::Callable);
+            .set_availability("app_lookup", Some(ToolAvailability::Callable))
+            .expect("app tool");
         let generation = session.apply_tool_state(callable).await?;
         let callable = session.tool_state().await?;
 
-        assert_eq!(callable.base_generation, generation);
+        assert_eq!(callable.generation(), generation);
         assert_eq!(
             callable
-                .tools
                 .get("app_lookup")
-                .and_then(|spec| spec.definition.availability_override.clone()),
+                .and_then(|spec| spec.definition().availability_override),
             Some(ToolAvailability::Callable)
         );
         Ok(())
@@ -3142,7 +2968,7 @@ mod tests {
                 execution_mode: lash::ExecutionMode::standard(),
                 ..Default::default()
             },
-            dynamic_state_snapshot: Some(persisted_tool_state),
+            tool_state_snapshot: Some(persisted_tool_state),
             ..Default::default()
         };
         let store: Arc<dyn lash::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
@@ -3159,9 +2985,8 @@ mod tests {
 
         assert_eq!(
             state
-                .tools
                 .get("app_lookup")
-                .and_then(|spec| spec.definition.availability_override.clone()),
+                .and_then(|spec| spec.definition().availability_override),
             Some(ToolAvailability::Hidden)
         );
         Ok(())
@@ -3253,15 +3078,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_collects_assistant_prose_without_result_duplication() -> Result<()> {
+    async fn run_collects_ordered_assistant_prose_activity() -> Result<()> {
         let core = standard_core();
         let session = core.session("main").open().await?;
 
         let result = session.run(Input::text("visible")).await?;
 
-        assert_eq!(result.transcript.assistant_prose, "echo: visible");
-        assert!(result.transcript.tool_calls.is_empty());
-        assert!(result.transcript.code_blocks.is_empty());
+        assert_eq!(assistant_prose(&result.activities), "echo: visible");
+        assert!(
+            result
+                .activities
+                .iter()
+                .any(|activity| matches!(&activity.event, TurnEvent::AssistantProseDelta { .. }))
+        );
+        assert!(
+            !result
+                .activities
+                .iter()
+                .any(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. }))
+        );
+        assert!(
+            !result
+                .activities
+                .iter()
+                .any(|activity| matches!(&activity.event, TurnEvent::CodeBlockCompleted { .. }))
+        );
         assert!(matches!(
             result.outcome,
             TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
@@ -3271,59 +3112,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_collector_records_streamed_tool_and_code_events() -> Result<()> {
-        let collector = TurnCollector::default();
+    async fn private_run_collector_records_ordered_activities() -> Result<()> {
+        let collector = RunActivityCollector::default();
 
         collector
-            .emit(TurnEvent::CodeBlockStarted {
-                language: "lashlang".to_string(),
-                code: "x = (call app_lookup {})?".to_string(),
-            })
-            .await;
-        collector
-            .emit(TurnEvent::ToolCallCompleted {
-                call_id: Some("call-1".to_string()),
-                name: "app_lookup".to_string(),
-                args: serde_json::json!({}),
-                result: ToolResultView {
-                    raw: serde_json::json!({ "ok": true }),
-                    for_model: serde_json::json!({ "ok": true }),
-                    for_state: serde_json::json!({ "ok": true }),
+            .emit(test_activity(
+                "code-1",
+                TurnEvent::CodeBlockStarted {
+                    language: "lashlang".to_string(),
+                    code: "x = (call app_lookup {})?".to_string(),
                 },
-                success: true,
-                duration_ms: 3,
-            })
+            ))
             .await;
         collector
-            .emit(TurnEvent::CodeBlockCompleted {
-                language: "lashlang".to_string(),
-                output: String::new(),
-                error: None,
-                success: true,
-                duration_ms: 4,
-            })
+            .emit(test_activity(
+                "tool-1",
+                TurnEvent::ToolCallCompleted {
+                    call_id: Some("call-1".to_string()),
+                    name: "app_lookup".to_string(),
+                    args: serde_json::json!({}),
+                    result: ToolResultView {
+                        raw: serde_json::json!({ "ok": true }),
+                        for_model: serde_json::json!({ "ok": true }),
+                        for_state: serde_json::json!({ "ok": true }),
+                    },
+                    success: true,
+                    duration_ms: 3,
+                },
+            ))
+            .await;
+        collector
+            .emit(test_activity(
+                "code-1",
+                TurnEvent::CodeBlockCompleted {
+                    language: "lashlang".to_string(),
+                    output: String::new(),
+                    error: None,
+                    success: true,
+                    duration_ms: 4,
+                },
+            ))
             .await;
 
-        let transcript = collector.snapshot();
-        assert_eq!(collector.events().len(), 3);
-        assert_eq!(transcript.tool_calls.len(), 1);
-        assert_eq!(transcript.tool_calls[0].name, "app_lookup");
-        assert_eq!(
-            transcript.tool_calls[0].result.raw,
-            serde_json::json!({ "ok": true })
-        );
-        assert_eq!(transcript.code_blocks.len(), 1);
-        assert_eq!(transcript.code_blocks[0].language, "lashlang");
-        assert_eq!(transcript.code_blocks[0].code, "x = (call app_lookup {})?");
-        assert!(transcript.code_blocks[0].success);
+        let activities = collector.snapshot();
+        assert_eq!(activities.len(), 3);
+        assert!(matches!(
+            &activities[0].event,
+            TurnEvent::CodeBlockStarted { language, code }
+                if language == "lashlang" && code == "x = (call app_lookup {})?"
+        ));
+        assert!(matches!(
+            &activities[1].event,
+            TurnEvent::ToolCallCompleted { name, result, .. }
+                if name == "app_lookup" && result.raw == serde_json::json!({ "ok": true })
+        ));
+        assert_eq!(activities[0].correlation_id, activities[2].correlation_id);
+        assert!(matches!(
+            &activities[2].event,
+            TurnEvent::CodeBlockCompleted { language, success, .. }
+                if language == "lashlang" && *success
+        ));
         Ok(())
     }
 
     #[tokio::test]
     async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
-        let collector = TurnCollector::default();
-        let live = Arc::new(RecordingEvents::default()) as Arc<dyn TurnEventSink>;
-        let fanout = TurnEventFanout::new(vec![collector.sink(), live]);
+        let recorded = Arc::new(RecordingEvents::default());
+        let live = Arc::new(RecordingEvents::default());
+        let fanout = TurnActivityFanout::new(vec![
+            recorded.clone() as Arc<dyn TurnActivitySink>,
+            live.clone() as Arc<dyn TurnActivitySink>,
+        ]);
         let core = LashCore::standard()
             .provider(tool_roundtrip_provider())
             .model("mock-model", None)
@@ -3341,14 +3200,21 @@ mod tests {
             result.outcome,
             TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
         ));
-        let transcript = collector.snapshot();
-        assert_eq!(transcript.assistant_prose, "done");
-        assert_eq!(transcript.tool_calls.len(), 1);
-        assert_eq!(transcript.tool_calls[0].name, "app_lookup");
+        let activities = recorded.snapshot().await;
         assert_eq!(
-            transcript.tool_calls[0].result.raw,
-            serde_json::json!({ "ok": true })
+            serde_json::to_value(&activities).expect("recorded activities serialize"),
+            serde_json::to_value(live.snapshot().await).expect("live activities serialize")
         );
+        assert_eq!(assistant_prose(&activities), "done");
+        let tool_completed = activities
+            .iter()
+            .find(|activity| matches!(&activity.event, TurnEvent::ToolCallCompleted { .. }))
+            .expect("tool completion");
+        assert!(matches!(
+            &tool_completed.event,
+            TurnEvent::ToolCallCompleted { name, result, .. }
+                if name == "app_lookup" && result.raw == serde_json::json!({ "ok": true })
+        ));
         Ok(())
     }
 
@@ -3368,19 +3234,16 @@ mod tests {
             .snapshot()
             .await
             .into_iter()
-            .filter_map(|event| match event {
+            .filter_map(|event| match event.event {
                 TurnEvent::AssistantProseDelta { text } => Some(text),
                 _ => None,
             })
             .collect::<String>();
         assert_eq!(prose, "echo: stream");
-        assert!(
-            !events
-                .snapshot()
-                .await
-                .iter()
-                .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
-        );
+        assert!(!events.snapshot().await.iter().any(|event| matches!(
+            &event.event,
+            TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        )));
         Ok(())
     }
 
@@ -3407,14 +3270,14 @@ mod tests {
         let events = events.snapshot().await;
         let started = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::ToolCallStarted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::ToolCallStarted { .. }))
             .expect("tool start event");
         let completed = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::ToolCallCompleted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { .. }))
             .expect("tool completed event");
         assert!(started < completed);
-        let TurnEvent::ToolCallCompleted { result, .. } = &events[completed] else {
+        let TurnEvent::ToolCallCompleted { result, .. } = &events[completed].event else {
             unreachable!();
         };
         assert_eq!(result.raw, serde_json::json!({ "ok": true }));
@@ -3422,7 +3285,7 @@ mod tests {
         assert_eq!(result.for_state, serde_json::json!({ "ok": true }));
         let prose = events
             .into_iter()
-            .filter_map(|event| match event {
+            .filter_map(|event| match event.event {
                 TurnEvent::AssistantProseDelta { text } => Some(text),
                 _ => None,
             })
@@ -3444,55 +3307,47 @@ mod tests {
             .build()?;
         let session = core.session("rlm-live-tool-events").open().await?;
         let events = Arc::new(RecordingEvents::default());
-        let collector = TurnCollector::default();
-        let fanout = TurnEventFanout::new(vec![
-            collector.sink(),
-            events.clone() as Arc<dyn TurnEventSink>,
-        ]);
 
         let result = session
             .turn(Input::text("use tool"))
-            .stream(&fanout)
+            .stream(events.as_ref())
             .await?;
 
         assert!(matches!(
             result.outcome,
-            TurnOutcome::Finished(lash::TurnFinish::Value {
-                source: lash::TerminalOutputSource::RlmSubmit,
-                ..
-            })
+            TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. })
         ));
         let events = events.snapshot().await;
         let code_started = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::CodeBlockStarted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::CodeBlockStarted { .. }))
             .expect("code started");
         let tool_started = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::ToolCallStarted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::ToolCallStarted { .. }))
             .expect("tool started");
         let tool_completed = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::ToolCallCompleted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { .. }))
             .expect("tool completed");
         let code_completed = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::CodeBlockCompleted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::CodeBlockCompleted { .. }))
             .expect("code completed");
         let terminal_output = events
             .iter()
-            .position(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
             .expect("terminal output");
         assert!(code_started < tool_started);
         assert!(tool_started < tool_completed);
         assert!(tool_completed < code_completed);
         assert!(code_completed < terminal_output);
         assert!(!events[code_completed + 1..].iter().any(|event| matches!(
-            event,
+            &event.event,
             TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallCompleted { .. }
         )));
 
-        let TurnEvent::ToolCallCompleted { result, .. } = &events[tool_completed] else {
+        let TurnEvent::ToolCallCompleted { result, .. } = &events[tool_completed].event else {
             unreachable!();
         };
         assert_eq!(result.raw, serde_json::json!({ "ok": true }));
@@ -3503,20 +3358,17 @@ mod tests {
             success,
             error,
             ..
-        } = &events[code_completed]
+        } = &events[code_completed].event
         else {
             unreachable!();
         };
         assert_eq!(language, "lashlang");
         assert!(*success);
         assert!(error.is_none());
-        let TurnEvent::TerminalOutput { source, value } = &events[terminal_output] else {
+        let TurnEvent::SubmittedValue { value } = &events[terminal_output].event else {
             unreachable!();
         };
-        assert!(matches!(source, lash::TerminalOutputSource::RlmSubmit));
         assert_eq!(value, &serde_json::json!("done"));
-        assert_eq!(collector.snapshot().terminal_outputs.len(), 1);
-        assert_eq!(collector.rendered_output(), "done");
         Ok(())
     }
 
@@ -3529,11 +3381,6 @@ mod tests {
             .build()?;
         let session = core.session("rlm-prose-completion").open().await?;
         let events = Arc::new(RecordingEvents::default());
-        let collector = TurnCollector::default();
-        let fanout = TurnEventFanout::new(vec![
-            collector.sink(),
-            events.clone() as Arc<dyn TurnEventSink>,
-        ]);
 
         let result = session
             .turn(Input::text("answer directly"))
@@ -3544,7 +3391,7 @@ mod tests {
                 )
                 .expect("rlm termination options serialize"),
             )
-            .stream(&fanout)
+            .stream(events.as_ref())
             .await?;
 
         assert!(matches!(
@@ -3552,12 +3399,11 @@ mod tests {
             TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
         ));
         let events = events.snapshot().await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
-        );
-        assert_eq!(collector.rendered_output(), "done in prose");
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
+        )));
+        assert_eq!(assistant_prose(&events), "done in prose");
         Ok(())
     }
 
@@ -3575,11 +3421,6 @@ mod tests {
             .open()
             .await?;
         let events = Arc::new(RecordingEvents::default());
-        let collector = TurnCollector::default();
-        let fanout = TurnEventFanout::new(vec![
-            collector.sink(),
-            events.clone() as Arc<dyn TurnEventSink>,
-        ]);
 
         let result = session
             .turn(Input::text("submit"))
@@ -3590,27 +3431,22 @@ mod tests {
                 )
                 .expect("rlm termination options serialize"),
             )
-            .stream(&fanout)
+            .stream(events.as_ref())
             .await?;
 
         assert!(matches!(
             result.outcome,
-            TurnOutcome::Finished(lash::TurnFinish::Value {
-                source: lash::TerminalOutputSource::RlmSubmit,
-                ..
-            })
+            TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. })
         ));
         let events = events.snapshot().await;
         let terminal_output = events
             .iter()
-            .find(|event| matches!(event, TurnEvent::TerminalOutput { .. }))
+            .find(|event| matches!(&event.event, TurnEvent::SubmittedValue { .. }))
             .expect("terminal output");
-        let TurnEvent::TerminalOutput { source, value } = terminal_output else {
+        let TurnEvent::SubmittedValue { value } = &terminal_output.event else {
             unreachable!();
         };
-        assert!(matches!(source, lash::TerminalOutputSource::RlmSubmit));
         assert_eq!(value, &serde_json::json!("done via submit"));
-        assert_eq!(collector.rendered_output(), "done via submit");
         Ok(())
     }
 
@@ -3640,7 +3476,7 @@ mod tests {
             .snapshot()
             .await
             .into_iter()
-            .find_map(|event| match event {
+            .find_map(|event| match event.event {
                 TurnEvent::ToolCallCompleted { result, .. } => Some(result),
                 _ => None,
             })
@@ -3665,7 +3501,7 @@ mod tests {
             .snapshot()
             .await
             .into_iter()
-            .find_map(|event| match event {
+            .find_map(|event| match event.event {
                 TurnEvent::ToolCallCompleted { result, .. } => Some(result),
                 _ => None,
             })
@@ -3707,7 +3543,7 @@ mod tests {
             .iter()
             .position(|event| {
                 matches!(
-                    event,
+                    &event.event,
                     TurnEvent::CodeBlockCompleted {
                         success: false,
                         error: Some(_),
@@ -3718,13 +3554,13 @@ mod tests {
             .expect("failed code completion");
         let next_code = events[failed + 1..]
             .iter()
-            .position(|event| matches!(event, TurnEvent::CodeBlockStarted { .. }))
+            .position(|event| matches!(&event.event, TurnEvent::CodeBlockStarted { .. }))
             .map(|offset| failed + 1 + offset)
             .unwrap_or(events.len());
         assert!(
             !events[failed + 1..next_code]
                 .iter()
-                .any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. }))
+                .any(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { .. }))
         );
         Ok(())
     }
@@ -3835,7 +3671,7 @@ mod tests {
             .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
             .await?;
         let mut persisted = opened.persist_current_state().await?;
-        persisted.dynamic_state_snapshot = Some(opened.tool_state().await?);
+        persisted.tool_state_snapshot = Some(opened.tool_state().await?);
         drop(opened);
 
         let reopened = core
@@ -3846,9 +3682,8 @@ mod tests {
         let state = reopened.tool_state().await?;
         assert_eq!(
             state
-                .tools
                 .get("app_lookup")
-                .and_then(|spec| spec.definition.availability_override.clone()),
+                .and_then(|spec| spec.definition().availability_override),
             Some(ToolAvailability::Hidden)
         );
         Ok(())
@@ -4003,7 +3838,6 @@ mod tests {
                 reasoning_meta: None,
                 response_meta: None,
             }]),
-            user_input: None,
             origin: None,
         }
     }

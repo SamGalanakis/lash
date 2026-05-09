@@ -210,7 +210,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }
     }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use lash::SkillCatalog;
+use crate::SkillCatalog;
 use lash_file_index::FileIndex;
 use lash_file_index::MatchResult;
 use lash_tui_extensions::TuiExtensions;

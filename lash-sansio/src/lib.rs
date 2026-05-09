@@ -11,21 +11,6 @@ pub mod turn;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TerminalOutputSource {
-    RlmSubmit,
-    Tool { name: String },
-}
-
-pub fn render_terminal_output_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-    }
-}
-
 pub use attachment::{AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType};
 pub use mode::{
     ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
@@ -33,7 +18,6 @@ pub use mode::{
 };
 pub use plugin::{
     CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, PromptContributionGate,
-    UserInputProvenance, UserInputTransform,
 };
 pub use prompt::{
     PreparedPrompt, PromptBuildInput, PromptCache, build_prompt, build_prompt_cached,
@@ -471,42 +455,6 @@ impl CompactToolContract {
             sections.push(format!("Examples: {}", self.examples.join("; ")));
         }
         sections.join("\n")
-    }
-}
-
-/// Render a JSON Schema as a compact value-shape contract using the same
-/// renderer that produces tool input signatures. Suitable for telling the
-/// model the exact shape of a value (e.g. an RLM `submit` payload) without
-/// needing a containing `ToolDefinition`.
-///
-/// Object-with-properties schemas render as `{ field: type, ... }` with a
-/// per-field doc table; scalar/array schemas fall back to the compact JSON
-/// type label (`str`, `list[int]`, `str | null`, …).
-pub fn render_value_schema_contract(schema: &serde_json::Value) -> String {
-    let params = schema_parameter_docs(schema);
-    let head = if params.is_empty() {
-        compact_schema_label(schema)
-    } else {
-        format!(
-            "{{ {} }}",
-            params
-                .iter()
-                .map(ParameterDoc::signature_fragment)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-
-    let lines = params
-        .into_iter()
-        .map(ParameterDoc::into_value)
-        .filter_map(|value| compact_doc_line(&value))
-        .collect::<Vec<_>>();
-
-    if lines.is_empty() {
-        head
-    } else {
-        format!("{head}\nFields:\n{}", lines.join("\n"))
     }
 }
 
@@ -1506,40 +1454,6 @@ mod tests {
         assert!(docs.contains(
             "Examples: search_docs(query=\"rust\"); search_docs(query=\"rust\", limit=3)"
         ));
-    }
-
-    #[test]
-    fn render_value_schema_contract_renders_object_shape_with_field_table() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": { "type": "string", "enum": ["call", "fold"] },
-                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
-            },
-            "required": ["action"]
-        });
-
-        let rendered = render_value_schema_contract(&schema);
-        let head = rendered.lines().next().expect("at least one line");
-        assert_eq!(
-            head,
-            "{ action: enum[\"call\", \"fold\"], confidence?: float >= 0 <= 1 }"
-        );
-        assert!(rendered.contains("Fields:"));
-        assert!(rendered.contains("- `action: enum[\"call\", \"fold\"]`"));
-        assert!(rendered.contains("- `confidence?: float >= 0 <= 1`"));
-    }
-
-    #[test]
-    fn render_value_schema_contract_falls_back_to_compact_label_for_scalars() {
-        let scalar = serde_json::json!({ "type": "string" });
-        assert_eq!(render_value_schema_contract(&scalar), "str");
-
-        let array = serde_json::json!({ "type": "array", "items": { "type": "integer" } });
-        assert_eq!(render_value_schema_contract(&array), "list[int]");
-
-        let nullable_string = serde_json::json!({ "type": ["string", "null"] });
-        assert_eq!(render_value_schema_contract(&nullable_string), "str | null");
     }
 
     #[test]

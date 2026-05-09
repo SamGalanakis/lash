@@ -24,7 +24,6 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
             response_meta: None,
         }]
         .into(),
-        user_input: None,
         origin: None,
     }
 }
@@ -45,8 +44,8 @@ async fn embedded_runtime_builder_loads_state_from_store() {
                 last_prompt_usage: None,
                 mode_turn_options: Default::default(),
             },
-            dynamic_state_ref: None,
-            dynamic_state: None,
+            tool_state_ref: None,
+            tool_state: None,
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,

@@ -7,20 +7,15 @@ impl LashRuntime {
 
     pub(super) fn stamp_live_plugin_state(&mut self) {
         if let Some(session) = self.session.as_ref() {
-            if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
-                let snapshot = dynamic_tools.export_state();
-                self.state.dynamic_state_generation = Some(snapshot.base_generation);
-                self.state.dynamic_state_snapshot = Some(snapshot);
-            } else {
-                self.state.dynamic_state_generation = None;
-                self.state.dynamic_state_snapshot = None;
-            }
+            let snapshot = session.plugins().tool_registry().export_state();
+            self.state.tool_state_generation = Some(snapshot.generation());
+            self.state.tool_state_snapshot = Some(snapshot);
             self.state.plugin_snapshot = session.plugins().snapshot().ok();
             self.state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
         } else {
-            self.state.dynamic_state_generation = None;
-            self.state.dynamic_state_snapshot = None;
+            self.state.tool_state_generation = None;
+            self.state.tool_state_snapshot = None;
             self.state.plugin_snapshot = None;
             self.state.plugin_snapshot_revision = None;
         }
@@ -39,18 +34,13 @@ impl LashRuntime {
             .unwrap_or_else(|| Arc::new(Vec::new()))
     }
 
-    pub fn dynamic_tool_state(&self) -> Result<crate::DynamicStateSnapshot, SessionError> {
+    pub fn tool_state(&self) -> Result<crate::ToolState, SessionError> {
         let Some(session) = self.session.as_ref() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let Some(dynamic_tools) = session.plugins().dynamic_tools() else {
-            return Err(SessionError::Protocol(
-                "dynamic tools are unavailable in this runtime session".to_string(),
-            ));
-        };
-        Ok(dynamic_tools.export_state())
+        Ok(session.plugins().tool_registry().export_state())
     }
     /// Override mode-owned turn options for this session.
     pub fn set_mode_turn_options(&mut self, options: crate::ModeTurnOptions) {
@@ -92,14 +82,9 @@ impl LashRuntime {
         let mut state = self.state.clone();
         state.mode_turn_options = self.mode_turn_options.clone();
         if let Some(session) = self.session.as_ref() {
-            if let Some(dynamic_tools) = session.plugins().dynamic_tools() {
-                let snapshot = dynamic_tools.export_state();
-                state.dynamic_state_generation = Some(snapshot.base_generation);
-                state.dynamic_state_snapshot = Some(snapshot);
-            } else {
-                state.dynamic_state_generation = None;
-                state.dynamic_state_snapshot = None;
-            }
+            let snapshot = session.plugins().tool_registry().export_state();
+            state.tool_state_generation = Some(snapshot.generation());
+            state.tool_state_snapshot = Some(snapshot);
             state.plugin_snapshot = session.plugins().snapshot().ok();
             state.plugin_snapshot_revision =
                 Some(session.plugins().snapshot_revision_fingerprint());
@@ -240,10 +225,8 @@ impl LashRuntime {
             self.state
                 .replace_active_read_state(&outcome.messages, &outcome.tool_calls);
             if let Some(session) = self.session.as_ref() {
-                self.state.dynamic_state_snapshot = session
-                    .plugins()
-                    .dynamic_tools()
-                    .map(|tools| tools.export_state());
+                self.state.tool_state_snapshot =
+                    Some(session.plugins().tool_registry().export_state());
                 self.state.plugin_snapshot = session.plugins().snapshot().ok();
                 self.state.plugin_snapshot_revision =
                     Some(session.plugins().snapshot_revision_fingerprint());

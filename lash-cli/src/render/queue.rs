@@ -53,7 +53,7 @@ fn push_queue_section(
     width: usize,
     title: &str,
     items: &[String],
-    skills: &lash::SkillCatalog,
+    skills: &crate::SkillCatalog,
     header_style: Style,
     item_style: Style,
 ) {
@@ -100,7 +100,7 @@ fn push_wrapped_queue_item(
     lines: &mut Vec<Line<'static>>,
     width: usize,
     text: &str,
-    skills: &lash::SkillCatalog,
+    skills: &crate::SkillCatalog,
     style: Style,
     first_prefix: &str,
     continuation_prefix: &str,

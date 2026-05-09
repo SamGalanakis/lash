@@ -1166,10 +1166,7 @@ fn render_message(
     };
 
     let user_text = if matches!(message.role, MessageRole::User) {
-        message
-            .display_user_text()
-            .map(str::to_string)
-            .filter(|t| !t.trim().is_empty())
+        first_message_text(message)
     } else {
         None
     };
@@ -1289,6 +1286,15 @@ fn headline_for_message(message: &Message, user_text: Option<&str>) -> String {
     } else {
         summary.join(" · ")
     }
+}
+
+fn first_message_text(message: &Message) -> Option<String> {
+    message
+        .parts
+        .iter()
+        .find(|part| matches!(part.kind, PartKind::Text | PartKind::Prose))
+        .map(|part| part.content.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn build_search_text_message(message: &Message, user_text: Option<&str>) -> String {
@@ -1413,10 +1419,8 @@ fn pick_display_title(session: &LoadedSession, name: &str, id: &str) -> String {
                 if !matches!(message.role, MessageRole::User) {
                     continue;
                 }
-                if let Some(text) = message.display_user_text()
-                    && !text.trim().is_empty()
-                {
-                    return one_line_summary(text, 110);
+                if let Some(text) = first_message_text(message) {
+                    return one_line_summary(&text, 110);
                 }
                 for part in message.parts.iter() {
                     if matches!(part.kind, PartKind::Text | PartKind::Prose)
@@ -3173,9 +3177,7 @@ fn render_drill_card(
             ChronologicalPayload::Message(m)
                 if matches!(m.role, MessageRole::User) && !m.is_transient() =>
             {
-                m.display_user_text()
-                    .map(str::to_string)
-                    .filter(|t| !t.trim().is_empty())
+                first_message_text(m)
             }
             _ => None,
         })
@@ -3333,7 +3335,7 @@ fn render_handoff_divider(
             seed_obj.len()
         );
         for (name, value) in seed_obj {
-            let projected = lash::tools::projection_inner(value).is_some();
+            let projected = lash_rlm_types::projection_inner(value).is_some();
             let kind_label = if projected { "projected" } else { "global" };
             let kind_attr = if projected { "projected" } else { "global" };
             let _ = writeln!(
@@ -3507,7 +3509,6 @@ mod tests {
                 reasoning_meta: None,
                 response_meta: None,
             }]),
-            user_input: None,
             origin: None,
         }
     }
@@ -3625,7 +3626,6 @@ mod tests {
             id: "m0".to_string(),
             role: lash::session_model::MessageRole::Assistant,
             parts: shared_parts(vec![tool_part]),
-            user_input: None,
             origin: None,
         };
         let session = LoadedSession {

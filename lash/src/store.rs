@@ -81,7 +81,7 @@ pub struct SessionCheckpoint {
     #[serde(default)]
     pub turn_state: crate::PersistedTurnState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dynamic_state_ref: Option<BlobRef>,
+    pub tool_state_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_snapshot_ref: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,8 +93,8 @@ pub struct SessionCheckpoint {
 #[derive(Clone, Debug, Default)]
 pub struct HydratedSessionCheckpoint {
     pub turn_state: crate::PersistedTurnState,
-    pub dynamic_state_ref: Option<BlobRef>,
-    pub dynamic_state: Option<crate::DynamicStateSnapshot>,
+    pub tool_state_ref: Option<BlobRef>,
+    pub tool_state: Option<crate::ToolState>,
     pub plugin_snapshot_ref: Option<BlobRef>,
     pub plugin_snapshot: Option<crate::PluginSessionSnapshot>,
     pub plugin_snapshot_revision: Option<u64>,
@@ -217,8 +217,8 @@ fn build_checkpoint_from_persisted_state(
 ) -> HydratedSessionCheckpoint {
     HydratedSessionCheckpoint {
         turn_state: build_persisted_turn_state(state),
-        dynamic_state_ref: state.dynamic_state_ref.clone(),
-        dynamic_state: state.dynamic_state_snapshot.clone(),
+        tool_state_ref: state.tool_state_ref.clone(),
+        tool_state: state.tool_state_snapshot.clone(),
         plugin_snapshot_ref: state.plugin_snapshot_ref.clone(),
         plugin_snapshot_revision: state.plugin_snapshot_revision,
         plugin_snapshot: state.plugin_snapshot.clone(),
@@ -276,9 +276,9 @@ fn persisted_session_state_from_head(
         token_usage: crate::TokenUsage::default(),
         last_prompt_usage: None,
         mode_turn_options: crate::ModeTurnOptions::default(),
-        dynamic_state_ref: None,
-        dynamic_state_generation: None,
-        dynamic_state_snapshot: None,
+        tool_state_ref: None,
+        tool_state_generation: None,
+        tool_state_snapshot: None,
         plugin_snapshot_ref: None,
         plugin_snapshot_revision: None,
         plugin_snapshot: None,
@@ -301,12 +301,12 @@ fn persisted_session_state_from_head(
         state.token_usage = checkpoint.turn_state.token_usage;
         state.last_prompt_usage = checkpoint.turn_state.last_prompt_usage;
         state.mode_turn_options = checkpoint.turn_state.mode_turn_options;
-        state.dynamic_state_ref = checkpoint.dynamic_state_ref.clone();
-        state.dynamic_state_generation = checkpoint
-            .dynamic_state
+        state.tool_state_ref = checkpoint.tool_state_ref.clone();
+        state.tool_state_generation = checkpoint
+            .tool_state
             .as_ref()
-            .map(|snapshot| snapshot.base_generation);
-        state.dynamic_state_snapshot = checkpoint.dynamic_state;
+            .map(|snapshot| snapshot.generation());
+        state.tool_state_snapshot = checkpoint.tool_state;
         state.plugin_snapshot_ref = checkpoint.plugin_snapshot_ref.clone();
         state.plugin_snapshot_revision = checkpoint.plugin_snapshot_revision;
         state.plugin_snapshot = checkpoint.plugin_snapshot;

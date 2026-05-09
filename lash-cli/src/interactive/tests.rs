@@ -100,7 +100,7 @@ fn enter_on_skill_suggestion_stays_text_completion() {
     .expect("skill file");
 
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.skills = lash::SkillCatalog::from_dirs(std::slice::from_ref(&root));
+    app.skills = crate::SkillCatalog::from_dirs(std::slice::from_ref(&root));
     app.set_input("/loc".into());
     app.update_suggestions();
 

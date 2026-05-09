@@ -8,6 +8,7 @@ use lash_sqlite_store::Store;
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 use sha2::{Digest, Sha256};
 
+use crate::SkillCatalog;
 use crate::app::{App, PreparedTurn, UiTimelineItem};
 use crate::command;
 
@@ -389,6 +390,15 @@ pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
     mode.plugin_id()
 }
 
+pub(crate) fn standard_context_approach_label(
+    approach: &lash::StandardContextApproach,
+) -> &'static str {
+    match approach.kind() {
+        lash::StandardContextApproachKind::RollingHistory => "rolling_history",
+        lash::StandardContextApproachKind::ObservationalMemory => "observational_memory",
+    }
+}
+
 pub(crate) fn validate_model_selection(
     provider: &ProviderHandle,
     selection: &ModelSelection,
@@ -473,7 +483,7 @@ pub(crate) fn variant_lines(
 }
 
 pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str {
-    lash::provider_cli_label(provider.kind())
+    crate::provider_metadata::provider_cli_label(provider.kind())
 }
 
 pub(crate) fn hash12(bytes: &[u8]) -> String {
@@ -552,7 +562,7 @@ pub(crate) fn info_text(
     {
         lines.push(format!(
             "context approach: {}",
-            standard_context_approach.label()
+            standard_context_approach_label(standard_context_approach)
         ));
     }
 

@@ -634,9 +634,8 @@ mod fork_tests {
     use super::*;
     use crate::session_log;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::DynamicStateSnapshot;
+    use lash::ToolState;
     use lash::provider::ProviderHandle;
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn dummy_provider() -> ProviderHandle {
@@ -646,11 +645,8 @@ mod fork_tests {
         )
     }
 
-    fn empty_dynamic_state() -> DynamicStateSnapshot {
-        DynamicStateSnapshot {
-            base_generation: 0,
-            tools: BTreeMap::new(),
-        }
+    fn empty_tool_state() -> ToolState {
+        ToolState::default()
     }
 
     fn persisted_graph(messages: Vec<lash::Message>, _iteration: usize) -> lash::SessionGraph {
@@ -670,8 +666,8 @@ mod fork_tests {
                 last_prompt_usage: None,
                 mode_turn_options: Default::default(),
             },
-            dynamic_state_ref: None,
-            dynamic_state: Some(empty_dynamic_state()),
+            tool_state_ref: None,
+            tool_state: Some(empty_tool_state()),
             plugin_snapshot_ref: None,
             plugin_snapshot_revision: None,
             plugin_snapshot: None,
@@ -757,7 +753,6 @@ mod fork_tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }];
         save_persisted_root(parent_store.as_ref(), persisted_graph(messages, 1), 1);

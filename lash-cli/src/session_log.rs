@@ -13,9 +13,9 @@ use lash::session_model::{MessageRole, PartKind};
 use lash::{SessionStateEnvelope, TokenUsage};
 use lash_sqlite_store::Store;
 
-#[cfg(test)]
-use crate::app::UiTimelineItem;
-use crate::app::{LiveToolOutput, UiTimeline, timeline_from_read_view};
+use crate::app::{
+    LiveToolOutput, PreparedTurn, UiTimeline, UiTimelineItem, timeline_from_read_view,
+};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -47,6 +47,17 @@ pub struct SessionLogger {
     store: Arc<Store>,
     pub session_id: String,
     filename: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct HostInputSidecar {
+    inputs: Vec<HostInputRecord>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct HostInputRecord {
+    display_text: String,
+    effective_text: String,
 }
 
 #[derive(Clone)]
@@ -141,6 +152,28 @@ impl SessionLogger {
         sessions_dir().join(&self.filename)
     }
 
+    fn host_input_path_for(filename: &str) -> PathBuf {
+        sessions_dir().join(format!("{filename}.ui.json"))
+    }
+
+    fn host_input_path(&self) -> PathBuf {
+        Self::host_input_path_for(&self.filename)
+    }
+
+    pub fn record_host_input(&self, turn: &PreparedTurn) -> Result<()> {
+        if turn.display_text.trim().is_empty() || turn.display_text == turn.effective_text {
+            return Ok(());
+        }
+        let path = self.host_input_path();
+        let mut sidecar = load_host_input_sidecar_path(&path).unwrap_or_default();
+        sidecar.inputs.push(HostInputRecord {
+            display_text: turn.display_text.clone(),
+            effective_text: turn.effective_text.clone(),
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&sidecar)?)?;
+        Ok(())
+    }
+
     pub fn mark_as_child_of(&self, parent_session_id: &str) -> Result<()> {
         let meta = self
             .store
@@ -155,6 +188,29 @@ impl SessionLogger {
             parent_session_id: Some(parent_session_id.to_string()),
         });
         Ok(())
+    }
+}
+
+fn load_host_input_sidecar_path(path: &Path) -> Result<HostInputSidecar> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HostInputSidecar::default()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn apply_host_input_sidecar(blocks: &mut UiTimeline, sidecar: &HostInputSidecar) {
+    for item in blocks.iter_mut() {
+        let UiTimelineItem::UserInput(text) = item else {
+            continue;
+        };
+        if let Some(record) = sidecar
+            .inputs
+            .iter()
+            .find(|record| record.effective_text.trim() == text.trim())
+        {
+            *text = record.display_text.trim().to_string();
+        }
     }
 }
 
@@ -323,7 +379,11 @@ pub fn load_session(filename: &str) -> Result<LoadedSession> {
         .and_then(|blob_ref| store.get_checkpoint(blob_ref));
     let plugin_mode_indicators = ui_state.plugin_mode_indicators.clone();
     let live_tool_output = ui_state.live_tool_output.clone();
-    let blocks = timeline_from_read_view(&read_view, &ui_state);
+    let mut blocks = timeline_from_read_view(&read_view, &ui_state);
+    if let Ok(sidecar) = load_host_input_sidecar_path(&SessionLogger::host_input_path_for(filename))
+    {
+        apply_host_input_sidecar(&mut blocks, &sidecar);
+    }
     tracing::debug!(
         session_file = filename,
         messages = read_view.messages().len(),
@@ -376,11 +436,8 @@ mod tests {
                     last_prompt_usage: None,
                     mode_turn_options: Default::default(),
                 },
-                dynamic_state_ref: None,
-                dynamic_state: Some(lash::DynamicStateSnapshot {
-                    base_generation: 0,
-                    tools: BTreeMap::new(),
-                }),
+                tool_state_ref: None,
+                tool_state: Some(lash::ToolState::default()),
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
@@ -423,7 +480,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }
     }
@@ -446,7 +502,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }
     }

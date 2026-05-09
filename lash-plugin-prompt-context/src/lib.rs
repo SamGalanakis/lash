@@ -146,7 +146,6 @@ fn environment_tail_message(content: String) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: Some(lash::MessageOrigin::Plugin {
             plugin_id: "prompt_context".to_string(),
             transient: true,

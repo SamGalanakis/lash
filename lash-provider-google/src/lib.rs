@@ -803,7 +803,7 @@ impl GoogleOAuthProvider {
     }
 
     fn build_request(
-        _provider: &GoogleOAuthProvider,
+        provider: &GoogleOAuthProvider,
         req: &LlmRequest,
         contents: Vec<Value>,
         project_id: Option<&str>,
@@ -830,16 +830,22 @@ impl GoogleOAuthProvider {
         {
             match config {
                 VariantRequestConfig::GoogleThinkingLevel { level } => {
-                    request["request"]["generationConfig"]["thinkingConfig"] = json!({
-                        "includeThoughts": true,
+                    let mut thinking_config = json!({
                         "thinkingLevel": level,
                     });
+                    if provider.options.thinking.expose {
+                        thinking_config["includeThoughts"] = json!(true);
+                    }
+                    request["request"]["generationConfig"]["thinkingConfig"] = thinking_config;
                 }
                 VariantRequestConfig::GoogleThinkingBudget { budget_tokens } => {
-                    request["request"]["generationConfig"]["thinkingConfig"] = json!({
-                        "includeThoughts": true,
+                    let mut thinking_config = json!({
                         "thinkingBudget": budget_tokens,
                     });
+                    if provider.options.thinking.expose {
+                        thinking_config["includeThoughts"] = json!(true);
+                    }
+                    request["request"]["generationConfig"]["thinkingConfig"] = thinking_config;
                 }
                 _ => {}
             }
@@ -1306,15 +1312,6 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
     fn kind(&self) -> &'static str {
         "google_oauth"
     }
-    fn cli_label(&self) -> &'static str {
-        "Google OAuth (Gemini)"
-    }
-    fn setup_name(&self) -> &'static str {
-        "Google OAuth"
-    }
-    fn setup_description(&self) -> &'static str {
-        "Gemini via Google account"
-    }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: GoogleProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
@@ -1327,5 +1324,64 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
             client: build_http_client(),
         }
         .into_components())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use lash::llm::types::{LlmEventSender, LlmMessage, LlmToolSpec};
+
+    fn request(model_variant: Option<&str>) -> LlmRequest {
+        LlmRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![LlmMessage::text(LlmRole::User, "hello")],
+            attachments: Vec::new(),
+            tools: Arc::new(Vec::<LlmToolSpec>::new()),
+            tool_choice: LlmToolChoice::Auto,
+            model_variant: model_variant.map(str::to_string),
+            session_id: None,
+            output_spec: None,
+            stream_events: None::<LlmEventSender>,
+            provider_trace: None,
+        }
+    }
+
+    #[test]
+    fn thinking_config_omits_thoughts_unless_provider_exposes_thinking() {
+        let hidden_provider = GoogleOAuthProvider::new("access", "refresh", 0);
+        let hidden = GoogleOAuthProvider::build_request(
+            &hidden_provider,
+            &request(Some("medium")),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            hidden["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "medium"
+        );
+        assert!(
+            hidden["request"]["generationConfig"]["thinkingConfig"]
+                .get("includeThoughts")
+                .is_none()
+        );
+
+        let exposed_provider =
+            GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
+                thinking: lash::ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
+            });
+        let exposed = GoogleOAuthProvider::build_request(
+            &exposed_provider,
+            &request(Some("medium")),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            exposed["request"]["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
     }
 }

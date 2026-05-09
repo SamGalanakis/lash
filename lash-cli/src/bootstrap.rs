@@ -18,7 +18,7 @@ use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::interactive::run_app;
 use crate::prompt_tool::{CliPromptBridge, cli_ask_plugin_factory};
 use crate::session_bootstrap::{CliSessionOpener, SessionBootstrapSource};
-use crate::{Args, setup};
+use crate::{Args, SkillCatalog, setup};
 use crate::{
     apply_standard_context_approach_overrides, cleanup_terminal, ensure_supported_execution_mode,
     hash12, info_text, info_text_unconfigured, models_dev_catalog, parse_execution_mode,
@@ -141,10 +141,8 @@ async fn apply_autonomous_tool_policy(session: &lash_embed::LashSession) -> anyh
     Ok(())
 }
 
-fn retain_autonomous_tools(snapshot: &mut DynamicStateSnapshot) {
-    snapshot
-        .tools
-        .retain(|name, _| autonomous_tool_allowed(name));
+fn retain_autonomous_tools(snapshot: &mut ToolState) {
+    snapshot.retain(|name, _| autonomous_tool_allowed(name));
 }
 
 fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
@@ -576,7 +574,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
         prompt_bridge: prompt_bridge.clone(),
     });
-    let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
+    let plugin_host = PluginHost::new(plugin_factories);
     if args.info {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -848,15 +846,13 @@ mod tests {
 
     #[test]
     fn autonomous_policy_disables_interactive_tools() {
-        let dynamic_tools =
-            DynamicToolProvider::from_tool_provider(Arc::new(DummyToolProvider)).unwrap();
+        let tool_registry = ToolRegistry::from_tool_provider(Arc::new(DummyToolProvider)).unwrap();
 
-        let mut snapshot = dynamic_tools.export_state();
+        let mut snapshot = tool_registry.export_state();
         retain_autonomous_tools(&mut snapshot);
-        let tools = snapshot.tools;
-        assert!(tools.contains_key("read_file"));
-        assert!(!tools.contains_key("ask"));
-        assert!(!tools.contains_key("plan_exit"));
-        assert!(!tools.contains_key("showcase"));
+        assert!(snapshot.contains("read_file"));
+        assert!(!snapshot.contains("ask"));
+        assert!(!snapshot.contains("plan_exit"));
+        assert!(!snapshot.contains("showcase"));
     }
 }

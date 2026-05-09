@@ -56,7 +56,6 @@ struct CurrentSessionCapability {
     policy: SessionPolicy,
     host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
-    tool_catalog: Arc<Vec<serde_json::Value>>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
@@ -120,9 +119,9 @@ impl CurrentSessionCapability {
             token_usage: runtime.state.token_usage.clone(),
             last_prompt_usage: runtime.state.last_prompt_usage.clone(),
             mode_turn_options: runtime.mode_turn_options.clone(),
-            dynamic_state_ref: runtime.state.dynamic_state_ref.clone(),
-            dynamic_state_generation: runtime.state.dynamic_state_generation,
-            dynamic_state_snapshot: None,
+            tool_state_ref: runtime.state.tool_state_ref.clone(),
+            tool_state_generation: runtime.state.tool_state_generation,
+            tool_state_snapshot: None,
             plugin_snapshot_ref: runtime.state.plugin_snapshot_ref.clone(),
             plugin_snapshot_revision: runtime.state.plugin_snapshot_revision,
             plugin_snapshot: None,
@@ -155,7 +154,6 @@ impl CurrentSessionCapability {
             policy: runtime.policy.clone(),
             host: runtime.host.clone(),
             plugins,
-            tool_catalog: runtime.active_tool_catalog_shared(),
             store: runtime.services.store.clone(),
         }
     }

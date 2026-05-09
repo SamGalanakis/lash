@@ -12,8 +12,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::{
-    DynamicToolProvider, ReconfigureError, ToolDefinition, ToolExecutionAdapter, ToolExecutionMode,
-    ToolImage, ToolResult,
+    ReconfigureError, ToolDefinition, ToolExecutionMode, ToolImage, ToolRegistry, ToolResult,
 };
 
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
@@ -134,7 +133,7 @@ pub enum McpError {
     CallTimeout { server: String, timeout_ms: u64 },
     #[error("failed to decode MCP image payload: {0}")]
     Decode(#[from] base64::DecodeError),
-    #[error("dynamic tool registration failed: {0}")]
+    #[error("tool registration failed: {0}")]
     Reconfigure(#[from] ReconfigureError),
 }
 
@@ -217,7 +216,7 @@ impl McpSession {
     }
 }
 
-pub struct McpToolExecutionAdapter {
+pub(crate) struct McpToolSource {
     id: String,
     server_name: String,
     config: McpServerConfig,
@@ -225,7 +224,7 @@ pub struct McpToolExecutionAdapter {
     session: Mutex<Option<McpSession>>,
 }
 
-impl McpToolExecutionAdapter {
+impl McpToolSource {
     pub async fn from_named_config(
         server_name: impl Into<String>,
         config: McpServerConfig,
@@ -243,7 +242,7 @@ impl McpToolExecutionAdapter {
     }
 }
 
-impl Drop for McpToolExecutionAdapter {
+impl Drop for McpToolSource {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.session.try_lock()
             && let Some(session) = guard.as_mut()
@@ -254,7 +253,7 @@ impl Drop for McpToolExecutionAdapter {
 }
 
 #[async_trait::async_trait]
-impl ToolExecutionAdapter for McpToolExecutionAdapter {
+impl crate::tool_registry::ToolSourceExecutor for McpToolSource {
     fn id(&self) -> &str {
         &self.id
     }
@@ -316,14 +315,14 @@ impl ToolExecutionAdapter for McpToolExecutionAdapter {
 }
 
 pub async fn attach_mcp_servers(
-    dynamic_tools: &DynamicToolProvider,
+    tool_registry: &ToolRegistry,
     servers: &BTreeMap<String, McpServerConfig>,
 ) -> Result<(), McpError> {
     for (server_name, config) in servers {
-        let adapter = Arc::new(
-            McpToolExecutionAdapter::from_named_config(server_name.clone(), config.clone()).await?,
-        ) as Arc<dyn ToolExecutionAdapter>;
-        dynamic_tools.upsert_adapter(adapter)?;
+        let adapter =
+            Arc::new(McpToolSource::from_named_config(server_name.clone(), config.clone()).await?)
+                as Arc<dyn crate::tool_registry::ToolSourceExecutor>;
+        tool_registry.upsert_source(adapter)?;
     }
     Ok(())
 }
@@ -698,6 +697,7 @@ fn tool_result_from_value(value: Value) -> Result<ToolResult, McpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_registry::ToolSourceExecutor;
 
     #[test]
     fn mcp_definition_preserves_server_schema_as_canonical_input_contract() {
@@ -782,7 +782,7 @@ mod tests {
             shell_single_quote(&call.to_string()),
         );
         let config = McpServerConfig::stdio("sh", vec!["-lc".to_string(), script]);
-        let adapter = McpToolExecutionAdapter::from_named_config("docs", config)
+        let adapter = McpToolSource::from_named_config("docs", config)
             .await
             .expect("adapter created");
         let defs = adapter.advertised_tools();

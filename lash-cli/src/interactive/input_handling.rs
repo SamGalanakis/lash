@@ -287,7 +287,7 @@ pub(super) async fn process_pending_monitor_wakes(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &crate::event::AppEventTx,
-    desired_dynamic: &DynamicStateSnapshot,
+    desired_tool_state: &ToolState,
 ) -> Result<bool, String> {
     if !app.running && runtime_return_rx.is_none() && runtime.is_none() {
         return Ok(false);
@@ -307,7 +307,6 @@ pub(super) async fn process_pending_monitor_wakes(
     let turn_input = TurnInput {
         items: Vec::new(),
         image_blobs: Default::default(),
-        user_input: None,
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
         trace_turn_id: None,
@@ -326,7 +325,7 @@ pub(super) async fn process_pending_monitor_wakes(
         cancel_token,
         active_stream_id,
         app_tx,
-        desired_dynamic,
+        desired_tool_state,
     )
     .await;
     Ok(true)
@@ -568,7 +567,7 @@ pub(super) async fn handle_key_event(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -818,7 +817,7 @@ pub(super) async fn handle_key_event(
                         current_model_variant,
                         current_execution_mode,
                         session_manager,
-                        desired_dynamic,
+                        desired_tool_state,
                         model_catalog,
                         toolset_hash,
                     )
@@ -866,7 +865,7 @@ pub(super) async fn handle_key_event(
                 if let UiActionOutcome::TreePicked(Some(selection)) =
                     apply_terminal_action(app, terminal, UiAction::SubmitTree)
                 {
-                    let current_dynamic_state = desired_dynamic.clone();
+                    let current_tool_state = desired_tool_state.clone();
                     let Some(rt) = runtime.as_ref() else {
                         push_system_message(
                             app,
@@ -880,7 +879,7 @@ pub(super) async fn handle_key_event(
                         app,
                         history,
                         selection,
-                        &current_dynamic_state,
+                        &current_tool_state,
                     )
                     .await
                     {
@@ -1053,7 +1052,7 @@ pub(super) async fn handle_key_event(
                         current_model_variant,
                         current_execution_mode,
                         session_manager,
-                        desired_dynamic,
+                        desired_tool_state,
                         pending_reconfigure,
                         model_catalog,
                         toolset_hash,
@@ -1083,7 +1082,7 @@ pub(super) async fn handle_key_event(
             }
 
             let turn_input = make_turn_input(&queued);
-            let current_dynamic_state = desired_dynamic.clone();
+            let current_tool_state = desired_tool_state.clone();
             send_user_message(
                 queued.clone(),
                 turn_input.clone(),
@@ -1096,7 +1095,7 @@ pub(super) async fn handle_key_event(
                 cancel_token,
                 active_stream_id,
                 app_tx,
-                &current_dynamic_state,
+                &current_tool_state,
             )
             .await;
             *last_turn = Some(TurnReplayPayload {
@@ -1158,7 +1157,7 @@ pub(super) async fn handle_key_event(
                             current_model_variant,
                             current_execution_mode,
                             session_manager,
-                            desired_dynamic,
+                            desired_tool_state,
                             pending_reconfigure,
                             model_catalog,
                             toolset_hash,
@@ -1199,7 +1198,7 @@ pub(super) async fn handle_key_event(
                     current_model_variant,
                     current_execution_mode,
                     session_manager,
-                    desired_dynamic,
+                    desired_tool_state,
                     pending_reconfigure,
                     model_catalog,
                     toolset_hash,
@@ -1273,7 +1272,7 @@ pub(super) async fn handle_key_event(
                         current_model_variant,
                         current_execution_mode,
                         session_manager,
-                        desired_dynamic,
+                        desired_tool_state,
                         pending_reconfigure,
                         model_catalog,
                         toolset_hash,
@@ -1422,7 +1421,7 @@ pub(super) async fn handle_key_event(
                     current_model_variant,
                     current_execution_mode,
                     session_manager,
-                    desired_dynamic,
+                    desired_tool_state,
                     pending_reconfigure,
                     model_catalog,
                     toolset_hash,
@@ -1443,7 +1442,7 @@ pub(super) async fn handle_key_event(
 
             // Regular user message — send to the active session
             if let Err(e) =
-                apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
+                apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
             {
                 push_system_message(
                     app,
@@ -1455,17 +1454,11 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
             *toolset_hash = hash12(
-                &serde_json::to_vec(
-                    &desired_dynamic
-                        .tools
-                        .values()
-                        .map(|spec| spec.definition.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap_or_else(|_| b"[]".to_vec()),
+                &serde_json::to_vec(&desired_tool_state.definitions())
+                    .unwrap_or_else(|_| b"[]".to_vec()),
             );
             let turn_input = make_turn_input(&queued);
-            let current_dynamic_state = desired_dynamic.clone();
+            let current_tool_state = desired_tool_state.clone();
             send_user_message(
                 queued.clone(),
                 turn_input.clone(),
@@ -1478,7 +1471,7 @@ pub(super) async fn handle_key_event(
                 cancel_token,
                 active_stream_id,
                 app_tx,
-                &current_dynamic_state,
+                &current_tool_state,
             )
             .await;
             *last_turn = Some(TurnReplayPayload {

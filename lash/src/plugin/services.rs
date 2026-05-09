@@ -62,7 +62,7 @@ impl ToolCatalogHost for NoopSessionManager {
     }
 }
 
-impl DynamicToolHost for NoopSessionManager {}
+impl ToolStateHost for NoopSessionManager {}
 
 #[async_trait::async_trait]
 impl SessionLifecycleHost for NoopSessionManager {

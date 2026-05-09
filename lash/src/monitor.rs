@@ -28,7 +28,6 @@ pub enum MonitorWakePolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorSpec {
     pub id: String,
-    pub label: String,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -78,7 +77,6 @@ pub struct MonitorStatus {
 pub struct MonitorEvent {
     pub sequence: u64,
     pub monitor_id: String,
-    pub monitor_label: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_turn_input: Option<String>,

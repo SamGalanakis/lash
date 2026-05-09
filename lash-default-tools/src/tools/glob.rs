@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
@@ -64,7 +64,7 @@ impl ToolProvider for Glob {
                 r#"glob(pattern="**/*.rs", path="lash/src", limit=50)"#.into(),
                 r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata("filesystem", &["find_files"]))
+            .with_discovery(super::discovery_metadata("filesystem", &["find_files"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }

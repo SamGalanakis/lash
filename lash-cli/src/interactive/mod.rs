@@ -120,7 +120,7 @@ pub(crate) async fn run_app(
         .await
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut runtime = Some(session);
-    let mut desired_dynamic = runtime
+    let mut desired_tool_state = runtime
         .as_ref()
         .expect("session initialized")
         .tool_state()
@@ -258,7 +258,7 @@ pub(crate) async fn run_app(
             &mut current_execution_mode,
             &provider,
             &mut current_model_variant,
-            &mut desired_dynamic,
+            &mut desired_tool_state,
             model_catalog.as_ref(),
         )
         .await
@@ -276,14 +276,8 @@ pub(crate) async fn run_app(
             }
             let _ = app_tx.send(AppEvent::RequestUiSnapshot);
             toolset_hash = hash12(
-                &serde_json::to_vec(
-                    &desired_dynamic
-                        .tools
-                        .values()
-                        .map(|spec| spec.definition.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap_or_else(|_| b"[]".to_vec()),
+                &serde_json::to_vec(&desired_tool_state.definitions())
+                    .unwrap_or_else(|_| b"[]".to_vec()),
             );
         }
         if let Some(prompt) = args
@@ -293,7 +287,7 @@ pub(crate) async fn run_app(
             .filter(|prompt| !prompt.is_empty())
         {
             if let Err(e) = apply_pending_reconfigure(
-                &mut desired_dynamic,
+                &mut desired_tool_state,
                 &mut pending_reconfigure,
                 &mut runtime,
             )
@@ -308,18 +302,12 @@ pub(crate) async fn run_app(
                 );
             } else {
                 toolset_hash = hash12(
-                    &serde_json::to_vec(
-                        &desired_dynamic
-                            .tools
-                            .values()
-                            .map(|spec| spec.definition.clone())
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap_or_else(|_| b"[]".to_vec()),
+                    &serde_json::to_vec(&desired_tool_state.definitions())
+                        .unwrap_or_else(|_| b"[]".to_vec()),
                 );
                 let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
                 let turn_input = make_turn_input(&prepared);
-                let current_dynamic_state = desired_dynamic.clone();
+                let current_tool_state = desired_tool_state.clone();
                 send_user_message(
                     prepared.clone(),
                     turn_input.clone(),
@@ -332,7 +320,7 @@ pub(crate) async fn run_app(
                     &mut cancel_token,
                     &mut active_stream_id,
                     &app_tx,
-                    &current_dynamic_state,
+                    &current_tool_state,
                 )
                 .await;
                 last_turn = Some(TurnReplayPayload {
@@ -372,7 +360,7 @@ pub(crate) async fn run_app(
                 &mut cancel_token,
                 &mut active_stream_id,
                 &app_tx,
-                &desired_dynamic,
+                &desired_tool_state,
             )
             .await
             {
@@ -412,7 +400,7 @@ pub(crate) async fn run_app(
                 &mut current_model_variant,
                 &mut current_execution_mode,
                 &mut session_manager,
-                &mut desired_dynamic,
+                &mut desired_tool_state,
                 &mut pending_reconfigure,
                 model_catalog.as_ref(),
                 &mut toolset_hash,
@@ -485,7 +473,7 @@ pub(crate) async fn run_app(
                                 &mut current_model_variant,
                                 &mut current_execution_mode,
                                 &mut session_manager,
-                                &mut desired_dynamic,
+                                &mut desired_tool_state,
                                 &mut pending_reconfigure,
                                 model_catalog.as_ref(),
                                 &mut toolset_hash,
@@ -546,7 +534,6 @@ pub(crate) async fn run_app(
                         turn_index = state.turn_index,
                         outcome = ?done.result.outcome,
                         assistant_chars = done.result.assistant_output.safe_text.len(),
-                        plugin_visible_output = done.result.has_plugin_visible_output,
                         "runtime turn completed"
                     );
                     if no_visible_output {
@@ -637,7 +624,7 @@ pub(crate) async fn run_app(
                             &mut current_model_variant,
                             &mut current_execution_mode,
                             &mut session_manager,
-                            &mut desired_dynamic,
+                            &mut desired_tool_state,
                             &mut pending_reconfigure,
                             model_catalog.as_ref(),
                             &mut toolset_hash,
@@ -682,7 +669,7 @@ pub(crate) async fn run_app(
                         &mut current_model_variant,
                         &mut current_execution_mode,
                         &mut session_manager,
-                        &mut desired_dynamic,
+                        &mut desired_tool_state,
                         &mut pending_reconfigure,
                         model_catalog.as_ref(),
                         &mut toolset_hash,
@@ -907,7 +894,7 @@ pub(crate) async fn run_app(
                     &mut current_model_variant,
                     &mut current_execution_mode,
                     &mut session_manager,
-                    &mut desired_dynamic,
+                    &mut desired_tool_state,
                     &mut pending_reconfigure,
                     model_catalog.as_ref(),
                     &mut toolset_hash,

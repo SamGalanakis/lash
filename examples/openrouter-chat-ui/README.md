@@ -12,34 +12,40 @@ OPENROUTER_API_KEY=... cargo run -p openrouter-chat-ui
 Optional environment:
 
 ```bash
-OPENROUTER_MODEL=anthropic/claude-sonnet-4.6
+OPENROUTER_MODEL=openai/gpt-5.5
+OPENROUTER_MODEL_VARIANT=medium
 OPENROUTER_CHAT_ADDR=127.0.0.1:3000
 OPENROUTER_CHAT_DATA_DIR=.openrouter-chat-ui
+OPENROUTER_CHAT_TRACE=.openrouter-chat-ui/trace.jsonl
 ```
 
 Then open `http://127.0.0.1:3000`.
 
-The example also attaches a trace sink to `LashCore` and writes JSONL trace
-records to stderr so the RLM response, extracted lashlang, terminal output, and
-tool calls are visible while you run it.
+The example opts into provider-level thinking exposure for demonstration,
+attaches a trace sink to `LashCore`, and writes JSONL trace records to stderr
+and `OPENROUTER_CHAT_TRACE` so provider payloads, RLM response, extracted
+lashlang, terminal output, and tool calls are visible while you run it.
 
 The app installs RLM explicitly with `ModePreset::rlm()`, registers
-`DemoPlugin` on `LashCore`, and activates it per chat session with
-`SessionBuilder::use_plugin::<DemoPlugin>(...)`.
+`DemoPlugin` on `LashCore`, activates it per chat session with
+`SessionBuilder::use_plugin::<DemoPlugin>(...)`, and lets the plugin provide
+its fixed app tools through the normal `ToolProvider` hook.
 
 The plugin demonstrates:
 
 - Typed session activation through `EmbedPlugin::SessionConfig`.
 - Typed per-turn UI inputs through `DemoTurnInput`.
 - A required tic-tac-toe board input validated before the turn runs.
-- `read_board` and `play_move` tools that read the same typed turn context from
-  `ToolExecutionContext`.
+- `read_board` and `play_move` app tools provided by the plugin's
+  `ToolProvider`. Their handlers read the same typed turn context used by the
+  prompt hook.
 - Prompt contribution that reflects the current board state.
-- Additive semantic streaming: assistant prose is streamed as
-  `TurnEvent::AssistantProseDelta`, code/tool activity is rendered as cards, and
-  RLM `submit` is streamed as `TurnEvent::TerminalOutput`.
-- Final persistence uses `TurnCollector::rendered_output()` so prose and typed
-  terminal output are stored exactly through the same visible-output path.
+- Additive semantic streaming: thinking is shown live from
+  `TurnEvent::ReasoningDelta`, assistant prose as
+  `TurnEvent::AssistantProseDelta`, code/tool activity as structured cards, and
+  RLM `submit` as `TurnEvent::TerminalOutput`.
+- Final persistence is app-owned: the stream sink accumulates assistant prose
+  while rendering the same semantic activities live in the browser.
 
 This example opts into `RlmTermination::SubmitRequired { schema: None }`, so the
 assistant's final user-facing text should be placed in `submit`. RLM also

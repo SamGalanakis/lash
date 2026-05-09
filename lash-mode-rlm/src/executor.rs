@@ -774,7 +774,7 @@ fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
                 // Canonical JSON encoding for projected values: a single-key
                 // object `{"__projected__": <inner>}` rather than the bare
                 // inner value. Tools that don't care unwrap via
-                // `lash::tools::unwrap_projected_arg`; tools that do (e.g.
+                // `lash_rlm_types::unwrap_projected_arg`; tools that do (e.g.
                 // `spawn_agent` / `continue_as` `seed:`) inspect the wrapper
                 // to preserve "kind" across the lashlang→host boundary.
                 let inner = flow_to_json_value(&value.materialize_async().await).await;

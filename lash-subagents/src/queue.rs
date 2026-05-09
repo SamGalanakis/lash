@@ -136,13 +136,15 @@ pub(crate) fn queue_event(tree: &mut AgentTree, event: WaitAgentEvent) {
 
 pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
     match &turn.outcome {
-        TurnOutcome::Finished(TurnFinish::Value { value, .. }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::ToolValue { value, .. }) => return value.clone(),
         TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => {
             if !text.trim().is_empty() {
                 return json!(text.trim().to_string());
             }
         }
-        TurnOutcome::Stopped(TurnStop::TerminalError { value, .. }) => return value.clone(),
+        TurnOutcome::Stopped(TurnStop::SubmittedError { value }) => return value.clone(),
+        TurnOutcome::Stopped(TurnStop::ToolError { value, .. }) => return value.clone(),
         TurnOutcome::Handoff { session_id } => return json!({ "session_id": session_id }),
         TurnOutcome::Stopped(_) => {}
     }
@@ -211,7 +213,10 @@ pub(crate) fn turn_outcome_label(outcome: &TurnOutcome) -> &'static str {
 }
 
 pub(crate) fn terminal_error_message(outcome: &TurnOutcome) -> Option<String> {
-    if let TurnOutcome::Stopped(TurnStop::TerminalError { value, .. }) = outcome {
+    if let TurnOutcome::Stopped(
+        TurnStop::SubmittedError { value } | TurnStop::ToolError { value, .. },
+    ) = outcome
+    {
         return Some(
             value
                 .get("reason")
@@ -232,8 +237,7 @@ mod tests {
     #[test]
     fn task_result_value_prefers_submission_outcome() {
         let mut turn = mock_assembled_turn("child", "fallback");
-        turn.outcome = TurnOutcome::Finished(TurnFinish::Value {
-            source: lash::TerminalOutputSource::RlmSubmit,
+        turn.outcome = TurnOutcome::Finished(TurnFinish::SubmittedValue {
             value: json!({ "answer": "ok" }),
         });
         assert_eq!(task_result_value(&turn), json!({ "answer": "ok" }));

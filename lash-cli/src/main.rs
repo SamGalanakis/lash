@@ -20,6 +20,7 @@ mod paths;
 mod persistence;
 mod plugin_surface;
 mod prompt_tool;
+mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
@@ -28,6 +29,8 @@ mod scratch_tui;
 mod session_bootstrap;
 mod session_log;
 mod setup;
+mod skill_catalog;
+mod skill_prompt;
 mod stream_markdown;
 #[cfg(test)]
 mod test_support;
@@ -64,6 +67,7 @@ use input_items::{build_items_from_editor_input, image_marker_ranges};
 pub(crate) use interactive::generate_session_name;
 #[cfg(test)]
 pub(crate) use interactive::{injected_image_part_indices, make_injected_plugin_message};
+pub(crate) use skill_catalog::{LoadedSkill, SkillCatalog};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_GIT_HEAD: &str = env!("LASH_BUILD_GIT_HEAD");
@@ -99,9 +103,7 @@ static GLOBAL_ALLOCATOR: DhatAlloc = DhatAlloc;
 static GLOBAL_ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
-    !turn.assistant_output.safe_text.trim().is_empty()
-        || !turn.errors.is_empty()
-        || turn.has_plugin_visible_output
+    !turn.assistant_output.safe_text.trim().is_empty() || !turn.errors.is_empty()
 }
 
 fn normalized_cli_args() -> Vec<std::ffi::OsString> {
@@ -634,32 +636,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_has_visible_output_accepts_plugin_rendered_turns() {
-        let turn = AssembledTurn {
-            state: SessionStateEnvelope::default(),
-            outcome: lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage {
-                text: String::new(),
-            }),
-            assistant_output: AssistantOutput {
-                safe_text: String::new(),
-                raw_text: String::new(),
-                state: OutputState::Usable,
-            },
-            has_plugin_visible_output: true,
-            execution: ExecutionSummary {
-                mode: ExecutionMode::standard(),
-                had_tool_calls: false,
-                had_code_execution: false,
-            },
-            token_usage: TokenUsage::default(),
-            tool_calls: Vec::new(),
-            errors: Vec::new(),
-        };
-
-        assert!(turn_has_visible_output(&turn));
-    }
-
-    #[test]
     fn normalize_prepared_turn_keeps_plain_slash_text() {
         let skills = skill_catalog_with(&[("yolopush", "ship changes")]);
         let turn = PreparedTurn::new("/not-a-command details".into(), Vec::new());
@@ -684,12 +660,7 @@ mod tests {
                 .effective_text
                 .starts_with("/yolopush merge staging")
         );
-        assert_eq!(normalized.input_provenance.transforms.len(), 1);
-        assert!(matches!(
-            normalized.input_provenance.transforms.first(),
-            Some(lash::UserInputTransform::SkillBlockAppend { skill_name, .. })
-                if skill_name == "yolopush"
-        ));
+        assert!(normalized.input_metadata.transforms.is_empty());
         assert!(normalized.effective_text.contains("<skill>"));
     }
 
@@ -706,12 +677,7 @@ mod tests {
             turn.display_text,
             "Compare with /localref opencode and mention /localref again"
         );
-        assert_eq!(turn.input_provenance.transforms.len(), 1);
-        assert!(matches!(
-            turn.input_provenance.transforms.first(),
-            Some(lash::UserInputTransform::SkillBlockAppend { skill_name, .. })
-                if skill_name == "localref"
-        ));
+        assert!(turn.input_metadata.transforms.is_empty());
         assert_eq!(turn.effective_text.matches("<skill>").count(), 1);
         assert!(turn.effective_text.contains("<name>localref</name>"));
     }

@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::object_schema;
 
@@ -69,7 +69,7 @@ impl ToolProvider for WebSearch {
             .with_examples(vec![
                 "search_web(query=\"latest Rust release notes\", limit=5)".into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata("web", &["web_search"]))
+            .with_discovery(super::discovery_metadata("web", &["web_search"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }
@@ -167,10 +167,10 @@ mod tests {
             definition.output_schema["required"],
             serde_json::json!(["results"])
         );
-        assert_eq!(definition.activation, crate::ToolActivation::Always);
+        assert_eq!(definition.activation, lash::ToolActivation::Always);
         assert_eq!(
             definition.availability.standard,
-            crate::ToolAvailability::Documented
+            lash::ToolAvailability::Documented
         );
     }
 }

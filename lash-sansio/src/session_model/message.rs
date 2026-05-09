@@ -1,6 +1,5 @@
 use crate::AttachmentRef;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ResponseTextMeta};
-use crate::plugin::UserInputProvenance;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
@@ -18,8 +17,6 @@ pub struct Message {
     pub id: String,
     pub role: MessageRole,
     pub parts: Arc<Vec<Part>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
 }
@@ -197,20 +194,6 @@ impl Message {
         self.parts.iter().map(Part::prompt_char_count).sum()
     }
 
-    pub fn user_input_provenance(&self) -> Option<&UserInputProvenance> {
-        self.user_input.as_ref()
-    }
-
-    pub fn display_user_text(&self) -> Option<&str> {
-        self.user_input_provenance()
-            .map(|user_input| user_input.display_text.as_str())
-    }
-
-    pub fn effective_user_text(&self) -> Option<&str> {
-        self.user_input_provenance()
-            .map(|user_input| user_input.effective_text.as_str())
-    }
-
     pub fn is_transient(&self) -> bool {
         matches!(
             self.origin,
@@ -266,11 +249,6 @@ fn attachment_from_part(part: &Part) -> Option<LlmAttachment> {
 }
 
 fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachment>) -> String {
-    if let Some(display_text) = msg.display_user_text()
-        && matches!(msg.role, MessageRole::User)
-    {
-        return display_text.to_string();
-    }
     let mut out = Vec::new();
     for part in msg.parts.iter() {
         // Reasoning items are display-only from the transcript's point of
@@ -854,21 +832,18 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
                 parts: vec![part(PartKind::Prose, "reply one")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")].into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -879,37 +854,6 @@ mod tests {
         assert!(text.contains("=== Turn 1 ===\nUser:\nfirst"));
         assert!(text.contains("Assistant (Lash, continuing this transcript):\nreply one"));
         assert!(text.contains("=== Turn 2 ===\nUser:\nsecond"));
-    }
-
-    #[test]
-    fn display_user_text_prefers_user_input_provenance() {
-        let message = Message {
-            id: "m0".to_string(),
-            role: MessageRole::User,
-            parts: vec![part(
-                PartKind::Text,
-                "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>",
-            )]
-            .into(),
-            user_input: Some(UserInputProvenance {
-                display_text: "Use /wholehog".to_string(),
-                effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
-                    .to_string(),
-                transforms: vec![crate::plugin::UserInputTransform::SkillBlockAppend {
-                    skill_name: "wholehog".to_string(),
-                    skill_path: "/tmp/wholehog/SKILL.md".to_string(),
-                }],
-            }),
-            origin: None,
-        };
-
-        assert_eq!(message.display_user_text(), Some("Use /wholehog"));
-        assert!(
-            message
-                .effective_user_text()
-                .is_some_and(|text| text.contains("<skill>"))
-        );
-        assert!(message.user_input_provenance().is_some());
     }
 
     fn block_text(msg: &LlmMessage, idx: usize) -> &str {
@@ -927,7 +871,6 @@ mod tests {
                 id: "m1".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -938,14 +881,12 @@ mod tests {
                     part(PartKind::Code, "x = 1"),
                 ]
                 .into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m3".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")].into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -965,14 +906,12 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::System,
                 parts: vec![part(PartKind::Text, "note")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "show this"), image_part(&[1, 2, 3])].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -992,7 +931,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -1012,7 +950,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -1062,7 +999,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -1082,7 +1018,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -1115,7 +1050,6 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::User,
             parts: vec![image_part(&[9, 8, 7])].into(),
-            user_input: None,
             origin: None,
         }];
 
@@ -1132,21 +1066,18 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "first")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m1".to_string(),
                 role: MessageRole::Assistant,
                 parts: vec![part(PartKind::Prose, "reply one")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
                 id: "m2".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "second")].into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -1165,7 +1096,6 @@ mod tests {
                 id: "m0".to_string(),
                 role: MessageRole::User,
                 parts: vec![part(PartKind::Text, "what time is it")].into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -1185,7 +1115,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -1202,7 +1131,6 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::User,
             parts: vec![part(PartKind::Text, "hi")].into(),
-            user_input: None,
             origin: None,
         }];
 
@@ -1231,7 +1159,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
             Message {
@@ -1251,7 +1178,6 @@ mod tests {
                     response_meta: None,
                 }]
                 .into(),
-                user_input: None,
                 origin: None,
             },
         ];
@@ -1283,7 +1209,6 @@ mod tests {
                 part(PartKind::Prose, "Here is the answer."),
             ]
             .into(),
-            user_input: None,
             origin: None,
         }];
 
@@ -1322,7 +1247,6 @@ mod tests {
             id: "m2".to_string(),
             role: MessageRole::Assistant,
             parts: vec![reasoning_part].into(),
-            user_input: None,
             origin: None,
         }];
         let rendered_only = render_structured_prompt(&reasoning_only);
@@ -1348,7 +1272,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }];
 
@@ -1388,7 +1311,6 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
             parts: vec![reasoning_part_fixture(Some("CIPHER=="))].into(),
-            user_input: None,
             origin: None,
         }];
         let serialized = serde_json::to_string(&msgs).expect("serialize");
@@ -1428,7 +1350,6 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
             parts: vec![reasoning_part_fixture(None)].into(),
-            user_input: None,
             origin: None,
         }];
         let rendered = render_structured_prompt(&display_only);
@@ -1443,7 +1364,6 @@ mod tests {
             id: "m0".to_string(),
             role: MessageRole::Assistant,
             parts: vec![reasoning_part_fixture(Some("CIPHER=="))].into(),
-            user_input: None,
             origin: None,
         }];
         let rendered = render_structured_prompt(&replayable);

@@ -10,19 +10,17 @@ use serde_json::json;
 
 use crate::ToolCallRecord;
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmUsage};
-use crate::plugin::plugin_surface_event_renders_visible_output;
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::state::SessionStateEnvelope;
-use super::turn_driver::llm_response_has_content;
 use super::{
     AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, SanitizerPolicy,
     TerminationPolicy, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct StandardStreamFallback {
+pub(super) struct StandardStreamAccumulator {
     pub(super) parts: Vec<LlmOutputPart>,
 }
 
@@ -59,10 +57,11 @@ pub(super) struct LlmStreamEventLog<'a> {
 pub(super) struct StandardStreamState<'a> {
     pub(super) text_streamed: &'a mut bool,
     pub(super) streamed_usage: &'a mut LlmUsage,
-    pub(super) streamed_output: &'a mut StandardStreamFallback,
-    pub(super) buffer_stream_fallback: bool,
+    pub(super) stream_accumulator: &'a mut StandardStreamAccumulator,
     pub(super) debug: &'a mut LlmStreamDebugState,
     pub(super) mode_iteration: usize,
+    pub(super) assistant_prose_correlation: &'a mut Option<crate::TurnActivityId>,
+    pub(super) reasoning_correlation: &'a mut Option<crate::TurnActivityId>,
     /// Set to `true` by `forward_standard_stream_event` when a plugin
     /// stream hook has raised `AssistantStreamTransform.abort_stream`.
     /// The LLM runner checks this after each stream event and
@@ -149,7 +148,7 @@ impl LlmStreamSummary {
     }
 }
 
-impl StandardStreamFallback {
+impl StandardStreamAccumulator {
     pub(super) fn push_text(&mut self, piece: &str) {
         if piece.is_empty() {
             return;
@@ -187,6 +186,7 @@ impl StandardStreamFallback {
         summary: Vec<String>,
         encrypted_content: Option<String>,
     ) {
+        let has_roundtrip_payload = encrypted_content.is_some();
         if let Some(LlmOutputPart::Reasoning {
             text: existing,
             signature: None,
@@ -203,6 +203,53 @@ impl StandardStreamFallback {
             && summary.is_empty()
         {
             append_stream_piece(existing, &text);
+            return;
+        }
+        if let Some(LlmOutputPart::Reasoning {
+            text: existing,
+            signature: existing_signature,
+            redacted: existing_redacted,
+            item_id: existing_item_id,
+            encrypted_content: existing_encrypted_content,
+            summary: existing_summary,
+        }) = self.parts.last_mut()
+            && has_roundtrip_payload
+            && existing_encrypted_content.is_none()
+            && !existing.trim().is_empty()
+            && (text.trim().is_empty() || text.contains(existing.as_str()))
+        {
+            if !text.trim().is_empty() && text != *existing {
+                *existing = text;
+            }
+            *existing_signature = None;
+            *existing_redacted = false;
+            *existing_item_id = item_id;
+            *existing_encrypted_content = encrypted_content;
+            *existing_summary = summary;
+            return;
+        }
+        if let Some(LlmOutputPart::Reasoning {
+            text: existing,
+            signature: existing_signature,
+            redacted: existing_redacted,
+            item_id: existing_item_id,
+            encrypted_content: existing_encrypted_content,
+            summary: existing_summary,
+        }) = self.parts.last_mut()
+            && !has_roundtrip_payload
+            && existing_encrypted_content.is_some()
+            && !text.trim().is_empty()
+            && existing.trim().is_empty()
+        {
+            append_stream_piece(existing, &text);
+            *existing_signature = None;
+            *existing_redacted = false;
+            if existing_item_id.is_none() {
+                *existing_item_id = item_id;
+            }
+            if existing_summary.is_empty() {
+                *existing_summary = summary;
+            }
             return;
         }
         self.parts.push(LlmOutputPart::Reasoning {
@@ -234,14 +281,184 @@ impl StandardStreamFallback {
     }
 
     pub(super) fn apply_to_response(&self, response: &mut LlmResponse) {
-        if llm_response_has_content(response) || self.is_empty() {
+        if self.is_empty() {
             return;
         }
-        response.parts = self.parts.clone();
+        if response.parts.is_empty() {
+            response.parts = self.parts.clone();
+            if response.full_text.is_empty() {
+                response.full_text = self.full_text();
+            }
+            return;
+        }
+
+        if response_contains_accumulated_parts(response, &self.parts) {
+            return;
+        }
+
+        response.parts = reconcile_accumulated_parts(&self.parts, &response.parts);
         if response.full_text.is_empty() {
-            response.full_text = self.full_text();
+            response.full_text = response_parts_text(&response.parts);
         }
     }
+}
+
+fn response_contains_accumulated_parts(
+    response: &LlmResponse,
+    accumulated_parts: &[LlmOutputPart],
+) -> bool {
+    accumulated_parts
+        .iter()
+        .filter(|part| part_has_visible_or_tool_content(part))
+        .all(|part| response_contains_part(response, part))
+}
+
+fn response_contains_part(response: &LlmResponse, part: &LlmOutputPart) -> bool {
+    match part {
+        LlmOutputPart::Text { text, .. } => {
+            text.trim().is_empty()
+                || response.full_text.contains(text)
+                || response.parts.iter().any(|candidate| {
+                    matches!(candidate, LlmOutputPart::Text { text: candidate, .. } if candidate.contains(text))
+                })
+        }
+        LlmOutputPart::Reasoning { text, item_id, .. } => {
+            text.trim().is_empty()
+                || response.parts.iter().any(|candidate| match candidate {
+                    LlmOutputPart::Reasoning {
+                        text: candidate,
+                        item_id: candidate_id,
+                        ..
+                    } => {
+                        candidate.contains(text)
+                            || (item_id.is_some()
+                                && candidate_id.is_some()
+                                && item_id == candidate_id
+                                && !candidate.trim().is_empty())
+                    }
+                    _ => false,
+                })
+        }
+        LlmOutputPart::ToolCall {
+            call_id, item_id, ..
+        } => response.parts.iter().any(|candidate| match candidate {
+            LlmOutputPart::ToolCall {
+                call_id: candidate_call_id,
+                item_id: candidate_item_id,
+                ..
+            } => {
+                candidate_call_id == call_id
+                    || (item_id.is_some() && candidate_item_id.is_some() && item_id == candidate_item_id)
+            }
+            _ => false,
+        }),
+    }
+}
+
+fn reconcile_accumulated_parts(
+    accumulated_parts: &[LlmOutputPart],
+    final_parts: &[LlmOutputPart],
+) -> Vec<LlmOutputPart> {
+    let mut out = accumulated_parts.to_vec();
+    for final_part in final_parts {
+        match final_part {
+            LlmOutputPart::ToolCall { .. } => {
+                if let Some(existing) = out
+                    .iter_mut()
+                    .find(|candidate| tool_calls_match(candidate, final_part))
+                {
+                    *existing = final_part.clone();
+                } else {
+                    out.push(final_part.clone());
+                }
+            }
+            LlmOutputPart::Reasoning { .. } => {
+                if !out.iter().any(|candidate| reasoning_matches(candidate, final_part)) {
+                    out.push(final_part.clone());
+                }
+            }
+            LlmOutputPart::Text { text, .. } => {
+                if !text.trim().is_empty()
+                    && !out
+                        .iter()
+                        .any(|candidate| matches!(candidate, LlmOutputPart::Text { text: candidate, .. } if candidate.contains(text)))
+                {
+                    out.push(final_part.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn part_has_visible_or_tool_content(part: &LlmOutputPart) -> bool {
+    match part {
+        LlmOutputPart::Text { text, .. } => !text.trim().is_empty(),
+        LlmOutputPart::Reasoning {
+            text,
+            encrypted_content,
+            signature,
+            ..
+        } => !text.trim().is_empty() || encrypted_content.is_some() || signature.is_some(),
+        LlmOutputPart::ToolCall { .. } => true,
+    }
+}
+
+fn tool_calls_match(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> bool {
+    match (candidate, expected) {
+        (
+            LlmOutputPart::ToolCall {
+                call_id, item_id, ..
+            },
+            LlmOutputPart::ToolCall {
+                call_id: expected_call_id,
+                item_id: expected_item_id,
+                ..
+            },
+        ) => {
+            call_id == expected_call_id
+                || (item_id.is_some() && expected_item_id.is_some() && item_id == expected_item_id)
+        }
+        _ => false,
+    }
+}
+
+fn reasoning_matches(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> bool {
+    match (candidate, expected) {
+        (
+            LlmOutputPart::Reasoning {
+                text,
+                item_id,
+                encrypted_content,
+                ..
+            },
+            LlmOutputPart::Reasoning {
+                text: expected_text,
+                item_id: expected_item_id,
+                encrypted_content: expected_encrypted_content,
+                ..
+            },
+        ) => {
+            (!text.trim().is_empty()
+                && !expected_text.trim().is_empty()
+                && (text.contains(expected_text) || expected_text.contains(text)))
+                || (item_id.is_some() && expected_item_id.is_some() && item_id == expected_item_id)
+                || (encrypted_content.is_some()
+                    && expected_encrypted_content.is_some()
+                    && encrypted_content == expected_encrypted_content)
+        }
+        _ => false,
+    }
+}
+
+fn response_parts_text(parts: &[LlmOutputPart]) -> String {
+    let mut full_text = String::new();
+    for part in parts {
+        if let LlmOutputPart::Text { text, .. } = part {
+            full_text.push_str(text);
+        }
+    }
+    full_text
 }
 
 fn append_stream_piece(full: &mut String, piece: &str) {
@@ -265,7 +482,6 @@ pub(super) struct TurnAssembler {
     pub(super) issues: Vec<TurnIssue>,
     pub(super) saw_done: bool,
     pub(super) saw_tool_failure: bool,
-    pub(super) has_plugin_visible_output: bool,
     pub(super) outcome: Option<TurnOutcome>,
 }
 
@@ -287,7 +503,6 @@ impl TurnAssembler {
             issues: Vec::new(),
             saw_done: false,
             saw_tool_failure: false,
-            has_plugin_visible_output: false,
             outcome: None,
         }
     }
@@ -349,11 +564,6 @@ impl TurnAssembler {
             }
             SessionEvent::TurnOutcome { outcome } => {
                 self.outcome = Some(outcome.clone());
-            }
-            SessionEvent::PluginEvent { event, .. }
-                if plugin_surface_event_renders_visible_output(event) =>
-            {
-                self.has_plugin_visible_output = true;
             }
             _ => {}
         }
@@ -431,7 +641,6 @@ impl TurnAssembler {
                 raw_text: raw_output,
                 state: output_state,
             },
-            has_plugin_visible_output: self.has_plugin_visible_output,
             token_usage: self.token_usage,
             tool_calls: self.tool_calls,
             errors: issues,
@@ -446,17 +655,10 @@ impl TurnAssembler {
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
     let read_model = state.read_model();
     let messages = read_model.messages.as_slice();
-    let latest_user_input_idx = messages
+    let latest_user_message_idx = messages
         .iter()
-        .rposition(|message| {
-            matches!(message.role, MessageRole::User) && message.user_input.is_some()
-        })
-        .or_else(|| {
-            messages
-                .iter()
-                .rposition(|message| matches!(message.role, MessageRole::User))
-        });
-    let search_messages = latest_user_input_idx
+        .rposition(|message| matches!(message.role, MessageRole::User));
+    let search_messages = latest_user_message_idx
         .map(|idx| &messages[idx.saturating_add(1)..])
         .unwrap_or(messages);
     search_messages

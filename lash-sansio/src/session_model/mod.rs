@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
-use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent, UserInputProvenance};
-use crate::{MessageOrigin, TerminalOutputSource, ToolCallRecord};
+use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
+use crate::{MessageOrigin, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SessionEventRecord<ME = ()> {
@@ -33,8 +33,6 @@ pub struct ConversationRecord {
     pub id: String,
     pub role: MessageRole,
     pub parts: Arc<Vec<Part>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
 }
@@ -52,7 +50,6 @@ impl ConversationRecord {
             id: message.id,
             role: message.role,
             parts: message.parts,
-            user_input: message.user_input,
             origin: message.origin,
         }
     }
@@ -62,7 +59,6 @@ impl ConversationRecord {
             id: self.id.clone(),
             role: self.role,
             parts: Arc::clone(&self.parts),
-            user_input: self.user_input.clone(),
             origin: self.origin.clone(),
         }
     }
@@ -227,8 +223,11 @@ pub enum TurnFinish {
     AssistantMessage {
         text: String,
     },
-    Value {
-        source: TerminalOutputSource,
+    SubmittedValue {
+        value: serde_json::Value,
+    },
+    ToolValue {
+        tool_name: String,
         value: serde_json::Value,
     },
 }
@@ -243,8 +242,11 @@ pub enum TurnStop {
     ProviderError,
     PluginAbort,
     RuntimeError,
-    TerminalError {
-        source: TerminalOutputSource,
+    SubmittedError {
+        value: serde_json::Value,
+    },
+    ToolError {
+        tool_name: String,
         value: serde_json::Value,
     },
 }
@@ -425,7 +427,6 @@ impl TurnTerminationPolicyState {
                 reasoning_meta: None,
                 response_meta: None,
             }]),
-            user_input: None,
             origin: None,
         });
         self.max_steps_final = true;

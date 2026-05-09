@@ -5,7 +5,8 @@ mod queue;
 #[cfg(test)]
 mod tests;
 
-use lash::{SkillCatalog, collect_skill_mentions_with_ranges};
+use crate::SkillCatalog;
+use crate::skill_prompt::collect_skill_mentions_with_ranges;
 use lash_tui::{Line, Modifier, Rect, Span, Style};
 use lash_tui_extensions::TuiSurfaceSlot;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

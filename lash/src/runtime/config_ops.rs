@@ -128,24 +128,20 @@ impl LashRuntime {
         Ok(())
     }
 
-    pub async fn apply_dynamic_tool_state(
+    pub async fn apply_tool_state(
         &mut self,
-        snapshot: crate::DynamicStateSnapshot,
+        snapshot: crate::ToolState,
     ) -> Result<u64, SessionError> {
         let Some(session) = self.session.as_mut() else {
             return Err(SessionError::Protocol(
                 "runtime session not available".to_string(),
             ));
         };
-        let Some(dynamic_tools) = session.plugins().dynamic_tools() else {
-            return Err(SessionError::Protocol(
-                "dynamic tools are unavailable in this runtime session".to_string(),
-            ));
-        };
-
-        let generation = dynamic_tools.apply_state(snapshot).map_err(|err| {
-            SessionError::Protocol(format!("dynamic tool reconfigure failed: {err}"))
-        })?;
+        let generation = session
+            .plugins()
+            .tool_registry()
+            .apply_state(snapshot)
+            .map_err(|err| SessionError::Protocol(format!("tool reconfigure failed: {err}")))?;
         self.stamp_live_plugin_state();
         Ok(generation)
     }

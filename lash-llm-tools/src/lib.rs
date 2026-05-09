@@ -368,9 +368,9 @@ mod tests {
 
     use async_trait::async_trait;
     use lash::plugin::{
-        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, SessionGraphHost,
-        SessionHandle, SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost,
-        ToolCatalogHost, TraceHost, TurnHost,
+        DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
+        SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
+        ToolStateHost, TraceHost, TurnHost,
     };
     use lash::{PersistedSessionState, SessionCreateRequest, ToolExecutionContext, TurnInput};
 
@@ -405,7 +405,7 @@ mod tests {
         }
     }
 
-    impl DynamicToolHost for DirectCompletionManager {}
+    impl ToolStateHost for DirectCompletionManager {}
 
     #[async_trait]
     impl SessionLifecycleHost for DirectCompletionManager {

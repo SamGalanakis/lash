@@ -427,12 +427,10 @@ fn filter_user_visible(nodes: &[SessionMessageTreeNode]) -> Vec<SessionMessageTr
 
 fn is_user_visible_message(message: &Message) -> bool {
     match message.role {
-        MessageRole::User => {
-            // A real typed turn always has `user_input` set. Synthetic
-            // user messages that exist solely to deliver tool results
-            // back to the LLM have no `user_input` and are filtered.
-            message.user_input.is_some()
-        }
+        MessageRole::User => !message
+            .parts
+            .iter()
+            .any(|part| matches!(part.kind, PartKind::ToolResult)),
         MessageRole::Assistant => {
             // Keep assistant messages that contain prose the reader
             // would want to see. Pure tool-call scaffolding (no text
@@ -501,16 +499,6 @@ fn first_node_id(nodes: &[SessionMessageTreeNode]) -> Option<String> {
 }
 
 pub fn tree_message_preview(message: &Message) -> String {
-    if matches!(message.role, MessageRole::User)
-        && let Some(text) = message
-            .user_input
-            .as_ref()
-            .map(|input| input.display_text.trim())
-            .filter(|text| !text.is_empty())
-    {
-        return text.replace('\n', " ");
-    }
-
     let mut preview = String::new();
     for part in message.parts.iter() {
         match part.kind {

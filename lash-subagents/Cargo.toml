@@ -5,7 +5,8 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash = { path = "../lash", default-features = false }
+lash-default-tools = { path = "../lash-default-tools" }
 lash-llm-tools = { path = "../lash-llm-tools" }
 lash-mode-rlm = { path = "../lash-mode-rlm" }
 lash-rlm-types = { path = "../lash-rlm-types" }
@@ -17,4 +18,4 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
+lash = { path = "../lash", default-features = false, features = ["testing"] }

@@ -429,12 +429,17 @@ impl AnthropicProvider {
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(cfg) = AnthropicModelPolicy.request_variant_config(&req.model, variant)
         {
+            let display = if self.options.thinking.expose {
+                "summarized"
+            } else {
+                "omitted"
+            };
             match cfg {
                 VariantRequestConfig::AnthropicAdaptiveThinking { effort } => {
                     let clamped = clamp_effort(&req.model, &effort);
                     body["thinking"] = json!({
                         "type": "adaptive",
-                        "display": "summarized",
+                        "display": display,
                     });
                     body["output_config"] = json!({ "effort": clamped });
                     thinking_enabled = true;
@@ -443,7 +448,7 @@ impl AnthropicProvider {
                     body["thinking"] = json!({
                         "type": "enabled",
                         "budget_tokens": budget_tokens,
-                        "display": "summarized",
+                        "display": display,
                     });
                     thinking_enabled = true;
                 }
@@ -625,6 +630,7 @@ impl AnthropicProvider {
         raw: &str,
         state: &mut StreamState,
         stream_events: Option<&LlmEventSender>,
+        expose_thinking: bool,
     ) -> Result<(), LlmTransportError> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -715,7 +721,9 @@ impl AnthropicProvider {
                         let piece = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                         if !piece.is_empty() {
                             slot.text.push_str(piece);
-                            if let Some(tx) = stream_events {
+                            if let Some(tx) = stream_events
+                                && expose_thinking
+                            {
                                 tx.send(LlmStreamEvent::ReasoningDelta(piece.to_string()));
                             }
                         }
@@ -1098,13 +1106,14 @@ impl ProviderTransport for AnthropicProvider {
         }
 
         let mut state = StreamState::default();
+        let expose_thinking = self.options.thinking.expose;
         drive_sse_response(
             resp,
             timeouts.chunk_timeout,
             "Anthropic stream chunk timed out",
             |raw| {
                 emit_provider_trace(provider_trace.as_ref(), "anthropic", raw);
-                Self::process_sse_event(raw, &mut state, stream_events.as_ref())
+                Self::process_sse_event(raw, &mut state, stream_events.as_ref(), expose_thinking)
             },
         )
         .await?;
@@ -1156,18 +1165,6 @@ impl AnthropicProviderFactory {
 impl ProviderFactory for AnthropicProviderFactory {
     fn kind(&self) -> &'static str {
         "anthropic"
-    }
-    fn cli_label(&self) -> &'static str {
-        "Anthropic API (Claude)"
-    }
-    fn setup_name(&self) -> &'static str {
-        "Anthropic API"
-    }
-    fn setup_description(&self) -> &'static str {
-        "Claude via Anthropic API key"
-    }
-    fn default_base_url(&self) -> Option<&'static str> {
-        Some("https://api.anthropic.com")
     }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
         let cfg: AnthropicProviderConfig =
@@ -1264,6 +1261,26 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn thinking_display_is_omitted_unless_provider_exposes_thinking() {
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "extract")]);
+        req.model_variant = Some("medium".to_string());
+
+        let hidden = AnthropicProvider::new("key")
+            .build_request_body(&req)
+            .expect("body");
+        assert_eq!(hidden["thinking"]["display"], "omitted");
+
+        let exposed = AnthropicProvider::new("key")
+            .with_options(ProviderOptions {
+                thinking: lash::provider::ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
+            })
+            .build_request_body(&req)
+            .expect("body");
+        assert_eq!(exposed["thinking"]["display"], "summarized");
     }
 
     #[test]
