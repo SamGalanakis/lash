@@ -20,8 +20,8 @@ use lash::llm::types::{
     LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
-    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
+    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, VariantRequestConfig,
 };
 
 pub mod oauth;
@@ -1224,59 +1224,19 @@ impl ProviderModelPolicy for GoogleModelPolicy {
 }
 
 #[async_trait]
-impl ProviderAuth for GoogleOAuthProvider {
-    async fn ensure_fresh(&mut self) -> Result<bool, lash::oauth::OAuthError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if now + 300 >= self.expires_at {
-            let tokens = oauth::refresh_tokens(&self.refresh_token).await?;
-            self.access_token = tokens.access_token;
-            self.refresh_token = tokens.refresh_token;
-            self.expires_at = tokens.expires_at;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderReadiness for GoogleOAuthProvider {
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        if self.project_id.is_none() {
-            let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
-                .ok()
-                .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
-            let access_token = self.access_token.clone();
-            let resolved = self
-                .resolve_project_id(&access_token, hint.as_deref())
-                .await?;
-            self.project_id = resolved;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn requires_streaming(&self) -> bool {
-        false
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
 impl ProviderTransport for GoogleOAuthProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let access_token = self.access_token.clone();
+        if self.project_id.is_none() {
+            let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
+                .ok()
+                .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT_ID").ok());
+            self.project_id = self
+                .resolve_project_id(&access_token, hint.as_deref())
+                .await?;
+        }
         let project_id = self.project_id.clone();
 
         let inline_attachment_parts = req

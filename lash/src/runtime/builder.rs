@@ -134,6 +134,30 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
+    pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
+        self.core = self.core.with_prompt_contribution(contribution);
+        self
+    }
+
+    pub fn with_replaced_prompt_slot(
+        mut self,
+        slot: crate::PromptSlot,
+        contributions: impl IntoIterator<Item = crate::PromptContribution>,
+    ) -> Self {
+        self.core = self.core.with_replaced_prompt_slot(slot, contributions);
+        self
+    }
+
+    pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
+        self.core = self.core.with_cleared_prompt_slot(slot);
+        self
+    }
+
+    pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
+        self.core = self.core.with_prompt_layer(prompt);
+        self
+    }
+
     pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
         self.core = self.core.with_trace_jsonl_path(trace_path);
         self

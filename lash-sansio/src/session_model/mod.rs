@@ -7,8 +7,9 @@ pub use message::{
     messages_are_prompt_resume_safe, render_prompt, render_transcript_prompt, shared_parts,
 };
 pub use prompt::{
-    CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, default_prompt_template,
+    CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptLayer, PromptSlot,
+    PromptSlotLayer, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    ResolvedPromptLayer, default_prompt_template, resolve_prompt_layers,
 };
 
 use std::collections::HashMap;
@@ -36,6 +37,13 @@ pub struct ConversationRecord {
     pub user_input: Option<UserInputProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MessageOrigin>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AcceptedInjectedTurnInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub message: PluginMessage,
 }
 
 impl ConversationRecord {
@@ -178,7 +186,7 @@ pub enum SessionEvent {
     },
     #[serde(rename = "injected_turn_input_accepted")]
     InjectedTurnInputAccepted {
-        messages: Vec<PluginMessage>,
+        inputs: Vec<AcceptedInjectedTurnInput>,
         checkpoint: CheckpointKind,
     },
     #[serde(rename = "injected_messages_committed")]
@@ -202,12 +210,6 @@ pub enum SessionEvent {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         envelope: Option<ErrorEnvelope>,
-    },
-    #[serde(rename = "prompt")]
-    Prompt {
-        request: PromptRequest,
-        #[serde(skip)]
-        response_tx: std::sync::mpsc::Sender<PromptResponse>,
     },
 }
 

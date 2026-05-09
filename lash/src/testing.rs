@@ -15,8 +15,8 @@ use crate::plugin::{
     SessionSnapshot, SessionSnapshotHost, ToolCatalogHost, TurnHost,
 };
 use crate::provider::{
-    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderHandle, ProviderModelPolicy,
-    ProviderReadiness, ProviderState, ProviderTransport, VariantRequestConfig,
+    AgentModelSelection, ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState,
+    ProviderTransport, VariantRequestConfig,
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
@@ -238,35 +238,13 @@ impl ProviderState for TestProvider {
 }
 
 #[async_trait::async_trait]
-impl ProviderAuth for TestProvider {
-    async fn ensure_fresh(&mut self) -> Result<bool, crate::oauth::OAuthError> {
-        Ok(false)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderReadiness for TestProvider {
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        Ok(false)
+impl ProviderTransport for TestProvider {
+    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        (self.complete)(request).await
     }
 
     fn requires_streaming(&self) -> bool {
         self.requires_streaming
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderTransport for TestProvider {
-    async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        (self.complete)(request).await
     }
 
     fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
@@ -514,7 +492,6 @@ impl TurnHost for MockSessionManager {
 impl crate::plugin::TaskHost for MockSessionManager {}
 impl crate::plugin::MonitorHost for MockSessionManager {}
 impl crate::plugin::SessionGraphHost for MockSessionManager {}
-impl crate::plugin::PromptHost for MockSessionManager {}
 impl crate::plugin::DirectCompletionHost for MockSessionManager {}
 impl crate::plugin::TraceHost for MockSessionManager {}
 

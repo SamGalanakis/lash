@@ -4,7 +4,17 @@ use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
-use lash::{InjectedTurnInput, MessageRole, TurnInputInjectionBridge};
+
+async fn monitor_test_session() -> lash_embed::LashSession {
+    lash_embed::LashCore::standard()
+        .max_context_tokens(200_000)
+        .build()
+        .expect("core")
+        .session("test-session-id")
+        .open()
+        .await
+        .expect("session")
+}
 
 #[tokio::test]
 async fn runtime_event_bridge_coalesces_text_before_structural_event() {
@@ -127,20 +137,17 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
     ));
 }
 
-#[test]
-fn pending_monitor_wakes_inject_as_hidden_system_messages() {
+#[tokio::test]
+async fn pending_monitor_wakes_inject_as_hidden_system_messages() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let bridge = TurnInputInjectionBridge::new();
+    let session = monitor_test_session().await;
     app.queue_monitor_wake("Monitor event \"build\": done".into());
 
-    let injected = enqueue_pending_monitor_wakes(&mut app, &bridge).expect("inject wakes");
+    let injected = enqueue_pending_monitor_wakes(&mut app, &session)
+        .await
+        .expect("inject wakes");
     assert_eq!(injected, 1);
     assert!(!app.has_pending_monitor_wakes());
-
-    let drained = bridge.drain().expect("drain bridge");
-    assert_eq!(drained.len(), 1);
-    assert_eq!(drained[0].message.role, MessageRole::System);
-    assert_eq!(drained[0].message.content, "Monitor event \"build\": done");
 
     app.recycle_unaccepted_monitor_wakes();
     assert_eq!(
@@ -149,19 +156,19 @@ fn pending_monitor_wakes_inject_as_hidden_system_messages() {
     );
 }
 
-#[test]
-fn accepted_monitor_wake_is_not_requeued_after_bridge_delivery() {
+#[tokio::test]
+async fn accepted_monitor_wake_is_not_requeued_after_bridge_delivery() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let bridge = TurnInputInjectionBridge::new();
+    let session = monitor_test_session().await;
     app.queue_monitor_wake("Monitor event \"build\": done".into());
 
-    let injected = enqueue_pending_monitor_wakes(&mut app, &bridge).expect("inject wakes");
+    let injected = enqueue_pending_monitor_wakes(&mut app, &session)
+        .await
+        .expect("inject wakes");
     assert_eq!(injected, 1);
-    let drained = bridge.drain().expect("drain bridge");
-    let messages = drained
-        .into_iter()
-        .map(|InjectedTurnInput { message }| message)
-        .collect::<Vec<_>>();
+    let messages = vec![super::helpers::monitor_wake_message(
+        "Monitor event \"build\": done",
+    )];
 
     app.acknowledge_monitor_wakes(&messages);
     app.recycle_unaccepted_monitor_wakes();

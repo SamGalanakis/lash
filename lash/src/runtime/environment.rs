@@ -4,7 +4,7 @@
 //! startup and reuses across every `LashRuntime` instance it spawns.
 //! Fields are all `Arc`-wrapped or cheap-to-clone so building a runtime
 //! from an environment never rebuilds expensive state (plugin host,
-//! path resolver, prompt template, …).
+//! path resolver, prompt layer, …).
 //!
 //! Three embedder patterns this enables:
 //!
@@ -74,23 +74,22 @@ pub struct RuntimeEnvironment {
     // Background task executor for `PluginSessionTask` futures.
     pub session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
 
+    // Store factory used by managed child sessions created from runtimes
+    // built with this environment.
+    pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
+
     // All fields below mirror `RuntimeCoreConfig` and carry the same
     // semantics. They live on `RuntimeEnvironment` directly so
     // embedders don't have to build a separate core config.
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
-    pub prompt_template: crate::PromptTemplate,
+    pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
-
-    // Host-owned destination for refreshed OAuth credentials. lash-cli
-    // points this at `paths::config_file()`; library embedders can
-    // leave it `None` and persist via their own channel.
-    pub credential_store_path: Option<PathBuf>,
 }
 
 impl Default for RuntimeEnvironment {
@@ -99,16 +98,16 @@ impl Default for RuntimeEnvironment {
             plugin_host: None,
             residency: Residency::default(),
             session_task_executor: None,
+            session_store_factory: None,
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            prompt_template: crate::default_prompt_template(),
+            prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            credential_store_path: None,
         }
     }
 }
@@ -126,14 +125,12 @@ impl RuntimeEnvironment {
             base_dir: self.base_dir.clone(),
             path_resolver: Arc::clone(&self.path_resolver),
             attachment_store: Arc::clone(&self.attachment_store),
-            prompt_template: self.prompt_template.clone(),
-            prompt_contributions: Vec::new(),
+            prompt: self.prompt.clone(),
             trace_sink: self.trace_sink.clone(),
             trace_level: self.trace_level,
             trace_context: self.trace_context.clone(),
             sanitizer: self.sanitizer.clone(),
             termination: self.termination.clone(),
-            credential_store_path: self.credential_store_path.clone(),
         }
     }
 }
@@ -183,6 +180,14 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
+    pub fn with_session_store_factory(
+        mut self,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+    ) -> Self {
+        self.env.session_store_factory = Some(factory);
+        self
+    }
+
     pub fn with_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
         self.env.base_dir = base_dir.into();
         self
@@ -199,7 +204,31 @@ impl RuntimeEnvironmentBuilder {
     }
 
     pub fn with_prompt_template(mut self, template: crate::PromptTemplate) -> Self {
-        self.env.prompt_template = template;
+        self.env.prompt.template = Some(template);
+        self
+    }
+
+    pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
+        self.env.prompt.add_contribution(contribution);
+        self
+    }
+
+    pub fn with_replaced_prompt_slot(
+        mut self,
+        slot: crate::PromptSlot,
+        contributions: impl IntoIterator<Item = crate::PromptContribution>,
+    ) -> Self {
+        self.env.prompt.replace_slot(slot, contributions);
+        self
+    }
+
+    pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
+        self.env.prompt.clear_slot(slot);
+        self
+    }
+
+    pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
+        self.env.prompt = prompt;
         self
     }
 
@@ -230,11 +259,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.env.termination = termination;
-        self
-    }
-
-    pub fn with_credential_store_path(mut self, path: Option<PathBuf>) -> Self {
-        self.env.credential_store_path = path;
         self
     }
 

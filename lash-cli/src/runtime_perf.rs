@@ -1144,7 +1144,7 @@ fn build_embed_core(
     };
     builder = builder
         .provider(benchmark_provider(scenario).into_handle())
-        .model("mock-model")
+        .model("mock-model", None)
         .max_context_tokens(200_000)
         .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
     builder.build().map_err(anyhow::Error::from)

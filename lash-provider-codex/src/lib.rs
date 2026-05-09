@@ -18,9 +18,9 @@ use lash::llm::types::{
     LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
 use lash::provider::{
-    AgentModelSelection, ProviderAuth, ProviderComponents, ProviderFactory,
-    ProviderFailureClassifier, ProviderModelPolicy, ProviderOptions, ProviderReadiness,
-    ProviderReliability, ProviderState, ProviderTransport, VariantRequestConfig,
+    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
+    ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
+    VariantRequestConfig,
 };
 use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,
@@ -1742,47 +1742,11 @@ impl ProviderModelPolicy for CodexModelPolicy {
 }
 
 #[async_trait]
-impl ProviderAuth for CodexProvider {
-    async fn ensure_fresh(&mut self) -> Result<bool, lash::oauth::OAuthError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if now + 300 >= self.expires_at {
-            let tokens = oauth::refresh_tokens(&self.refresh_token).await?;
-            self.access_token = tokens.access_token;
-            self.refresh_token = tokens.refresh_token;
-            self.expires_at = tokens.expires_at;
-            if let Some(new_account_id) = tokens.account_id {
-                self.account_id = Some(new_account_id);
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderReadiness for CodexProvider {
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        Ok(false)
-    }
-
+impl ProviderTransport for CodexProvider {
     fn requires_streaming(&self) -> bool {
         true
     }
 
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderTransport for CodexProvider {
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();

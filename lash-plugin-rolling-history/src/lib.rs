@@ -3,7 +3,7 @@
 //! Owns the compaction strategy that used to live in
 //! `lash/src/session_model/context.rs`: per-turn pruning (tool results,
 //! old images) and summary insertion, plus persistent history rewrites
-//! for `/compact`, overflow recovery, and window-shrink events.
+//! for manual compaction, overflow recovery, and window-shrink events.
 //!
 //! Registered as a default plugin by
 //! the first-party default tool bundles from `lash-default-tools`,
@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use lash::plugin::{
-    CommandDef, CommandHandler, CommandInvocation, CommandOutcome,
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
     HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
@@ -744,21 +743,6 @@ impl SessionPlugin for RollingHistoryPlugin {
             .prepare_turn(100, Arc::new(RollingTurnTransform::new(config.clone())));
         reg.history()
             .rewrite(100, Arc::new(RollingHistoryRewriter::new(config)));
-
-        let handler: CommandHandler =
-            Arc::new(|invocation: CommandInvocation| Box::pin(handle_compact_command(invocation)));
-        reg.commands().register(
-            CommandDef {
-                name: "/compact",
-                usage: "/compact [focus instructions]",
-                description: "Summarize older messages to free up context.",
-                argument_hint: Some("[focus instructions]"),
-                argument_options: &[],
-                takes_argument: true,
-                runs_out_of_band: false,
-            },
-            handler,
-        )?;
         Ok(())
     }
 }
@@ -943,59 +927,6 @@ impl HistoryRewriter for RollingHistoryRewriter {
             }
             RewriteTrigger::Periodic => Ok(input),
         }
-    }
-}
-
-async fn handle_compact_command(
-    invocation: CommandInvocation,
-) -> Result<CommandOutcome, PluginError> {
-    let CommandInvocation {
-        argument,
-        session_id,
-        host,
-        ..
-    } = invocation;
-    let state = host
-        .snapshot_session(&session_id)
-        .await
-        .map_err(|err| PluginError::Session(format!("compact: snapshot failed: {err}")))?;
-    let input = HistoryState {
-        messages: state.read_view().messages().to_vec(),
-        tool_calls: state.read_view().tool_calls().to_vec(),
-        metadata: Default::default(),
-    };
-    let ctx = RewriteContext {
-        session_id: session_id.clone(),
-        trigger: RewriteTrigger::Manual {
-            instructions: argument,
-        },
-        state: state.read_view(),
-        host: host.clone(),
-    };
-    // Run only the rolling rewriter for now — invoking the full chain
-    // via PluginSession::rewrite_history would require looking the
-    // session up via the plugin host, which adds plumbing without new
-    // capability for the built-in plugin. A future command-API revision
-    // will surface `PluginSession` on `CommandInvocation`.
-    let rewriter = RollingHistoryRewriter::new(RollingHistoryConfig);
-    let outcome = rewriter
-        .rewrite(&ctx, input)
-        .await
-        .map_err(|err| PluginError::Session(err.to_string()))?;
-
-    if outcome.metadata.produced_summary {
-        // Persist the rewritten messages back onto the live session by
-        // opening a create_session call with the updated snapshot? For
-        // now, rely on Phase 4 where the runtime directly invokes
-        // `rewrite_history` for `/compact` and applies the result.
-        Ok(CommandOutcome::Message(
-            "Compaction summary inserted. The new message list will take effect on the next turn."
-                .to_string(),
-        ))
-    } else {
-        Ok(CommandOutcome::Message(
-            "Nothing to compact yet — the conversation is still short.".to_string(),
-        ))
     }
 }
 

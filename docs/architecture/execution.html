@@ -107,7 +107,7 @@ flowchart LR
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
-    .model("anthropic/claude-sonnet-4.6")
+    .model("anthropic/claude-sonnet-4.6", None)
     .max_context_tokens(200_000)
     .store_factory(store_factory)
     .build()?;

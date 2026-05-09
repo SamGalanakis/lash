@@ -6,7 +6,7 @@ async fn main() -> lash_embed::Result<()> {
         .install_mode(ModePreset::standard())
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::standard())
-        .model("example-model")
+        .model("example-model", None)
         .max_context_tokens(200_000)
         .build()?;
 

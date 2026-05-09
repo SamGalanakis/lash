@@ -8,11 +8,9 @@ mod direct;
 mod graph;
 mod managed;
 mod monitor;
-mod prompt;
 mod turns;
 mod usage;
 
-pub(in crate::runtime) use prompt::{HostPromptBridge, PendingPrompt};
 pub(in crate::runtime) use usage::ChildUsageEventRelay;
 pub(in crate::runtime::session_manager) use usage::{
     ChannelEventSink, LiveChildUsageForwarder, subtract_usage,
@@ -100,11 +98,6 @@ struct BackgroundTaskCapability {
     sync_needed: Arc<AtomicBool>,
 }
 
-#[derive(Clone)]
-struct PromptCapability {
-    prompt_bridge: Option<HostPromptBridge>,
-}
-
 #[derive(Clone, Default)]
 struct DirectCompletionCapability;
 
@@ -114,7 +107,6 @@ pub(super) struct RuntimeSessionManager {
     managed: ManagedSessionCapability,
     background: BackgroundTaskCapability,
     usage: UsageCapability,
-    prompt: PromptCapability,
     direct: DirectCompletionCapability,
 }
 
@@ -205,16 +197,9 @@ impl UsageCapability {
     }
 }
 
-impl PromptCapability {
-    fn new(prompt_bridge: Option<HostPromptBridge>) -> Self {
-        Self { prompt_bridge }
-    }
-}
-
 impl RuntimeSessionManager {
     pub(super) fn new(
         runtime: &LashRuntime,
-        prompt_bridge: Option<HostPromptBridge>,
         persist_usage_to_store: bool,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Self, ExternalInvokeError> {
@@ -230,7 +215,6 @@ impl RuntimeSessionManager {
             managed: ManagedSessionCapability::new(runtime),
             background: BackgroundTaskCapability::new(runtime),
             usage: UsageCapability::new(runtime, persist_usage_to_store, child_usage_event_relay),
-            prompt: PromptCapability::new(prompt_bridge),
             direct: DirectCompletionCapability,
         })
     }

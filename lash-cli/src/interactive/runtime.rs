@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use lash::session_model::{Part, PartKind, PruneState};
 use lash::{PluginMessage, *};
+use lash_embed::LashSession;
 
 use super::helpers::RuntimeEventBridge;
 use super::*;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
-use crate::turn_runner::{RuntimeRunResult, spawn_runtime_turn};
+use crate::turn_runner::{RuntimeRunResult, spawn_session_turn};
 
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
@@ -131,124 +131,35 @@ pub(super) fn parse_kv_args(raw: &str) -> HashMap<String, String> {
     out
 }
 
-pub(super) fn register_builtin_tool(
-    dynamic_tools: &Arc<DynamicToolProvider>,
-    tool_name: &str,
-    handler_id: &str,
-    description_override: Option<String>,
-    _execution_mode: ExecutionMode,
-) -> Result<ToolDefinition, String> {
-    let adapter = dynamic_tools.inprocess_adapter();
-    let def = match handler_id {
-        "echo" => {
-            let handler: InProcessToolHandler = Arc::new(|args, _context, _progress| {
-                Box::pin(async move {
-                    let text = args
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    ToolResult::ok(serde_json::json!(text))
-                })
-            });
-            let def = ToolDefinition::new(
-                tool_name,
-                description_override
-                    .unwrap_or_else(|| "Echoes back the `text` argument.".to_string()),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": { "text": { "type": "string" } },
-                    "required": ["text"],
-                    "additionalProperties": false
-                }),
-                serde_json::json!({ "type": "string" }),
-            )
-            .with_examples(vec![format!("{tool_name}(text=\"hello\")")])
-            .with_availability(lash::ToolAvailabilityConfig::callable())
-            .with_execution_mode(ToolExecutionMode::Parallel);
-            adapter.register_tool(def.clone(), handler);
-            def
-        }
-        "time" => {
-            let handler: InProcessToolHandler = Arc::new(|_args, _context, _progress| {
-                Box::pin(async move {
-                    ToolResult::ok(serde_json::json!(chrono::Utc::now().to_rfc3339()))
-                })
-            });
-            let def = ToolDefinition::new(
-                tool_name,
-                description_override
-                    .unwrap_or_else(|| "Returns the current UTC timestamp (RFC3339).".to_string()),
-                ToolDefinition::default_input_schema(),
-                serde_json::json!({ "type": "string" }),
-            )
-            .with_examples(vec![format!("{tool_name}()")])
-            .with_availability(lash::ToolAvailabilityConfig::callable())
-            .with_execution_mode(ToolExecutionMode::Parallel);
-            adapter.register_tool(def.clone(), handler);
-            def
-        }
-        "uuid" => {
-            let handler: InProcessToolHandler = Arc::new(|_args, _context, _progress| {
-                Box::pin(async move {
-                    ToolResult::ok(serde_json::json!(uuid::Uuid::new_v4().to_string()))
-                })
-            });
-            let def = ToolDefinition::new(
-                tool_name,
-                description_override
-                    .unwrap_or_else(|| "Returns a random UUIDv4 string.".to_string()),
-                ToolDefinition::default_input_schema(),
-                serde_json::json!({ "type": "string" }),
-            )
-            .with_examples(vec![format!("{tool_name}()")])
-            .with_availability(lash::ToolAvailabilityConfig::callable())
-            .with_execution_mode(ToolExecutionMode::Parallel);
-            adapter.register_tool(def.clone(), handler);
-            def
-        }
-        other => {
-            return Err(format!(
-                "Unknown handler `{other}`. Supported handlers: echo, time, uuid"
-            ));
-        }
-    };
-
-    Ok(def)
-}
-
 pub(super) async fn apply_pending_reconfigure(
-    dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
     pending_reconfigure: &mut bool,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
 ) -> Result<u64, String> {
     if !*pending_reconfigure {
-        return Ok(dynamic_tools.generation());
+        return Ok(desired_dynamic.base_generation);
     }
 
-    let generation = if let Some(rt) = runtime.as_mut() {
-        rt.apply_dynamic_tool_state(desired_dynamic.clone())
-            .await
-            .map_err(|err| err.to_string())?
-    } else {
-        dynamic_tools
-            .apply_state(desired_dynamic.clone())
-            .map_err(|err| err.to_string())?
+    let Some(session) = runtime.as_ref().cloned() else {
+        return Err("runtime session is unavailable while a turn is running".to_string());
     };
+    let generation = session
+        .apply_tool_state(desired_dynamic.clone())
+        .await
+        .map_err(|err| err.to_string())?;
 
     sync_runtime_tool_surface(runtime).await?;
 
-    *desired_dynamic = dynamic_tools.export_state();
+    *desired_dynamic = session.tool_state().await.map_err(|err| err.to_string())?;
     *pending_reconfigure = false;
     Ok(generation)
 }
 
 pub(super) async fn sync_runtime_tool_surface(
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
 ) -> Result<(), String> {
     if let Some(rt) = runtime.as_mut() {
-        rt.refresh_session_tool_surface()
+        rt.refresh_tool_surface()
             .await
             .map_err(|err| err.to_string())?;
     }
@@ -263,7 +174,7 @@ pub(super) async fn send_user_message(
     app: &mut App,
     ui_trace: Option<&mut UiTraceRecorder>,
     _logger: &mut SessionLogger,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     _history: &mut Vec<Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
@@ -295,8 +206,9 @@ pub(super) async fn send_user_message(
         "send_user_message taking runtime for dispatch"
     );
 
-    let rt = runtime
-        .take()
+    let session = runtime
+        .as_ref()
+        .cloned()
         .expect("runtime should be available when not running");
     tracing::info!(
         mode = ?turn_input.mode,
@@ -316,7 +228,7 @@ pub(super) async fn send_user_message(
     );
 
     let sink = RuntimeEventBridge::spawn(stream_id, app_tx.clone());
-    let (cancel, return_rx) = spawn_runtime_turn(rt, turn_input, sink, stream_id);
+    let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);
 }

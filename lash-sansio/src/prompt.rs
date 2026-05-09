@@ -152,7 +152,10 @@ fn slot_order(slot: crate::PromptSlot) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PromptContribution, default_prompt_template};
+    use crate::{
+        PromptBuiltin, PromptContribution, PromptLayer, PromptSlot, PromptTemplate,
+        PromptTemplateEntry, PromptTemplateSection, default_prompt_template, resolve_prompt_layers,
+    };
 
     #[test]
     fn build_prompt_renders_template_from_merged_context() {
@@ -218,5 +221,85 @@ mod tests {
         );
         assert!(!Arc::ptr_eq(&first.system_prompt, &second.system_prompt));
         assert_ne!(first.system_prompt, second.system_prompt);
+    }
+
+    fn template_with_text(text: &str) -> PromptTemplate {
+        PromptTemplate::new(vec![PromptTemplateSection::untitled(vec![
+            PromptTemplateEntry::text(text),
+            PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
+        ])])
+    }
+
+    fn content(contributions: &[PromptContribution]) -> Vec<&str> {
+        contributions
+            .iter()
+            .map(|contribution| contribution.content.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn prompt_layers_use_later_template() {
+        let core = PromptLayer::with_template(template_with_text("core"));
+        let session = PromptLayer::with_template(template_with_text("session"));
+        let resolved = resolve_prompt_layers([&core, &session]);
+
+        let rendered = resolved.template.render(&PromptContext {
+            mode: crate::ExecutionMode::standard(),
+            execution_prompt: "execute".to_string(),
+            ..PromptContext::default()
+        });
+        assert!(rendered.contains("session"));
+        assert!(!rendered.contains("core"));
+    }
+
+    #[test]
+    fn prompt_layers_append_inherited_slot_content() {
+        let core =
+            PromptLayer::new().with_contribution(PromptContribution::guidance("Core", "core"));
+        let session = PromptLayer::new()
+            .with_contribution(PromptContribution::guidance("Session", "session"));
+
+        let resolved = resolve_prompt_layers([&core, &session]);
+        assert_eq!(content(&resolved.contributions), vec!["core", "session"]);
+    }
+
+    #[test]
+    fn prompt_layers_clear_one_slot_without_touching_others() {
+        let core = PromptLayer::new()
+            .with_contribution(PromptContribution::guidance("Guide", "guide"))
+            .with_contribution(PromptContribution::project_instructions("project"));
+        let session = PromptLayer::new().with_cleared_slot(PromptSlot::Guidance);
+
+        let resolved = resolve_prompt_layers([&core, &session]);
+        assert_eq!(content(&resolved.contributions), vec!["project"]);
+    }
+
+    #[test]
+    fn prompt_layers_replace_slot_and_normalize_contribution_slot() {
+        let core =
+            PromptLayer::new().with_contribution(PromptContribution::guidance("Guide", "old"));
+        let session = PromptLayer::new().with_replaced_slot(
+            PromptSlot::Guidance,
+            [PromptContribution::project_instructions("new")],
+        );
+
+        let resolved = resolve_prompt_layers([&core, &session]);
+        assert_eq!(content(&resolved.contributions), vec!["new"]);
+        assert_eq!(resolved.contributions[0].slot, PromptSlot::Guidance);
+    }
+
+    #[test]
+    fn prompt_layers_allow_later_append_after_replace() {
+        let core =
+            PromptLayer::new().with_contribution(PromptContribution::guidance("Guide", "old"));
+        let session = PromptLayer::new().with_replaced_slot(
+            PromptSlot::Guidance,
+            [PromptContribution::guidance("New", "new")],
+        );
+        let turn =
+            PromptLayer::new().with_contribution(PromptContribution::guidance("Turn", "turn"));
+
+        let resolved = resolve_prompt_layers([&core, &session, &turn]);
+        assert_eq!(content(&resolved.contributions), vec!["new", "turn"]);
     }
 }

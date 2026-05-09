@@ -169,7 +169,10 @@ impl LashRuntime {
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
         let core = env.to_runtime_core_config();
-        let embedded = EmbeddedRuntimeHost::new(core);
+        let mut embedded = EmbeddedRuntimeHost::new(core);
+        if let Some(factory) = env.session_store_factory.as_ref() {
+            embedded = embedded.with_session_store_factory(Arc::clone(factory));
+        }
         let runtime = if let Some(store) = store {
             let services = PersistentRuntimeServices::new_with_bridges(
                 plugin_session,

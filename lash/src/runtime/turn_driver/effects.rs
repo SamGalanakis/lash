@@ -22,9 +22,10 @@ impl RuntimeTurnDriver {
             .map_err(|err| RuntimeError {
                 code: "turn_input_injection_bridge".to_string(),
                 message: err,
-            })?
-            .into_iter()
-            .map(|item| item.message)
+            })?;
+        let injected_messages = injected
+            .iter()
+            .map(|item| item.message.clone())
             .collect::<Vec<_>>();
         let plugins = Arc::clone(self.session.plugins());
         let applied = plugins
@@ -44,7 +45,14 @@ impl RuntimeTurnDriver {
             send_session_event(
                 event_tx,
                 SessionEvent::InjectedTurnInputAccepted {
-                    messages: injected.clone(),
+                    inputs: injected
+                        .iter()
+                        .cloned()
+                        .map(|item| crate::AcceptedInjectedTurnInput {
+                            id: item.id,
+                            message: item.message,
+                        })
+                        .collect(),
                     checkpoint,
                 },
             )
@@ -70,53 +78,24 @@ impl RuntimeTurnDriver {
             .await;
         }
 
-        Ok((committed, injected))
+        Ok((committed, injected_messages))
     }
 
     pub(super) async fn prepare_provider(
         &mut self,
         policy: &mut SessionPolicy,
     ) -> Result<String, SessionEvent> {
-        match policy.provider.ensure_fresh().await {
-            Ok(true) => {
-                if let Some(path) = self.host.core.credential_store_path.as_ref() {
-                    let _ = crate::provider::save_provider(path, &policy.provider);
-                }
-            }
-            Err(e) => {
-                return Err(make_error_event(
-                    "token_refresh",
-                    Some("refresh_failed"),
-                    format!(
-                        "Token refresh failed: {}. Re-authenticate with /provider and retry.",
-                        e
-                    ),
-                    Some(e.to_string()),
-                ));
-            }
-            _ => {}
-        }
-
         let model = policy.provider.resolve_model(&policy.model);
-        match policy.provider.ensure_ready().await {
-            Ok(changed) => {
-                if changed && let Some(path) = self.host.core.credential_store_path.as_ref() {
-                    let _ = crate::provider::save_provider(path, &policy.provider);
-                }
-            }
-            Err(e) => {
-                return Err(make_error_event(
-                    "llm_provider",
-                    e.code.as_deref(),
-                    format!(
-                        "LLM provider initialization failed: {}. Run /provider to reconfigure credentials, then retry.",
-                        e.message
-                    ),
-                    e.raw,
-                ));
-            }
+        if let Some(variant) = policy.model_variant.as_deref()
+            && let Err(message) = policy.provider.validate_variant(&model, variant)
+        {
+            return Err(make_error_event(
+                "llm_provider",
+                Some("invalid_model_variant"),
+                message.clone(),
+                Some(message),
+            ));
         }
-
         Ok(model)
     }
 

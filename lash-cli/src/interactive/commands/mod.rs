@@ -1,4 +1,3 @@
-mod plugin;
 mod provider;
 mod session;
 mod tools;
@@ -13,16 +12,15 @@ use crate::turn_runner::make_turn_input;
 #[derive(Clone)]
 pub(super) enum ParsedSlashCommand {
     Builtin(command::Command),
-    Ui(UiCommandInvocation),
+    Ui(TuiSlashInvocation),
 }
 
 pub(super) fn parse_slash_command(
     input: &str,
     skills: &SkillCatalog,
-    ui_extensions: &UiExtensions,
-    plugin_commands: &[lash::CommandDef],
+    ui_extensions: &TuiExtensions,
 ) -> Option<ParsedSlashCommand> {
-    command::parse(input, skills, plugin_commands)
+    command::parse(input, skills)
         .map(ParsedSlashCommand::Builtin)
         .or_else(|| {
             ui_extensions
@@ -31,33 +29,31 @@ pub(super) fn parse_slash_command(
         })
 }
 
-pub(super) fn slash_command_runs_out_of_band_while_running(
-    cmd: &ParsedSlashCommand,
-    plugin_commands: &[lash::CommandDef],
-) -> bool {
+pub(super) fn slash_command_runs_out_of_band_while_running(cmd: &ParsedSlashCommand) -> bool {
     match cmd {
-        ParsedSlashCommand::Builtin(command) => {
-            command::runs_out_of_band_while_running(command, plugin_commands)
-        }
+        ParsedSlashCommand::Builtin(command) => command::runs_out_of_band_while_running(command),
         ParsedSlashCommand::Ui(command) => command.allow_while_running(),
     }
 }
 
 async fn handle_ui_command(
-    invocation: UiCommandInvocation,
+    invocation: TuiSlashInvocation,
     app: &mut App,
-    ui_extensions: &UiExtensions,
+    ui_extensions: &TuiExtensions,
     plugin_host: &PluginHost,
     session_manager: &Arc<dyn RuntimeSessionHost>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
 ) {
+    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
+        plugin_host,
+        session_id: app.session_id.as_str(),
+        session_manager: Arc::clone(session_manager),
+    };
     match ui_extensions
-        .invoke_command(
+        .invoke_parsed_command(
             &invocation,
-            UiContext {
-                plugin_host,
-                session_id: app.session_id.as_str(),
-                session_manager: Arc::clone(session_manager),
+            TuiExtensionContext {
+                session: &tui_session,
             },
         )
         .await
@@ -91,11 +87,10 @@ pub(super) async fn dispatch_next_queued_turn(
     args: &Args,
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
-    ui_extensions: &UiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    ui_extensions: &TuiExtensions,
+    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
     lash_config: &lash::provider::LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -124,12 +119,7 @@ pub(super) async fn dispatch_next_queued_turn(
             return Ok(());
         }
         let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
-        if let Some(cmd) = parse_slash_command(
-            &queued.display_text,
-            &app.skills,
-            ui_extensions,
-            &app.plugin_commands,
-        ) {
+        if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions) {
             if let Some(recorder) = ui_trace.as_mut() {
                 recorder.record_slash_command(queued.display_text.clone());
             }
@@ -144,7 +134,6 @@ pub(super) async fn dispatch_next_queued_turn(
                 ui_extensions,
                 runtime_factory,
                 lash_config,
-                dynamic_tools,
                 runtime,
                 history,
                 turn_counter,
@@ -171,8 +160,7 @@ pub(super) async fn dispatch_next_queued_turn(
         }
 
         if let Err(e) =
-            apply_pending_reconfigure(dynamic_tools, desired_dynamic, pending_reconfigure, runtime)
-                .await
+            apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
         {
             push_system_message(
                 app,
@@ -185,10 +173,17 @@ pub(super) async fn dispatch_next_queued_turn(
             return Ok(());
         }
         *toolset_hash = hash12(
-            &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
+            &serde_json::to_vec(
+                &desired_dynamic
+                    .tools
+                    .values()
+                    .map(|spec| spec.definition.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_else(|_| b"[]".to_vec()),
         );
         let turn_input = make_turn_input(&queued);
-        let current_dynamic_state = dynamic_tools.export_state();
+        let current_dynamic_state = desired_dynamic.clone();
         send_user_message(
             queued.clone(),
             turn_input.clone(),
@@ -223,11 +218,10 @@ pub(super) async fn handle_parsed_slash_command(
     args: &Args,
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
-    ui_extensions: &UiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    ui_extensions: &TuiExtensions,
+    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
     lash_config: &lash::provider::LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -257,7 +251,6 @@ pub(super) async fn handle_parsed_slash_command(
                 plugin_host,
                 runtime_factory,
                 lash_config,
-                dynamic_tools,
                 runtime,
                 history,
                 turn_counter,
@@ -302,10 +295,9 @@ async fn handle_slash_command(
     _args: &Args,
     paused: &Arc<AtomicBool>,
     _plugin_host: &PluginHost,
-    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
     lash_config: &lash::provider::LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -331,7 +323,6 @@ async fn handle_slash_command(
                 runtime_factory,
                 lash_config,
                 logger,
-                dynamic_tools,
                 runtime,
                 history,
                 turn_counter,
@@ -357,8 +348,11 @@ async fn handle_slash_command(
             let session_name = app.session_name.clone();
             let standard_context_approach = runtime
                 .as_ref()
-                .map(|rt| rt.export_state().policy.standard_context_approach)
-                .unwrap_or_default();
+                .map(|rt| async { rt.policy_snapshot().await.standard_context_approach });
+            let standard_context_approach = match standard_context_approach {
+                Some(future) => future.await,
+                None => None,
+            };
             let session_db_path = logger.db_path().to_string_lossy().to_string();
             push_system_message(
                 app,
@@ -369,7 +363,7 @@ async fn handle_slash_command(
                     current_execution_mode,
                     standard_context_approach.as_ref(),
                     context_window,
-                    Some((dynamic_tools.definitions().len(), toolset_hash)),
+                    Some((desired_dynamic.tools.len(), toolset_hash)),
                     &cwd,
                     Some(&session_name),
                     Some(&logger.session_id),
@@ -413,7 +407,6 @@ async fn handle_slash_command(
             session::handle_retry(
                 app,
                 logger,
-                dynamic_tools,
                 runtime,
                 history,
                 last_turn,
@@ -436,7 +429,6 @@ async fn handle_slash_command(
             session::handle_fork(
                 app,
                 logger,
-                dynamic_tools,
                 runtime,
                 provider,
                 current_model_variant,
@@ -444,7 +436,7 @@ async fn handle_slash_command(
             )
             .await
         }
-        command::Command::Tree => session::handle_tree(app, runtime),
+        command::Command::Tree => session::handle_tree(app, runtime).await,
         command::Command::Help => {
             let help = help_text(&app.skills, app.ui_extensions());
             push_system_message(app, help);
@@ -457,7 +449,6 @@ async fn handle_slash_command(
                 logger,
                 runtime_factory,
                 lash_config,
-                dynamic_tools,
                 runtime,
                 history,
                 turn_counter,
@@ -472,19 +463,21 @@ async fn handle_slash_command(
             )
             .await
         }
-        command::Command::Tools(raw) => tools::handle_tools(
-            raw,
-            app,
-            dynamic_tools,
-            desired_dynamic,
-            pending_reconfigure,
-            current_execution_mode.clone(),
-        ),
+        command::Command::Tools(raw) => {
+            tools::handle_tools(
+                raw,
+                app,
+                runtime,
+                desired_dynamic,
+                pending_reconfigure,
+                current_execution_mode.clone(),
+            )
+            .await
+        }
         command::Command::Reconfigure(raw) => {
             tools::handle_reconfigure(
                 raw,
                 app,
-                dynamic_tools,
                 runtime,
                 desired_dynamic,
                 pending_reconfigure,
@@ -493,8 +486,32 @@ async fn handle_slash_command(
             .await
         }
         command::Command::Skills => session::handle_skills(app),
-        command::Command::Plugin { name, argument } => {
-            plugin::handle_plugin(name, argument, app, runtime, history, session_manager).await
+        command::Command::Compact(argument) => {
+            let Some(rt) = runtime.as_mut() else {
+                push_system_message(app, "Compaction is unavailable while a turn is running.");
+                return Ok(false);
+            };
+            let trigger = lash::RewriteTrigger::Manual {
+                instructions: argument,
+            };
+            match rt.rewrite_history(trigger).await {
+                Ok(true) => {
+                    let read_view = rt.read_view().await;
+                    history.clear();
+                    history.extend(read_view.messages().iter().cloned());
+                    app.timeline =
+                        app::timeline_from_read_view(&read_view, &app.ui_projection_state());
+                    app.invalidate_height_cache();
+                    app.scroll_to_bottom();
+                    push_system_message(app, "Compaction summary inserted.");
+                }
+                Ok(false) => push_system_message(
+                    app,
+                    "Nothing to compact yet — the conversation is still short.",
+                ),
+                Err(err) => push_system_message(app, format!("Compaction failed: {err}")),
+            }
+            Ok(false)
         }
     }
 }

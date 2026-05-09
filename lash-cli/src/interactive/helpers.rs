@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use lash::*;
-use lash_ui::{KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers};
+use lash_tui_extensions::{
+    KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
+};
 use tokio::sync::mpsc;
 
 use crate::app::{App, PreparedTurn};
@@ -120,7 +122,7 @@ struct UiSnapshotRequest {
 impl UiSnapshotWorker {
     pub(super) fn spawn(
         app_tx: AppEventTx,
-        ui_extensions: std::sync::Arc<lash_ui::UiExtensions>,
+        ui_extensions: std::sync::Arc<lash_tui_extensions::TuiExtensions>,
         plugin_host: PluginHost,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<UiSnapshotRequest>();
@@ -224,7 +226,7 @@ pub(super) fn cleared_session_state(policy: SessionPolicy) -> SessionStateEnvelo
 pub(super) fn log_runtime_handoff(
     phase: &str,
     app: &App,
-    runtime: &Option<LashRuntime>,
+    runtime: &Option<lash_embed::LashSession>,
     runtime_return_rx_present: bool,
     cancel_token_present: bool,
     active_stream_id: u64,

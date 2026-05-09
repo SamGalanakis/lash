@@ -46,6 +46,7 @@ impl LashRuntime {
         model: Option<String>,
         model_variant: Option<Option<String>>,
         max_context_tokens: Option<usize>,
+        prompt: Option<crate::PromptLayer>,
     ) {
         let previous = self.session_policy();
         if let Some(provider) = provider {
@@ -60,6 +61,9 @@ impl LashRuntime {
         if let Some(max_context_tokens) = max_context_tokens {
             self.policy.max_context_tokens = Some(max_context_tokens);
         }
+        if let Some(prompt) = prompt {
+            self.policy.prompt = prompt;
+        }
         self.state.policy = self.policy.clone();
         // Eagerly compact messages if the context window shrunk.
         let new_max = self.policy.max_context_tokens;
@@ -71,6 +75,45 @@ impl LashRuntime {
         }
         self.apply_session_config_mutations(previous.clone()).await;
         self.notify_session_config_changed(previous).await;
+    }
+
+    pub async fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
+        let mut prompt = self.policy.prompt.clone();
+        prompt.template = Some(template);
+        self.update_session_config(None, None, None, None, Some(prompt))
+            .await;
+    }
+
+    pub async fn clear_prompt_template(&mut self) {
+        let mut prompt = self.policy.prompt.clone();
+        prompt.template = None;
+        self.update_session_config(None, None, None, None, Some(prompt))
+            .await;
+    }
+
+    pub async fn add_prompt_contribution(&mut self, contribution: crate::PromptContribution) {
+        let mut prompt = self.policy.prompt.clone();
+        prompt.add_contribution(contribution);
+        self.update_session_config(None, None, None, None, Some(prompt))
+            .await;
+    }
+
+    pub async fn replace_prompt_slot(
+        &mut self,
+        slot: crate::PromptSlot,
+        contributions: impl IntoIterator<Item = crate::PromptContribution>,
+    ) {
+        let mut prompt = self.policy.prompt.clone();
+        prompt.replace_slot(slot, contributions);
+        self.update_session_config(None, None, None, None, Some(prompt))
+            .await;
+    }
+
+    pub async fn clear_prompt_slot(&mut self, slot: crate::PromptSlot) {
+        let mut prompt = self.policy.prompt.clone();
+        prompt.clear_slot(slot);
+        self.update_session_config(None, None, None, None, Some(prompt))
+            .await;
     }
 
     /// Re-register the current tool surface in the live RLM session.

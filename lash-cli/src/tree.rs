@@ -1,17 +1,18 @@
-use lash::{DynamicStateSnapshot, LashRuntime, Message, MessageRole, SessionMessageTreeNode};
+use lash::{DynamicStateSnapshot, Message, MessageRole, SessionMessageTreeNode};
+use lash_embed::LashSession;
 
 use crate::app::{App, timeline_from_read_view};
 use crate::overlay::TreeSelection;
 use crate::persistence::persist_committed_runtime_state;
 use crate::session_log::SessionLogger;
 
-pub fn current_message_tree(runtime: &LashRuntime) -> Vec<SessionMessageTreeNode> {
-    runtime.read_view().message_tree()
+pub async fn current_message_tree(session: &LashSession) -> Vec<SessionMessageTreeNode> {
+    session.read_view().await.message_tree()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn switch_to_tree_selection(
-    runtime: &mut LashRuntime,
+    session: &LashSession,
     logger: &SessionLogger,
     app: &mut App,
     history: &mut Vec<Message>,
@@ -40,8 +41,9 @@ pub async fn switch_to_tree_selection(
     // branch is a no-op. Skip the full `branch_to_node` rebuild —
     // `from_state` walks the plugin host and re-projects the
     // transcript, which is expensive to pay for a visible no-op.
-    let current_leaf = runtime
+    let current_leaf = session
         .read_view()
+        .await
         .materialized_session_graph()
         .leaf_node_id
         .clone();
@@ -49,7 +51,7 @@ pub async fn switch_to_tree_selection(
         return Ok(());
     }
 
-    let state = runtime
+    let state = session
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;

@@ -134,7 +134,6 @@ pub struct PluginSession {
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionAuthority>,
     pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
-    pub(super) prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(super) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(super) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
@@ -149,7 +148,6 @@ pub struct PluginSession {
     pub(super) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub(super) session_config_mutators: Vec<SessionConfigMutator>,
     pub(super) external_ops: BTreeMap<String, RegisteredExternalOp>,
-    pub(super) commands: BTreeMap<String, RegisteredCommand>,
     pub(super) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     pub(super) turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     pub(super) history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
@@ -311,34 +309,8 @@ impl PluginSession {
         self.monitor_specs.as_slice()
     }
 
-    /// Catalog of slash commands contributed by plugins registered on this session.
-    pub fn command_catalog(&self) -> Vec<CommandDef> {
-        self.commands.values().map(|cmd| cmd.def.clone()).collect()
-    }
-
     pub fn has_assistant_stream_hooks(&self) -> bool {
         !self.assistant_stream_hooks.is_empty()
-    }
-
-    /// Invoke a plugin-registered slash command.
-    pub async fn invoke_command(
-        &self,
-        name: &str,
-        argument: Option<String>,
-        host: Arc<dyn CommandHost>,
-    ) -> Result<CommandOutcome, PluginError> {
-        let Some(cmd) = self.commands.get(name).cloned() else {
-            return Err(PluginError::Session(format!(
-                "unknown plugin command `{name}`"
-            )));
-        };
-        (cmd.handler)(CommandInvocation {
-            name: name.to_string(),
-            argument,
-            session_id: self.session_id.clone(),
-            host,
-        })
-        .await
     }
 
     /// Chain registered turn-context transforms, piping each one's output
@@ -395,13 +367,6 @@ impl PluginSession {
                 .then(a.priority.cmp(&b.priority))
         });
         Ok(out)
-    }
-
-    pub async fn on_prompt_request(
-        &self,
-        ctx: PromptRequestHookContext,
-    ) -> Result<Vec<PluginOwned<PluginSurfaceEvent>>, PluginError> {
-        collect_owned_async(&self.prompt_request_hooks, ctx, |hook, ctx| hook(ctx)).await
     }
 
     async fn apply_turn_directives(
@@ -976,5 +941,29 @@ impl PluginSession {
             args,
         )
         .await)
+    }
+
+    pub async fn invoke_external_typed<Op: TypedExternalOp>(
+        &self,
+        args: Op::Args,
+        session_id: Option<String>,
+        default_to_current_session: bool,
+        host: Arc<dyn ExternalInvokeHost>,
+    ) -> Result<Op::Output, PluginError> {
+        let args = serde_json::to_value(args)
+            .map_err(|err| PluginError::Invoke(format!("invalid {} args: {err}", Op::NAME)))?;
+        let result = self
+            .invoke_external(Op::NAME, args, session_id, default_to_current_session, host)
+            .await
+            .map_err(|err| PluginError::Invoke(err.to_string()))?;
+        if !result.success {
+            return Err(PluginError::Invoke(format!(
+                "{} failed: {}",
+                Op::NAME,
+                result.result
+            )));
+        }
+        serde_json::from_value(result.result)
+            .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
     }
 }

@@ -3,11 +3,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use lash::{
-    BackgroundRuntimeHost, DynamicToolProvider, EmbeddedRuntimeHost, LashRuntime,
     PersistedSessionConfig, PersistedSessionState, PluginHost, RuntimeCoreConfig,
     RuntimePersistence, SessionGraph, SessionHead, SessionPolicy, SessionTaskExecutor,
-    TurnInjectionBridge, TurnInputInjectionBridge,
 };
+use lash_embed::{LashCore, LashSession, ModeId, ModePreset};
 use lash_sqlite_store::Store;
 
 use crate::session_log::{self, SessionLogger, SessionStart};
@@ -28,19 +27,16 @@ pub(crate) struct SessionBootstrap {
     session_name: String,
 }
 
-pub(crate) struct OpenedCliSession {
+pub(crate) struct OpenedCliLashSession {
     pub(crate) bootstrap: SessionBootstrap,
     pub(crate) logger: SessionLogger,
-    pub(crate) dynamic_tools: Arc<DynamicToolProvider>,
-    pub(crate) runtime: LashRuntime,
+    pub(crate) session: LashSession,
 }
 
 #[derive(Clone)]
-pub(crate) struct CliRuntimeFactory {
+pub(crate) struct CliSessionOpener {
     plugin_host: PluginHost,
     core: RuntimeCoreConfig,
-    turn_injection_bridge: TurnInjectionBridge,
-    turn_input_injection_bridge: TurnInputInjectionBridge,
     session_task_executor: Arc<dyn SessionTaskExecutor>,
 }
 
@@ -187,19 +183,15 @@ impl SessionBootstrap {
     }
 }
 
-impl CliRuntimeFactory {
+impl CliSessionOpener {
     pub(crate) fn new(
         plugin_host: PluginHost,
         core: RuntimeCoreConfig,
-        turn_injection_bridge: TurnInjectionBridge,
-        turn_input_injection_bridge: TurnInputInjectionBridge,
         session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Self {
         Self {
             plugin_host,
             core,
-            turn_injection_bridge,
-            turn_input_injection_bridge,
             session_task_executor,
         }
     }
@@ -208,7 +200,7 @@ impl CliRuntimeFactory {
         &self,
         source: SessionBootstrapSource,
         fallback_policy: SessionPolicy,
-    ) -> Result<OpenedCliSession> {
+    ) -> Result<OpenedCliLashSession> {
         let bootstrap = SessionBootstrap::open(source)?;
         let session_id = bootstrap
             .run_session_id()
@@ -226,40 +218,39 @@ impl CliRuntimeFactory {
             ..PersistedSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
-        let embedded_host =
-            EmbeddedRuntimeHost::new(self.core.clone()).with_session_store_factory(Arc::new(
-                session_log::DbSessionStoreFactory::new(bootstrap.sessions_dir().to_path_buf()),
-            ));
-        let plugins = self.plugin_host.isolated_registry().build_session(
-            &session_id,
-            state.policy.execution_mode.clone(),
-            state.policy.standard_context_approach.clone(),
-            None,
-        )?;
-        let dynamic_tools = plugins
-            .dynamic_tools()
-            .ok_or_else(|| anyhow::anyhow!("root dynamic tool provider was not initialized"))?;
-        let runtime = LashRuntime::from_persistent_background_state(
-            policy,
-            BackgroundRuntimeHost::new(embedded_host, Arc::clone(&self.session_task_executor)),
-            lash::PersistentRuntimeServices::new_with_bridges(
-                plugins,
-                self.turn_injection_bridge.clone(),
-                self.turn_input_injection_bridge.clone(),
-                store,
-            ),
-            state,
-        )
-        .await?;
-        Ok(OpenedCliSession {
+        let mut core_builder = LashCore::builder()
+            .install_mode(ModePreset::standard())
+            .install_mode(ModePreset::rlm())
+            .default_mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
+            .provider(policy.provider.clone())
+            .model(policy.model.clone(), policy.model_variant.clone())
+            .plugin_host(self.plugin_host.clone())
+            .runtime_core_config(self.core.clone())
+            .session_task_executor(Arc::clone(&self.session_task_executor))
+            .child_store_factory(Arc::new(session_log::DbSessionStoreFactory::new(
+                bootstrap.sessions_dir().to_path_buf(),
+            )));
+        if let Some(max_context_tokens) = policy.max_context_tokens {
+            core_builder = core_builder.max_context_tokens(max_context_tokens);
+        }
+        let core = core_builder.build()?;
+        let session = core
+            .session(session_id)
+            .mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
+            .store(store)
+            .open_with_state(state)
+            .await?;
+        Ok(OpenedCliLashSession {
             bootstrap,
             logger,
-            dynamic_tools,
-            runtime,
+            session,
         })
     }
 
-    pub(crate) async fn fresh(&self, fallback_policy: SessionPolicy) -> Result<OpenedCliSession> {
+    pub(crate) async fn fresh(
+        &self,
+        fallback_policy: SessionPolicy,
+    ) -> Result<OpenedCliLashSession> {
         self.open(SessionBootstrapSource::Fresh, fallback_policy)
             .await
     }
@@ -268,7 +259,7 @@ impl CliRuntimeFactory {
         &self,
         identifier: &str,
         fallback_policy: SessionPolicy,
-    ) -> Result<OpenedCliSession> {
+    ) -> Result<OpenedCliLashSession> {
         self.open(
             SessionBootstrapSource::from_resume_arg(Some(identifier.to_string())),
             fallback_policy,

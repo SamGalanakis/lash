@@ -66,6 +66,7 @@ pub struct TurnInjectionBridge {
 
 #[derive(Clone, Debug)]
 pub struct InjectedTurnInput {
+    pub id: Option<String>,
     pub message: PluginMessage,
 }
 

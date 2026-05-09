@@ -754,6 +754,24 @@ impl RuntimeTurnDriver {
                 );
                 *state.streamed_usage = usage;
             }
+            LlmStreamEvent::RetryStatus {
+                wait_seconds,
+                attempt,
+                max_attempts,
+                reason,
+            } => {
+                send_session_event(
+                    event_tx,
+                    SessionEvent::RetryStatus {
+                        wait_seconds,
+                        attempt,
+                        max_attempts,
+                        reason,
+                        envelope: None,
+                    },
+                )
+                .await;
+            }
         }
         Ok(())
     }

@@ -1,8 +1,10 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use async_trait::async_trait;
-use lash::{Part, PruneState};
-use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
+use lash::{Part, PruneState, ToolResultView, TurnEvent};
+use lash_tui_extensions::{
+    SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
+};
 use std::sync::Arc;
 
 fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
@@ -196,7 +198,7 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 #[test]
 fn ui_extension_commands_appear_in_editor_suggestions() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let ui_extensions = lash_ui::UiExtensions::builtin().expect("ui extensions");
+    let ui_extensions = lash_tui_extensions::TuiExtensions::builtin().expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/pl".into());
 
@@ -207,7 +209,7 @@ fn ui_extension_commands_appear_in_editor_suggestions() {
 
 #[test]
 fn ui_extension_argument_suggestions_complete_second_token() {
-    struct DemoUiExtension;
+    struct DemoTuiExtension;
 
     const DEMO_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
         name: "/demo",
@@ -222,7 +224,7 @@ fn ui_extension_argument_suggestions_complete_second_token() {
     }];
 
     #[async_trait]
-    impl UiExtension for DemoUiExtension {
+    impl TuiExtension for DemoTuiExtension {
         fn id(&self) -> &'static str {
             "demo_ui"
         }
@@ -235,14 +237,15 @@ fn ui_extension_argument_suggestions_complete_second_token() {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: UiContext<'_>,
-        ) -> Result<Vec<UiHostEffect>, String> {
+            _ctx: TuiExtensionContext<'_>,
+        ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }
     }
 
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
+    let ui_extensions =
+        TuiExtensions::new(vec![Arc::new(DemoTuiExtension)]).expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/demo h".into());
     app.editor.cursor_pos = app.input().len();
@@ -1196,20 +1199,25 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
 #[test]
 fn plan_exit_tool_queues_follow_up_turn() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
+    let ui_extensions =
+        lash_tui_extensions::TuiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
         &mut app,
-        ui_extensions.effects_for_session_event(&SessionEvent::ToolCall {
+        ui_extensions.effects_for_turn_event(&TurnEvent::ToolCallCompleted {
             call_id: Some("tc-plan-exit".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: serde_json::json!({
+            result: ToolResultView {
+                raw: serde_json::json!({
                 "approved": true,
                 "confirmation_display": "Start implementing now\n\nNote: safe slice first",
                 "plan_path": ".lash/plans/session.md",
                 "execution_mode": "current_session",
                 "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
-            }),
+                }),
+                for_model: serde_json::json!({}),
+                for_state: serde_json::json!({}),
+            },
             success: true,
             duration_ms: 5,
         }),
@@ -1279,18 +1287,23 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
 #[test]
 fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let ui_extensions = lash_ui::UiExtensions::builtin().expect("builtin ui extensions");
+    let ui_extensions =
+        lash_tui_extensions::TuiExtensions::builtin().expect("builtin ui extensions");
     crate::apply_ui_host_effects(
         &mut app,
-        ui_extensions.effects_for_session_event(&SessionEvent::ToolCall {
+        ui_extensions.effects_for_turn_event(&TurnEvent::ToolCallCompleted {
             call_id: Some("tc-plan-exit-fresh".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: serde_json::json!({
+            result: ToolResultView {
+                raw: serde_json::json!({
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
-            }),
+                }),
+                for_model: serde_json::json!({}),
+                for_state: serde_json::json!({}),
+            },
             success: true,
             duration_ms: 5,
         }),
@@ -1700,7 +1713,7 @@ fn wake_session_effect_uses_hidden_monitor_queue() {
 
     crate::apply_ui_host_effects(
         &mut app,
-        vec![UiHostEffect::WakeSession {
+        vec![TuiHostEffect::WakeSession {
             input: "Monitor event \"build\": done".into(),
         }],
     );
@@ -1735,7 +1748,10 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        messages: vec![PluginMessage::text(MessageRole::User, "follow up")],
+        inputs: vec![lash::AcceptedInjectedTurnInput {
+            id: None,
+            message: PluginMessage::text(MessageRole::User, "follow up"),
+        }],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
 
@@ -1758,10 +1774,13 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        messages: vec![PluginMessage::text(
-            MessageRole::User,
-            "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
-        )],
+        inputs: vec![lash::AcceptedInjectedTurnInput {
+            id: None,
+            message: PluginMessage::text(
+                MessageRole::User,
+                "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
+            ),
+        }],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
 
@@ -1777,16 +1796,19 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        messages: vec![PluginMessage {
-            role: MessageRole::User,
-            content: "runtime content".into(),
-            parts: Vec::new(),
-            images: Vec::new(),
-            user_input: Some(lash::UserInputProvenance {
-                display_text: "visible text".into(),
-                effective_text: "runtime content".into(),
-                transforms: Vec::new(),
-            }),
+        inputs: vec![lash::AcceptedInjectedTurnInput {
+            id: None,
+            message: PluginMessage {
+                role: MessageRole::User,
+                content: "runtime content".into(),
+                parts: Vec::new(),
+                images: Vec::new(),
+                user_input: Some(lash::UserInputProvenance {
+                    display_text: "visible text".into(),
+                    effective_text: "runtime content".into(),
+                    transforms: Vec::new(),
+                }),
+            },
         }],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
@@ -1824,10 +1846,10 @@ fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_w
     ));
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        messages: vec![PluginMessage::text(
-            MessageRole::User,
-            "uhh do not switch nvm",
-        )],
+        inputs: vec![lash::AcceptedInjectedTurnInput {
+            id: None,
+            message: PluginMessage::text(MessageRole::User, "uhh do not switch nvm"),
+        }],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
 

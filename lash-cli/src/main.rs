@@ -19,6 +19,7 @@ mod overlay;
 mod paths;
 mod persistence;
 mod plugin_surface;
+mod prompt_tool;
 mod render;
 mod repo_status;
 mod resume;
@@ -34,6 +35,7 @@ mod text_display;
 mod text_layout;
 mod theme;
 mod tree;
+mod tui_extension_session;
 mod turn_runner;
 mod ui_action;
 mod ui_perf;
@@ -666,7 +668,7 @@ mod tests {
 
         assert_eq!(normalized.display_text, "/not-a-command details");
         assert_eq!(normalized.effective_text, "/not-a-command details");
-        assert!(command::parse(&normalized.display_text, &skills, &[]).is_none());
+        assert!(command::parse(&normalized.display_text, &skills).is_none());
     }
 
     #[test]

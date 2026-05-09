@@ -5,18 +5,18 @@ use anyhow::{Context, Result, anyhow};
 use lash::provider::ProviderHandle;
 use lash_sqlite_store::Store;
 
-use crate::persistence::{persist_committed_runtime_state, snapshot_execution_state};
+use crate::persistence::persist_committed_runtime_state;
 use crate::session_bootstrap::SessionBootstrap;
 use crate::session_log::SessionLogger;
 
 async fn persist_parent_root_snapshot(
-    runtime: &mut lash::LashRuntime,
+    session: &lash_embed::LashSession,
     store: &Store,
 ) -> Result<()> {
-    let mut state = runtime.export_persistence_state();
-    snapshot_execution_state(runtime, &mut state)
+    let mut state = session
+        .persist_current_state()
         .await
-        .context("Failed to snapshot execution state for fork")?;
+        .context("Failed to snapshot session state for fork")?;
     persist_committed_runtime_state(store, &mut state).await;
     Ok(())
 }
@@ -581,15 +581,15 @@ pub struct ForkedSession {
 }
 
 pub async fn fork_current_session(
-    runtime: Option<&mut lash::LashRuntime>,
+    session: Option<&lash_embed::LashSession>,
     logger: &SessionLogger,
     _provider: &ProviderHandle,
     configured_model: &str,
     _context_window: u64,
     _model_variant: Option<&str>,
 ) -> Result<ForkedSession> {
-    if let Some(runtime) = runtime {
-        persist_parent_root_snapshot(runtime, logger.store().as_ref()).await?;
+    if let Some(session) = session {
+        persist_parent_root_snapshot(session, logger.store().as_ref()).await?;
     }
     let child_bootstrap = SessionBootstrap::fork_child(&logger.session_id, configured_model)?;
     let child_store = child_bootstrap.store();

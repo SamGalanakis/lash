@@ -19,9 +19,8 @@ use lash::llm::types::{
     LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
 use lash::provider::{
-    AgentModelSelection, NoopProviderAuth, NoopProviderReadiness, ProviderComponents,
-    ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState, ProviderTransport,
-    VariantRequestConfig,
+    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, VariantRequestConfig,
 };
 use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,
@@ -2224,13 +2223,7 @@ impl OpenAiGenericProvider {
 impl OpenAiGenericProvider {
     pub fn into_components(self) -> ProviderComponents {
         let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
-        ProviderComponents::new(
-            Box::new(self.clone()),
-            Box::new(NoopProviderAuth),
-            Box::new(NoopProviderReadiness::new()),
-            Box::new(self),
-            model_policy,
-        )
+        ProviderComponents::new(Box::new(self.clone()), Box::new(self), model_policy)
     }
 }
 

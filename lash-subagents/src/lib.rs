@@ -104,9 +104,9 @@ mod tests {
     use async_trait::async_trait;
     use lash::PersistedSessionState;
     use lash::plugin::{
-        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
-        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshotHost,
-        SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, SessionGraphHost,
+        SessionHandle, SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost,
+        ToolCatalogHost, TraceHost, TurnHost,
     };
     use lash::{
         SessionCreateRequest, ToolDefinition, ToolExecutionContext, ToolOutputContract, TurnInput,
@@ -233,7 +233,6 @@ mod tests {
         impl TaskHost for SnapshotManager {}
         impl MonitorHost for SnapshotManager {}
         impl SessionGraphHost for SnapshotManager {}
-        impl PromptHost for SnapshotManager {}
         impl DirectCompletionHost for SnapshotManager {}
         impl TraceHost for SnapshotManager {}
 

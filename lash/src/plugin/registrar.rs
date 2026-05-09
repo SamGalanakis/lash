@@ -15,13 +15,6 @@ pub(crate) struct RegisteredExclusiveHook<T> {
     pub(crate) hook: T,
 }
 
-#[derive(Clone)]
-pub(crate) struct RegisteredCommand {
-    pub plugin_id: String,
-    pub def: CommandDef,
-    pub handler: CommandHandler,
-}
-
 pub(crate) fn current_plugin_id(registering_plugin_id: &Option<String>) -> String {
     registering_plugin_id
         .clone()
@@ -101,7 +94,6 @@ pub struct PluginRegistrar {
     pub(crate) tool_names: BTreeSet<String>,
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
-    pub(crate) prompt_request_hooks: Vec<RegisteredHook<PromptRequestHook>>,
     pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(crate) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
     pub(crate) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
@@ -116,7 +108,6 @@ pub struct PluginRegistrar {
     pub(crate) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
     pub(crate) external_ops: BTreeMap<String, RegisteredExternalOp>,
-    pub(crate) commands: BTreeMap<String, RegisteredCommand>,
     pub(crate) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
@@ -144,10 +135,6 @@ pub struct PromptRegistrations<'a> {
 impl PromptRegistrations<'_> {
     pub fn contribute(self, contributor: PromptContributor) {
         self.reg.add_prompt_contributor(contributor);
-    }
-
-    pub fn on_request(self, hook: PromptRequestHook) {
-        self.reg.add_prompt_request_hook(hook);
     }
 }
 
@@ -263,15 +250,42 @@ impl ExternalRegistrations<'_> {
     pub fn op(self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Result<(), PluginError> {
         self.reg.add_external_op(def, handler)
     }
-}
 
-pub struct CommandRegistrations<'a> {
-    reg: &'a mut PluginRegistrar,
-}
-
-impl CommandRegistrations<'_> {
-    pub fn register(self, def: CommandDef, handler: CommandHandler) -> Result<(), PluginError> {
-        self.reg.add_command(def, handler)
+    pub fn typed<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
+    where
+        Op: TypedExternalOp,
+        F: Fn(ExternalInvokeContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Op::Output, TypedExternalOpError>> + Send + 'static,
+    {
+        self.op(
+            typed_external_op_def::<Op>(),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            match fut.await {
+                                Ok(output) => match serde_json::to_value(output) {
+                                    Ok(value) => ToolResult::ok(value),
+                                    Err(err) => ToolResult::err(serde_json::json!(format!(
+                                        "failed to serialize {} output: {err}",
+                                        Op::NAME
+                                    ))),
+                                },
+                                Err(err) => ToolResult::err(serde_json::json!(err.to_string())),
+                            }
+                        })
+                    }
+                    Err(err) => Box::pin(async move {
+                        ToolResult::err(serde_json::json!(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }),
+                }
+            }),
+        )
     }
 }
 
@@ -322,7 +336,6 @@ impl PluginRegistrar {
             tool_names: BTreeSet::new(),
             tool_providers: Vec::new(),
             prompt_contributors: Vec::new(),
-            prompt_request_hooks: Vec::new(),
             tool_surface_contributors: Vec::new(),
             tool_discovery_contributors: Vec::new(),
             before_turn_hooks: Vec::new(),
@@ -336,7 +349,6 @@ impl PluginRegistrar {
             runtime_event_hooks: Vec::new(),
             session_config_mutators: Vec::new(),
             external_ops: BTreeMap::new(),
-            commands: BTreeMap::new(),
             monitor_specs: Vec::new(),
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
@@ -387,10 +399,6 @@ impl PluginRegistrar {
         ExternalRegistrations { reg: self }
     }
 
-    pub fn commands(&mut self) -> CommandRegistrations<'_> {
-        CommandRegistrations { reg: self }
-    }
-
     pub fn monitors(&mut self) -> MonitorRegistrations<'_> {
         MonitorRegistrations { reg: self }
     }
@@ -421,14 +429,6 @@ impl PluginRegistrar {
             &mut self.prompt_contributors,
             &self.registering_plugin_id,
             contributor,
-        );
-    }
-
-    fn add_prompt_request_hook(&mut self, hook: PromptRequestHook) {
-        push_registered_hook(
-            &mut self.prompt_request_hooks,
-            &self.registering_plugin_id,
-            hook,
         );
     }
 
@@ -532,28 +532,6 @@ impl PluginRegistrar {
         }
         self.external_ops
             .insert(def.name.clone(), RegisteredExternalOp { def, handler });
-        Ok(())
-    }
-
-    fn add_command(&mut self, def: CommandDef, handler: CommandHandler) -> Result<(), PluginError> {
-        let key = def.name.to_string();
-        if let Some(existing) = self.commands.get(&key) {
-            return Err(PluginError::Registration(format!(
-                "duplicate slash command `{}`: `{}` conflicts with `{}`",
-                def.name,
-                current_plugin_id(&self.registering_plugin_id),
-                existing.plugin_id,
-            )));
-        }
-        let plugin_id = current_plugin_id(&self.registering_plugin_id);
-        self.commands.insert(
-            key,
-            RegisteredCommand {
-                plugin_id,
-                def,
-                handler,
-            },
-        );
         Ok(())
     }
 

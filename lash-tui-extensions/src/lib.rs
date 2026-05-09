@@ -4,14 +4,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::{
-    MonitorSnapshot, MonitorUpdateBatch, PluginHost, RuntimeSessionHost, SessionEvent, ToolResult,
+use lash_embed::{
+    LashSession, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStatus, MonitorUpdateBatch,
+    ToolResult, TurnEvent,
 };
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{
-    UiMountedSurface, UiSurfaceScene, UiSurfaceSize, UiSurfaceSlot, UiSurfaceSpec, UiSurfaceUpdate,
-    global_surface_id,
+    TuiMountedSurface, TuiSurfaceScene, TuiSurfaceSize, TuiSurfaceSlot, TuiSurfaceSpec,
+    TuiSurfaceUpdate, global_surface_id,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,7 +107,7 @@ pub struct ShortcutSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UiHostEffect {
+pub enum TuiHostEffect {
     PushSystemMessage(String),
     DesktopNotification {
         title: String,
@@ -141,11 +142,11 @@ pub enum UiHostEffect {
         input: String,
     },
     MountSurface {
-        spec: UiSurfaceSpec,
+        spec: TuiSurfaceSpec,
     },
     UpdateSurface {
         key: String,
-        update: UiSurfaceUpdate,
+        update: TuiSurfaceUpdate,
     },
     UnmountSurface {
         key: String,
@@ -158,14 +159,51 @@ pub enum UiHostEffect {
     },
 }
 
-pub struct UiContext<'a> {
-    pub plugin_host: &'a PluginHost,
-    pub session_id: &'a str,
-    pub session_manager: Arc<dyn RuntimeSessionHost>,
+#[async_trait]
+pub trait TuiExtensionSession: Send + Sync {
+    async fn invoke_external(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, String>;
+}
+
+pub async fn invoke_typed_external<Op>(
+    session: &dyn TuiExtensionSession,
+    args: Op::Args,
+) -> Result<Op::Output, String>
+where
+    Op: lash_embed::TypedExternalOp,
+{
+    let args =
+        serde_json::to_value(args).map_err(|err| format!("invalid {} args: {err}", Op::NAME))?;
+    let result = session.invoke_external(Op::NAME, args).await?;
+    if !result.success {
+        return Err(format!("{} failed: {}", Op::NAME, result.result));
+    }
+    serde_json::from_value(result.result)
+        .map_err(|err| format!("invalid {} output: {err}", Op::NAME))
+}
+
+#[async_trait]
+impl TuiExtensionSession for LashSession {
+    async fn invoke_external(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, String> {
+        LashSession::invoke_external(self, name, args)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+pub struct TuiExtensionContext<'a> {
+    pub session: &'a dyn TuiExtensionSession,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct UiRenderContext<'a> {
+pub struct TuiRenderContext<'a> {
     pub session_id: &'a str,
     pub capabilities: TermCapabilities,
     pub surface_id: &'a str,
@@ -173,13 +211,13 @@ pub struct UiRenderContext<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UiInputOutcome {
+pub enum TuiInputOutcome {
     Ignored,
-    Handled(Vec<UiHostEffect>),
+    Handled(Vec<TuiHostEffect>),
 }
 
 #[async_trait]
-pub trait UiExtension: Send + Sync {
+pub trait TuiExtension: Send + Sync {
     fn id(&self) -> &'static str;
 
     fn commands(&self) -> &'static [SlashCommandSpec] {
@@ -193,7 +231,7 @@ pub trait UiExtension: Send + Sync {
     fn render_surface(
         &self,
         _surface_key: &str,
-        _ctx: UiRenderContext<'_>,
+        _ctx: TuiRenderContext<'_>,
         _frame: &mut Frame<'_>,
     ) {
     }
@@ -202,12 +240,12 @@ pub trait UiExtension: Send + Sync {
         &self,
         _surface_key: &str,
         _event: &InputEvent,
-        _ctx: UiContext<'_>,
-    ) -> UiInputOutcome {
-        UiInputOutcome::Ignored
+        _ctx: TuiExtensionContext<'_>,
+    ) -> TuiInputOutcome {
+        TuiInputOutcome::Ignored
     }
 
-    async fn snapshot(&self, _ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    async fn snapshot(&self, _ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
         Ok(Vec::new())
     }
 
@@ -215,67 +253,71 @@ pub trait UiExtension: Send + Sync {
         &self,
         action: &str,
         arg: Option<&str>,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String>;
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String>;
 
-    fn handle_session_event(&self, _event: &SessionEvent) -> Vec<UiHostEffect> {
+    fn handle_turn_event(&self, _event: &TurnEvent) -> Vec<TuiHostEffect> {
+        Vec::new()
+    }
+
+    fn handle_turn_finished(&self) -> Vec<TuiHostEffect> {
         Vec::new()
     }
 }
 
 #[derive(Clone)]
 struct RegisteredCommand {
-    extension: Arc<dyn UiExtension>,
+    extension: Arc<dyn TuiExtension>,
     spec: SlashCommandSpec,
 }
 
 #[derive(Clone)]
 struct RegisteredShortcut {
-    extension: Arc<dyn UiExtension>,
+    extension: Arc<dyn TuiExtension>,
     spec: ShortcutSpec,
 }
 
 #[derive(Clone)]
-pub struct UiCommandInvocation {
-    extension: Arc<dyn UiExtension>,
+pub struct TuiSlashInvocation {
+    extension: Arc<dyn TuiExtension>,
     spec: SlashCommandSpec,
     arg: Option<String>,
 }
 
-impl UiCommandInvocation {
+impl TuiSlashInvocation {
     pub fn allow_while_running(&self) -> bool {
         self.spec.allow_while_running
     }
 }
 
 #[derive(Clone)]
-pub struct UiShortcutInvocation {
-    extension: Arc<dyn UiExtension>,
+pub struct TuiShortcutInvocation {
+    extension: Arc<dyn TuiExtension>,
     spec: ShortcutSpec,
 }
 
 #[derive(Clone, Default)]
-pub struct UiExtensions {
-    extensions: Vec<Arc<dyn UiExtension>>,
-    extension_map: BTreeMap<String, Arc<dyn UiExtension>>,
+pub struct TuiExtensions {
+    extensions: Vec<Arc<dyn TuiExtension>>,
+    extension_map: BTreeMap<String, Arc<dyn TuiExtension>>,
     commands: Vec<RegisteredCommand>,
     shortcuts: Vec<RegisteredShortcut>,
     surfaces: Arc<Mutex<surface::SurfaceRegistry>>,
 }
 
-impl UiExtensions {
-    pub fn with_builtins(mut extra: Vec<Arc<dyn UiExtension>>) -> Result<Self, String> {
-        let mut extensions: Vec<Arc<dyn UiExtension>> = vec![
-            Arc::new(PlanModeUiExtension),
-            Arc::new(MonitorUiExtension::default()),
+impl TuiExtensions {
+    pub fn with_builtins(mut extra: Vec<Arc<dyn TuiExtension>>) -> Result<Self, String> {
+        let mut extensions: Vec<Arc<dyn TuiExtension>> = vec![
+            Arc::new(PlanModeTuiExtension),
+            Arc::new(MonitorTuiExtension::default()),
         ];
         extensions.append(&mut extra);
         Self::new(extensions)
     }
 
-    pub fn new(extensions: Vec<Arc<dyn UiExtension>>) -> Result<Self, String> {
+    pub fn new(extensions: Vec<Arc<dyn TuiExtension>>) -> Result<Self, String> {
         let mut command_names = BTreeMap::<String, &'static str>::new();
-        let mut extension_map = BTreeMap::<String, Arc<dyn UiExtension>>::new();
+        let mut extension_map = BTreeMap::<String, Arc<dyn TuiExtension>>::new();
         let mut shortcuts = BTreeMap::<KeyChord, &'static str>::new();
         let mut registered_commands = Vec::new();
         let mut registered_shortcuts = Vec::new();
@@ -371,7 +413,7 @@ impl UiExtensions {
             .map(|entry| entry.spec.takes_argument)
     }
 
-    pub fn parse_command(&self, input: &str) -> Option<UiCommandInvocation> {
+    pub fn parse_command(&self, input: &str) -> Option<TuiSlashInvocation> {
         let trimmed = input.trim();
         if !trimmed.starts_with('/') {
             return None;
@@ -385,32 +427,33 @@ impl UiExtensions {
             .commands
             .iter()
             .find(|entry| command_matches(&cmd, entry.spec))?;
-        Some(UiCommandInvocation {
+        Some(TuiSlashInvocation {
             extension: Arc::clone(&entry.extension),
             spec: entry.spec,
             arg: arg.filter(|value| !value.is_empty()).map(str::to_string),
         })
     }
 
-    pub fn shortcut_for(&self, chord: KeyChord) -> Option<UiShortcutInvocation> {
+    pub fn shortcut_for(&self, chord: KeyChord) -> Option<TuiShortcutInvocation> {
         let entry = self
             .shortcuts
             .iter()
             .find(|entry| entry.spec.chord == chord)?;
-        Some(UiShortcutInvocation {
+        Some(TuiShortcutInvocation {
             extension: Arc::clone(&entry.extension),
             spec: entry.spec,
         })
     }
 
-    pub async fn snapshot_all(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    pub async fn snapshot_all(
+        &self,
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         let mut effects = Vec::new();
         for extension in &self.extensions {
             let extension_effects = extension
-                .snapshot(UiContext {
-                    plugin_host: ctx.plugin_host,
-                    session_id: ctx.session_id,
-                    session_manager: Arc::clone(&ctx.session_manager),
+                .snapshot(TuiExtensionContext {
+                    session: ctx.session,
                 })
                 .await?;
             effects.extend(self.process_effects(extension.id(), extension_effects));
@@ -418,11 +461,11 @@ impl UiExtensions {
         Ok(effects)
     }
 
-    pub async fn invoke_command(
+    pub async fn invoke_parsed_command(
         &self,
-        invocation: &UiCommandInvocation,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        invocation: &TuiSlashInvocation,
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         let effects = invocation
             .extension
             .invoke_action(invocation.spec.action, invocation.arg.as_deref(), ctx)
@@ -432,9 +475,9 @@ impl UiExtensions {
 
     pub async fn invoke_shortcut(
         &self,
-        invocation: &UiShortcutInvocation,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        invocation: &TuiShortcutInvocation,
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         let effects = invocation
             .extension
             .invoke_action(invocation.spec.action, None, ctx)
@@ -442,12 +485,19 @@ impl UiExtensions {
         Ok(self.process_effects(invocation.extension.id(), effects))
     }
 
-    pub fn effects_for_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
+    pub fn effects_for_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
         let mut effects = Vec::new();
         for extension in &self.extensions {
-            effects.extend(
-                self.process_effects(extension.id(), extension.handle_session_event(event)),
-            );
+            effects
+                .extend(self.process_effects(extension.id(), extension.handle_turn_event(event)));
+        }
+        effects
+    }
+
+    pub fn effects_for_turn_finished(&self) -> Vec<TuiHostEffect> {
+        let mut effects = Vec::new();
+        for extension in &self.extensions {
+            effects.extend(self.process_effects(extension.id(), extension.handle_turn_finished()));
         }
         effects
     }
@@ -459,28 +509,28 @@ impl UiExtensions {
             .clear_areas();
     }
 
-    pub fn has_surface_in_slot(&self, slot: UiSurfaceSlot) -> bool {
+    pub fn has_surface_in_slot(&self, slot: TuiSurfaceSlot) -> bool {
         self.surfaces
             .lock()
             .expect("surface registry poisoned")
             .has_surface_in_slot(slot)
     }
 
-    pub fn mounted_surfaces(&self, slot: UiSurfaceSlot) -> Vec<UiMountedSurface> {
+    pub fn mounted_surfaces(&self, slot: TuiSurfaceSlot) -> Vec<TuiMountedSurface> {
         self.surfaces
             .lock()
             .expect("surface registry poisoned")
             .surfaces_in_slot(slot)
     }
 
-    pub fn surface_scene(&self) -> UiSurfaceScene {
+    pub fn surface_scene(&self) -> TuiSurfaceScene {
         self.surfaces
             .lock()
             .expect("surface registry poisoned")
             .scene()
     }
 
-    pub fn stack_height(&self, slot: UiSurfaceSlot, max_height: u16) -> u16 {
+    pub fn stack_height(&self, slot: TuiSurfaceSlot, max_height: u16) -> u16 {
         self.surfaces
             .lock()
             .expect("surface registry poisoned")
@@ -512,7 +562,7 @@ impl UiExtensions {
         }
     }
 
-    pub fn mount_surface(&self, owner_id: &str, spec: UiSurfaceSpec) {
+    pub fn mount_surface(&self, owner_id: &str, spec: TuiSurfaceSpec) {
         self.surfaces
             .lock()
             .expect("surface registry poisoned")
@@ -535,7 +585,7 @@ impl UiExtensions {
             .is_some()
     }
 
-    pub fn render_surface(&self, id: &str, ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+    pub fn render_surface(&self, id: &str, ctx: TuiRenderContext<'_>, frame: &mut Frame<'_>) {
         let surface = self
             .surfaces
             .lock()
@@ -546,7 +596,7 @@ impl UiExtensions {
         };
         self.render_mounted_surface(
             &surface,
-            UiRenderContext {
+            TuiRenderContext {
                 focused: self.focused_surface().as_deref() == Some(surface.id.as_str()),
                 ..ctx
             },
@@ -556,8 +606,8 @@ impl UiExtensions {
 
     pub fn render_mounted_surface(
         &self,
-        surface: &UiMountedSurface,
-        ctx: UiRenderContext<'_>,
+        surface: &TuiMountedSurface,
+        ctx: TuiRenderContext<'_>,
         frame: &mut Frame<'_>,
     ) {
         let Some(extension) = self.extension_map.get(&surface.owner_id) else {
@@ -565,7 +615,7 @@ impl UiExtensions {
         };
         extension.render_surface(
             &surface.key,
-            UiRenderContext {
+            TuiRenderContext {
                 surface_id: &surface.id,
                 ..ctx
             },
@@ -573,38 +623,42 @@ impl UiExtensions {
         );
     }
 
-    pub fn handle_input(&self, event: &InputEvent, ctx: UiContext<'_>) -> UiInputOutcome {
+    pub fn handle_input(
+        &self,
+        event: &InputEvent,
+        ctx: TuiExtensionContext<'_>,
+    ) -> TuiInputOutcome {
         let target = self
             .surfaces
             .lock()
             .expect("surface registry poisoned")
             .target_for_input(event);
         let Some(surface) = target else {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         };
         let Some(extension) = self.extension_map.get(&surface.owner_id) else {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         };
         match extension.handle_surface_input(&surface.key, event, ctx) {
-            UiInputOutcome::Ignored => UiInputOutcome::Ignored,
-            UiInputOutcome::Handled(effects) => {
-                UiInputOutcome::Handled(self.process_effects(extension.id(), effects))
+            TuiInputOutcome::Ignored => TuiInputOutcome::Ignored,
+            TuiInputOutcome::Handled(effects) => {
+                TuiInputOutcome::Handled(self.process_effects(extension.id(), effects))
             }
         }
     }
 
-    fn process_effects(&self, owner_id: &str, effects: Vec<UiHostEffect>) -> Vec<UiHostEffect> {
+    fn process_effects(&self, owner_id: &str, effects: Vec<TuiHostEffect>) -> Vec<TuiHostEffect> {
         let mut passthrough = Vec::new();
         let mut surfaces = self.surfaces.lock().expect("surface registry poisoned");
         for effect in effects {
             match effect {
-                UiHostEffect::MountSurface { spec } => surfaces.mount(owner_id, spec),
-                UiHostEffect::UpdateSurface { key, update } => {
+                TuiHostEffect::MountSurface { spec } => surfaces.mount(owner_id, spec),
+                TuiHostEffect::UpdateSurface { key, update } => {
                     surfaces.update(owner_id, &key, update)
                 }
-                UiHostEffect::UnmountSurface { key } => surfaces.unmount(owner_id, &key),
-                UiHostEffect::FocusSurface { key } => surfaces.focus(owner_id, &key),
-                UiHostEffect::BlurSurface { key } => surfaces.blur(owner_id, &key),
+                TuiHostEffect::UnmountSurface { key } => surfaces.unmount(owner_id, &key),
+                TuiHostEffect::FocusSurface { key } => surfaces.focus(owner_id, &key),
+                TuiHostEffect::BlurSurface { key } => surfaces.blur(owner_id, &key),
                 other => passthrough.push(other),
             }
         }
@@ -627,55 +681,50 @@ struct PlanModeStatus {
     panel_content: Option<String>,
 }
 
-fn plan_mode_command_result(result: ToolResult, op_name: &str) -> Result<PlanModeStatus, String> {
-    if !result.success {
-        return Err(format!("{op_name} failed: {}", result.result));
-    }
+async fn invoke_plan_mode_action(
+    ctx: TuiExtensionContext<'_>,
+    op_name: &str,
+) -> Result<PlanModeStatus, String> {
+    let status = match op_name {
+        "plan_mode.toggle" => {
+            invoke_typed_external::<lash_plugin_plan_mode::PlanModeToggleOp>(
+                ctx.session,
+                lash_plugin_plan_mode::PlanModeExternalArgs {},
+            )
+            .await?
+        }
+        "plan_mode.enable" => {
+            invoke_typed_external::<lash_plugin_plan_mode::PlanModeEnableOp>(
+                ctx.session,
+                lash_plugin_plan_mode::PlanModeExternalArgs {},
+            )
+            .await?
+        }
+        "plan_mode.disable" => {
+            invoke_typed_external::<lash_plugin_plan_mode::PlanModeDisableOp>(
+                ctx.session,
+                lash_plugin_plan_mode::PlanModeExternalArgs {},
+            )
+            .await?
+        }
+        other => return Err(format!("unknown plan mode op `{other}`")),
+    };
     Ok(PlanModeStatus {
-        enabled: result
-            .result
-            .get("enabled")
-            .and_then(|value| value.as_bool())
-            .ok_or_else(|| format!("{op_name} response missing `enabled`"))?,
-        panel_title: result
-            .result
-            .get("panel_title")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        panel_content: result
-            .result
-            .get("panel_content")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        enabled: status.enabled,
+        panel_title: status.panel_title,
+        panel_content: status.panel_content,
     })
 }
 
-async fn invoke_plan_mode_action(
-    ctx: UiContext<'_>,
-    op_name: &str,
-) -> Result<PlanModeStatus, String> {
-    let result = ctx
-        .plugin_host
-        .invoke_external_for_session(
-            ctx.session_id,
-            op_name,
-            serde_json::json!({}),
-            ctx.session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    plan_mode_command_result(result, op_name)
-}
-
-fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
+fn plan_mode_effects(status: &PlanModeStatus) -> Vec<TuiHostEffect> {
     let key = surface_key("plan_mode", "mode");
     let mut effects = if status.enabled {
-        vec![UiHostEffect::UpsertModeIndicator {
+        vec![TuiHostEffect::UpsertModeIndicator {
             key,
             label: "plan".to_string(),
         }]
     } else {
-        vec![UiHostEffect::ClearModeIndicator { key }]
+        vec![TuiHostEffect::ClearModeIndicator { key }]
     };
     let panel_key = "panel".to_string();
     match (
@@ -683,13 +732,13 @@ fn plan_mode_effects(status: &PlanModeStatus) -> Vec<UiHostEffect> {
         status.panel_title.as_deref(),
         status.panel_content.as_deref(),
     ) {
-        (true, Some(title), Some(content)) => effects.push(UiHostEffect::UpsertPanel {
+        (true, Some(title), Some(content)) => effects.push(TuiHostEffect::UpsertPanel {
             plugin_id: "plan_mode".to_string(),
             key: panel_key,
             title: title.to_string(),
             content: content.to_string(),
         }),
-        _ => effects.push(UiHostEffect::ClearPanel {
+        _ => effects.push(TuiHostEffect::ClearPanel {
             plugin_id: "plan_mode".to_string(),
             key: panel_key,
         }),
@@ -711,19 +760,19 @@ const MONITOR_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
 }];
 
 #[derive(Clone, Default)]
-struct MonitorUiExtension {
-    state: Arc<Mutex<MonitorUiState>>,
+struct MonitorTuiExtension {
+    state: Arc<Mutex<MonitorTuiState>>,
 }
 
 #[derive(Clone, Default)]
-struct MonitorUiState {
+struct MonitorTuiState {
     snapshot: MonitorSnapshot,
     overlay_open: bool,
     outstanding_wakes: std::collections::BTreeSet<String>,
 }
 
-impl MonitorUiExtension {
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, MonitorUiState>, String> {
+impl MonitorTuiExtension {
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, MonitorTuiState>, String> {
         self.state
             .lock()
             .map_err(|_| "monitor UI state poisoned".to_string())
@@ -731,7 +780,7 @@ impl MonitorUiExtension {
 }
 
 #[async_trait]
-impl UiExtension for MonitorUiExtension {
+impl TuiExtension for MonitorTuiExtension {
     fn id(&self) -> &'static str {
         "monitor_ui"
     }
@@ -740,19 +789,9 @@ impl UiExtension for MonitorUiExtension {
         MONITOR_COMMANDS
     }
 
-    async fn snapshot(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
-        let updates = monitor_updates(
-            ctx.plugin_host,
-            ctx.session_id,
-            Arc::clone(&ctx.session_manager),
-        )
-        .await?;
-        let snapshot = monitor_status(
-            ctx.plugin_host,
-            ctx.session_id,
-            Arc::clone(&ctx.session_manager),
-        )
-        .await?;
+    async fn snapshot(&self, ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
+        let updates = monitor_updates(ctx.session).await?;
+        let snapshot = monitor_status(ctx.session).await?;
         let (effects, ack_ids) = {
             let mut state = self.lock_state()?;
             state.snapshot = snapshot.clone();
@@ -761,17 +800,17 @@ impl UiExtension for MonitorUiExtension {
             for event in updates.events {
                 if let Some(input) = event.queue_turn_input.as_ref() {
                     if state.outstanding_wakes.insert(event.monitor_id.clone()) {
-                        effects.push(UiHostEffect::PushSystemMessage(format!(
+                        effects.push(TuiHostEffect::PushSystemMessage(format!(
                             "Monitor event: \"{}\"",
                             event.message
                         )));
-                        effects.push(UiHostEffect::WakeSession {
+                        effects.push(TuiHostEffect::WakeSession {
                             input: input.clone(),
                         });
                         ack_ids.push(event.monitor_id.clone());
                     }
                 } else if event.message.contains("failed") || event.message.contains("exited") {
-                    effects.push(UiHostEffect::PushSystemMessage(format!(
+                    effects.push(TuiHostEffect::PushSystemMessage(format!(
                         "Monitor {}: {}",
                         event.monitor_label, event.message
                     )));
@@ -780,13 +819,7 @@ impl UiExtension for MonitorUiExtension {
             (effects, ack_ids)
         };
         if !ack_ids.is_empty() {
-            monitor_ack_wakes(
-                ctx.plugin_host,
-                ctx.session_id,
-                ctx.session_manager,
-                ack_ids,
-            )
-            .await?;
+            monitor_ack_wakes(ctx.session, ack_ids).await?;
         }
         Ok(effects)
     }
@@ -795,8 +828,8 @@ impl UiExtension for MonitorUiExtension {
         &self,
         action: &str,
         arg: Option<&str>,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         if action != "command" {
             return Err(format!("unknown monitor UI action `{action}`"));
         }
@@ -818,27 +851,15 @@ impl UiExtension for MonitorUiExtension {
                 Ok(monitor_effects(&state))
             }
             "list" => {
-                let snapshot = monitor_status(
-                    ctx.plugin_host,
-                    ctx.session_id,
-                    Arc::clone(&ctx.session_manager),
-                )
-                .await?;
-                Ok(vec![UiHostEffect::PushSystemMessage(
+                let snapshot = monitor_status(ctx.session).await?;
+                Ok(vec![TuiHostEffect::PushSystemMessage(
                     format_monitor_summary(&snapshot),
                 )])
             }
             _ if command.starts_with("stop ") => {
                 let id = command["stop ".len()..].trim();
-                monitor_stop(
-                    ctx.plugin_host,
-                    ctx.session_id,
-                    Arc::clone(&ctx.session_manager),
-                    id,
-                )
-                .await?;
-                let snapshot =
-                    monitor_status(ctx.plugin_host, ctx.session_id, ctx.session_manager).await?;
+                monitor_stop(ctx.session, id).await?;
+                let snapshot = monitor_status(ctx.session).await?;
                 let mut state = self.lock_state()?;
                 state.snapshot = snapshot;
                 Ok(monitor_effects(&state))
@@ -855,15 +876,8 @@ impl UiExtension for MonitorUiExtension {
                         .map(|status| status.spec.clone())
                 }
                 .ok_or_else(|| format!("unknown monitor `{id}`"))?;
-                monitor_start(
-                    ctx.plugin_host,
-                    ctx.session_id,
-                    Arc::clone(&ctx.session_manager),
-                    spec,
-                )
-                .await?;
-                let snapshot =
-                    monitor_status(ctx.plugin_host, ctx.session_id, ctx.session_manager).await?;
+                monitor_start(ctx.session, spec).await?;
+                let snapshot = monitor_status(ctx.session).await?;
                 let mut state = self.lock_state()?;
                 state.snapshot = snapshot;
                 Ok(monitor_effects(&state))
@@ -872,7 +886,7 @@ impl UiExtension for MonitorUiExtension {
         }
     }
 
-    fn render_surface(&self, surface_key: &str, _ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+    fn render_surface(&self, surface_key: &str, _ctx: TuiRenderContext<'_>, frame: &mut Frame<'_>) {
         if surface_key != MONITOR_OVERLAY_KEY {
             return;
         }
@@ -923,38 +937,45 @@ impl UiExtension for MonitorUiExtension {
         &self,
         surface_key: &str,
         event: &InputEvent,
-        _ctx: UiContext<'_>,
-    ) -> UiInputOutcome {
+        _ctx: TuiExtensionContext<'_>,
+    ) -> TuiInputOutcome {
         if surface_key != MONITOR_OVERLAY_KEY {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         }
         let InputEvent::Key(key) = event else {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         };
         if key.kind != lash_tui::KeyEventKind::Press {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         }
         if key.code != InputKeyCode::Esc {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         }
         let Ok(mut state) = self.state.lock() else {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         };
         state.overlay_open = false;
-        UiInputOutcome::Handled(monitor_effects(&state))
+        TuiInputOutcome::Handled(monitor_effects(&state))
     }
 
-    fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
-        if matches!(event, SessionEvent::Done | SessionEvent::Error { .. })
+    fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
+        if matches!(event, TurnEvent::Error { .. })
             && let Ok(mut state) = self.state.lock()
         {
             state.outstanding_wakes.clear();
         }
         Vec::new()
     }
+
+    fn handle_turn_finished(&self) -> Vec<TuiHostEffect> {
+        if let Ok(mut state) = self.state.lock() {
+            state.outstanding_wakes.clear();
+        }
+        Vec::new()
+    }
 }
 
-fn monitor_effects(state: &MonitorUiState) -> Vec<UiHostEffect> {
+fn monitor_effects(state: &MonitorTuiState) -> Vec<TuiHostEffect> {
     let mut effects = Vec::new();
     let key = "monitor".to_string();
     if state.snapshot.active_count > 0 {
@@ -963,16 +984,16 @@ fn monitor_effects(state: &MonitorUiState) -> Vec<UiHostEffect> {
         } else {
             format!("{} monitors", state.snapshot.active_count)
         };
-        effects.push(UiHostEffect::UpsertModeIndicator { key, label });
+        effects.push(TuiHostEffect::UpsertModeIndicator { key, label });
     } else {
-        effects.push(UiHostEffect::ClearModeIndicator { key });
+        effects.push(TuiHostEffect::ClearModeIndicator { key });
     }
     if state.overlay_open {
-        effects.push(UiHostEffect::MountSurface {
-            spec: UiSurfaceSpec {
+        effects.push(TuiHostEffect::MountSurface {
+            spec: TuiSurfaceSpec {
                 key: MONITOR_OVERLAY_KEY.to_string(),
-                slot: UiSurfaceSlot::Overlay,
-                size: UiSurfaceSize::Fixed {
+                slot: TuiSurfaceSlot::Overlay,
+                size: TuiSurfaceSize::Fixed {
                     width: 88,
                     height: 18,
                 },
@@ -982,27 +1003,27 @@ fn monitor_effects(state: &MonitorUiState) -> Vec<UiHostEffect> {
                 modal: true,
             },
         });
-        effects.push(UiHostEffect::FocusSurface {
+        effects.push(TuiHostEffect::FocusSurface {
             key: MONITOR_OVERLAY_KEY.to_string(),
         });
     } else {
-        effects.push(UiHostEffect::BlurSurface {
+        effects.push(TuiHostEffect::BlurSurface {
             key: MONITOR_OVERLAY_KEY.to_string(),
         });
-        effects.push(UiHostEffect::UnmountSurface {
+        effects.push(TuiHostEffect::UnmountSurface {
             key: MONITOR_OVERLAY_KEY.to_string(),
         });
     }
     effects
 }
 
-fn monitor_state_label(status: &lash::MonitorStatus) -> &'static str {
+fn monitor_state_label(status: &MonitorStatus) -> &'static str {
     match status.run_state {
-        lash::MonitorRunState::Idle => "idle",
-        lash::MonitorRunState::Running => "running",
-        lash::MonitorRunState::Stopped => "stopped",
-        lash::MonitorRunState::Exited => "exited",
-        lash::MonitorRunState::Failed => "failed",
+        MonitorRunState::Idle => "idle",
+        MonitorRunState::Running => "running",
+        MonitorRunState::Stopped => "stopped",
+        MonitorRunState::Exited => "exited",
+        MonitorRunState::Failed => "failed",
     }
 }
 
@@ -1022,113 +1043,46 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
     lines.join("\n")
 }
 
-async fn monitor_status(
-    plugin_host: &PluginHost,
-    session_id: &str,
-    session_manager: Arc<dyn RuntimeSessionHost>,
-) -> Result<MonitorSnapshot, String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            session_id,
-            "monitor.status",
-            serde_json::json!({}),
-            session_manager,
-        )
+async fn monitor_status(session: &dyn TuiExtensionSession) -> Result<MonitorSnapshot, String> {
+    invoke_typed_external::<lash_embed::MonitorStatusOp>(session, lash_embed::MonitorEmptyArgs {})
         .await
-        .map_err(|err| err.to_string())?;
-    if !result.success {
-        return Err(result.result.to_string());
-    }
-    serde_json::from_value(result.result).map_err(|err| format!("invalid monitor status: {err}"))
 }
 
-async fn monitor_updates(
-    plugin_host: &PluginHost,
-    session_id: &str,
-    session_manager: Arc<dyn RuntimeSessionHost>,
-) -> Result<MonitorUpdateBatch, String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            session_id,
-            "monitor.take_updates",
-            serde_json::json!({}),
-            session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    if !result.success {
-        return Err(result.result.to_string());
-    }
-    serde_json::from_value(result.result).map_err(|err| format!("invalid monitor updates: {err}"))
+async fn monitor_updates(session: &dyn TuiExtensionSession) -> Result<MonitorUpdateBatch, String> {
+    invoke_typed_external::<lash_embed::MonitorTakeUpdatesOp>(
+        session,
+        lash_embed::MonitorEmptyArgs {},
+    )
+    .await
 }
 
 async fn monitor_ack_wakes(
-    plugin_host: &PluginHost,
-    session_id: &str,
-    session_manager: Arc<dyn RuntimeSessionHost>,
+    session: &dyn TuiExtensionSession,
     ids: Vec<String>,
 ) -> Result<(), String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            session_id,
-            "monitor.ack_wake",
-            serde_json::json!({ "ids": ids }),
-            session_manager,
-        )
+    invoke_typed_external::<lash_embed::MonitorAckWakeOp>(session, lash_embed::AckWakeArgs { ids })
         .await
-        .map_err(|err| err.to_string())?;
-    if result.success {
-        Ok(())
-    } else {
-        Err(result.result.to_string())
-    }
 }
 
-async fn monitor_stop(
-    plugin_host: &PluginHost,
-    session_id: &str,
-    session_manager: Arc<dyn RuntimeSessionHost>,
-    id: &str,
-) -> Result<(), String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            session_id,
-            "monitor.stop",
-            serde_json::json!({ "id": id }),
-            session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    if result.success {
-        Ok(())
-    } else {
-        Err(result.result.to_string())
-    }
+async fn monitor_stop(session: &dyn TuiExtensionSession, id: &str) -> Result<(), String> {
+    let _ = invoke_typed_external::<lash_embed::MonitorStopOp>(
+        session,
+        lash_embed::StopMonitorArgs { id: id.to_string() },
+    )
+    .await?;
+    Ok(())
 }
 
-async fn monitor_start(
-    plugin_host: &PluginHost,
-    session_id: &str,
-    session_manager: Arc<dyn RuntimeSessionHost>,
-    spec: lash::MonitorSpec,
-) -> Result<(), String> {
-    let result = plugin_host
-        .invoke_external_for_session(
-            session_id,
-            "monitor.start",
-            serde_json::json!({ "spec": spec }),
-            session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    if result.success {
-        Ok(())
-    } else {
-        Err(result.result.to_string())
-    }
+async fn monitor_start(session: &dyn TuiExtensionSession, spec: MonitorSpec) -> Result<(), String> {
+    let _ = invoke_typed_external::<lash_embed::MonitorStartOp>(
+        session,
+        lash_embed::StartMonitorArgs { spec },
+    )
+    .await?;
+    Ok(())
 }
 
-struct PlanModeUiExtension;
+struct PlanModeTuiExtension;
 
 const PLAN_MODE_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
     name: "/plan",
@@ -1149,7 +1103,7 @@ const PLAN_MODE_SHORTCUTS: &[ShortcutSpec] = &[ShortcutSpec {
 }];
 
 #[async_trait]
-impl UiExtension for PlanModeUiExtension {
+impl TuiExtension for PlanModeTuiExtension {
     fn id(&self) -> &'static str {
         "plan_mode_ui"
     }
@@ -1166,15 +1120,15 @@ impl UiExtension for PlanModeUiExtension {
         &self,
         action: &str,
         _arg: Option<&str>,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         match action {
             "toggle" => {
                 let status = invoke_plan_mode_action(ctx, "plan_mode.toggle")
                     .await
                     .map_err(|err| format!("failed to toggle plan mode: {err}"))?;
                 let mut effects = plan_mode_effects(&status);
-                effects.push(UiHostEffect::PushSystemMessage(if status.enabled {
+                effects.push(TuiHostEffect::PushSystemMessage(if status.enabled {
                     "Plan mode on.".to_string()
                 } else {
                     "Plan mode off.".to_string()
@@ -1185,8 +1139,8 @@ impl UiExtension for PlanModeUiExtension {
         }
     }
 
-    fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
-        let SessionEvent::ToolCall {
+    fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
+        let TurnEvent::ToolCallCompleted {
             name,
             result,
             success,
@@ -1199,34 +1153,38 @@ impl UiExtension for PlanModeUiExtension {
             return Vec::new();
         }
         let approved = result
+            .raw
             .get("approved")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
         if approved {
             let mut effects = vec![
-                UiHostEffect::ClearModeIndicator {
+                TuiHostEffect::ClearModeIndicator {
                     key: surface_key("plan_mode", "mode"),
                 },
-                UiHostEffect::ClearPanel {
+                TuiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                 },
             ];
             if result
+                .raw
                 .get("execution_mode")
                 .and_then(|value| value.as_str())
                 == Some("current_session")
                 && let Some(input) = result
+                    .raw
                     .get("next_turn_input")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
             {
                 let display_text = result
+                    .raw
                     .get("confirmation_display")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(input);
-                effects.push(UiHostEffect::QueuePreparedTurn {
+                effects.push(TuiHostEffect::QueuePreparedTurn {
                     display_text: display_text.to_string(),
                     effective_text: input.to_string(),
                 });
@@ -1244,13 +1202,40 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use lash::SessionEvent;
     use lash_tui::{Rect, Style};
     use serde_json::json;
 
+    struct MockSession;
+
+    #[async_trait]
+    impl TuiExtensionSession for MockSession {
+        async fn invoke_external(
+            &self,
+            _name: &str,
+            _args: serde_json::Value,
+        ) -> Result<ToolResult, String> {
+            panic!("mock session should not be invoked")
+        }
+    }
+
+    fn completed_tool_event(name: &str, result: serde_json::Value) -> TurnEvent {
+        TurnEvent::ToolCallCompleted {
+            call_id: None,
+            name: name.to_string(),
+            args: json!({}),
+            result: lash_embed::ToolResultView {
+                raw: result.clone(),
+                for_model: result.clone(),
+                for_state: result,
+            },
+            success: true,
+            duration_ms: 12,
+        }
+    }
+
     #[test]
     fn builtin_extensions_register_plan_command_and_shortcut() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
+        let extensions = TuiExtensions::builtin().expect("builtin extensions");
 
         assert!(extensions.parse_command("/plan").is_some());
         assert!(extensions.shortcut_for(KeyChord::SHIFT_TAB).is_some());
@@ -1272,11 +1257,11 @@ mod tests {
                 panel_content: Some("Path: `.lash/plans/root.md`".to_string()),
             }),
             vec![
-                UiHostEffect::UpsertModeIndicator {
+                TuiHostEffect::UpsertModeIndicator {
                     key: "plan_mode:mode".to_string(),
                     label: "plan".to_string(),
                 },
-                UiHostEffect::UpsertPanel {
+                TuiHostEffect::UpsertPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                     title: "PLAN".to_string(),
@@ -1295,10 +1280,10 @@ mod tests {
                 panel_content: Some("stale".to_string()),
             }),
             vec![
-                UiHostEffect::ClearModeIndicator {
+                TuiHostEffect::ClearModeIndicator {
                     key: "plan_mode:mode".to_string(),
                 },
-                UiHostEffect::ClearPanel {
+                TuiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string(),
                 }
@@ -1308,86 +1293,11 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_snapshot_is_event_driven() {
-        struct UnusedSessionManager;
-
-        #[async_trait]
-        impl lash::SessionSnapshotHost for UnusedSessionManager {
-            async fn snapshot_current(&self) -> Result<lash::SessionSnapshot, lash::PluginError> {
-                panic!("plan-mode UI sync should not inspect sessions")
-            }
-
-            async fn snapshot_session(
-                &self,
-                _session_id: &str,
-            ) -> Result<lash::SessionSnapshot, lash::PluginError> {
-                panic!("plan-mode UI sync should not inspect sessions")
-            }
-        }
-
-        #[async_trait]
-        impl lash::ToolCatalogHost for UnusedSessionManager {
-            async fn tool_catalog(
-                &self,
-                _session_id: &str,
-            ) -> Result<Vec<serde_json::Value>, lash::PluginError> {
-                panic!("plan-mode UI sync should not inspect tool catalogs")
-            }
-        }
-
-        impl lash::DynamicToolHost for UnusedSessionManager {}
-
-        #[async_trait]
-        impl lash::SessionLifecycleHost for UnusedSessionManager {
-            async fn create_session(
-                &self,
-                _request: lash::SessionCreateRequest,
-            ) -> Result<lash::SessionHandle, lash::PluginError> {
-                panic!("plan-mode UI sync should not create sessions")
-            }
-
-            async fn close_session(&self, _session_id: &str) -> Result<(), lash::PluginError> {
-                panic!("plan-mode UI sync should not close sessions")
-            }
-        }
-
-        #[async_trait]
-        impl lash::TurnHost for UnusedSessionManager {
-            async fn start_turn_stream(
-                &self,
-                _session_id: &str,
-                _input: lash::TurnInput,
-            ) -> Result<lash::SessionTurnHandle, lash::PluginError> {
-                panic!("plan-mode UI sync should not start turns")
-            }
-
-            async fn await_turn(
-                &self,
-                _turn_id: &str,
-            ) -> Result<lash::AssembledTurn, lash::PluginError> {
-                panic!("plan-mode UI sync should not await turns")
-            }
-
-            async fn cancel_turn(&self, _turn_id: &str) -> Result<(), lash::PluginError> {
-                panic!("plan-mode UI sync should not cancel turns")
-            }
-        }
-
-        impl lash::TaskHost for UnusedSessionManager {}
-        impl lash::MonitorHost for UnusedSessionManager {}
-        impl lash::SessionGraphHost for UnusedSessionManager {}
-        impl lash::PromptHost for UnusedSessionManager {}
-        impl lash::DirectCompletionHost for UnusedSessionManager {}
-        impl lash::TraceHost for UnusedSessionManager {}
-
         let extensions =
-            UiExtensions::new(vec![Arc::new(PlanModeUiExtension)]).expect("extensions");
-        let host = PluginHost::new(Vec::new());
+            TuiExtensions::new(vec![Arc::new(PlanModeTuiExtension)]).expect("extensions");
+        let session = MockSession;
         let effects = extensions
-            .snapshot_all(UiContext {
-                plugin_host: &host,
-                session_id: "fresh-context-child",
-                session_manager: Arc::new(UnusedSessionManager),
-            })
+            .snapshot_all(TuiExtensionContext { session: &session })
             .await
             .expect("sync");
 
@@ -1399,7 +1309,7 @@ mod tests {
         struct Duplicate;
 
         #[async_trait]
-        impl UiExtension for Duplicate {
+        impl TuiExtension for Duplicate {
             fn id(&self) -> &'static str {
                 "duplicate"
             }
@@ -1412,13 +1322,13 @@ mod tests {
                 &self,
                 _action: &str,
                 _arg: Option<&str>,
-                _ctx: UiContext<'_>,
-            ) -> Result<Vec<UiHostEffect>, String> {
+                _ctx: TuiExtensionContext<'_>,
+            ) -> Result<Vec<TuiHostEffect>, String> {
                 Ok(Vec::new())
             }
         }
 
-        let err = UiExtensions::new(vec![Arc::new(PlanModeUiExtension), Arc::new(Duplicate)])
+        let err = TuiExtensions::new(vec![Arc::new(PlanModeTuiExtension), Arc::new(Duplicate)])
             .err()
             .expect("duplicate commands should fail");
         assert!(err.contains("/plan"));
@@ -1426,33 +1336,29 @@ mod tests {
 
     #[test]
     fn plan_exit_event_queues_current_session_follow_up() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
+        let extensions = TuiExtensions::builtin().expect("builtin extensions");
 
-        let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
-            call_id: None,
-            name: "plan_exit".to_string(),
-            args: json!({}),
-            result: json!({
+        let effects = extensions.effects_for_turn_event(&completed_tool_event(
+            "plan_exit",
+            json!({
                 "approved": true,
                 "execution_mode": "current_session",
                 "confirmation_display": "Start implementing now",
                 "next_turn_input": "Execute the approved plan."
             }),
-            success: true,
-            duration_ms: 12,
-        });
+        ));
 
         assert_eq!(
             effects,
             vec![
-                UiHostEffect::ClearModeIndicator {
+                TuiHostEffect::ClearModeIndicator {
                     key: "plan_mode:mode".to_string()
                 },
-                UiHostEffect::ClearPanel {
+                TuiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
                 },
-                UiHostEffect::QueuePreparedTurn {
+                TuiHostEffect::QueuePreparedTurn {
                     display_text: "Start implementing now".to_string(),
                     effective_text: "Execute the approved plan.".to_string()
                 }
@@ -1462,28 +1368,24 @@ mod tests {
 
     #[test]
     fn plan_exit_event_clears_ui_for_fresh_context_handoff() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
+        let extensions = TuiExtensions::builtin().expect("builtin extensions");
 
-        let effects = extensions.effects_for_session_event(&SessionEvent::ToolCall {
-            call_id: None,
-            name: "plan_exit".to_string(),
-            args: json!({}),
-            result: json!({
+        let effects = extensions.effects_for_turn_event(&completed_tool_event(
+            "plan_exit",
+            json!({
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
             }),
-            success: true,
-            duration_ms: 12,
-        });
+        ));
 
         assert_eq!(
             effects,
             vec![
-                UiHostEffect::ClearModeIndicator {
+                TuiHostEffect::ClearModeIndicator {
                     key: "plan_mode:mode".to_string()
                 },
-                UiHostEffect::ClearPanel {
+                TuiHostEffect::ClearPanel {
                     plugin_id: "plan_mode".to_string(),
                     key: "panel".to_string()
                 },
@@ -1493,7 +1395,7 @@ mod tests {
 
     #[test]
     fn command_tokens_and_shortcuts_are_unique() {
-        let extensions = UiExtensions::builtin().expect("builtin extensions");
+        let extensions = TuiExtensions::builtin().expect("builtin extensions");
         let command_specs = extensions.command_specs();
         let command_names = command_specs
             .iter()
@@ -1515,7 +1417,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl UiExtension for SurfaceHarness {
+    impl TuiExtension for SurfaceHarness {
         fn id(&self) -> &'static str {
             "surface_harness"
         }
@@ -1524,15 +1426,15 @@ mod tests {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: UiContext<'_>,
-        ) -> Result<Vec<UiHostEffect>, String> {
+            _ctx: TuiExtensionContext<'_>,
+        ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }
 
         fn render_surface(
             &self,
             surface_key: &str,
-            _ctx: UiRenderContext<'_>,
+            _ctx: TuiRenderContext<'_>,
             frame: &mut Frame<'_>,
         ) {
             self.renders
@@ -1542,41 +1444,41 @@ mod tests {
             frame.write_text(0, 0, surface_key, Style::default(), frame.area().width);
         }
 
-        fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
+        fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
             match event {
-                SessionEvent::TextDelta { content } if content == "mount" => vec![
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                TurnEvent::AssistantProseDelta { text } if text == "mount" => vec![
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "workspace".to_string(),
-                            slot: UiSurfaceSlot::Workspace,
-                            size: UiSurfaceSize::Auto,
+                            slot: TuiSurfaceSlot::Workspace,
+                            size: TuiSurfaceSize::Auto,
                             order: 0,
                             focusable: true,
                             visible: true,
                             modal: false,
                         },
                     },
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "footer".to_string(),
-                            slot: UiSurfaceSlot::Footer,
-                            size: UiSurfaceSize::Lines(1),
+                            slot: TuiSurfaceSlot::Footer,
+                            size: TuiSurfaceSize::Lines(1),
                             order: 0,
                             focusable: false,
                             visible: true,
                             modal: false,
                         },
                     },
-                    UiHostEffect::FocusSurface {
+                    TuiHostEffect::FocusSurface {
                         key: "workspace".to_string(),
                     },
                 ],
-                SessionEvent::TextDelta { content } if content == "overlay" => vec![
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                TurnEvent::AssistantProseDelta { text } if text == "overlay" => vec![
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "overlay".to_string(),
-                            slot: UiSurfaceSlot::Overlay,
-                            size: UiSurfaceSize::Fixed {
+                            slot: TuiSurfaceSlot::Overlay,
+                            size: TuiSurfaceSize::Fixed {
                                 width: 12,
                                 height: 3,
                             },
@@ -1586,15 +1488,15 @@ mod tests {
                             modal: true,
                         },
                     },
-                    UiHostEffect::FocusSurface {
+                    TuiHostEffect::FocusSurface {
                         key: "overlay".to_string(),
                     },
                 ],
-                SessionEvent::TextDelta { content } if content == "close" => vec![
-                    UiHostEffect::BlurSurface {
+                TurnEvent::AssistantProseDelta { text } if text == "close" => vec![
+                    TuiHostEffect::BlurSurface {
                         key: "overlay".to_string(),
                     },
-                    UiHostEffect::UnmountSurface {
+                    TuiHostEffect::UnmountSurface {
                         key: "overlay".to_string(),
                     },
                 ],
@@ -1606,31 +1508,31 @@ mod tests {
     #[test]
     fn surface_effects_mount_and_restore_focus() {
         let harness = Arc::new(SurfaceHarness::default());
-        let extensions = UiExtensions::new(vec![harness]).expect("surface harness");
+        let extensions = TuiExtensions::new(vec![harness]).expect("surface harness");
 
-        extensions.effects_for_session_event(&SessionEvent::TextDelta {
-            content: "mount".to_string(),
+        extensions.effects_for_turn_event(&TurnEvent::AssistantProseDelta {
+            text: "mount".to_string(),
         });
         assert_eq!(
             extensions.focused_surface().as_deref(),
             Some("surface_harness:workspace")
         );
         assert_eq!(
-            extensions.mounted_surfaces(UiSurfaceSlot::Workspace).len(),
+            extensions.mounted_surfaces(TuiSurfaceSlot::Workspace).len(),
             1
         );
-        assert_eq!(extensions.mounted_surfaces(UiSurfaceSlot::Footer).len(), 1);
+        assert_eq!(extensions.mounted_surfaces(TuiSurfaceSlot::Footer).len(), 1);
 
-        extensions.effects_for_session_event(&SessionEvent::TextDelta {
-            content: "overlay".to_string(),
+        extensions.effects_for_turn_event(&TurnEvent::AssistantProseDelta {
+            text: "overlay".to_string(),
         });
         assert_eq!(
             extensions.focused_surface().as_deref(),
             Some("surface_harness:overlay")
         );
 
-        extensions.effects_for_session_event(&SessionEvent::TextDelta {
-            content: "close".to_string(),
+        extensions.effects_for_turn_event(&TurnEvent::AssistantProseDelta {
+            text: "close".to_string(),
         });
         assert_eq!(
             extensions.focused_surface().as_deref(),
@@ -1641,13 +1543,13 @@ mod tests {
     #[test]
     fn render_surface_dispatches_to_owner_extension() {
         let harness = Arc::new(SurfaceHarness::default());
-        let extensions = UiExtensions::new(vec![Arc::clone(&harness) as Arc<dyn UiExtension>])
+        let extensions = TuiExtensions::new(vec![Arc::clone(&harness) as Arc<dyn TuiExtension>])
             .expect("surface harness");
-        extensions.effects_for_session_event(&SessionEvent::TextDelta {
-            content: "mount".to_string(),
+        extensions.effects_for_turn_event(&TurnEvent::AssistantProseDelta {
+            text: "mount".to_string(),
         });
         let workspace = extensions
-            .mounted_surfaces(UiSurfaceSlot::Workspace)
+            .mounted_surfaces(TuiSurfaceSlot::Workspace)
             .into_iter()
             .next()
             .expect("workspace surface");
@@ -1658,7 +1560,7 @@ mod tests {
             let mut viewport = frame.viewport(area);
             extensions.render_surface(
                 &workspace.id,
-                UiRenderContext {
+                TuiRenderContext {
                     session_id: "root",
                     capabilities: TermCapabilities::default(),
                     surface_id: "",

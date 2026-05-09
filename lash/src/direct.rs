@@ -3,7 +3,7 @@ use crate::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmJsonSchema, LlmMessage, LlmOutputSpec,
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
 };
-use crate::provider::{ProviderHandle, save_provider};
+use crate::provider::ProviderHandle;
 use lash_trace::{TraceContext, TraceError, TraceEvent, TraceSink};
 use std::sync::Arc;
 
@@ -97,10 +97,6 @@ impl DirectRequest {
 pub enum DirectLlmError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
-    #[error("provider auth failed: {0}")]
-    OAuth(String),
-    #[error("provider initialization failed: {0}")]
-    ProviderInit(String),
     #[error("transport error: {0}")]
     Transport(String),
 }
@@ -113,7 +109,6 @@ impl From<LlmTransportError> for DirectLlmError {
 
 pub struct DirectLlmClient {
     provider: ProviderHandle,
-    credential_store_path: Option<std::path::PathBuf>,
     trace_sink: Option<Arc<dyn TraceSink>>,
     trace_context: TraceContext,
 }
@@ -122,19 +117,9 @@ impl DirectLlmClient {
     pub fn new(provider: ProviderHandle) -> Self {
         Self {
             provider,
-            credential_store_path: None,
             trace_sink: None,
             trace_context: TraceContext::default(),
         }
-    }
-
-    /// Write refreshed OAuth credentials to `path` after each successful
-    /// token refresh. When `None`, refresh still happens but nothing is
-    /// written. Host decides the file location (lash-cli uses
-    /// `paths::config_file()`).
-    pub fn with_credential_store_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.credential_store_path = path;
-        self
     }
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
@@ -159,29 +144,11 @@ impl DirectLlmClient {
         &mut self,
         request: DirectRequest,
     ) -> Result<LlmResponse, DirectLlmError> {
-        let refreshed = self
-            .provider
-            .ensure_fresh()
-            .await
-            .map_err(|err| DirectLlmError::OAuth(err.to_string()))?;
-        if refreshed && let Some(path) = self.credential_store_path.as_ref() {
-            let _ = save_provider(path, &self.provider);
-        }
-
         let normalized_model = self.provider.resolve_model(&request.model);
         if let Some(variant) = request.model_variant.as_deref() {
             self.provider
                 .validate_variant(&normalized_model, variant)
                 .map_err(DirectLlmError::InvalidRequest)?;
-        }
-
-        let changed = self
-            .provider
-            .ensure_ready()
-            .await
-            .map_err(|err| DirectLlmError::ProviderInit(err.message))?;
-        if changed && let Some(path) = self.credential_store_path.as_ref() {
-            let _ = save_provider(path, &self.provider);
         }
 
         let llm_request = build_llm_request(&self.provider, request, normalized_model);

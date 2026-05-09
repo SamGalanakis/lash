@@ -249,8 +249,7 @@ impl TraceSessionEvent {
                 plugin_id: plugin_id.clone(),
                 event: TracePluginSurfaceEvent::from_event(event),
             }),
-            SessionEvent::Prompt { .. }
-            | SessionEvent::ToolCallStart { .. }
+            SessionEvent::ToolCallStart { .. }
             | SessionEvent::LlmResponse { .. }
             | SessionEvent::TokenUsage { .. }
             | SessionEvent::ChildTokenUsage { .. }
@@ -646,7 +645,7 @@ mod tests {
     #[test]
     fn recorder_writes_trace_and_snapshot_files() {
         let dir = std::env::temp_dir().join(format!(
-            "lash-ui-trace-{}",
+            "lash-tui-extensions-trace-{}",
             uuid::Uuid::new_v4().as_simple()
         ));
         fs::create_dir_all(&dir).expect("temp dir");
@@ -681,7 +680,7 @@ mod tests {
     #[test]
     fn recorder_writes_periodic_checkpoint_snapshots() {
         let dir = std::env::temp_dir().join(format!(
-            "lash-ui-trace-checkpoints-{}",
+            "lash-tui-extensions-trace-checkpoints-{}",
             uuid::Uuid::new_v4().as_simple()
         ));
         fs::create_dir_all(&dir).expect("temp dir");

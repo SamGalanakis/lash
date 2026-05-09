@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use lash::attach_mcp_servers;
 use lash::provider::LashConfig;
 use lash::session_model::Message;
 use lash::*;
+use lash_embed::LashSession;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, UiTimelineItem};
 use crate::fork;
 use crate::resume;
-use crate::session_bootstrap::{CliRuntimeFactory, OpenedCliSession};
+use crate::session_bootstrap::{CliSessionOpener, OpenedCliLashSession};
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::RuntimeRunResult;
 use crate::{hash12, push_system_message};
@@ -20,11 +20,10 @@ use super::super::runtime::{apply_pending_reconfigure, send_user_message};
 
 #[allow(clippy::too_many_arguments)]
 async fn activate_opened_session(
-    opened: OpenedCliSession,
+    opened: OpenedCliLashSession,
     app: &mut App,
     logger: &mut SessionLogger,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
@@ -35,9 +34,7 @@ async fn activate_opened_session(
     provider: &ProviderHandle,
     lash_config: &LashConfig,
 ) -> Result<(), String> {
-    let new_dynamic_tools = opened.dynamic_tools;
-    *dynamic_tools = new_dynamic_tools;
-    *runtime = Some(opened.runtime);
+    *runtime = Some(opened.session);
     *logger = opened.logger;
     resume::load_resumed_session(
         opened.bootstrap.filename(),
@@ -49,22 +46,24 @@ async fn activate_opened_session(
         current_execution_mode,
         provider,
         current_model_variant,
-        dynamic_tools,
         desired_dynamic,
         model_catalog,
     )
     .await?;
-    attach_mcp_servers(dynamic_tools, lash_config.mcp_servers())
+    let Some(session) = runtime.as_ref() else {
+        return Err("opened session was not installed".to_string());
+    };
+    session
+        .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| format!("failed to attach MCP servers: {err}"))?;
-    if let Some(rt) = runtime.as_mut() {
-        rt.refresh_session_tool_surface()
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-    *desired_dynamic = dynamic_tools.export_state();
+    session
+        .refresh_tool_surface()
+        .await
+        .map_err(|err| err.to_string())?;
+    *desired_dynamic = session.tool_state().await.map_err(|err| err.to_string())?;
     if let Some(rt) = runtime.as_ref() {
-        match rt.session_manager() {
+        match rt.session_manager().await {
             Ok(manager) => *session_manager = manager,
             Err(err) => {
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
@@ -75,33 +74,29 @@ async fn activate_opened_session(
 }
 
 fn fallback_policy_for_session_switch(
-    runtime: &Option<LashRuntime>,
+    _runtime: &Option<LashSession>,
     provider: &ProviderHandle,
     app: &App,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
 ) -> SessionPolicy {
-    runtime
-        .as_ref()
-        .map(|rt| rt.export_state().policy)
-        .unwrap_or_else(|| SessionPolicy {
-            provider: provider.clone(),
-            model: app.model.clone(),
-            model_variant: current_model_variant.clone(),
-            max_context_tokens: app.context_window.map(|window| window as usize),
-            execution_mode: current_execution_mode.clone(),
-            ..SessionPolicy::default()
-        })
+    SessionPolicy {
+        provider: provider.clone(),
+        model: app.model.clone(),
+        model_variant: current_model_variant.clone(),
+        max_context_tokens: app.context_window.map(|window| window as usize),
+        execution_mode: current_execution_mode.clone(),
+        ..SessionPolicy::default()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear(
     app: &mut App,
-    runtime_factory: &CliRuntimeFactory,
+    runtime_factory: &CliSessionOpener,
     lash_config: &LashConfig,
     logger: &mut SessionLogger,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -126,21 +121,25 @@ pub(super) async fn handle_clear(
         current_execution_mode,
     );
     let opened = runtime_factory.fresh(policy).await?;
-    *dynamic_tools = opened.dynamic_tools;
-    *runtime = Some(opened.runtime);
+    *runtime = Some(opened.session);
     *logger = opened.logger;
-    attach_mcp_servers(dynamic_tools, lash_config.mcp_servers())
+    let Some(session) = runtime.as_ref() else {
+        return Err(anyhow::anyhow!("opened session was not installed"));
+    };
+    session
+        .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
-    if let Some(rt) = runtime.as_mut() {
-        rt.refresh_session_tool_surface()
+    if let Some(rt) = runtime.as_ref() {
+        rt.refresh_tool_surface()
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let state = rt.export_state();
-        app.session_id = state.session_id;
-        *current_execution_mode = state.policy.execution_mode;
-        *current_model_variant = state.policy.model_variant;
-        match rt.session_manager() {
+        let session_id = rt.session_id().await;
+        let policy = rt.policy_snapshot().await;
+        app.session_id = session_id;
+        *current_execution_mode = policy.execution_mode;
+        *current_model_variant = policy.model_variant;
+        match rt.session_manager().await {
             Ok(manager) => *session_manager = manager,
             Err(err) => {
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
@@ -148,7 +147,7 @@ pub(super) async fn handle_clear(
         }
     }
     app.session_name = opened.bootstrap.session_name();
-    *desired_dynamic = dynamic_tools.export_state();
+    *desired_dynamic = session.tool_state().await?;
     history.clear();
     *turn_counter = 0;
     *last_turn = None;
@@ -166,8 +165,7 @@ pub(super) async fn handle_clear(
 pub(super) async fn handle_retry(
     app: &mut App,
     logger: &mut SessionLogger,
-    dynamic_tools: &Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     last_turn: &Option<TurnReplayPayload>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
@@ -181,8 +179,7 @@ pub(super) async fn handle_retry(
 ) -> anyhow::Result<bool> {
     if let Some(previous) = last_turn.clone() {
         if let Err(e) =
-            apply_pending_reconfigure(dynamic_tools, desired_dynamic, pending_reconfigure, runtime)
-                .await
+            apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
         {
             push_system_message(
                 app,
@@ -190,11 +187,14 @@ pub(super) async fn handle_retry(
             );
             return Ok(false);
         }
-        *toolset_hash = hash12(
-            &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
-        );
+        let definitions = match runtime.as_ref() {
+            Some(session) => session.active_tool_definitions().await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        *toolset_hash =
+            hash12(&serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()));
         *current_execution_mode = previous.execution_mode;
-        let current_dynamic_state = dynamic_tools.export_state();
+        let current_dynamic_state = desired_dynamic.clone();
         send_user_message(
             previous.prepared_turn.clone(),
             previous.turn_input.clone(),
@@ -219,14 +219,13 @@ pub(super) async fn handle_retry(
 pub(super) async fn handle_fork(
     app: &mut App,
     logger: &mut SessionLogger,
-    _dynamic_tools: &Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     provider: &ProviderHandle,
     current_model_variant: &Option<String>,
     _toolset_hash: &str,
 ) -> anyhow::Result<bool> {
     match fork::fork_current_session(
-        runtime.as_mut(),
+        runtime.as_ref(),
         logger,
         provider,
         &app.model,
@@ -291,7 +290,10 @@ fn fork_launch_fallback_message(
     )
 }
 
-pub(super) fn handle_tree(app: &mut App, runtime: &Option<LashRuntime>) -> anyhow::Result<bool> {
+pub(super) async fn handle_tree(
+    app: &mut App,
+    runtime: &Option<LashSession>,
+) -> anyhow::Result<bool> {
     if app.has_prompt() {
         push_system_message(app, "Close the active prompt before opening /tree.");
         return Ok(false);
@@ -303,7 +305,7 @@ pub(super) fn handle_tree(app: &mut App, runtime: &Option<LashRuntime>) -> anyho
         );
         return Ok(false);
     };
-    let roots = crate::tree::current_message_tree(rt);
+    let roots = crate::tree::current_message_tree(rt).await;
     if roots.is_empty() {
         push_system_message(app, "No messages yet.");
     } else {
@@ -317,10 +319,9 @@ pub(crate) async fn switch_to_session_identifier(
     identifier: &str,
     app: &mut App,
     logger: &mut SessionLogger,
-    runtime_factory: &CliRuntimeFactory,
+    runtime_factory: &CliSessionOpener,
     lash_config: &LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     provider: &ProviderHandle,
@@ -343,7 +344,6 @@ pub(crate) async fn switch_to_session_identifier(
         opened,
         app,
         logger,
-        dynamic_tools,
         runtime,
         history,
         turn_counter,
@@ -358,7 +358,14 @@ pub(crate) async fn switch_to_session_identifier(
     .await
     .map_err(anyhow::Error::msg)?;
     *toolset_hash = hash12(
-        &serde_json::to_vec(&dynamic_tools.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
+        &serde_json::to_vec(
+            &desired_dynamic
+                .tools
+                .values()
+                .map(|spec| spec.definition.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| b"[]".to_vec()),
     );
     Ok(())
 }
@@ -368,10 +375,9 @@ pub(super) async fn handle_resume(
     name: Option<String>,
     app: &mut App,
     logger: &mut SessionLogger,
-    runtime_factory: &CliRuntimeFactory,
+    runtime_factory: &CliSessionOpener,
     lash_config: &LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -390,7 +396,6 @@ pub(super) async fn handle_resume(
             logger,
             runtime_factory,
             lash_config,
-            dynamic_tools,
             runtime,
             history,
             turn_counter,

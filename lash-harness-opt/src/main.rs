@@ -397,13 +397,10 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .model
             .clone()
             .unwrap_or_else(|| self.provider.default_model().to_string());
-        let mut core_builder = LashCore::rlm()
+        let core_builder = LashCore::rlm()
             .provider(self.provider.clone())
-            .model(model)
+            .model(model, self.variant.clone())
             .max_context_tokens(self.max_context_tokens);
-        if let Some(variant) = &self.variant {
-            core_builder = core_builder.model_variant(variant.clone());
-        }
         let core = core_builder
             .build()
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;

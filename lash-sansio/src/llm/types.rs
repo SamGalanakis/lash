@@ -250,6 +250,12 @@ pub enum LlmStreamEvent {
     ReasoningDelta(String),
     Part(LlmOutputPart),
     Usage(LlmUsage),
+    RetryStatus {
+        wait_seconds: u64,
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
 }
 
 #[derive(Clone)]

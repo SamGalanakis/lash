@@ -8,9 +8,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lash_tui::{Frame, Line, Span};
-use lash_ui::{
-    UiContext, UiExtension, UiHostEffect, UiRenderContext, UiSurfaceSize, UiSurfaceSlot,
-    UiSurfaceSpec,
+use lash_tui_extensions::{
+    TuiExtension, TuiExtensionContext, TuiHostEffect, TuiRenderContext, TuiSurfaceSize,
+    TuiSurfaceSlot, TuiSurfaceSpec,
 };
 
 use crate::theme;
@@ -54,11 +54,11 @@ pub struct ChromeUiState {
     turn: Option<TurnStatusSnapshot>,
 }
 
-pub struct ChromeUiExtension {
+pub struct ChromeTuiExtension {
     state: Arc<Mutex<ChromeUiState>>,
 }
 
-impl ChromeUiExtension {
+impl ChromeTuiExtension {
     pub fn new() -> (Arc<Self>, Arc<Mutex<ChromeUiState>>) {
         let state = Arc::new(Mutex::new(ChromeUiState::default()));
         let ext = Arc::new(Self {
@@ -68,11 +68,11 @@ impl ChromeUiExtension {
     }
 }
 
-pub fn turn_status_surface_spec() -> UiSurfaceSpec {
-    UiSurfaceSpec {
+pub fn turn_status_surface_spec() -> TuiSurfaceSpec {
+    TuiSurfaceSpec {
         key: TURN_STATUS_KEY.to_string(),
-        slot: UiSurfaceSlot::Footer,
-        size: UiSurfaceSize::Lines(1),
+        slot: TuiSurfaceSlot::Footer,
+        size: TuiSurfaceSize::Lines(1),
         // Negative order so the indicator floats above any plugin-mounted
         // footer surfaces.
         order: -1_000,
@@ -89,7 +89,7 @@ pub fn set_turn_status(state: &Mutex<ChromeUiState>, snapshot: Option<TurnStatus
 }
 
 #[async_trait]
-impl UiExtension for ChromeUiExtension {
+impl TuiExtension for ChromeTuiExtension {
     fn id(&self) -> &'static str {
         CHROME_UI_ID
     }
@@ -98,12 +98,12 @@ impl UiExtension for ChromeUiExtension {
         &self,
         action: &str,
         _arg: Option<&str>,
-        _ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        _ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         Err(format!("unknown chrome UI action `{action}`"))
     }
 
-    fn render_surface(&self, surface_key: &str, _ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+    fn render_surface(&self, surface_key: &str, _ctx: TuiRenderContext<'_>, frame: &mut Frame<'_>) {
         if surface_key != TURN_STATUS_KEY {
             return;
         }

@@ -110,7 +110,6 @@ impl TurnHost for NoopSessionManager {
 impl TaskHost for NoopSessionManager {}
 impl MonitorHost for NoopSessionManager {}
 impl SessionGraphHost for NoopSessionManager {}
-impl PromptHost for NoopSessionManager {}
 impl DirectCompletionHost for NoopSessionManager {}
 impl TraceHost for NoopSessionManager {}
 

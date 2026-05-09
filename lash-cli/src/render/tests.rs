@@ -7,7 +7,9 @@ use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
 use lash::{Part, PartKind, PromptRequest, SkillCatalog};
-use lash_ui::{SlashCommandSpec, UiContext, UiExtension, UiExtensions, UiHostEffect};
+use lash_tui_extensions::{
+    SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -603,7 +605,7 @@ fn input_box_shows_skill_argument_hint_inline() {
 
 #[test]
 fn input_box_shows_ui_command_argument_hint_inline() {
-    struct DemoUiExtension;
+    struct DemoTuiExtension;
 
     const DEMO_COMMANDS: &[SlashCommandSpec] = &[SlashCommandSpec {
         name: "/demo",
@@ -618,7 +620,7 @@ fn input_box_shows_ui_command_argument_hint_inline() {
     }];
 
     #[async_trait]
-    impl UiExtension for DemoUiExtension {
+    impl TuiExtension for DemoTuiExtension {
         fn id(&self) -> &'static str {
             "demo_ui"
         }
@@ -631,14 +633,15 @@ fn input_box_shows_ui_command_argument_hint_inline() {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: UiContext<'_>,
-        ) -> Result<Vec<UiHostEffect>, String> {
+            _ctx: TuiExtensionContext<'_>,
+        ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }
     }
 
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-    let ui_extensions = UiExtensions::new(vec![Arc::new(DemoUiExtension)]).expect("ui extensions");
+    let ui_extensions =
+        TuiExtensions::new(vec![Arc::new(DemoTuiExtension)]).expect("ui extensions");
     app.set_ui_extensions(Arc::new(ui_extensions));
     app.set_input("/demo ".into());
     app.editor.cursor_pos = app.input().len();

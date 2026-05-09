@@ -649,22 +649,25 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                 run_count,
                 anchor_idx,
             }) => {
-                let anchor = first_seen
-                    .get(&prompt.system_hash)
-                    .cloned()
-                    .or_else(|| {
-                        // fallback: derive from the prompt at anchor_idx
-                        let anchor_prompt = &session.llm_prompts[*anchor_idx];
-                        Some(PromptAnchor {
-                            entry_id: String::new(),
-                            iter_label: anchor_prompt
-                                .mode_iteration
-                                .map(|i| format!("iter {i}"))
-                                .unwrap_or_else(|| "first call".to_string()),
-                        })
-                    });
-                let id =
-                    render_system_prompt_banner(entries, spine, ctx, prompt, *run_count, anchor.as_ref());
+                let anchor = first_seen.get(&prompt.system_hash).cloned().or_else(|| {
+                    // fallback: derive from the prompt at anchor_idx
+                    let anchor_prompt = &session.llm_prompts[*anchor_idx];
+                    Some(PromptAnchor {
+                        entry_id: String::new(),
+                        iter_label: anchor_prompt
+                            .mode_iteration
+                            .map(|i| format!("iter {i}"))
+                            .unwrap_or_else(|| "first call".to_string()),
+                    })
+                });
+                let id = render_system_prompt_banner(
+                    entries,
+                    spine,
+                    ctx,
+                    prompt,
+                    *run_count,
+                    anchor.as_ref(),
+                );
                 // Don't emit individual usage bars for suppressed siblings —
                 // they would have nowhere to anchor. Keep the banner one
                 // anchored to the banner row.
@@ -795,10 +798,7 @@ enum CoalesceState {
     /// First repeat after the anchor: emit one banner row standing in for
     /// `run_count` suppressed siblings. `anchor_idx` points to the prompt
     /// that carries the full system text.
-    BannerStart {
-        run_count: usize,
-        anchor_idx: usize,
-    },
+    BannerStart { run_count: usize, anchor_idx: usize },
     /// Suppress entirely — already represented by the banner.
     Suppress,
 }
@@ -835,8 +835,8 @@ fn compute_coalesce_states(
                     anchor_idx: anchor,
                 },
             );
-            for k in (i + 2)..j {
-                out.insert(main_indices[k], CoalesceState::Suppress);
+            for idx in main_indices.iter().take(j).skip(i + 2) {
+                out.insert(*idx, CoalesceState::Suppress);
             }
         }
         // run_len < min_run_len → leave entries with implicit Show (default).
@@ -870,9 +870,7 @@ fn render_system_prompt_banner(
     out.push_str("      </div>\n");
     out.push_str("      <div class=\"entry-body\">\n");
     out.push_str("        <div class=\"system-coalesce-banner\">\n");
-    out.push_str(
-        "          <span class=\"entry-tag entry-tag--system\">system prompt</span>\n",
-    );
+    out.push_str("          <span class=\"entry-tag entry-tag--system\">system prompt</span>\n");
     let _ = writeln!(
         out,
         "          <span>unchanged across the next <span class=\"system-coalesce-banner-count\">{n}</span> calls</span>",

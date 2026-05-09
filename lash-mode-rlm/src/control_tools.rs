@@ -254,9 +254,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use lash::plugin::{
-        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
-        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshotHost,
-        SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, SessionGraphHost,
+        SessionHandle, SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost,
+        ToolCatalogHost, TraceHost, TurnHost,
     };
     use lash::{PersistedSessionState, TurnInput};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
@@ -334,7 +334,6 @@ mod tests {
     impl TaskHost for BatonManager {}
     impl MonitorHost for BatonManager {}
     impl SessionGraphHost for BatonManager {}
-    impl PromptHost for BatonManager {}
     impl DirectCompletionHost for BatonManager {}
     impl TraceHost for BatonManager {}
 

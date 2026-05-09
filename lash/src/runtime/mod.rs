@@ -143,6 +143,10 @@ pub struct TurnInput {
 #[derive(Clone, Default)]
 pub struct TurnContext {
     plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    provider: Option<crate::ProviderHandle>,
+    model: Option<String>,
+    model_variant: Option<Option<String>>,
+    prompt: crate::PromptLayer,
 }
 
 impl TurnContext {
@@ -157,6 +161,30 @@ impl TurnContext {
         self.plugin_inputs.insert(plugin_id, Arc::new(input));
     }
 
+    pub fn set_provider(&mut self, provider: crate::ProviderHandle) {
+        self.provider = Some(provider);
+    }
+
+    pub fn provider(&self) -> Option<&crate::ProviderHandle> {
+        self.provider.as_ref()
+    }
+
+    pub fn set_model(&mut self, model: impl Into<String>, variant: Option<String>) {
+        self.model = Some(model.into());
+        self.model_variant = Some(variant);
+    }
+
+    pub fn model_selection(&self) -> Option<(&str, Option<&str>)> {
+        self.model.as_deref().map(|model| {
+            (
+                model,
+                self.model_variant
+                    .as_ref()
+                    .and_then(|variant| variant.as_deref()),
+            )
+        })
+    }
+
     pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
     where
         T: 'static,
@@ -169,6 +197,34 @@ impl TurnContext {
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
         self.plugin_inputs.contains_key(plugin_id)
     }
+
+    pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
+        self.prompt.template = Some(template);
+    }
+
+    pub fn add_prompt_contribution(&mut self, contribution: crate::PromptContribution) {
+        self.prompt.add_contribution(contribution);
+    }
+
+    pub fn replace_prompt_slot(
+        &mut self,
+        slot: crate::PromptSlot,
+        contributions: impl IntoIterator<Item = crate::PromptContribution>,
+    ) {
+        self.prompt.replace_slot(slot, contributions);
+    }
+
+    pub fn clear_prompt_slot(&mut self, slot: crate::PromptSlot) {
+        self.prompt.clear_slot(slot);
+    }
+
+    pub fn set_prompt_layer(&mut self, prompt: crate::PromptLayer) {
+        self.prompt = prompt;
+    }
+
+    pub fn prompt_layer(&self) -> &crate::PromptLayer {
+        &self.prompt
+    }
 }
 
 impl fmt::Debug for TurnContext {
@@ -178,6 +234,9 @@ impl fmt::Debug for TurnContext {
                 "plugin_inputs",
                 &self.plugin_inputs.keys().collect::<Vec<_>>(),
             )
+            .field("has_provider", &self.provider.is_some())
+            .field("has_model", &self.model.is_some())
+            .field("has_prompt_layer", &(!self.prompt.is_empty()))
             .finish()
     }
 }
@@ -410,6 +469,9 @@ pub struct ToolResultView {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
+    ModelRequestStarted {
+        mode_iteration: usize,
+    },
     AssistantProseDelta {
         text: String,
     },
@@ -448,6 +510,24 @@ pub enum TurnEvent {
         mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
+    },
+    RetryStatus {
+        wait_seconds: u64,
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
+    PluginSurface {
+        plugin_id: String,
+        event: crate::PluginSurfaceEvent,
+    },
+    QueuedInputAccepted {
+        checkpoint: crate::CheckpointKind,
+        inputs: Vec<crate::AcceptedInjectedTurnInput>,
+    },
+    QueuedMessagesCommitted {
+        messages: Vec<crate::PluginMessage>,
+        checkpoint: crate::CheckpointKind,
     },
     Error {
         message: String,

@@ -6,15 +6,16 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 
 use lash::plugin::{
-    ExternalOpDef, ExternalOpKind, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
+    ExternalOpKind, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader,
-    SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
+    SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride, TypedExternalOp,
+    TypedExternalOpError,
 };
 use lash::tools::{PatchAction, inspect_patch_ops};
 use lash::{
-    PluginMessage, PromptRequest, PromptResponse, SessionContextSurface, SessionCreateRequest,
-    SessionPluginMode, SessionStartPoint, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
-    ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
+    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
+    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
@@ -213,6 +214,11 @@ pub struct PlanModePluginConfig {
     pub allowed_tools: BTreeSet<String>,
 }
 
+#[async_trait::async_trait]
+pub trait PlanModePrompt: Send + Sync {
+    async fn prompt_user(&self, request: PromptRequest) -> Result<PromptResponse, PluginError>;
+}
+
 impl Default for PlanModePluginConfig {
     fn default() -> Self {
         Self {
@@ -241,6 +247,49 @@ struct PlanModeSnapshot {
     generation: u64,
     #[serde(default)]
     plan_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
+pub struct PlanModeExternalArgs {}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
+pub struct PlanModeExternalStatus {
+    pub session_id: String,
+    pub enabled: bool,
+    pub plan_path: Option<String>,
+    pub panel_title: Option<String>,
+    pub panel_content: Option<String>,
+}
+
+pub struct PlanModeEnableOp;
+pub struct PlanModeDisableOp;
+pub struct PlanModeToggleOp;
+
+impl TypedExternalOp for PlanModeEnableOp {
+    const NAME: &'static str = "plan_mode.enable";
+    const DESCRIPTION: &'static str = "Enable plan mode for this session.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = PlanModeExternalArgs;
+    type Output = PlanModeExternalStatus;
+}
+
+impl TypedExternalOp for PlanModeDisableOp {
+    const NAME: &'static str = "plan_mode.disable";
+    const DESCRIPTION: &'static str = "Disable plan mode for this session.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = PlanModeExternalArgs;
+    type Output = PlanModeExternalStatus;
+}
+
+impl TypedExternalOp for PlanModeToggleOp {
+    const NAME: &'static str = "plan_mode.toggle";
+    const DESCRIPTION: &'static str = "Toggle plan mode for this session.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = PlanModeExternalArgs;
+    type Output = PlanModeExternalStatus;
 }
 
 #[derive(Debug, Default)]
@@ -440,18 +489,18 @@ fn plan_mode_payload(
     session_id: &str,
     enabled: bool,
     report: Option<&PlanReport>,
-) -> serde_json::Value {
-    json!({
-        "session_id": session_id,
-        "enabled": enabled,
-        "plan_path": report.map(|value| value.display_path.clone()),
-        "panel_title": enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
-        "panel_content": if enabled {
+) -> PlanModeExternalStatus {
+    PlanModeExternalStatus {
+        session_id: session_id.to_string(),
+        enabled,
+        plan_path: report.map(|value| value.display_path.clone()),
+        panel_title: enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
+        panel_content: if enabled {
             report.map(|value| value.preview_content())
         } else {
             None
         },
-    })
+    }
 }
 
 fn patch_allowed_for_plan_file(args: &serde_json::Value, plan_path: &Path) -> Result<(), String> {
@@ -491,6 +540,7 @@ fn patch_allowed_for_plan_file(args: &serde_json::Value, plan_path: &Path) -> Re
 #[derive(Clone)]
 struct PlanModeTools {
     state: Arc<Mutex<PlanModeState>>,
+    prompt: Option<Arc<dyn PlanModePrompt>>,
 }
 
 impl PlanModeTools {
@@ -509,8 +559,12 @@ impl PlanModeTools {
                 Err(err) => return ToolResult::err(json!(err.to_string())),
             };
 
-        let answer = match context
-            .host
+        let Some(prompt) = &self.prompt else {
+            return ToolResult::err(json!(
+                "plan approval prompts are unavailable in this session"
+            ));
+        };
+        let answer = match prompt
             .prompt_user(
                 PromptRequest::single(
                     format!("Review the plan in `{}`. What next?", report.display_path),
@@ -619,6 +673,7 @@ impl ToolProvider for PlanModeTools {
 
 pub struct PlanModePluginFactory {
     config: PlanModePluginConfig,
+    prompt: Option<Arc<dyn PlanModePrompt>>,
 }
 
 impl Default for PlanModePluginFactory {
@@ -629,7 +684,15 @@ impl Default for PlanModePluginFactory {
 
 impl PlanModePluginFactory {
     pub fn new(config: PlanModePluginConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            prompt: None,
+        }
+    }
+
+    pub fn with_prompt(mut self, prompt: Arc<dyn PlanModePrompt>) -> Self {
+        self.prompt = Some(prompt);
+        self
     }
 }
 
@@ -642,6 +705,7 @@ impl PluginFactory for PlanModePluginFactory {
         Ok(Arc::new(PlanModePlugin {
             state: Arc::new(Mutex::new(PlanModeState::default())),
             config: self.config.clone(),
+            prompt: self.prompt.clone(),
         }))
     }
 }
@@ -649,6 +713,7 @@ impl PluginFactory for PlanModePluginFactory {
 struct PlanModePlugin {
     state: Arc<Mutex<PlanModeState>>,
     config: PlanModePluginConfig,
+    prompt: Option<Arc<dyn PlanModePrompt>>,
 }
 
 impl SessionPlugin for PlanModePlugin {
@@ -659,6 +724,7 @@ impl SessionPlugin for PlanModePlugin {
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.tools().provider(Arc::new(PlanModeTools {
             state: Arc::clone(&self.state),
+            prompt: self.prompt.clone(),
         }))?;
 
         let before_turn_state = Arc::clone(&self.state);
@@ -899,75 +965,9 @@ impl SessionPlugin for PlanModePlugin {
             })
         }));
 
-        for (name, description) in [
-            ("plan_mode.enable", "Enable plan mode for this session."),
-            ("plan_mode.disable", "Disable plan mode for this session."),
-            ("plan_mode.toggle", "Toggle plan mode for this session."),
-        ] {
-            let state = Arc::clone(&self.state);
-            reg.external().op(
-                ExternalOpDef {
-                    name: name.to_string(),
-                    description: description.to_string(),
-                    kind: ExternalOpKind::Command,
-                    session_param: SessionParam::Required,
-                    input_schema: json!({
-                        "type": "object",
-                        "additionalProperties": false
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "session_id": { "type": "string" },
-                            "enabled": { "type": "boolean" },
-                            "plan_path": { "type": ["string", "null"] },
-                            "panel_title": { "type": ["string", "null"] },
-                            "panel_content": { "type": ["string", "null"] }
-                        },
-                        "required": ["session_id", "enabled", "plan_path", "panel_title", "panel_content"],
-                        "additionalProperties": false
-                    }),
-                },
-                Arc::new(move |ctx, _args| {
-                    let state = Arc::clone(&state);
-                    let op_name = name.to_string();
-                    Box::pin(async move {
-                        let Some(session_id) = ctx.session_id else {
-                            return ToolResult::err(json!(format!(
-                                "{op_name} requires session_id"
-                            )));
-                        };
-                        let target_enabled = match state.lock() {
-                            Ok(guard) => match op_name.as_str() {
-                                "plan_mode.enable" => true,
-                                "plan_mode.disable" => false,
-                                "plan_mode.toggle" => !guard.enabled,
-                                _ => unreachable!(),
-                            },
-                            Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
-                        };
-                        let enabled = match set_plan_mode_enabled_state(
-                            &state,
-                            &session_id,
-                            &ctx.host,
-                            target_enabled,
-                        )
-                        .await
-                        {
-                            Ok(enabled) => enabled,
-                            Err(err) => return ToolResult::err(json!(err.to_string())),
-                        };
-                        let report = match ensure_plan_report(&state, &session_id, &ctx.host, enabled)
-                            .await
-                        {
-                            Ok(report) => report,
-                            Err(err) => return ToolResult::err(json!(err.to_string())),
-                        };
-                        ToolResult::ok(plan_mode_payload(&session_id, enabled, Some(&report)))
-                    })
-                }),
-            )?;
-        }
+        register_plan_mode_op::<PlanModeEnableOp>(reg, Arc::clone(&self.state))?;
+        register_plan_mode_op::<PlanModeDisableOp>(reg, Arc::clone(&self.state))?;
+        register_plan_mode_op::<PlanModeToggleOp>(reg, Arc::clone(&self.state))?;
 
         Ok(())
     }
@@ -1018,6 +1018,39 @@ impl SessionPlugin for PlanModePlugin {
             .map(|state| state.generation)
             .unwrap_or_default()
     }
+}
+
+fn register_plan_mode_op<Op>(
+    reg: &mut PluginRegistrar,
+    state: Arc<Mutex<PlanModeState>>,
+) -> Result<(), PluginError>
+where
+    Op: TypedExternalOp<Args = PlanModeExternalArgs, Output = PlanModeExternalStatus>,
+{
+    reg.external().typed::<Op, _, _>(move |ctx, _args| {
+        let state = Arc::clone(&state);
+        async move {
+            let Some(session_id) = ctx.session_id else {
+                return Err(TypedExternalOpError::new(format!(
+                    "{} requires session_id",
+                    Op::NAME
+                )));
+            };
+            let target_enabled = match state.lock() {
+                Ok(guard) => match Op::NAME {
+                    "plan_mode.enable" => true,
+                    "plan_mode.disable" => false,
+                    "plan_mode.toggle" => !guard.enabled,
+                    _ => unreachable!(),
+                },
+                Err(_) => return Err(TypedExternalOpError::new("plan mode state poisoned")),
+            };
+            let enabled =
+                set_plan_mode_enabled_state(&state, &session_id, &ctx.host, target_enabled).await?;
+            let report = ensure_plan_report(&state, &session_id, &ctx.host, enabled).await?;
+            Ok(plan_mode_payload(&session_id, enabled, Some(&report)))
+        }
+    })
 }
 
 #[cfg(test)]
