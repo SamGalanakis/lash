@@ -269,7 +269,7 @@ impl ManagedSessionCapability {
     pub(in crate::runtime::session_manager) async fn inject_turn_input(
         &self,
         session_id: &str,
-        message: crate::PluginMessage,
+        input: crate::InjectedTurnInput,
     ) -> Result<(), crate::PluginError> {
         let runtime_arc = {
             let registry = self.registry.lock().await;
@@ -288,7 +288,7 @@ impl ManagedSessionCapability {
         };
         session
             .turn_input_injection_bridge()
-            .enqueue(vec![crate::InjectedTurnInput { message }])
+            .enqueue(vec![input])
             .map_err(crate::PluginError::Session)
     }
 }

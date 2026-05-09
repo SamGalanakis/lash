@@ -16,9 +16,8 @@ use lash::llm::types::{
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
 use lash::provider::{
-    AgentModelSelection, NoopProviderAuth, NoopProviderReadiness, ProviderComponents,
-    ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState, ProviderTransport,
-    VariantRequestConfig,
+    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, VariantRequestConfig,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -892,8 +891,6 @@ impl AnthropicProvider {
     pub fn into_components(self) -> ProviderComponents {
         ProviderComponents::new(
             Box::new(self.clone()),
-            Box::new(NoopProviderAuth),
-            Box::new(NoopProviderReadiness::new()),
             Box::new(self),
             std::sync::Arc::new(AnthropicModelPolicy),
         )

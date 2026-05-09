@@ -7,5 +7,8 @@
 mod plan_mode;
 mod update_plan;
 
-pub use plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
+pub use plan_mode::{
+    PlanModeDisableOp, PlanModeEnableOp, PlanModeExternalArgs, PlanModeExternalStatus,
+    PlanModePluginConfig, PlanModePluginFactory, PlanModePrompt, PlanModeToggleOp,
+};
 pub use update_plan::{PlanItem, PlanSnapshot, UpdatePlanPluginFactory};

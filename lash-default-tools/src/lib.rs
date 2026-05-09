@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::tools::{
-    ApplyPatchTool, AskTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory,
-    StandardShellPluginFactory, WebSearch,
+    ApplyPatchTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, StandardShellPluginFactory,
+    WebSearch,
 };
 use lash::{
     BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
@@ -134,13 +134,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                         .with_tool_provider(Arc::new(Grep::new()) as Arc<dyn ToolProvider>),
                 )));
             }
-            DefaultToolBundle::UserPrompts => {
-                factories.push(Arc::new(StaticPluginFactory::new(
-                    "ask",
-                    PluginSpec::new()
-                        .with_tool_provider(Arc::new(AskTool::new()) as Arc<dyn ToolProvider>),
-                )));
-            }
+            DefaultToolBundle::UserPrompts => {}
             DefaultToolBundle::Web => {
                 if let Some(key) = options.tavily_api_key.clone() {
                     let search_key = key.clone();

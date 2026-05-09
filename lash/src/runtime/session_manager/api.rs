@@ -101,9 +101,9 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
     async fn inject_turn_input(
         &self,
         session_id: &str,
-        message: crate::PluginMessage,
+        input: crate::InjectedTurnInput,
     ) -> Result<(), crate::PluginError> {
-        self.managed.inject_turn_input(session_id, message).await
+        self.managed.inject_turn_input(session_id, input).await
     }
 
     async fn spawn_hidden_task(
@@ -265,16 +265,6 @@ impl crate::plugin::SessionGraphHost for RuntimeSessionManager {
                 request,
             )
             .await
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::PromptHost for RuntimeSessionManager {
-    async fn prompt_user(
-        &self,
-        request: crate::PromptRequest,
-    ) -> Result<crate::PromptResponse, crate::PluginError> {
-        self.prompt.prompt_user(request).await
     }
 }
 

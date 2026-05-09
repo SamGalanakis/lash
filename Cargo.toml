@@ -24,7 +24,7 @@ members = [
     "lash-provider-openai",
     "lash-providers-builtin",
     "lash-subagents",
-    "lash-ui",
+    "lash-tui-extensions",
     "lash-tui",
     "lash-autoresearch",
     "lash-harness-opt",

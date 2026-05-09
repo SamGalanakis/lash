@@ -49,7 +49,7 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model("anthropic/claude-sonnet-4.6")
+    .model("anthropic/claude-sonnet-4.6", None)
     .max_context_tokens(200_000)
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
@@ -216,6 +216,63 @@ let result = session
 
         <div class="section">
           <div class="section-header">
+            <h2>Prompt Templates And Slots</h2>
+            <p><code>lash-embed</code> exposes the same prompt model as the runtime: one effective template chooses the layout, while slot contributions supply app, session, and turn-specific content. Core, session, and turn layers inherit by default; a lower layer can replace or clear one slot without rebuilding the whole template.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Template layout is separate from slot content</div>
+            <pre><code>use lash_embed::{
+    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection,
+};
+
+let template = PromptTemplate::new(vec![
+    PromptTemplateSection::untitled(vec![
+        PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
+        PromptTemplateEntry::slot(PromptSlot::Intro),
+    ]),
+    PromptTemplateSection::titled(
+        "Guidance",
+        vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
+    ),
+]);
+
+let core = lash_embed::LashCore::standard()
+    .provider(provider)
+    .model("gpt-5.4", None)
+    .max_context_tokens(200_000)
+    .prompt_template(template)
+    .prompt_contribution(PromptContribution::guidance(
+        "App",
+        "Answer as the host application assistant.",
+    ))
+    .build()?;
+
+let session = core
+    .session("customer-42")
+    .replace_prompt_slot(
+        PromptSlot::Guidance,
+        [PromptContribution::guidance(
+            "Tenant",
+            "Use the tenant's support policy.",
+        )],
+    )
+    .open()
+    .await?;
+
+let result = session
+    .turn(Input::text("Draft the response."))
+    .prompt_contribution(PromptContribution::guidance(
+        "Turn",
+        "Keep this reply under 120 words.",
+    ))
+    .run()
+    .await?;</code></pre>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
             <h2>Typed Plugin Input</h2>
             <p>Embed plugins let an app provide strongly typed session configuration and per-turn input. The plugin can contribute prompt context and tools, and tools read the same typed turn input through <code>ToolExecutionContext</code>.</p>
           </div>
@@ -284,11 +341,12 @@ impl lash::ToolProvider for BoardTools {
     }
 }</code></pre>
           </div>
+          <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. Embed streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
           <p>Register the plugin on the core, activate it on the session, and provide turn input before each run:</p>
           <pre><code>let core = LashCore::rlm()
     .register_plugin::&lt;BoardPlugin&gt;()
     .provider(provider)
-    .model(model)
+    .model(model, None)
     .build()?;
 
 let session = core

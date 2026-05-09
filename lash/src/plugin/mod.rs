@@ -9,6 +9,8 @@ use crate::{
     ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
     ToolProvider, ToolResult, TurnInput,
 };
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tokio::sync::mpsc;
@@ -27,6 +29,8 @@ pub type SessionConfigMutator = Arc<
 pub type ExternalInvokeFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
 pub type ExternalInvokeHandler =
     Arc<dyn Fn(ExternalInvokeContext, serde_json::Value) -> ExternalInvokeFuture + Send + Sync>;
+pub type TypedExternalOpFuture<T> =
+    Pin<Box<dyn Future<Output = Result<T, TypedExternalOpError>> + Send>>;
 pub type BeforeTurnHook =
     Arc<dyn Fn(TurnHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type BeforeToolCallHook =
@@ -41,8 +45,6 @@ pub type CheckpointHook =
     Arc<dyn Fn(CheckpointHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type PromptContributor =
     Arc<dyn Fn(PromptHookContext) -> PluginFuture<Vec<PromptContribution>> + Send + Sync>;
-pub type PromptRequestHook =
-    Arc<dyn Fn(PromptRequestHookContext) -> PluginFuture<Vec<PluginSurfaceEvent>> + Send + Sync>;
 pub type ToolSurfaceContributor =
     Arc<dyn Fn(ToolSurfaceContext) -> Result<ToolSurfaceContribution, PluginError> + Send + Sync>;
 pub type ToolDiscoveryContributor = Arc<
@@ -53,9 +55,6 @@ pub type AssistantStreamHook =
 pub type AssistantResponseHook = Arc<
     dyn Fn(AssistantResponseHookContext) -> PluginFuture<AssistantResponseTransform> + Send + Sync,
 >;
-pub type CommandHandler =
-    Arc<dyn Fn(CommandInvocation) -> PluginFuture<CommandOutcome> + Send + Sync>;
-
 mod mode;
 pub use mode::{
     ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, ModeNativeToolsPlugin,
@@ -557,7 +556,7 @@ pub trait TaskHost: Send + Sync {
     async fn inject_turn_input(
         &self,
         _session_id: &str,
-        _message: PluginMessage,
+        _input: crate::InjectedTurnInput,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "turn input injection is unavailable in this session".to_string(),
@@ -695,18 +694,6 @@ pub trait SessionGraphHost: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub trait PromptHost: Send + Sync {
-    async fn prompt_user(
-        &self,
-        _request: crate::PromptRequest,
-    ) -> Result<crate::PromptResponse, PluginError> {
-        Err(PluginError::Session(
-            "user prompts are unavailable in this session".to_string(),
-        ))
-    }
-}
-
-#[async_trait::async_trait]
 pub trait DirectCompletionHost: Send + Sync {
     /// Make a single LLM call without creating a full session. Used by
     /// plugins for structured extraction, summarization, observation,
@@ -754,20 +741,12 @@ impl<T> PromptHookHost for T where
 {
 }
 
-pub trait PromptRequestHookHost: PromptHost {}
-impl<T> PromptRequestHookHost for T where T: PromptHost + ?Sized {}
-
 pub trait TurnHookHost:
-    SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + PromptHost + TraceHost
+    SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + TraceHost
 {
 }
 impl<T> TurnHookHost for T where
-    T: SessionSnapshotHost
-        + DynamicToolHost
-        + SessionLifecycleHost
-        + PromptHost
-        + TraceHost
-        + ?Sized
+    T: SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + TraceHost + ?Sized
 {
 }
 
@@ -780,7 +759,6 @@ pub trait ToolHookHost:
     + TaskHost
     + MonitorHost
     + SessionGraphHost
-    + PromptHost
     + DirectCompletionHost
     + TraceHost
     + TurnResultHookHost
@@ -796,7 +774,6 @@ impl<T> ToolHookHost for T where
         + TaskHost
         + MonitorHost
         + SessionGraphHost
-        + PromptHost
         + DirectCompletionHost
         + TraceHost
         + ?Sized
@@ -808,9 +785,6 @@ impl<T> TurnResultHookHost for T where T: SessionLifecycleHost + TraceHost + ?Si
 
 pub trait CheckpointHookHost: SessionLifecycleHost + TraceHost {}
 impl<T> CheckpointHookHost for T where T: SessionLifecycleHost + TraceHost + ?Sized {}
-
-pub trait CommandHost: HistoryHost + TraceHost {}
-impl<T> CommandHost for T where T: HistoryHost + TraceHost + ?Sized {}
 
 pub trait HistoryHost:
     SessionSnapshotHost
@@ -841,7 +815,6 @@ pub trait ExternalInvokeHost:
     + TaskHost
     + MonitorHost
     + SessionGraphHost
-    + PromptHost
     + DirectCompletionHost
     + TraceHost
 {
@@ -855,7 +828,6 @@ impl<T> ExternalInvokeHost for T where
         + TaskHost
         + MonitorHost
         + SessionGraphHost
-        + PromptHost
         + DirectCompletionHost
         + TraceHost
         + ?Sized
@@ -863,24 +835,11 @@ impl<T> ExternalInvokeHost for T where
 }
 
 pub trait RuntimeSessionHost:
-    ExternalInvokeHost
-    + ToolHookHost
-    + HistoryHost
-    + CommandHost
-    + TurnHookHost
-    + PromptHookHost
-    + PromptRequestHookHost
+    ExternalInvokeHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost
 {
 }
 impl<T> RuntimeSessionHost for T where
-    T: ExternalInvokeHost
-        + ToolHookHost
-        + HistoryHost
-        + CommandHost
-        + TurnHookHost
-        + PromptHookHost
-        + PromptRequestHookHost
-        + ?Sized
+    T: ExternalInvokeHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost + ?Sized
 {
 }
 
@@ -924,13 +883,6 @@ pub struct PromptHookContext {
     pub state: SessionReadView,
     pub mode_turn_options: ModeTurnOptions,
     pub turn_context: crate::TurnContext,
-}
-
-#[derive(Clone)]
-pub struct PromptRequestHookContext {
-    pub session_id: String,
-    pub request: crate::PromptRequest,
-    pub host: Arc<dyn PromptRequestHookHost>,
 }
 
 #[derive(Clone)]
@@ -1053,42 +1005,6 @@ pub struct CheckpointHookContext {
     pub host: Arc<dyn CheckpointHookHost>,
 }
 
-/// Metadata about a slash command contributed by a plugin.
-#[derive(Clone, Debug)]
-pub struct CommandDef {
-    pub name: &'static str,
-    pub usage: &'static str,
-    pub description: &'static str,
-    pub argument_hint: Option<&'static str>,
-    pub argument_options: &'static [&'static str],
-    pub takes_argument: bool,
-    /// When true, the host may invoke this command while a turn is
-    /// streaming instead of queueing it behind the turn. Plugins should
-    /// only opt in for handlers that are read-only with respect to the
-    /// runtime / persisted state.
-    pub runs_out_of_band: bool,
-}
-
-/// Runtime context passed to a plugin command handler.
-#[derive(Clone)]
-pub struct CommandInvocation {
-    pub name: String,
-    pub argument: Option<String>,
-    pub session_id: String,
-    pub host: Arc<dyn CommandHost>,
-}
-
-/// Result from a plugin command handler, surfaced into the host UI.
-#[derive(Clone, Debug)]
-pub enum CommandOutcome {
-    /// Handler did its work and has no user-visible message.
-    Handled,
-    /// Push a user-visible system message.
-    Message(String),
-    /// Push a user-visible error message.
-    Error(String),
-}
-
 #[derive(Clone)]
 pub struct AssistantStreamHookContext {
     pub session_id: String,
@@ -1158,6 +1074,60 @@ pub struct ExternalOpDef {
     pub output_schema: serde_json::Value,
 }
 
+pub trait TypedExternalOp: Send + Sync + 'static {
+    const NAME: &'static str;
+    const DESCRIPTION: &'static str;
+    const KIND: ExternalOpKind;
+    const SESSION_PARAM: SessionParam;
+    type Args: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+    type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct TypedExternalOpError {
+    message: String,
+}
+
+impl TypedExternalOpError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for TypedExternalOpError {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for TypedExternalOpError {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<PluginError> for TypedExternalOpError {
+    fn from(value: PluginError) -> Self {
+        Self::new(value.to_string())
+    }
+}
+
+pub fn typed_external_op_def<Op: TypedExternalOp>() -> ExternalOpDef {
+    ExternalOpDef {
+        name: Op::NAME.to_string(),
+        description: Op::DESCRIPTION.to_string(),
+        kind: Op::KIND,
+        session_param: Op::SESSION_PARAM,
+        input_schema: serde_json::to_value(schemars::schema_for!(Op::Args))
+            .unwrap_or_else(|_| serde_json::json!({})),
+        output_schema: serde_json::to_value(schemars::schema_for!(Op::Output))
+            .unwrap_or_else(|_| serde_json::json!({})),
+    }
+}
+
 #[derive(Clone)]
 pub struct ExternalInvokeContext {
     pub session_id: Option<String>,
@@ -1177,6 +1147,11 @@ pub use registry::{
 };
 
 mod monitor;
+pub use monitor::{
+    AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorStartOp,
+    MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec, RegisterSpecsArgs,
+    StartMonitorArgs, StopMonitorArgs,
+};
 mod registrar;
 mod runtime_impl;
 mod services;
@@ -1184,12 +1159,12 @@ mod session_obj;
 mod tool_result_projection_builtin;
 
 pub use registrar::{
-    CommandRegistrations, ExternalRegistrations, HistoryRegistrations, ModeRegistrations,
-    MonitorRegistrations, OutputRegistrations, PluginRegistrar, PromptRegistrations,
-    SessionRegistrations, SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations,
-    ToolResultRegistrations, TurnRegistrations,
+    ExternalRegistrations, HistoryRegistrations, ModeRegistrations, MonitorRegistrations,
+    OutputRegistrations, PluginRegistrar, PromptRegistrations, SessionRegistrations,
+    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
+    TurnRegistrations,
 };
-pub(crate) use registrar::{RegisteredCommand, RegisteredExclusiveHook, RegisteredHook};
+pub(crate) use registrar::{RegisteredExclusiveHook, RegisteredHook};
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;
 pub use services::{ExternalInvokeError, PersistentRuntimeServices, RuntimeServices};
@@ -1227,6 +1202,28 @@ mod tests {
     use crate::{ExecutionMode, SessionStateEnvelope, ToolDefinition};
 
     struct MockToolProvider;
+
+    #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+    struct TypedEchoArgs {
+        value: String,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+    struct TypedEchoOutput {
+        value: String,
+        session_id: Option<String>,
+    }
+
+    struct TypedEchoOp;
+
+    impl TypedExternalOp for TypedEchoOp {
+        const NAME: &'static str = "mock.typed_echo";
+        const DESCRIPTION: &'static str = "typed echo";
+        const KIND: ExternalOpKind = ExternalOpKind::Query;
+        const SESSION_PARAM: SessionParam = SessionParam::Optional;
+        type Args = TypedEchoArgs;
+        type Output = TypedEchoOutput;
+    }
 
     #[async_trait::async_trait]
     impl ToolProvider for MockToolProvider {
@@ -1309,6 +1306,13 @@ mod tests {
                     })
                 }),
             )?;
+            reg.external()
+                .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+                    Ok(TypedEchoOutput {
+                        value: args.value,
+                        session_id: ctx.session_id,
+                    })
+                })?;
             Ok(())
         }
 
@@ -1368,6 +1372,118 @@ mod tests {
             result.result.get("session_id").and_then(|v| v.as_str()),
             Some("root")
         );
+    }
+
+    #[tokio::test]
+    async fn typed_external_op_generates_schema_and_invokes_typed_output() {
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let session = host.build_standard_session("root", None).expect("session");
+
+        let def = session
+            .external_ops()
+            .into_iter()
+            .find(|def| def.name == TypedEchoOp::NAME)
+            .expect("typed op definition");
+        assert_eq!(def.kind, ExternalOpKind::Query);
+        assert_eq!(def.session_param, SessionParam::Optional);
+        let value_type = def
+            .input_schema
+            .pointer("/schema/properties/value/type")
+            .or_else(|| def.input_schema.pointer("/properties/value/type"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(value_type, Some("string"));
+
+        let output = session
+            .invoke_external_typed::<TypedEchoOp>(
+                TypedEchoArgs {
+                    value: "hello".to_string(),
+                },
+                None,
+                true,
+                Arc::new(MockSessionManager::default()),
+            )
+            .await
+            .expect("typed invoke");
+        assert_eq!(output.value, "hello");
+        assert_eq!(output.session_id.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn typed_external_op_rejects_duplicate_names() {
+        struct DuplicatePlugin;
+
+        impl SessionPlugin for DuplicatePlugin {
+            fn id(&self) -> &'static str {
+                "duplicate"
+            }
+
+            fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
+                reg.external()
+                    .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+                        Ok(TypedEchoOutput {
+                            value: args.value,
+                            session_id: ctx.session_id,
+                        })
+                    })?;
+                reg.external()
+                    .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
+                        Ok(TypedEchoOutput {
+                            value: args.value,
+                            session_id: ctx.session_id,
+                        })
+                    })
+            }
+        }
+
+        struct DuplicateFactory;
+        impl PluginFactory for DuplicateFactory {
+            fn id(&self) -> &'static str {
+                "duplicate"
+            }
+
+            fn build(
+                &self,
+                _ctx: &PluginSessionContext,
+            ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+                Ok(Arc::new(DuplicatePlugin))
+            }
+        }
+
+        let err = match PluginHost::new(vec![Arc::new(DuplicateFactory)])
+            .build_standard_session("root", None)
+        {
+            Ok(_) => panic!("duplicate typed external op should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("duplicate external invoke name"));
+    }
+
+    #[tokio::test]
+    async fn typed_external_invoke_errors_on_failed_or_invalid_output() {
+        struct BadOp;
+        impl TypedExternalOp for BadOp {
+            const NAME: &'static str = "mock.echo";
+            const DESCRIPTION: &'static str = "bad typed projection over raw op";
+            const KIND: ExternalOpKind = ExternalOpKind::Query;
+            const SESSION_PARAM: SessionParam = SessionParam::Optional;
+            type Args = TypedEchoArgs;
+            type Output = TypedEchoOutput;
+        }
+
+        let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
+        let session = host.build_standard_session("root", None).expect("session");
+        let err = session
+            .invoke_external_typed::<BadOp>(
+                TypedEchoArgs {
+                    value: "hello".to_string(),
+                },
+                None,
+                true,
+                Arc::new(MockSessionManager::default()),
+            )
+            .await
+            .expect_err("raw output shape should not match typed output");
+        assert!(err.to_string().contains("invalid mock.echo output"));
     }
 
     #[tokio::test]

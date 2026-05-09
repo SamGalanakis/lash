@@ -12,12 +12,11 @@ use std::sync::Arc;
 
 use super::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
-    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, CommandDef, CommandHandler,
-    ExternalInvokeHandler, ExternalOpDef, HistoryRewriter, PluginError, PluginHost,
-    PluginRegistrar, PluginRuntimeEventHook, PluginSnapshotMeta, PromptContributor,
-    PromptRequestHook, SessionConfigMutator, SessionToolAccess, SnapshotReader, SnapshotWriter,
-    SubagentSessionAuthority, ToolDiscoveryContributor, ToolResultProjectionHook,
-    ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
+    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ExternalInvokeHandler, ExternalOpDef,
+    HistoryRewriter, PluginError, PluginHost, PluginRegistrar, PluginRuntimeEventHook,
+    PluginSnapshotMeta, PromptContributor, SessionConfigMutator, SessionToolAccess, SnapshotReader,
+    SnapshotWriter, SubagentSessionAuthority, ToolDiscoveryContributor, ToolResultProjectionHook,
+    ToolResultProjector, ToolSurfaceContributor, TurnContextTransform, TypedExternalOp,
 };
 use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
 
@@ -25,7 +24,6 @@ use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
 pub struct PluginSpec {
     pub tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub prompt_contributors: Vec<PromptContributor>,
-    pub prompt_request_hooks: Vec<PromptRequestHook>,
     pub tool_surface_contributors: Vec<ToolSurfaceContributor>,
     pub tool_discovery_contributors: Vec<ToolDiscoveryContributor>,
     pub before_turn_hooks: Vec<BeforeTurnHook>,
@@ -39,7 +37,6 @@ pub struct PluginSpec {
     pub runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
     pub external_ops: Vec<(ExternalOpDef, ExternalInvokeHandler)>,
-    pub commands: Vec<(CommandDef, CommandHandler)>,
     pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
 }
@@ -56,11 +53,6 @@ impl PluginSpec {
 
     pub fn with_prompt_contributor(mut self, contributor: PromptContributor) -> Self {
         self.prompt_contributors.push(contributor);
-        self
-    }
-
-    pub fn with_prompt_request(mut self, hook: PromptRequestHook) -> Self {
-        self.prompt_request_hooks.push(hook);
         self
     }
 
@@ -136,9 +128,62 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_command(mut self, def: CommandDef, handler: CommandHandler) -> Self {
-        self.commands.push((def, handler));
-        self
+    pub fn with_typed_external_op<Op, F, Fut>(self, handler: F) -> Self
+    where
+        Op: TypedExternalOp,
+        F: Fn(super::ExternalInvokeContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Op::Output, super::TypedExternalOpError>>
+            + Send
+            + 'static,
+    {
+        self.with_external_op(
+            super::typed_external_op_def::<Op>(),
+            Arc::new(move |ctx, args| {
+                let parsed = serde_json::from_value::<Op::Args>(args);
+                match parsed {
+                    Ok(args) => {
+                        let fut = handler(ctx, args);
+                        Box::pin(async move {
+                            match fut.await {
+                                Ok(output) => match serde_json::to_value(output) {
+                                    Ok(value) => crate::ToolResult::ok(value),
+                                    Err(err) => crate::ToolResult::err(serde_json::json!(format!(
+                                        "failed to serialize {} output: {err}",
+                                        Op::NAME
+                                    ))),
+                                },
+                                Err(err) => {
+                                    crate::ToolResult::err(serde_json::json!(err.to_string()))
+                                }
+                            }
+                        })
+                    }
+                    Err(err) => Box::pin(async move {
+                        crate::ToolResult::err(serde_json::json!(format!(
+                            "invalid {} args: {err}",
+                            Op::NAME
+                        )))
+                    }),
+                }
+            }),
+        )
+    }
+
+    pub fn with_typed_external_op_sync<Op, F>(self, handler: F) -> Self
+    where
+        Op: TypedExternalOp,
+        F: Fn(
+                super::ExternalInvokeContext,
+                Op::Args,
+            ) -> Result<Op::Output, super::TypedExternalOpError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.with_typed_external_op::<Op, _, _>(move |ctx, args| {
+            let result = handler(ctx, args);
+            async move { result }
+        })
     }
 
     pub fn with_turn_context_transform(
@@ -359,9 +404,6 @@ impl SessionPlugin for SpecPlugin {
         for contributor in &self.spec.prompt_contributors {
             reg.prompt().contribute(Arc::clone(contributor));
         }
-        for hook in &self.spec.prompt_request_hooks {
-            reg.prompt().on_request(Arc::clone(hook));
-        }
         for contributor in &self.spec.tool_surface_contributors {
             reg.surface().contribute(Arc::clone(contributor));
         }
@@ -400,9 +442,6 @@ impl SessionPlugin for SpecPlugin {
         }
         for (def, handler) in &self.spec.external_ops {
             reg.external().op(def.clone(), Arc::clone(handler))?;
-        }
-        for (def, handler) in &self.spec.commands {
-            reg.commands().register(def.clone(), Arc::clone(handler))?;
         }
         for (priority, transform) in &self.spec.turn_context_transforms {
             reg.history().prepare_turn(*priority, Arc::clone(transform));

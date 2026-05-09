@@ -321,7 +321,6 @@ impl PluginHost {
             tool_access: authority.tool_access,
             subagent: authority.subagent,
             prompt_contributors: reg.prompt_contributors,
-            prompt_request_hooks: reg.prompt_request_hooks,
             tool_surface_contributors: reg.tool_surface_contributors,
             tool_discovery_contributors: reg.tool_discovery_contributors,
             before_turn_hooks: reg.before_turn_hooks,
@@ -335,7 +334,6 @@ impl PluginHost {
             runtime_event_hooks: reg.runtime_event_hooks,
             session_config_mutators: reg.session_config_mutators,
             external_ops: reg.external_ops,
-            commands: reg.commands,
             monitor_specs: reg.monitor_specs,
             turn_context_transforms: {
                 let mut list = reg.turn_context_transforms;

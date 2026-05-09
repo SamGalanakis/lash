@@ -32,8 +32,8 @@ pub use mode::{
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 pub use plugin::{
-    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, UserInputProvenance,
-    UserInputTransform,
+    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, PromptContributionGate,
+    UserInputProvenance, UserInputTransform,
 };
 pub use prompt::{
     PreparedPrompt, PromptBuildInput, PromptCache, build_prompt, build_prompt_cached,
@@ -50,12 +50,14 @@ pub use session::{
 };
 pub use session_model::message::MessageOrigin;
 pub use session_model::{
-    BaseRenderCache, CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO,
-    Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind, PromptBuiltin,
-    PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, SessionEvent,
+    AcceptedInjectedTurnInput, BaseRenderCache, CORE_GUIDANCE_SECTION, ConversationRecord,
+    ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence, Part, PartAttachment,
+    PartKind, PromptBuiltin, PromptLayer, PromptPanel, PromptRequest, PromptResponse,
+    PromptSelectionMode, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, SessionEvent,
     SessionEventRecord, StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish, TurnOutcome,
-    TurnStop, default_prompt_template, messages_are_prompt_resume_safe, shared_parts,
+    TurnStop, default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers,
+    shared_parts,
 };
 pub use tool_surface::{
     ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,

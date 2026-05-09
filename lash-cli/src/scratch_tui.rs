@@ -1,5 +1,5 @@
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, TermCapabilities};
-use lash_ui::{UiRenderContext, UiSurfaceScene, UiSurfaceSlot};
+use lash_tui_extensions::{TuiRenderContext, TuiSurfaceScene, TuiSurfaceSlot};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, format_tokens};
@@ -40,7 +40,7 @@ pub fn draw_with_capabilities(
     let surfaces = app.ui_extensions().surface_scene();
     draw_status_bar(frame, app, Rect::new(0, 0, area.width, 1));
     let surfaces = sync_surface_areas(app, surfaces, history, dock_area, footer_area, body_area);
-    if surfaces.has_slot(UiSurfaceSlot::Workspace) {
+    if surfaces.has_slot(TuiSurfaceSlot::Workspace) {
         draw_workspace_surface(frame, app, &surfaces, history, capabilities);
     } else {
         draw_history(frame, app, history);
@@ -51,7 +51,7 @@ pub fn draw_with_capabilities(
             frame,
             app,
             &surfaces,
-            UiSurfaceSlot::Dock,
+            TuiSurfaceSlot::Dock,
             dock_area,
             capabilities,
         );
@@ -64,7 +64,7 @@ pub fn draw_with_capabilities(
             frame,
             app,
             &surfaces,
-            UiSurfaceSlot::Footer,
+            TuiSurfaceSlot::Footer,
             footer_area,
             capabilities,
         );
@@ -84,12 +84,12 @@ pub fn draw_with_capabilities(
 
 fn sync_surface_areas(
     app: &App,
-    mut surfaces: UiSurfaceScene,
+    mut surfaces: TuiSurfaceScene,
     history_area: Rect,
     dock_area: Rect,
     footer_area: Rect,
     body_area: Rect,
-) -> UiSurfaceScene {
+) -> TuiSurfaceScene {
     let mut assignments = Vec::new();
     if let Some(surface) = surfaces.workspace.last_mut() {
         surface.area = Some(history_area);
@@ -150,7 +150,7 @@ fn sync_surface_areas(
 fn draw_workspace_surface(
     frame: &mut Frame<'_>,
     app: &App,
-    surfaces: &UiSurfaceScene,
+    surfaces: &TuiSurfaceScene,
     area: Rect,
     capabilities: TermCapabilities,
 ) {
@@ -160,7 +160,7 @@ fn draw_workspace_surface(
     let mut viewport = frame.viewport(area);
     app.ui_extensions().render_mounted_surface(
         surface,
-        UiRenderContext {
+        TuiRenderContext {
             session_id: app.session_id.as_str(),
             capabilities,
             surface_id: &surface.id,
@@ -173,8 +173,8 @@ fn draw_workspace_surface(
 fn draw_surface_stack(
     frame: &mut Frame<'_>,
     app: &App,
-    surfaces: &UiSurfaceScene,
-    slot: UiSurfaceSlot,
+    surfaces: &TuiSurfaceScene,
+    slot: TuiSurfaceSlot,
     area: Rect,
     capabilities: TermCapabilities,
 ) {
@@ -189,7 +189,7 @@ fn draw_surface_stack(
         viewport.clear(bg(theme::surface_raised()));
         app.ui_extensions().render_mounted_surface(
             surface,
-            UiRenderContext {
+            TuiRenderContext {
                 session_id: app.session_id.as_str(),
                 capabilities,
                 surface_id: &surface.id,
@@ -203,7 +203,7 @@ fn draw_surface_stack(
 fn draw_overlay_surface(
     frame: &mut Frame<'_>,
     app: &App,
-    surfaces: &UiSurfaceScene,
+    surfaces: &TuiSurfaceScene,
     area: Rect,
     capabilities: TermCapabilities,
 ) {
@@ -218,7 +218,7 @@ fn draw_overlay_surface(
     viewport.clear(bg(theme::surface_base()));
     app.ui_extensions().render_mounted_surface(
         surface,
-        UiRenderContext {
+        TuiRenderContext {
             session_id: app.session_id.as_str(),
             capabilities,
             surface_id: &surface.id,
@@ -1293,9 +1293,9 @@ fn bg(color: lash_tui::Color) -> Style {
 mod tests {
     use super::*;
     use lash::{PromptRequest, PromptUsage};
-    use lash_ui::{
-        UiExtension, UiExtensions, UiHostEffect, UiRenderContext, UiSurfaceSize, UiSurfaceSlot,
-        UiSurfaceSpec,
+    use lash_tui_extensions::{
+        TuiExtension, TuiExtensions, TuiHostEffect, TuiRenderContext, TuiSurfaceSize,
+        TuiSurfaceSlot, TuiSurfaceSpec,
     };
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -1513,10 +1513,10 @@ mod tests {
         );
     }
 
-    struct SurfaceTestExtension;
+    struct SurfaceTestTuiExtension;
 
     #[async_trait::async_trait]
-    impl UiExtension for SurfaceTestExtension {
+    impl TuiExtension for SurfaceTestTuiExtension {
         fn id(&self) -> &'static str {
             "surface_test"
         }
@@ -1525,15 +1525,15 @@ mod tests {
             &self,
             _action: &str,
             _arg: Option<&str>,
-            _ctx: lash_ui::UiContext<'_>,
-        ) -> Result<Vec<UiHostEffect>, String> {
+            _ctx: lash_tui_extensions::TuiExtensionContext<'_>,
+        ) -> Result<Vec<TuiHostEffect>, String> {
             Ok(Vec::new())
         }
 
         fn render_surface(
             &self,
             surface_key: &str,
-            _ctx: UiRenderContext<'_>,
+            _ctx: TuiRenderContext<'_>,
             frame: &mut Frame<'_>,
         ) {
             let label = match surface_key {
@@ -1545,25 +1545,25 @@ mod tests {
             frame.write_text(0, 0, label, Style::default(), frame.area().width);
         }
 
-        fn handle_session_event(&self, event: &lash::SessionEvent) -> Vec<UiHostEffect> {
+        fn handle_turn_event(&self, event: &lash::TurnEvent) -> Vec<TuiHostEffect> {
             match event {
-                lash::SessionEvent::TextDelta { content } if content == "mount" => vec![
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                lash::TurnEvent::AssistantProseDelta { text } if text == "mount" => vec![
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "workspace".to_string(),
-                            slot: UiSurfaceSlot::Workspace,
-                            size: UiSurfaceSize::Auto,
+                            slot: TuiSurfaceSlot::Workspace,
+                            size: TuiSurfaceSize::Auto,
                             order: 0,
                             focusable: true,
                             visible: true,
                             modal: false,
                         },
                     },
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "footer".to_string(),
-                            slot: UiSurfaceSlot::Footer,
-                            size: UiSurfaceSize::Lines(1),
+                            slot: TuiSurfaceSlot::Footer,
+                            size: TuiSurfaceSize::Lines(1),
                             order: 0,
                             focusable: false,
                             visible: true,
@@ -1571,12 +1571,12 @@ mod tests {
                         },
                     },
                 ],
-                lash::SessionEvent::TextDelta { content } if content == "overlay" => vec![
-                    UiHostEffect::MountSurface {
-                        spec: UiSurfaceSpec {
+                lash::TurnEvent::AssistantProseDelta { text } if text == "overlay" => vec![
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
                             key: "overlay".to_string(),
-                            slot: UiSurfaceSlot::Overlay,
-                            size: UiSurfaceSize::Fixed {
+                            slot: TuiSurfaceSlot::Overlay,
+                            size: TuiSurfaceSize::Fixed {
                                 width: 16,
                                 height: 3,
                             },
@@ -1586,7 +1586,7 @@ mod tests {
                             modal: true,
                         },
                     },
-                    UiHostEffect::FocusSurface {
+                    TuiHostEffect::FocusSurface {
                         key: "overlay".to_string(),
                     },
                 ],
@@ -1600,10 +1600,11 @@ mod tests {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.timeline = vec![crate::app::UiTimelineItem::UserInput("history line".into())].into();
         let ui_extensions = Arc::new(
-            UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
+            TuiExtensions::new(vec![Arc::new(SurfaceTestTuiExtension)])
+                .expect("surface extensions"),
         );
-        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
-            content: "mount".to_string(),
+        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+            text: "mount".to_string(),
         });
         app.set_ui_extensions(Arc::clone(&ui_extensions));
 
@@ -1619,13 +1620,14 @@ mod tests {
     fn overlay_surface_renders_last_on_centered_scrim() {
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         let ui_extensions = Arc::new(
-            UiExtensions::new(vec![Arc::new(SurfaceTestExtension)]).expect("surface extensions"),
+            TuiExtensions::new(vec![Arc::new(SurfaceTestTuiExtension)])
+                .expect("surface extensions"),
         );
-        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
-            content: "mount".to_string(),
+        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+            text: "mount".to_string(),
         });
-        ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
-            content: "overlay".to_string(),
+        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+            text: "overlay".to_string(),
         });
         app.set_ui_extensions(Arc::clone(&ui_extensions));
 

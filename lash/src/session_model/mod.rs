@@ -161,6 +161,8 @@ pub struct SessionPolicy {
     pub execution_mode: ExecutionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standard_context_approach: Option<StandardContextApproach>,
+    #[serde(default, skip_serializing_if = "crate::PromptLayer::is_empty")]
+    pub prompt: crate::PromptLayer,
 }
 
 impl Default for SessionPolicy {
@@ -175,6 +177,7 @@ impl Default for SessionPolicy {
             max_turns: None,
             execution_mode: ExecutionMode::standard(),
             standard_context_approach: Some(StandardContextApproach::default()),
+            prompt: crate::PromptLayer::default(),
         }
     }
 }

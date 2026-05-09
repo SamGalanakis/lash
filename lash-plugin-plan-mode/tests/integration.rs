@@ -135,7 +135,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash::PromptHost for $ty {
+        impl lash_plugin_plan_mode::PlanModePrompt for $ty {
             async fn prompt_user(
                 &self,
                 request: lash::PromptRequest,
@@ -258,14 +258,14 @@ fn ready_plan_markdown() -> &'static str {
 
 ## Files
 - lash/src/plugin_builtin/plan_mode.rs
-- lash-ui/src/lib.rs
+- lash-tui-extensions/src/lib.rs
 
 ## Risks
 - Status/panel sync could drift if toggle handling is incomplete.
 
 ## Verification
 - cargo test -p lash --lib
-- cargo test -p lash-ui
+- cargo test -p lash-tui-extensions
 "#
 }
 
@@ -835,12 +835,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     )
     .expect("write plan");
 
-    let host = plan_mode_host(PlanModePluginFactory::new(PlanModePluginConfig::default()));
-    let session = host.build_standard_session("root", None).expect("session");
     let manager = Arc::new(PromptingSessionManager {
         base: mock_session_manager("run-session"),
     });
     let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
+    let host = plan_mode_host(
+        PlanModePluginFactory::new(PlanModePluginConfig::default()).with_prompt(manager.clone()),
+    );
+    let session = host.build_standard_session("root", None).expect("session");
 
     session
         .invoke_external(
@@ -986,9 +988,10 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = plan_mode_host(PlanModePluginFactory::default());
+    let manager = Arc::new(PromptingSessionManager);
+    let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(PromptingSessionManager);
+    let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
         .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
@@ -1108,9 +1111,10 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let _guard = plan_mode_env_lock().lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(temp.path());
-    let host = plan_mode_host(PlanModePluginFactory::default());
+    let manager = Arc::new(PromptingSessionManager);
+    let host = plan_mode_host(PlanModePluginFactory::default().with_prompt(manager.clone()));
     let session = host.build_standard_session("root", None).expect("session");
-    let manager: Arc<dyn RuntimeSessionHost> = Arc::new(PromptingSessionManager);
+    let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
         .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())

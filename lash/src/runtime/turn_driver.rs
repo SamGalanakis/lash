@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ModePreamble, PluginError, ToolSurface};
-use lash_sansio::{PreparedPrompt, PromptCache, PromptContribution, PromptTemplate};
+use lash_sansio::{PreparedPrompt, PromptCache, PromptLayer};
 
 mod effects;
 mod streaming;
@@ -22,6 +22,66 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                         mode_iteration: *mode_iteration,
                         usage: usage.clone(),
                         cumulative: cumulative.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::LlmRequest { mode_iteration, .. } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::ModelRequestStarted {
+                        mode_iteration: *mode_iteration,
+                    },
+                )
+                .await;
+            }
+            SessionEvent::RetryStatus {
+                wait_seconds,
+                attempt,
+                max_attempts,
+                reason,
+                ..
+            } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::RetryStatus {
+                        wait_seconds: *wait_seconds,
+                        attempt: *attempt,
+                        max_attempts: *max_attempts,
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::PluginEvent { plugin_id, event } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::PluginSurface {
+                        plugin_id: plugin_id.clone(),
+                        event: event.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::QueuedInputAccepted {
+                        checkpoint: *checkpoint,
+                        inputs: inputs.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::InjectedMessagesCommitted {
+                messages,
+                checkpoint,
+            } => {
+                send_turn_event(
+                    event_tx,
+                    TurnEvent::QueuedMessagesCommitted {
+                        messages: messages.clone(),
+                        checkpoint: *checkpoint,
                     },
                 )
                 .await;
@@ -133,7 +193,6 @@ pub(super) struct RuntimeTurnDriver {
     pub(super) llm_stream_summaries: HashMap<usize, LlmStreamSummary>,
     pub(super) next_llm_ordinal: usize,
     pub(super) session_manager: Arc<dyn RuntimeSessionHost>,
-    pub(super) prompt_bridge: HostPromptBridge,
     pub(super) mode_turn_options: crate::ModeTurnOptions,
     pub(super) mode_extension: Option<crate::ModeTurnExtensionHandle>,
     pub(super) turn_context: crate::TurnContext,
@@ -144,24 +203,35 @@ struct PreparedExecutionSurface {
     execution_mode: ExecutionMode,
     tool_surface: Arc<ToolSurface>,
     mode_preamble: Arc<ModePreamble>,
-    prompt_contributions: Vec<PromptContribution>,
+    prompt: PromptLayer,
 }
 
 impl PreparedExecutionSurface {
     fn build_prompt(
         &self,
-        template: PromptTemplate,
+        core_prompt: &PromptLayer,
+        session_prompt: &PromptLayer,
+        turn_prompt: &PromptLayer,
         prompt_cache: Option<Arc<PromptCache>>,
     ) -> PreparedPrompt {
-        let mut prompt_contributions = self.mode_preamble.prompt_contributions.clone();
-        prompt_contributions.extend(self.prompt_contributions.iter().cloned());
+        let mut capability_prompt = PromptLayer::new();
+        for contribution in self.mode_preamble.prompt_contributions.iter().cloned() {
+            capability_prompt.add_contribution(contribution);
+        }
+        let resolved = crate::resolve_prompt_layers([
+            &capability_prompt,
+            &self.prompt,
+            core_prompt,
+            session_prompt,
+            turn_prompt,
+        ]);
         let prompt_contributions = self
             .tool_surface
-            .filter_prompt_contributions(prompt_contributions);
+            .filter_prompt_contributions(resolved.contributions);
         lash_sansio::build_prompt_cached(
             crate::PromptBuildInput {
                 mode: self.execution_mode.clone(),
-                template,
+                template: resolved.template,
                 execution_prompt: self.mode_preamble.execution_prompt.clone(),
                 tool_names: self.mode_preamble.tool_names.clone(),
                 omitted_tool_count: self.mode_preamble.omitted_tool_count,
@@ -302,7 +372,7 @@ impl RuntimeTurnDriver {
                 send_session_event(&event_tx, $event).await
             };
         }
-        let result = async {
+        async {
             let mut machine = match self
                 .prepare_turn_machine(messages, &event_tx, run_offset)
                 .await
@@ -573,9 +643,7 @@ impl RuntimeTurnDriver {
 
             (crate::MessageSequence::default(), run_offset)
         }
-        .await;
-        self.prompt_bridge.clear_sender();
-        result
+        .await
     }
 
     async fn prepare_turn_machine(
@@ -622,6 +690,24 @@ impl RuntimeTurnDriver {
                 return Err((messages, run_offset));
             }
         };
+        let mut mode_prompt = PromptLayer::new();
+        for contribution in execution_surface
+            .mode_preamble
+            .prompt_contributions
+            .iter()
+            .cloned()
+        {
+            mode_prompt.add_contribution(contribution);
+        }
+        let resolved_prompt = crate::resolve_prompt_layers([
+            &mode_prompt,
+            &execution_surface.prompt,
+            &self.host.core.prompt,
+            &session_policy.prompt,
+            self.turn_context.prompt_layer(),
+        ]);
+        let mut mode_preamble = (*execution_surface.mode_preamble).clone();
+        mode_preamble.prompt_contributions.clear();
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
@@ -632,13 +718,9 @@ impl RuntimeTurnDriver {
             events: self.turn_pipeline.active_events(),
             mode_run_offset: run_offset,
             tool_surface: execution_surface.tool_surface,
-            mode_preamble: execution_surface.mode_preamble,
-            prompt_template: self.host.core.prompt_template.clone(),
-            prompt_contributions: {
-                let mut contributions = self.host.core.prompt_contributions.clone();
-                contributions.extend(execution_surface.prompt_contributions);
-                contributions
-            },
+            mode_preamble: Arc::new(mode_preamble),
+            prompt_template: resolved_prompt.template,
+            prompt_contributions: resolved_prompt.contributions,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
             emit_llm_trace: false,
@@ -691,7 +773,9 @@ impl RuntimeTurnDriver {
             .await
             .map_err(|err| crate::SessionError::Protocol(err.to_string()))?;
         let prepared_prompt = execution_surface.build_prompt(
-            self.host.core.prompt_template.clone(),
+            &self.host.core.prompt,
+            &policy.prompt,
+            self.turn_context.prompt_layer(),
             Some(self.session.prompt_cache()),
         );
 
@@ -730,16 +814,23 @@ impl RuntimeTurnDriver {
                 turn_context: self.turn_context.clone(),
             })
             .await?;
-        let mut prompt_contributions = self.session.context_prompt_contributions().to_vec();
-        prompt_contributions.extend(plugin_prompt_contributions);
+        let mut prompt = PromptLayer::new();
+        for contribution in self.session.context_prompt_contributions().iter().cloned() {
+            prompt.add_contribution(contribution);
+        }
+        for contribution in plugin_prompt_contributions {
+            prompt.add_contribution(contribution);
+        }
         if let Some(extension) = &self.mode_extension {
-            prompt_contributions.extend(extension.prompt_contributions());
+            for contribution in extension.prompt_contributions() {
+                prompt.add_contribution(contribution);
+            }
         }
         Ok(PreparedExecutionSurface {
             execution_mode,
             tool_surface,
             mode_preamble,
-            prompt_contributions,
+            prompt,
         })
     }
 

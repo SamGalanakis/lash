@@ -1,7 +1,7 @@
 use crossterm::event::Event as TermEvent;
-use lash::ManagedTaskStatus;
 use lash::SessionEvent;
-use lash_ui::UiHostEffect;
+use lash::{ManagedTaskStatus, PromptRequest, PromptResponse};
+use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
 
 /// Unified event type for the main loop.
@@ -17,6 +17,10 @@ pub enum AppEvent {
     Session {
         stream_id: u64,
         event: SessionEvent,
+    },
+    Prompt {
+        request: PromptRequest,
+        response_tx: std::sync::mpsc::Sender<PromptResponse>,
     },
     UiSnapshot {
         generation: u64,
@@ -36,7 +40,7 @@ pub enum AppEvent {
 }
 
 pub struct UiSnapshotResult {
-    pub effects: Vec<UiHostEffect>,
+    pub effects: Vec<TuiHostEffect>,
     pub background_tasks: Option<Vec<ManagedTaskStatus>>,
     pub duration: std::time::Duration,
     pub timed_out: bool,
@@ -157,7 +161,7 @@ fn lane_for_event(event: &AppEvent) -> EventLane {
         AppEvent::Terminal(_) | AppEvent::ClipboardImageReady { .. } | AppEvent::Quit => {
             EventLane::High
         }
-        AppEvent::Session { .. } => EventLane::Normal,
+        AppEvent::Session { .. } | AppEvent::Prompt { .. } => EventLane::Normal,
         AppEvent::UpdateCheckFinished { .. }
         | AppEvent::UiSnapshot { .. }
         | AppEvent::RequestUiSnapshot

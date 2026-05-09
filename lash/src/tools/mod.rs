@@ -1,5 +1,4 @@
 mod apply_patch;
-mod ask;
 pub mod batch;
 mod composite;
 mod fetch_url;
@@ -17,7 +16,6 @@ mod web_search;
 
 pub use apply_patch::ApplyPatchTool;
 pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
-pub use ask::AskTool;
 pub(crate) use composite::CompositeToolProvider;
 pub use fetch_url::FetchUrl;
 #[cfg(feature = "tool-impls")]

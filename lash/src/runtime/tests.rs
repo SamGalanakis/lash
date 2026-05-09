@@ -399,12 +399,7 @@ fn default_tool_session(
             crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::Ls)),
         )),
     ];
-    if enable_user_prompts {
-        factories.push(Arc::new(StaticPluginFactory::new(
-            "ask",
-            crate::PluginSpec::new().with_tool_provider(Arc::new(crate::tools::AskTool::new())),
-        )));
-    }
+    let _ = enable_user_prompts;
     crate::PluginHost::new(factories)
         .build_session(
             session_id,
@@ -1012,6 +1007,7 @@ async fn session_config_change_hook_receives_context_window_updates() {
             Some("alt-model".to_string()),
             Some(None),
             Some(123_456),
+            None,
         )
         .await;
 
@@ -1230,6 +1226,7 @@ async fn bridge_checkpoint_injection_continues_standard_turn() {
     let bridge = crate::TurnInputInjectionBridge::new();
     bridge
         .enqueue(vec![crate::InjectedTurnInput {
+            id: None,
             message: crate::PluginMessage::text(crate::MessageRole::User, "one more thing"),
         }])
         .expect("enqueue");
@@ -1497,6 +1494,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
     let bridge = crate::TurnInputInjectionBridge::new();
     bridge
         .enqueue(vec![crate::InjectedTurnInput {
+            id: Some("follow-up-id".to_string()),
             message: crate::PluginMessage {
                 role: crate::MessageRole::User,
                 content: "follow up".to_string(),
@@ -1546,9 +1544,11 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
 
     let mut saw_injected_accept = false;
     for event in sink.snapshot() {
-        if let crate::SessionEvent::InjectedTurnInputAccepted { messages, .. } = event {
-            saw_injected_accept = messages.iter().any(|message| {
-                message.role == crate::MessageRole::User && message.content == "follow up"
+        if let crate::SessionEvent::InjectedTurnInputAccepted { inputs, .. } = event {
+            saw_injected_accept = inputs.iter().any(|input| {
+                input.id.as_deref() == Some("follow-up-id")
+                    && input.message.role == crate::MessageRole::User
+                    && input.message.content == "follow up"
             });
         }
     }
@@ -3471,53 +3471,6 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
         })
         .collect();
     assert_eq!(streamed_text, "Intro paragraph.\n\n## Heading");
-}
-
-#[cfg(feature = "tool-impls")]
-#[tokio::test(flavor = "multi_thread")]
-async fn runtime_session_manager_forwards_user_prompts_when_available() {
-    let transport = mock_provider(Vec::new());
-    let runtime = rlm_mode_with_transport(transport).await;
-    let prompt_bridge = HostPromptBridge::new();
-    let manager = runtime
-        .runtime_session_manager_with_prompt_bridge(Some(prompt_bridge.clone()))
-        .expect("manager");
-    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
-    prompt_bridge.set_sender(prompt_tx);
-
-    let prompt_task = tokio::spawn(async move {
-        let prompt = prompt_rx.recv().await.expect("prompt");
-        assert_eq!(prompt.request.question, "Pick one");
-        assert_eq!(
-            prompt.request.options,
-            vec!["works".to_string(), "done".to_string()]
-        );
-        prompt
-            .response_tx
-            .send(crate::PromptResponse::Single {
-                selection: "done".to_string(),
-                note: None,
-            })
-            .expect("prompt response");
-    });
-
-    let answer = manager
-        .prompt_user(crate::PromptRequest::single(
-            "Pick one",
-            vec!["works".to_string(), "done".to_string()],
-        ))
-        .await
-        .expect("prompt answer");
-
-    prompt_bridge.clear_sender();
-    prompt_task.await.expect("prompt task");
-    assert_eq!(
-        answer,
-        crate::PromptResponse::Single {
-            selection: "done".to_string(),
-            note: None,
-        }
-    );
 }
 
 #[tokio::test]

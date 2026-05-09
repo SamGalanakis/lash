@@ -103,6 +103,145 @@ impl Default for PromptTemplate {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<PromptTemplate>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub slots: HashMap<PromptSlot, PromptSlotLayer>,
+}
+
+impl PromptLayer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.template.is_none() && self.slots.is_empty()
+    }
+
+    pub fn with_template(template: PromptTemplate) -> Self {
+        Self {
+            template: Some(template),
+            slots: HashMap::new(),
+        }
+    }
+
+    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
+        self.template = Some(template);
+        self
+    }
+
+    pub fn clear_template(mut self) -> Self {
+        self.template = None;
+        self
+    }
+
+    pub fn add_contribution(&mut self, contribution: PromptContribution) {
+        self.slots
+            .entry(contribution.slot)
+            .or_default()
+            .contributions
+            .push(contribution);
+    }
+
+    pub fn with_contribution(mut self, contribution: PromptContribution) -> Self {
+        self.add_contribution(contribution);
+        self
+    }
+
+    pub fn replace_slot(
+        &mut self,
+        slot: PromptSlot,
+        contributions: impl IntoIterator<Item = PromptContribution>,
+    ) {
+        self.slots.insert(
+            slot,
+            PromptSlotLayer {
+                reset: true,
+                contributions: normalize_slot_contributions(slot, contributions),
+            },
+        );
+    }
+
+    pub fn with_replaced_slot(
+        mut self,
+        slot: PromptSlot,
+        contributions: impl IntoIterator<Item = PromptContribution>,
+    ) -> Self {
+        self.replace_slot(slot, contributions);
+        self
+    }
+
+    pub fn clear_slot(&mut self, slot: PromptSlot) {
+        self.slots.insert(
+            slot,
+            PromptSlotLayer {
+                reset: true,
+                contributions: Vec::new(),
+            },
+        );
+    }
+
+    pub fn with_cleared_slot(mut self, slot: PromptSlot) -> Self {
+        self.clear_slot(slot);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptSlotLayer {
+    #[serde(default)]
+    pub reset: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributions: Vec<PromptContribution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPromptLayer {
+    pub template: PromptTemplate,
+    pub contributions: Vec<PromptContribution>,
+}
+
+pub fn resolve_prompt_layers<'a>(
+    layers: impl IntoIterator<Item = &'a PromptLayer>,
+) -> ResolvedPromptLayer {
+    let mut template = default_prompt_template();
+    let mut contributions = Vec::new();
+    for layer in layers {
+        if let Some(next_template) = &layer.template {
+            template = next_template.clone();
+        }
+        for (slot, slot_layer) in &layer.slots {
+            if slot_layer.reset {
+                contributions
+                    .retain(|contribution: &PromptContribution| contribution.slot != *slot);
+            }
+            contributions.extend(normalize_slot_contributions(
+                *slot,
+                slot_layer.contributions.iter().cloned(),
+            ));
+        }
+    }
+    ResolvedPromptLayer {
+        template,
+        contributions,
+    }
+}
+
+fn normalize_slot_contributions(
+    slot: PromptSlot,
+    contributions: impl IntoIterator<Item = PromptContribution>,
+) -> Vec<PromptContribution> {
+    contributions
+        .into_iter()
+        .map(|mut contribution| {
+            contribution.slot = slot;
+            contribution
+        })
+        .collect()
+}
+
 pub fn default_prompt_template() -> PromptTemplate {
     PromptTemplate::new(vec![
         PromptTemplateSection::untitled(vec![

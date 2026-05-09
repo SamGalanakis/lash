@@ -11,18 +11,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::Event as TermEvent;
 use lash::session_model::Message;
 use lash::*;
+use lash_embed::LashSession;
 use lash_sqlite_store::Store;
 use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
-use lash_ui::{UiCommandInvocation, UiContext, UiExtensions};
+use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
+use crate::prompt_tool::CliPromptBridge;
 use crate::render;
 use crate::resume;
-use crate::session_bootstrap::CliRuntimeFactory;
+use crate::session_bootstrap::CliSessionOpener;
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
 use crate::ui_action::UiAction;
@@ -68,13 +70,11 @@ use self::input_handling::enqueue_pending_monitor_wakes;
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_app(
     mut terminal: Terminal,
-    runtime: LashRuntime,
+    session: LashSession,
     plugin_host: PluginHost,
-    mut dynamic_tools: Arc<DynamicToolProvider>,
-    runtime_factory: CliRuntimeFactory,
+    runtime_factory: CliSessionOpener,
     lash_config: lash::provider::LashConfig,
-    turn_injection_bridge: TurnInjectionBridge,
-    turn_input_injection_bridge: TurnInputInjectionBridge,
+    prompt_bridge: CliPromptBridge,
     logger: &mut SessionLogger,
     args: &Args,
     mut provider: ProviderHandle,
@@ -89,23 +89,20 @@ pub(crate) async fn run_app(
     startup_system_message: Option<String>,
     subagent_host: Arc<dyn SubagentHost>,
 ) -> anyhow::Result<()> {
-    let initial_session_id = runtime.session_id().to_string();
+    let initial_session_id = session.session_id().await;
     let mut app = App::new(model, session_name, initial_session_id);
     app.activity_state.set_subagent_host(subagent_host);
-    let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeUiExtension::new();
-    let extra_ui_extensions: Vec<Arc<dyn lash_ui::UiExtension>> = vec![
-        Arc::new(lash_autoresearch::AutoresearchUiExtension::default()),
+    let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
+    let extra_ui_extensions: Vec<Arc<dyn lash_tui_extensions::TuiExtension>> = vec![
+        Arc::new(lash_autoresearch::AutoresearchTuiExtension::default()),
         chrome_ext,
     ];
     let ui_extensions = Arc::new(
-        UiExtensions::with_builtins(extra_ui_extensions)
+        TuiExtensions::with_builtins(extra_ui_extensions)
             .map_err(|err| anyhow::anyhow!("failed to build UI extensions: {err}"))?,
     );
     app.set_ui_extensions(Arc::clone(&ui_extensions));
     app.set_chrome_state(chrome_state);
-    if let Some(plugin_session) = runtime.plugin_session() {
-        app.plugin_commands = plugin_session.command_catalog();
-    }
     app.context_window = Some(initial_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
@@ -118,11 +115,16 @@ pub(crate) async fn run_app(
     app.load_history();
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
-    let mut session_manager = runtime
+    let mut session_manager = session
         .session_manager()
+        .await
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    let mut runtime = Some(runtime);
-    let mut desired_dynamic = dynamic_tools.export_state();
+    let mut runtime = Some(session);
+    let mut desired_dynamic = runtime
+        .as_ref()
+        .expect("session initialized")
+        .tool_state()
+        .await?;
     let mut pending_reconfigure = false;
     let mut ui_trace = args.debug_ui_trace.as_ref().map(|path| {
         let (width, height) = terminal.size().unwrap_or((80, 24));
@@ -147,6 +149,7 @@ pub(crate) async fn run_app(
     // Unified event channel
     let mut event_pump = AppEventPump::new();
     let app_tx = event_pump.sender();
+    prompt_bridge.set_event_tx(app_tx.clone());
     let mut snapshot_worker = UiSnapshotWorker::spawn(
         app_tx.clone(),
         Arc::clone(&ui_extensions),
@@ -255,7 +258,6 @@ pub(crate) async fn run_app(
             &mut current_execution_mode,
             &provider,
             &mut current_model_variant,
-            &dynamic_tools,
             &mut desired_dynamic,
             model_catalog.as_ref(),
         )
@@ -264,7 +266,7 @@ pub(crate) async fn run_app(
             push_system_message(&mut app, err);
         } else {
             if let Some(rt) = runtime.as_ref() {
-                match rt.session_manager() {
+                match rt.session_manager().await {
                     Ok(manager) => session_manager = manager,
                     Err(err) => push_system_message(
                         &mut app,
@@ -274,8 +276,14 @@ pub(crate) async fn run_app(
             }
             let _ = app_tx.send(AppEvent::RequestUiSnapshot);
             toolset_hash = hash12(
-                &serde_json::to_vec(&dynamic_tools.definitions())
-                    .unwrap_or_else(|_| b"[]".to_vec()),
+                &serde_json::to_vec(
+                    &desired_dynamic
+                        .tools
+                        .values()
+                        .map(|spec| spec.definition.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| b"[]".to_vec()),
             );
         }
         if let Some(prompt) = args
@@ -285,7 +293,6 @@ pub(crate) async fn run_app(
             .filter(|prompt| !prompt.is_empty())
         {
             if let Err(e) = apply_pending_reconfigure(
-                &dynamic_tools,
                 &mut desired_dynamic,
                 &mut pending_reconfigure,
                 &mut runtime,
@@ -301,12 +308,18 @@ pub(crate) async fn run_app(
                 );
             } else {
                 toolset_hash = hash12(
-                    &serde_json::to_vec(&dynamic_tools.definitions())
-                        .unwrap_or_else(|_| b"[]".to_vec()),
+                    &serde_json::to_vec(
+                        &desired_dynamic
+                            .tools
+                            .values()
+                            .map(|spec| spec.definition.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_else(|_| b"[]".to_vec()),
                 );
                 let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);
                 let turn_input = make_turn_input(&prepared);
-                let current_dynamic_state = dynamic_tools.export_state();
+                let current_dynamic_state = desired_dynamic.clone();
                 send_user_message(
                     prepared.clone(),
                     turn_input.clone(),
@@ -359,7 +372,6 @@ pub(crate) async fn run_app(
                 &mut cancel_token,
                 &mut active_stream_id,
                 &app_tx,
-                &turn_input_injection_bridge,
                 &desired_dynamic,
             )
             .await
@@ -389,7 +401,6 @@ pub(crate) async fn run_app(
                 ui_extensions.as_ref(),
                 &runtime_factory,
                 &lash_config,
-                &mut dynamic_tools,
                 &mut runtime,
                 &mut history,
                 &mut turn_counter,
@@ -422,7 +433,6 @@ pub(crate) async fn run_app(
                         active_stream_id,
                         "runtime return received in interactive loop"
                     );
-                    runtime = Some(done.runtime);
                     if done.stream_id == active_stream_id
                         && !pending_clear_after_return
                         && let Some(session_id) = pending_handoff_session_id.take()
@@ -464,7 +474,6 @@ pub(crate) async fn run_app(
                                 ui_extensions.as_ref(),
                                 &runtime_factory,
                                 &lash_config,
-                                &mut dynamic_tools,
                                 &mut runtime,
                                 &mut history,
                                 &mut turn_counter,
@@ -497,11 +506,12 @@ pub(crate) async fn run_app(
                         pending_handoff_session_id = None;
                         app.recycle_unaccepted_monitor_wakes();
                         if let Some(rt) = runtime.as_mut() {
-                            let preserved_policy = rt.export_state().policy;
+                            let preserved_policy = rt.policy_snapshot().await;
                             let _ = rt.reset_session().await;
                             rt.set_persisted_state(lash::PersistedSessionState::from_state(
                                 cleared_session_state(preserved_policy),
-                            ));
+                            ))
+                            .await;
                         }
                         history.clear();
                         turn_counter = 0;
@@ -616,7 +626,6 @@ pub(crate) async fn run_app(
                             ui_extensions.as_ref(),
                             &runtime_factory,
                             &lash_config,
-                            &mut dynamic_tools,
                             &mut runtime,
                             &mut history,
                             &mut turn_counter,
@@ -651,11 +660,6 @@ pub(crate) async fn run_app(
                         cancel_token.is_some(),
                         active_stream_id,
                     );
-                    let leftover_injections =
-                        turn_injection_bridge.drain().unwrap_or_else(|_| Vec::new());
-                    if !leftover_injections.is_empty() {
-                        promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-                    }
                     dispatch_next_queued_turn(
                         &mut app,
                         &mut ui_trace,
@@ -667,7 +671,6 @@ pub(crate) async fn run_app(
                         ui_extensions.as_ref(),
                         &runtime_factory,
                         &lash_config,
-                        &mut dynamic_tools,
                         &mut runtime,
                         &mut history,
                         &mut turn_counter,
@@ -893,7 +896,6 @@ pub(crate) async fn run_app(
                     ui_extensions.as_ref(),
                     &runtime_factory,
                     &lash_config,
-                    &mut dynamic_tools,
                     &mut runtime,
                     &mut history,
                     &mut turn_counter,
@@ -911,7 +913,6 @@ pub(crate) async fn run_app(
                     &mut toolset_hash,
                     &app_tx,
                     &mut pending_clear_after_return,
-                    &turn_input_injection_bridge,
                 )
                 .await?
                 {
@@ -991,62 +992,62 @@ pub(crate) async fn run_app(
                     continue;
                 }
                 app.dirty = true;
-                // Intercept Prompt events — set up dialog state instead of passing to handle_session_event
-                if let SessionEvent::Prompt {
-                    request,
-                    response_tx,
-                } = event
-                {
-                    let ui_effects =
-                        ui_extensions.effects_for_session_event(&SessionEvent::Prompt {
-                            request: request.clone(),
-                            response_tx: response_tx.clone(),
-                        });
-                    apply_ui_host_effects(&mut app, ui_effects);
-                    if let Some(recorder) = ui_trace.as_mut() {
-                        recorder.record_emit_prompt(&request);
-                    }
-                    let focus = if request.is_freeform() {
-                        crate::overlay::PromptFocus::Text
-                    } else {
-                        crate::overlay::PromptFocus::Options
-                    };
-                    app.show_prompt(app::PromptState {
-                        request,
-                        focus,
-                        cursor: 0,
-                        scroll_offset: 0,
-                        selected: Default::default(),
-                        reply_text: String::new(),
-                        reply_cursor: 0,
-                        response_tx,
-                    });
-                } else {
-                    if let Some(recorder) = ui_trace.as_mut() {
-                        recorder.record_session_event(&event);
-                    }
-                    let ui_effects = ui_extensions.effects_for_session_event(&event);
-                    let plugin_notification =
-                        if let SessionEvent::PluginEvent { event, .. } = &event {
-                            crate::plugin_surface::desktop_notification_effect(event)
-                        } else {
-                            None
-                        };
-                    if let SessionEvent::InjectedTurnInputAccepted { messages, .. } = &event {
-                        app.acknowledge_monitor_wakes(messages);
-                    }
-                    if let SessionEvent::TurnOutcome {
-                        outcome: lash::TurnOutcome::Handoff { session_id },
-                    } = &event
-                    {
-                        pending_handoff_session_id = Some(session_id.clone());
-                    }
-                    app.handle_session_event(event);
-                    apply_ui_host_effects(&mut app, ui_effects);
-                    if let Some(effect) = plugin_notification {
-                        apply_ui_host_effects(&mut app, vec![effect]);
-                    }
+                if let Some(recorder) = ui_trace.as_mut() {
+                    recorder.record_session_event(&event);
                 }
+                let mut ui_effects = session_event_to_turn_event(&event)
+                    .map(|event| ui_extensions.effects_for_turn_event(&event))
+                    .unwrap_or_default();
+                if matches!(event, SessionEvent::Done) {
+                    ui_effects.extend(ui_extensions.effects_for_turn_finished());
+                }
+                let plugin_notification = if let SessionEvent::PluginEvent { event, .. } = &event {
+                    crate::plugin_surface::desktop_notification_effect(event)
+                } else {
+                    None
+                };
+                if let SessionEvent::InjectedTurnInputAccepted { inputs, .. } = &event {
+                    let messages = inputs
+                        .iter()
+                        .map(|input| input.message.clone())
+                        .collect::<Vec<_>>();
+                    app.acknowledge_monitor_wakes(&messages);
+                }
+                if let SessionEvent::TurnOutcome {
+                    outcome: lash::TurnOutcome::Handoff { session_id },
+                } = &event
+                {
+                    pending_handoff_session_id = Some(session_id.clone());
+                }
+                app.handle_session_event(event);
+                apply_ui_host_effects(&mut app, ui_effects);
+                if let Some(effect) = plugin_notification {
+                    apply_ui_host_effects(&mut app, vec![effect]);
+                }
+            }
+            AppEvent::Prompt {
+                request,
+                response_tx,
+            } => {
+                app.dirty = true;
+                if let Some(recorder) = ui_trace.as_mut() {
+                    recorder.record_emit_prompt(&request);
+                }
+                let focus = if request.is_freeform() {
+                    crate::overlay::PromptFocus::Text
+                } else {
+                    crate::overlay::PromptFocus::Options
+                };
+                app.show_prompt(app::PromptState {
+                    request,
+                    focus,
+                    cursor: 0,
+                    scroll_offset: 0,
+                    selected: Default::default(),
+                    reply_text: String::new(),
+                    reply_cursor: 0,
+                    response_tx,
+                });
             }
             AppEvent::Quit => break,
         }
@@ -1081,4 +1082,82 @@ pub(crate) async fn run_app(
     app.save_history();
 
     Ok(())
+}
+
+pub(crate) fn session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
+    match event {
+        SessionEvent::LlmRequest { mode_iteration, .. } => Some(TurnEvent::ModelRequestStarted {
+            mode_iteration: *mode_iteration,
+        }),
+        SessionEvent::ToolCallStart {
+            call_id,
+            name,
+            args,
+        } => Some(TurnEvent::ToolCallStarted {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+        }),
+        SessionEvent::ToolCall {
+            call_id,
+            name,
+            args,
+            result,
+            success,
+            duration_ms,
+        } => Some(TurnEvent::ToolCallCompleted {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+            result: ToolResultView {
+                raw: result.clone(),
+                for_model: result.clone(),
+                for_state: result.clone(),
+            },
+            success: *success,
+            duration_ms: *duration_ms,
+        }),
+        SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginSurface {
+            plugin_id: plugin_id.clone(),
+            event: event.clone(),
+        }),
+        SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
+            Some(TurnEvent::QueuedInputAccepted {
+                checkpoint: *checkpoint,
+                inputs: inputs.clone(),
+            })
+        }
+        SessionEvent::InjectedMessagesCommitted {
+            messages,
+            checkpoint,
+        } => Some(TurnEvent::QueuedMessagesCommitted {
+            messages: messages.clone(),
+            checkpoint: *checkpoint,
+        }),
+        SessionEvent::Error { message, .. } => Some(TurnEvent::Error {
+            message: message.clone(),
+        }),
+        SessionEvent::TokenUsage {
+            mode_iteration,
+            usage,
+            cumulative,
+        } => Some(TurnEvent::Usage {
+            mode_iteration: *mode_iteration,
+            usage: usage.clone(),
+            cumulative: cumulative.clone(),
+        }),
+        SessionEvent::RetryStatus {
+            wait_seconds,
+            attempt,
+            max_attempts,
+            reason,
+            ..
+        } => Some(TurnEvent::RetryStatus {
+            wait_seconds: *wait_seconds,
+            attempt: *attempt,
+            max_attempts: *max_attempts,
+            reason: reason.clone(),
+        }),
+        _ => None,
+    }
 }

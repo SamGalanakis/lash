@@ -16,13 +16,14 @@ use serde_json::Value as JsonValue;
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::interactive::run_app;
-use crate::session_bootstrap::{CliRuntimeFactory, SessionBootstrapSource};
+use crate::prompt_tool::{CliPromptBridge, cli_ask_plugin_factory};
+use crate::session_bootstrap::{CliSessionOpener, SessionBootstrapSource};
 use crate::{Args, setup};
 use crate::{
     apply_standard_context_approach_overrides, cleanup_terminal, ensure_supported_execution_mode,
     hash12, info_text, info_text_unconfigured, models_dev_catalog, parse_execution_mode,
-    parse_model_selection, parse_standard_context_approach, provider_display_label,
-    resolve_model_selection, resolve_model_variant, validate_model_selection,
+    parse_model_selection, parse_standard_context_approach, resolve_model_selection,
+    resolve_model_variant, validate_model_selection,
 };
 
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
@@ -37,6 +38,7 @@ struct PluginFactorySurfaceInput<'a> {
     session_policy: SessionPolicy,
     lash_config: &'a LashConfig,
     host_docs_dir: Option<std::path::PathBuf>,
+    prompt_bridge: CliPromptBridge,
 }
 
 struct PluginFactoriesForSurface {
@@ -53,6 +55,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         session_policy,
         lash_config,
         host_docs_dir,
+        prompt_bridge,
     } = input;
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
 
@@ -92,7 +95,11 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
                 host_docs_dir,
             )) as Arc<dyn PluginFactory>);
         }
-        plugin_factories.push(Arc::new(PlanModePluginFactory::new(Default::default())));
+        plugin_factories.push(Arc::new(
+            PlanModePluginFactory::new(Default::default())
+                .with_prompt(Arc::new(prompt_bridge.clone())),
+        ));
+        plugin_factories.push(cli_ask_plugin_factory(prompt_bridge));
         plugin_factories.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
         // the TUI. Interactive-only here; root-only inside the plugin
@@ -127,14 +134,17 @@ fn autonomous_tool_allowed(name: &str) -> bool {
         && name != "request_user_input"
 }
 
-fn apply_autonomous_tool_policy(
-    dynamic_tools: &DynamicToolProvider,
-) -> Result<(), ReconfigureError> {
-    let mut snapshot = dynamic_tools.export_state();
+async fn apply_autonomous_tool_policy(session: &lash_embed::LashSession) -> anyhow::Result<()> {
+    let mut snapshot = session.tool_state().await?;
+    retain_autonomous_tools(&mut snapshot);
+    session.apply_tool_state(snapshot).await?;
+    Ok(())
+}
+
+fn retain_autonomous_tools(snapshot: &mut DynamicStateSnapshot) {
     snapshot
         .tools
         .retain(|name, _| autonomous_tool_allowed(name));
-    dynamic_tools.apply_state(snapshot).map(|_| ())
 }
 
 fn parse_rlm_var_arg(raw: &str) -> Result<(String, JsonValue), String> {
@@ -193,10 +203,7 @@ fn resolve_rlm_projected_bindings(
     Ok(Some(bindings))
 }
 
-fn cli_prompt_config(
-    autonomous: bool,
-    execution_mode: &ExecutionMode,
-) -> (PromptTemplate, Vec<PromptContribution>) {
+fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
     if autonomous {
         intro_entries.push(PromptTemplateEntry::slot(PromptSlot::CliAutonomousIntro));
@@ -236,27 +243,27 @@ fn cli_prompt_config(
         ),
     ]);
 
-    let mut contributions = Vec::new();
+    let mut layer = PromptLayer::with_template(template);
     if autonomous {
-        contributions.push(PromptContribution::new(
+        layer.add_contribution(PromptContribution::new(
             PromptSlot::CliAutonomousIntro,
             "",
             CLI_AUTONOMOUS_INTRO,
         ));
-        contributions.push(PromptContribution::new(
+        layer.add_contribution(PromptContribution::new(
             PromptSlot::CliAutonomousExecution,
             "",
             CLI_AUTONOMOUS_EXECUTION,
         ));
     }
     if *execution_mode == ExecutionMode::new("rlm") {
-        contributions.push(PromptContribution::new(
+        layer.add_contribution(PromptContribution::new(
             PromptSlot::CliRlmExecution,
             "RLM Submit Output",
             CLI_RLM_SUBMISSION_GUIDANCE,
         ));
     }
-    (template, contributions)
+    layer
 }
 
 pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
@@ -337,7 +344,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
     let interactive_startup = !args.info && args.print_prompt.is_none();
-    let mut startup_system_message: Option<String> = None;
+    let startup_system_message: Option<String> = None;
     let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
         if let Some(ref key) = args.api_key {
             // Shortcut: env var or --api-key activates OpenAI-compatible directly.
@@ -362,30 +369,10 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         // SAFETY: else branch means existing_config.is_some() (checked above)
         #[allow(clippy::unnecessary_unwrap)]
         let c = existing_config.unwrap();
-        let mut provider = c
+        let provider = c
             .build_active_provider()
             .map_err(|err| anyhow::anyhow!("build active provider: {err}"))?;
-        match provider.ensure_fresh().await {
-            Ok(true) => {
-                let mut c = c;
-                c.upsert_provider(&provider);
-                c.save(&crate::paths::config_file())?;
-                (c, provider)
-            }
-            Ok(false) => (c, provider),
-            Err(err) => {
-                if interactive_startup {
-                    let provider_label = provider_display_label(&provider);
-                    startup_system_message = Some(format!(
-                        "{} refresh failed: {}. Lash opened in recovery mode. Use /provider or relaunch with --provider to reauthenticate or switch providers.",
-                        provider_label, err
-                    ));
-                    (c, provider)
-                } else {
-                    return Err(err.into());
-                }
-            }
-        }
+        (c, provider)
     };
 
     // CLI env/flags override stored config
@@ -553,7 +540,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             global_root: Some(crate::paths::lash_home()),
             ..Default::default()
         }));
-    let (prompt_template, prompt_contributions) = cli_prompt_config(autonomous, &execution_mode);
+    let prompt_layer = cli_prompt_config(autonomous, &execution_mode);
     let session_policy = SessionPolicy {
         model: model.clone(),
         provider: active_provider.clone(),
@@ -566,18 +553,15 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         ..Default::default()
     };
     let host_core = RuntimeCoreConfig::default()
-        .with_prompt_template(prompt_template)
-        .with_prompt_contributions(prompt_contributions)
+        .with_prompt_layer(prompt_layer)
         .with_attachment_store(Arc::new(FileAttachmentStore::new(
             crate::paths::attachments_dir(),
         )))
         .with_trace_jsonl_path(trace_path)
-        .with_trace_level(trace_level)
-        .with_credential_store_path(Some(crate::paths::config_file()));
+        .with_trace_level(trace_level);
 
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
-    let turn_injection_bridge = TurnInjectionBridge::new();
-    let turn_input_injection_bridge = TurnInputInjectionBridge::new();
+    let prompt_bridge = CliPromptBridge::default();
 
     let PluginFactoriesForSurface {
         factories: plugin_factories,
@@ -590,6 +574,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         session_policy: session_policy.clone(),
         lash_config: &lash_config,
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
+        prompt_bridge: prompt_bridge.clone(),
     });
     let plugin_host = PluginHost::new(plugin_factories).with_dynamic_tools();
     if args.info {
@@ -614,11 +599,9 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let runtime_factory = CliRuntimeFactory::new(
+    let runtime_factory = CliSessionOpener::new(
         plugin_host.clone(),
         host_core,
-        turn_injection_bridge.clone(),
-        turn_input_injection_bridge.clone(),
         Arc::new(TokioSessionTaskExecutor::default()),
     );
     let opened_session = runtime_factory
@@ -627,30 +610,25 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             session_policy.clone(),
         )
         .await?;
-    let dynamic_tools = opened_session.dynamic_tools.clone();
-    attach_mcp_servers(&dynamic_tools, lash_config.mcp_servers())
+    let session = opened_session.session;
+    session
+        .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
     if autonomous {
-        apply_autonomous_tool_policy(&dynamic_tools)
+        apply_autonomous_tool_policy(&session)
+            .await
             .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
     }
-    let dynamic_tools_provider: Arc<dyn ToolProvider> = dynamic_tools.clone();
-    let toolset_hash = hash12(
-        &serde_json::to_vec(&dynamic_tools_provider.definitions())
-            .unwrap_or_else(|_| b"[]".to_vec()),
-    );
-    let initial_model_variant = opened_session
-        .runtime
-        .export_state()
-        .policy
-        .model_variant
-        .clone();
+    let active_tool_definitions = session.active_tool_definitions().await?;
+    let toolset_hash =
+        hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
+    let initial_policy = session.policy_snapshot().await;
+    let initial_model_variant = initial_policy.model_variant.clone();
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();
     let mut logger = opened_session.logger;
-    let mut runtime = opened_session.runtime;
-    runtime.refresh_session_tool_surface().await?;
+    session.refresh_tool_surface().await?;
     if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` are currently supported for autonomous `--print-prompt` turns; interactive hosts should use the RLM projection API."
@@ -660,7 +638,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     // ── Autonomous preset: skip TUI, run session, print response to stdout ──
     if let Some(prompt) = args.print_prompt {
         return run_autonomous(
-            runtime,
+            session,
             prompt,
             SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
             AutonomousPersistenceContext {
@@ -684,13 +662,11 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 
     run_app(
         terminal,
-        runtime,
+        session,
         plugin_host,
-        Arc::clone(&dynamic_tools),
         runtime_factory,
         lash_config.clone(),
-        turn_injection_bridge,
-        turn_input_injection_bridge,
+        prompt_bridge,
         &mut logger,
         &args,
         active_provider.clone(),
@@ -757,6 +733,7 @@ mod tests {
             lash_config: &lash_config,
             host_docs_dir: (!autonomous)
                 .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
+            prompt_bridge: CliPromptBridge::default(),
         })
         .factories
         .into_iter()
@@ -775,7 +752,13 @@ mod tests {
 
     #[test]
     fn rlm_prompt_config_uses_cli_rlm_slot_and_contribution() {
-        let (template, contributions) = cli_prompt_config(false, &ExecutionMode::new("rlm"));
+        let layer = cli_prompt_config(false, &ExecutionMode::new("rlm"));
+        let template = layer.template.as_ref().expect("cli prompt template");
+        let contributions = layer
+            .slots
+            .values()
+            .flat_map(|slot| slot.contributions.iter())
+            .collect::<Vec<_>>();
 
         let execution = template
             .sections
@@ -798,7 +781,13 @@ mod tests {
 
     #[test]
     fn standard_prompt_config_omits_cli_rlm_slot_and_contribution() {
-        let (template, contributions) = cli_prompt_config(false, &ExecutionMode::standard());
+        let layer = cli_prompt_config(false, &ExecutionMode::standard());
+        let template = layer.template.as_ref().expect("cli prompt template");
+        let contributions = layer
+            .slots
+            .values()
+            .flat_map(|slot| slot.contributions.iter())
+            .collect::<Vec<_>>();
 
         assert!(!template.sections.iter().any(|section| {
             section.entries.iter().any(|entry| {
@@ -819,7 +808,13 @@ mod tests {
 
     #[test]
     fn autonomous_prompt_config_uses_autonomous_slots() {
-        let (template, contributions) = cli_prompt_config(true, &ExecutionMode::standard());
+        let layer = cli_prompt_config(true, &ExecutionMode::standard());
+        let template = layer.template.as_ref().expect("cli prompt template");
+        let contributions = layer
+            .slots
+            .values()
+            .flat_map(|slot| slot.contributions.iter())
+            .collect::<Vec<_>>();
 
         assert!(template.sections.iter().any(|section| {
             section.entries.iter().any(|entry| {
@@ -856,9 +851,9 @@ mod tests {
         let dynamic_tools =
             DynamicToolProvider::from_tool_provider(Arc::new(DummyToolProvider)).unwrap();
 
-        apply_autonomous_tool_policy(&dynamic_tools).unwrap();
-
-        let tools = dynamic_tools.export_state().tools;
+        let mut snapshot = dynamic_tools.export_state();
+        retain_autonomous_tools(&mut snapshot);
+        let tools = snapshot.tools;
         assert!(tools.contains_key("read_file"));
         assert!(!tools.contains_key("ask"));
         assert!(!tools.contains_key("plan_exit"));

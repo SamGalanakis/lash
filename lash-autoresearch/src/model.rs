@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const PLUGIN_ID: &str = "autoresearch";
@@ -10,7 +11,7 @@ pub const JOURNAL_FILE: &str = "autoresearch.jsonl";
 pub const MARKDOWN_FILE: &str = "autoresearch.md";
 pub const EXPORT_FILE: &str = "autoresearch.html";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     #[default]
@@ -45,7 +46,7 @@ impl Direction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExperimentStatus {
     Keep,
@@ -65,19 +66,19 @@ impl ExperimentStatus {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModeSnapshot {
     pub active: bool,
     pub objective: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RunningStatus {
     pub command: String,
     pub started_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LastRunSummary {
     pub command: String,
     pub duration_seconds: f64,
@@ -92,7 +93,7 @@ pub struct LastRunSummary {
     pub tail_output: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigEntry {
     pub segment: u64,
     pub created_at_ms: u64,
@@ -103,7 +104,7 @@ pub struct ConfigEntry {
     pub direction: Direction,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResultEntry {
     pub segment: u64,
     pub timestamp_ms: u64,
@@ -125,14 +126,14 @@ pub struct ResultEntry {
     pub confidence: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JournalEntry {
     Config(ConfigEntry),
     Result(ResultEntry),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResultRow {
     pub run: usize,
     pub commit: String,
@@ -144,7 +145,7 @@ pub struct ResultRow {
     pub confidence: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusSummary {
     pub active: bool,
     pub objective: Option<String>,

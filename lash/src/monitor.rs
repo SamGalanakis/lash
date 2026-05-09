@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const fn default_monitor_timeout_ms() -> u64 {
@@ -8,7 +9,7 @@ const fn default_monitor_timeout_ms() -> u64 {
 
 pub const MAX_MONITOR_TIMEOUT_MS: u64 = 3_600_000;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorArmOn {
     #[default]
@@ -16,7 +17,7 @@ pub enum MonitorArmOn {
     SessionStart,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorWakePolicy {
     Notify,
@@ -24,7 +25,7 @@ pub enum MonitorWakePolicy {
     QueueTurn,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorSpec {
     pub id: String,
     pub label: String,
@@ -45,7 +46,7 @@ pub struct MonitorSpec {
     pub restart_on_restore: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorRunState {
     #[default]
@@ -56,7 +57,7 @@ pub enum MonitorRunState {
     Failed,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorStatus {
     pub spec: MonitorSpec,
     #[serde(default)]
@@ -73,7 +74,7 @@ pub struct MonitorStatus {
     pub event_count: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorEvent {
     pub sequence: u64,
     pub monitor_id: String,
@@ -83,7 +84,7 @@ pub struct MonitorEvent {
     pub queue_turn_input: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorSnapshot {
     #[serde(default)]
     pub revision: u64,
@@ -93,7 +94,7 @@ pub struct MonitorSnapshot {
     pub monitors: Vec<MonitorStatus>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorUpdateBatch {
     #[serde(default)]
     pub revision: u64,

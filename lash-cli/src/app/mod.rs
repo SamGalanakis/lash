@@ -12,7 +12,7 @@ use lash::{
     collect_skill_mentions, plugin_surface_event_renders_visible_output,
 };
 use lash_tui::{Line, Rect};
-use lash_ui::UiExtensions;
+use lash_tui_extensions::TuiExtensions;
 
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
@@ -561,8 +561,6 @@ pub struct App {
     pub live_tool_output: LiveToolOutput,
     /// Loaded skills registry.
     pub skills: SkillCatalog,
-    /// Slash commands contributed by plugins in the current session.
-    pub plugin_commands: Vec<lash::CommandDef>,
     /// Priority follow-ups entered with Enter while a turn is running.
     pub pending_steers: VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
@@ -611,7 +609,7 @@ pub struct App {
     /// Snapshot of background tasks registered for this session.
     pub background_tasks: Vec<BackgroundTaskView>,
     /// UI extension registry used for slash-command completion and host actions.
-    ui_extensions: Arc<UiExtensions>,
+    ui_extensions: Arc<TuiExtensions>,
     /// Shared state for the lash-cli chrome UI extension. The scratch-tui
     /// draw loop pushes live-turn snapshots through this so the
     /// `chrome_ui` extension's `turn_status` surface participates in the
@@ -894,7 +892,6 @@ impl App {
             editor: EditorState::default(),
             live_tool_output: LiveToolOutput::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
-            plugin_commands: Vec::new(),
             pending_steers: VecDeque::new(),
             queued_turns: VecDeque::new(),
             pending_monitor_wakes: VecDeque::new(),
@@ -918,7 +915,7 @@ impl App {
             plugin_mode_indicators: BTreeMap::new(),
             plan_dock: None,
             background_tasks: Vec::new(),
-            ui_extensions: Arc::new(UiExtensions::default()),
+            ui_extensions: Arc::new(TuiExtensions::default()),
             chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
             activity_state: ActivityState::default(),
@@ -1636,7 +1633,11 @@ impl App {
                     self.dirty = true;
                 }
             }
-            SessionEvent::InjectedTurnInputAccepted { messages, .. } => {
+            SessionEvent::InjectedTurnInputAccepted { inputs, .. } => {
+                let messages = inputs
+                    .iter()
+                    .map(|input| input.message.clone())
+                    .collect::<Vec<_>>();
                 self.accept_injected_turn_input(&messages);
             }
             SessionEvent::InjectedMessagesCommitted { messages, .. } => {
@@ -1644,9 +1645,6 @@ impl App {
             }
             SessionEvent::TurnOutcome { .. } => {}
             SessionEvent::LlmResponse { .. } => {}
-            SessionEvent::Prompt { .. } => {
-                // Handled by the main event loop, not here
-            }
         }
     }
 
@@ -1737,7 +1735,7 @@ impl App {
         self.pending_steers.remove(idx)
     }
 
-    pub fn set_ui_extensions(&mut self, ui_extensions: Arc<UiExtensions>) {
+    pub fn set_ui_extensions(&mut self, ui_extensions: Arc<TuiExtensions>) {
         self.ui_extensions = ui_extensions;
     }
 

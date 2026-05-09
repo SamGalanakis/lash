@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use lash_tui::{InputEvent, Rect};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UiSurfaceSlot {
+pub enum TuiSurfaceSlot {
     #[default]
     Workspace,
     Dock,
@@ -12,7 +12,7 @@ pub enum UiSurfaceSlot {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum UiSurfaceSize {
+pub enum TuiSurfaceSize {
     #[default]
     Auto,
     Lines(u16),
@@ -22,7 +22,7 @@ pub enum UiSurfaceSize {
     },
 }
 
-impl UiSurfaceSize {
+impl TuiSurfaceSize {
     pub const fn height(self) -> u16 {
         match self {
             Self::Auto => 1,
@@ -40,22 +40,22 @@ impl UiSurfaceSize {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UiSurfaceSpec {
+pub struct TuiSurfaceSpec {
     pub key: String,
-    pub slot: UiSurfaceSlot,
-    pub size: UiSurfaceSize,
+    pub slot: TuiSurfaceSlot,
+    pub size: TuiSurfaceSize,
     pub order: i32,
     pub focusable: bool,
     pub visible: bool,
     pub modal: bool,
 }
 
-impl UiSurfaceSpec {
-    pub fn new(key: impl Into<String>, slot: UiSurfaceSlot) -> Self {
+impl TuiSurfaceSpec {
+    pub fn new(key: impl Into<String>, slot: TuiSurfaceSlot) -> Self {
         Self {
             key: key.into(),
             slot,
-            size: UiSurfaceSize::Auto,
+            size: TuiSurfaceSize::Auto,
             order: 0,
             focusable: false,
             visible: true,
@@ -65,9 +65,9 @@ impl UiSurfaceSpec {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct UiSurfaceUpdate {
-    pub slot: Option<UiSurfaceSlot>,
-    pub size: Option<UiSurfaceSize>,
+pub struct TuiSurfaceUpdate {
+    pub slot: Option<TuiSurfaceSlot>,
+    pub size: Option<TuiSurfaceSize>,
     pub order: Option<i32>,
     pub focusable: Option<bool>,
     pub visible: Option<bool>,
@@ -75,12 +75,12 @@ pub struct UiSurfaceUpdate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UiMountedSurface {
+pub struct TuiMountedSurface {
     pub id: String,
     pub owner_id: String,
     pub key: String,
-    pub slot: UiSurfaceSlot,
-    pub size: UiSurfaceSize,
+    pub slot: TuiSurfaceSlot,
+    pub size: TuiSurfaceSize,
     pub order: i32,
     pub focusable: bool,
     pub visible: bool,
@@ -89,29 +89,29 @@ pub struct UiMountedSurface {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct UiSurfaceScene {
+pub struct TuiSurfaceScene {
     pub focused: Option<String>,
-    pub workspace: Vec<UiMountedSurface>,
-    pub dock: Vec<UiMountedSurface>,
-    pub footer: Vec<UiMountedSurface>,
-    pub overlay: Vec<UiMountedSurface>,
+    pub workspace: Vec<TuiMountedSurface>,
+    pub dock: Vec<TuiMountedSurface>,
+    pub footer: Vec<TuiMountedSurface>,
+    pub overlay: Vec<TuiMountedSurface>,
 }
 
-impl UiSurfaceScene {
-    pub fn has_slot(&self, slot: UiSurfaceSlot) -> bool {
+impl TuiSurfaceScene {
+    pub fn has_slot(&self, slot: TuiSurfaceSlot) -> bool {
         !self.surfaces(slot).is_empty()
     }
 
-    pub fn surfaces(&self, slot: UiSurfaceSlot) -> &[UiMountedSurface] {
+    pub fn surfaces(&self, slot: TuiSurfaceSlot) -> &[TuiMountedSurface] {
         match slot {
-            UiSurfaceSlot::Workspace => &self.workspace,
-            UiSurfaceSlot::Dock => &self.dock,
-            UiSurfaceSlot::Footer => &self.footer,
-            UiSurfaceSlot::Overlay => &self.overlay,
+            TuiSurfaceSlot::Workspace => &self.workspace,
+            TuiSurfaceSlot::Dock => &self.dock,
+            TuiSurfaceSlot::Footer => &self.footer,
+            TuiSurfaceSlot::Overlay => &self.overlay,
         }
     }
 
-    pub fn stack_height(&self, slot: UiSurfaceSlot, max_height: u16) -> u16 {
+    pub fn stack_height(&self, slot: TuiSurfaceSlot, max_height: u16) -> u16 {
         if max_height == 0 {
             return 0;
         }
@@ -132,13 +132,13 @@ impl UiSurfaceScene {
 #[derive(Clone, Debug)]
 struct SurfaceRecord {
     owner_id: String,
-    spec: UiSurfaceSpec,
+    spec: TuiSurfaceSpec,
     area: Option<Rect>,
 }
 
 impl SurfaceRecord {
-    fn mounted(&self) -> UiMountedSurface {
-        UiMountedSurface {
+    fn mounted(&self) -> TuiMountedSurface {
+        TuiMountedSurface {
             id: global_surface_id(&self.owner_id, &self.spec.key),
             owner_id: self.owner_id.clone(),
             key: self.spec.key.clone(),
@@ -161,7 +161,7 @@ pub struct SurfaceRegistry {
 }
 
 impl SurfaceRegistry {
-    pub fn mount(&mut self, owner_id: &str, spec: UiSurfaceSpec) {
+    pub fn mount(&mut self, owner_id: &str, spec: TuiSurfaceSpec) {
         let id = global_surface_id(owner_id, &spec.key);
         self.surfaces.insert(
             id,
@@ -174,7 +174,7 @@ impl SurfaceRegistry {
         self.prune_focus();
     }
 
-    pub fn update(&mut self, owner_id: &str, key: &str, update: UiSurfaceUpdate) {
+    pub fn update(&mut self, owner_id: &str, key: &str, update: TuiSurfaceUpdate) {
         let id = global_surface_id(owner_id, key);
         let Some(record) = self.surfaces.get_mut(&id) else {
             return;
@@ -237,17 +237,17 @@ impl SurfaceRegistry {
         self.focused.clone()
     }
 
-    pub fn has_surface_in_slot(&self, slot: UiSurfaceSlot) -> bool {
+    pub fn has_surface_in_slot(&self, slot: TuiSurfaceSlot) -> bool {
         self.surfaces
             .values()
             .any(|record| record.spec.visible && record.spec.slot == slot)
     }
 
-    pub fn surfaces_in_slot(&self, slot: UiSurfaceSlot) -> Vec<UiMountedSurface> {
+    pub fn surfaces_in_slot(&self, slot: TuiSurfaceSlot) -> Vec<TuiMountedSurface> {
         self.scene().surfaces(slot).to_vec()
     }
 
-    pub fn stack_height(&self, slot: UiSurfaceSlot, max_height: u16) -> u16 {
+    pub fn stack_height(&self, slot: TuiSurfaceSlot, max_height: u16) -> u16 {
         self.scene().stack_height(slot, max_height)
     }
 
@@ -263,14 +263,14 @@ impl SurfaceRegistry {
         }
     }
 
-    pub fn surface(&self, id: &str) -> Option<UiMountedSurface> {
+    pub fn surface(&self, id: &str) -> Option<TuiMountedSurface> {
         self.surfaces.get(id).map(SurfaceRecord::mounted)
     }
 
-    pub fn scene(&self) -> UiSurfaceScene {
-        let mut scene = UiSurfaceScene {
+    pub fn scene(&self) -> TuiSurfaceScene {
+        let mut scene = TuiSurfaceScene {
             focused: self.focused.clone(),
-            ..UiSurfaceScene::default()
+            ..TuiSurfaceScene::default()
         };
         for record in self.surfaces.values() {
             if !record.spec.visible {
@@ -278,10 +278,10 @@ impl SurfaceRegistry {
             }
             let mounted = record.mounted();
             match mounted.slot {
-                UiSurfaceSlot::Workspace => scene.workspace.push(mounted),
-                UiSurfaceSlot::Dock => scene.dock.push(mounted),
-                UiSurfaceSlot::Footer => scene.footer.push(mounted),
-                UiSurfaceSlot::Overlay => scene.overlay.push(mounted),
+                TuiSurfaceSlot::Workspace => scene.workspace.push(mounted),
+                TuiSurfaceSlot::Dock => scene.dock.push(mounted),
+                TuiSurfaceSlot::Footer => scene.footer.push(mounted),
+                TuiSurfaceSlot::Overlay => scene.overlay.push(mounted),
             }
         }
         for slot_surfaces in [
@@ -299,7 +299,7 @@ impl SurfaceRegistry {
         scene
     }
 
-    pub fn target_for_input(&mut self, event: &InputEvent) -> Option<UiMountedSurface> {
+    pub fn target_for_input(&mut self, event: &InputEvent) -> Option<TuiMountedSurface> {
         let target = match event {
             InputEvent::Mouse(mouse) => self.target_for_pointer(mouse.column, mouse.row),
             _ => self.focused_target(),
@@ -310,14 +310,14 @@ impl SurfaceRegistry {
         self.surface(&target.id)
     }
 
-    fn focused_target(&mut self) -> Option<UiMountedSurface> {
+    fn focused_target(&mut self) -> Option<TuiMountedSurface> {
         self.prune_focus();
         let focused = self.focused.as_ref()?;
         self.surface(focused)
     }
 
-    fn target_for_pointer(&self, column: u16, row: u16) -> Option<UiMountedSurface> {
-        let mut best: Option<UiMountedSurface> = None;
+    fn target_for_pointer(&self, column: u16, row: u16) -> Option<TuiMountedSurface> {
+        let mut best: Option<TuiMountedSurface> = None;
         for record in self.surfaces.values() {
             let Some(area) = record.area else {
                 continue;
@@ -374,16 +374,16 @@ impl SurfaceRegistry {
     }
 }
 
-fn slot_priority(slot: UiSurfaceSlot) -> u8 {
+fn slot_priority(slot: TuiSurfaceSlot) -> u8 {
     match slot {
-        UiSurfaceSlot::Workspace => 0,
-        UiSurfaceSlot::Dock => 1,
-        UiSurfaceSlot::Footer => 2,
-        UiSurfaceSlot::Overlay => 3,
+        TuiSurfaceSlot::Workspace => 0,
+        TuiSurfaceSlot::Dock => 1,
+        TuiSurfaceSlot::Footer => 2,
+        TuiSurfaceSlot::Overlay => 3,
     }
 }
 
-fn surface_rank(surface: &UiMountedSurface) -> (u8, i32, &str) {
+fn surface_rank(surface: &TuiMountedSurface) -> (u8, i32, &str) {
     (
         slot_priority(surface.slot),
         surface.order,

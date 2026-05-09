@@ -1,15 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::SessionEvent;
+use lash_embed::TurnEvent;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,
     TableState,
 };
-use lash_ui::{
-    KeyChord, KeyCode, KeyModifiers, ShortcutSpec, SlashCommandSpec, UiContext, UiExtension,
-    UiHostEffect, UiInputOutcome, UiRenderContext, UiSurfaceSize, UiSurfaceSlot, UiSurfaceSpec,
+use lash_tui_extensions::{
+    KeyChord, KeyCode, KeyModifiers, ShortcutSpec, SlashCommandSpec, TuiExtension,
+    TuiExtensionContext, TuiHostEffect, TuiInputOutcome, TuiRenderContext, TuiSurfaceSize,
+    TuiSurfaceSlot, TuiSurfaceSpec, invoke_typed_external,
 };
 use serde_json::Value;
 
@@ -63,7 +64,7 @@ const AUTORESEARCH_SHORTCUTS: &[ShortcutSpec] = &[
 ];
 
 #[derive(Clone, Default)]
-pub struct AutoresearchUiExtension {
+pub struct AutoresearchTuiExtension {
     state: Arc<Mutex<SessionUiState>>,
 }
 
@@ -79,7 +80,7 @@ struct SessionUiState {
 }
 
 #[async_trait]
-impl UiExtension for AutoresearchUiExtension {
+impl TuiExtension for AutoresearchTuiExtension {
     fn id(&self) -> &'static str {
         PLUGIN_ID
     }
@@ -92,7 +93,7 @@ impl UiExtension for AutoresearchUiExtension {
         AUTORESEARCH_SHORTCUTS
     }
 
-    async fn snapshot(&self, ctx: UiContext<'_>) -> Result<Vec<UiHostEffect>, String> {
+    async fn snapshot(&self, ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
         let summary = fetch_status(ctx).await?;
         let mut state = self.lock_state()?;
         state.summary = summary;
@@ -106,25 +107,25 @@ impl UiExtension for AutoresearchUiExtension {
         &self,
         action: &str,
         arg: Option<&str>,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         match action {
             "command" => self.handle_command(arg, ctx).await,
             "toggle_workspace" => {
                 let mut state = self.lock_state()?;
                 if !state.summary.active {
-                    return Ok(vec![UiHostEffect::PushSystemMessage(
+                    return Ok(vec![TuiHostEffect::PushSystemMessage(
                         "Autoresearch mode is off.".to_string(),
                     )]);
                 }
                 state.expanded = !state.expanded;
                 let mut effects = surface_effects(&state);
                 if state.expanded {
-                    effects.push(UiHostEffect::FocusSurface {
+                    effects.push(TuiHostEffect::FocusSurface {
                         key: WORKSPACE_KEY.to_string(),
                     });
                 } else {
-                    effects.push(UiHostEffect::BlurSurface {
+                    effects.push(TuiHostEffect::BlurSurface {
                         key: WORKSPACE_KEY.to_string(),
                     });
                 }
@@ -133,18 +134,18 @@ impl UiExtension for AutoresearchUiExtension {
             "toggle_overlay" => {
                 let mut state = self.lock_state()?;
                 if !state.summary.active {
-                    return Ok(vec![UiHostEffect::PushSystemMessage(
+                    return Ok(vec![TuiHostEffect::PushSystemMessage(
                         "Autoresearch mode is off.".to_string(),
                     )]);
                 }
                 state.overlay_open = !state.overlay_open;
                 let mut effects = surface_effects(&state);
                 if state.overlay_open {
-                    effects.push(UiHostEffect::FocusSurface {
+                    effects.push(TuiHostEffect::FocusSurface {
                         key: OVERLAY_KEY.to_string(),
                     });
                 } else {
-                    effects.push(UiHostEffect::BlurSurface {
+                    effects.push(TuiHostEffect::BlurSurface {
                         key: OVERLAY_KEY.to_string(),
                     });
                 }
@@ -154,7 +155,7 @@ impl UiExtension for AutoresearchUiExtension {
         }
     }
 
-    fn render_surface(&self, surface_key: &str, ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+    fn render_surface(&self, surface_key: &str, ctx: TuiRenderContext<'_>, frame: &mut Frame<'_>) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -170,10 +171,10 @@ impl UiExtension for AutoresearchUiExtension {
         &self,
         surface_key: &str,
         event: &InputEvent,
-        _ctx: UiContext<'_>,
-    ) -> UiInputOutcome {
+        _ctx: TuiExtensionContext<'_>,
+    ) -> TuiInputOutcome {
         let Ok(mut state) = self.state.lock() else {
-            return UiInputOutcome::Ignored;
+            return TuiInputOutcome::Ignored;
         };
         let result_len = state.summary.results.len();
         let workspace_rows = state.workspace_rows.max(1);
@@ -196,15 +197,15 @@ impl UiExtension for AutoresearchUiExtension {
             _ => TableInputOutcome::Ignored,
         };
         match handled {
-            TableInputOutcome::Ignored => UiInputOutcome::Ignored,
-            TableInputOutcome::Handled => UiInputOutcome::Handled(Vec::new()),
+            TableInputOutcome::Ignored => TuiInputOutcome::Ignored,
+            TableInputOutcome::Handled => TuiInputOutcome::Handled(Vec::new()),
             TableInputOutcome::CloseOverlay => {
                 state.overlay_open = false;
-                UiInputOutcome::Handled(vec![
-                    UiHostEffect::BlurSurface {
+                TuiInputOutcome::Handled(vec![
+                    TuiHostEffect::BlurSurface {
                         key: OVERLAY_KEY.to_string(),
                     },
-                    UiHostEffect::UnmountSurface {
+                    TuiHostEffect::UnmountSurface {
                         key: OVERLAY_KEY.to_string(),
                     },
                 ])
@@ -212,8 +213,8 @@ impl UiExtension for AutoresearchUiExtension {
         }
     }
 
-    fn handle_session_event(&self, event: &SessionEvent) -> Vec<UiHostEffect> {
-        let SessionEvent::PluginEvent { plugin_id, event } = event else {
+    fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
+        let TurnEvent::PluginSurface { plugin_id, event } = event else {
             return Vec::new();
         };
         if plugin_id != PLUGIN_ID {
@@ -240,42 +241,47 @@ impl UiExtension for AutoresearchUiExtension {
     }
 }
 
-impl AutoresearchUiExtension {
+impl AutoresearchTuiExtension {
     async fn handle_command(
         &self,
         arg: Option<&str>,
-        ctx: UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        ctx: TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         match arg.map(str::trim).filter(|value| !value.is_empty()) {
             Some(raw) if raw.eq_ignore_ascii_case("help") => {
                 let state = self.lock_state()?;
                 let mut effects = surface_effects(&state);
-                effects.push(UiHostEffect::PushSystemMessage(autoresearch_help_text()));
+                effects.push(TuiHostEffect::PushSystemMessage(autoresearch_help_text()));
                 Ok(effects)
             }
             Some(raw) if raw.eq_ignore_ascii_case("off") => {
-                let result =
-                    invoke_command_op(ctx, "autoresearch.stop", serde_json::json!({})).await?;
+                let result = invoke_external_op::<crate::AutoresearchStopOp>(
+                    ctx,
+                    crate::AutoresearchEmptyArgs {},
+                )
+                .await?;
                 self.apply_command_result(result, false)
             }
             Some(raw) if raw.eq_ignore_ascii_case("clear") => {
-                let result =
-                    invoke_command_op(ctx, "autoresearch.clear", serde_json::json!({})).await?;
+                let result = invoke_external_op::<crate::AutoresearchClearOp>(
+                    ctx,
+                    crate::AutoresearchEmptyArgs {},
+                )
+                .await?;
                 self.apply_command_result(result, true)
             }
             Some(raw) if raw.eq_ignore_ascii_case("export") => {
-                let result =
-                    invoke_command_op(ctx, "autoresearch.export", serde_json::json!({})).await?;
-                let status = parse_status_field(&result)?;
-                let path = result
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let result = invoke_typed_external::<crate::AutoresearchExportOp>(
+                    ctx.session,
+                    crate::AutoresearchEmptyArgs {},
+                )
+                .await?;
+                let status = result.status;
+                let path = result.path;
                 let mut state = self.lock_state()?;
                 state.summary = status;
                 let mut effects = surface_effects(&state);
-                effects.push(UiHostEffect::PushSystemMessage(if path.is_empty() {
+                effects.push(TuiHostEffect::PushSystemMessage(if path.is_empty() {
                     "Exported autoresearch summary.".to_string()
                 } else {
                     format!("Wrote {path}.")
@@ -283,12 +289,11 @@ impl AutoresearchUiExtension {
                 Ok(effects)
             }
             objective => {
-                let result = invoke_command_op(
+                let result = invoke_external_op::<crate::AutoresearchStartOp>(
                     ctx,
-                    "autoresearch.start",
-                    serde_json::json!({
-                        "objective": objective,
-                    }),
+                    crate::AutoresearchStartArgs {
+                        objective: objective.map(str::to_string),
+                    },
                 )
                 .await?;
                 self.apply_command_result(result, false)
@@ -300,7 +305,7 @@ impl AutoresearchUiExtension {
         &self,
         result: Value,
         clear_ui: bool,
-    ) -> Result<Vec<UiHostEffect>, String> {
+    ) -> Result<Vec<TuiHostEffect>, String> {
         let status = parse_status_field(&result)?;
         let message = result
             .get("message")
@@ -321,9 +326,9 @@ impl AutoresearchUiExtension {
         sync_selection(&mut state.workspace_table, result_len);
         sync_selection(&mut state.overlay_table, result_len);
         let mut effects = surface_effects(&state);
-        effects.push(UiHostEffect::PushSystemMessage(message));
+        effects.push(TuiHostEffect::PushSystemMessage(message));
         if let Some(input) = queued_input {
-            effects.push(UiHostEffect::QueueTurn { input });
+            effects.push(TuiHostEffect::QueueTurn { input });
         }
         Ok(effects)
     }
@@ -358,34 +363,24 @@ fn autoresearch_help_text() -> String {
     .join("\n")
 }
 
-async fn fetch_status(ctx: UiContext<'_>) -> Result<StatusSummary, String> {
-    let result = ctx
-        .plugin_host
-        .invoke_external_for_session(
-            ctx.session_id,
-            "autoresearch.status",
-            serde_json::json!({}),
-            ctx.session_manager,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    if !result.success {
-        return Err(result.result.to_string());
-    }
-    serde_json::from_value(result.result)
-        .map_err(|err| format!("invalid autoresearch status: {err}"))
+async fn fetch_status(ctx: TuiExtensionContext<'_>) -> Result<StatusSummary, String> {
+    invoke_typed_external::<crate::AutoresearchStatusOp>(
+        ctx.session,
+        crate::AutoresearchEmptyArgs {},
+    )
+    .await
 }
 
-async fn invoke_command_op(ctx: UiContext<'_>, name: &str, args: Value) -> Result<Value, String> {
-    let result = ctx
-        .plugin_host
-        .invoke_external_for_session(ctx.session_id, name, args, ctx.session_manager)
-        .await
-        .map_err(|err| err.to_string())?;
-    if !result.success {
-        return Err(result.result.to_string());
-    }
-    Ok(result.result)
+async fn invoke_external_op<Op>(
+    ctx: TuiExtensionContext<'_>,
+    args: Op::Args,
+) -> Result<Value, String>
+where
+    Op: lash_embed::TypedExternalOp,
+    Op::Output: serde::Serialize,
+{
+    let result = invoke_typed_external::<Op>(ctx.session, args).await?;
+    serde_json::to_value(result).map_err(|err| format!("invalid autoresearch output: {err}"))
 }
 
 fn parse_status_field(value: &Value) -> Result<StatusSummary, String> {
@@ -397,14 +392,14 @@ fn parse_status_field(value: &Value) -> Result<StatusSummary, String> {
         .map_err(|err| format!("invalid autoresearch status payload: {err}"))
 }
 
-fn surface_effects(state: &SessionUiState) -> Vec<UiHostEffect> {
+fn surface_effects(state: &SessionUiState) -> Vec<TuiHostEffect> {
     let mut effects = Vec::new();
     if state.summary.active {
-        effects.push(UiHostEffect::MountSurface {
-            spec: UiSurfaceSpec {
+        effects.push(TuiHostEffect::MountSurface {
+            spec: TuiSurfaceSpec {
                 key: FOOTER_KEY.to_string(),
-                slot: UiSurfaceSlot::Footer,
-                size: UiSurfaceSize::Lines(1),
+                slot: TuiSurfaceSlot::Footer,
+                size: TuiSurfaceSize::Lines(1),
                 order: 20,
                 focusable: false,
                 visible: true,
@@ -412,11 +407,11 @@ fn surface_effects(state: &SessionUiState) -> Vec<UiHostEffect> {
             },
         });
         if state.expanded {
-            effects.push(UiHostEffect::MountSurface {
-                spec: UiSurfaceSpec {
+            effects.push(TuiHostEffect::MountSurface {
+                spec: TuiSurfaceSpec {
                     key: WORKSPACE_KEY.to_string(),
-                    slot: UiSurfaceSlot::Workspace,
-                    size: UiSurfaceSize::Auto,
+                    slot: TuiSurfaceSlot::Workspace,
+                    size: TuiSurfaceSize::Auto,
                     order: 0,
                     focusable: true,
                     visible: true,
@@ -424,16 +419,16 @@ fn surface_effects(state: &SessionUiState) -> Vec<UiHostEffect> {
                 },
             });
         } else {
-            effects.push(UiHostEffect::UnmountSurface {
+            effects.push(TuiHostEffect::UnmountSurface {
                 key: WORKSPACE_KEY.to_string(),
             });
         }
         if state.overlay_open {
-            effects.push(UiHostEffect::MountSurface {
-                spec: UiSurfaceSpec {
+            effects.push(TuiHostEffect::MountSurface {
+                spec: TuiSurfaceSpec {
                     key: OVERLAY_KEY.to_string(),
-                    slot: UiSurfaceSlot::Overlay,
-                    size: UiSurfaceSize::Fixed {
+                    slot: TuiSurfaceSlot::Overlay,
+                    size: TuiSurfaceSize::Fixed {
                         width: 100,
                         height: 24,
                     },
@@ -444,18 +439,18 @@ fn surface_effects(state: &SessionUiState) -> Vec<UiHostEffect> {
                 },
             });
         } else {
-            effects.push(UiHostEffect::UnmountSurface {
+            effects.push(TuiHostEffect::UnmountSurface {
                 key: OVERLAY_KEY.to_string(),
             });
         }
     } else {
-        effects.push(UiHostEffect::UnmountSurface {
+        effects.push(TuiHostEffect::UnmountSurface {
             key: FOOTER_KEY.to_string(),
         });
-        effects.push(UiHostEffect::UnmountSurface {
+        effects.push(TuiHostEffect::UnmountSurface {
             key: WORKSPACE_KEY.to_string(),
         });
-        effects.push(UiHostEffect::UnmountSurface {
+        effects.push(TuiHostEffect::UnmountSurface {
             key: OVERLAY_KEY.to_string(),
         });
     }
@@ -478,7 +473,7 @@ fn render_footer_surface(state: &SessionUiState, frame: &mut Frame<'_>) {
 
 fn render_workspace_surface(
     state: &mut SessionUiState,
-    ctx: UiRenderContext<'_>,
+    ctx: TuiRenderContext<'_>,
     frame: &mut Frame<'_>,
 ) {
     let area = local_area(frame);
@@ -514,7 +509,7 @@ fn render_workspace_surface(
 
 fn render_overlay_surface(
     state: &mut SessionUiState,
-    ctx: UiRenderContext<'_>,
+    ctx: TuiRenderContext<'_>,
     frame: &mut Frame<'_>,
 ) {
     let area = local_area(frame);
@@ -999,17 +994,17 @@ mod tests {
         let effects = surface_effects(&state);
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiHostEffect::MountSurface { spec }
-            if spec.key == FOOTER_KEY && spec.slot == UiSurfaceSlot::Footer
+            TuiHostEffect::MountSurface { spec }
+            if spec.key == FOOTER_KEY && spec.slot == TuiSurfaceSlot::Footer
         )));
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiHostEffect::MountSurface { spec }
-            if spec.key == WORKSPACE_KEY && spec.slot == UiSurfaceSlot::Workspace
+            TuiHostEffect::MountSurface { spec }
+            if spec.key == WORKSPACE_KEY && spec.slot == TuiSurfaceSlot::Workspace
         )));
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiHostEffect::UnmountSurface { key } if key == OVERLAY_KEY
+            TuiHostEffect::UnmountSurface { key } if key == OVERLAY_KEY
         )));
     }
 
@@ -1026,7 +1021,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .all(|effect| matches!(effect, UiHostEffect::UnmountSurface { .. }))
+                .all(|effect| matches!(effect, TuiHostEffect::UnmountSurface { .. }))
         );
     }
 

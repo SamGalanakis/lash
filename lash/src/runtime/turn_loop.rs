@@ -67,54 +67,6 @@ impl LashRuntime {
         }
     }
 
-    async fn handle_pending_prompt(
-        prompt: PendingPrompt,
-        plugins: Option<&Arc<crate::PluginSession>>,
-        manager: &Arc<dyn RuntimeSessionHost>,
-        events: &dyn EventSink,
-        assembler: &mut TurnAssembler,
-    ) {
-        if let Some(plugins) = plugins {
-            match plugins
-                .on_prompt_request(crate::PromptRequestHookContext {
-                    session_id: plugins.session_id().to_string(),
-                    request: prompt.request.clone(),
-                    host: manager.clone(),
-                })
-                .await
-            {
-                Ok(emitted) => {
-                    for surface in emitted {
-                        let surface_events = crate::plugin::plugin_surface_session_events(
-                            &surface.plugin_id,
-                            vec![surface.value],
-                        );
-                        for event in surface_events {
-                            assembler.push(&event);
-                            emit_session_event_to_sink(events, event).await;
-                        }
-                    }
-                }
-                Err(err) => {
-                    let event = make_error_event(
-                        "plugin_prompt_request",
-                        None,
-                        err.to_string(),
-                        Some(err.to_string()),
-                    );
-                    assembler.push(&event);
-                    emit_session_event_to_sink(events, event).await;
-                }
-            }
-        }
-        let event = SessionEvent::Prompt {
-            request: prompt.request,
-            response_tx: prompt.response_tx,
-        };
-        assembler.push(&event);
-        emit_session_event_to_sink(events, event).await;
-    }
-
     /// Run a single turn and stream events to the host sink.
     /// Includes overflow recovery: if the LLM rejects the prompt as too long,
     /// the context is force-compacted and the turn is retried once.
@@ -262,6 +214,17 @@ impl LashRuntime {
             cancel,
         )
         .await
+    }
+
+    pub async fn stream_turn_with_events_following_handoffs(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnEventSink,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        self.stream_turn_following_handoffs_with_semantic_events(input, events, turn_events, cancel)
+            .await
     }
 
     async fn stream_turn_following_handoffs_with_semantic_events(
@@ -497,7 +460,7 @@ impl LashRuntime {
         });
 
         let manager = self
-            .runtime_session_manager_for_turn(None, None)
+            .runtime_session_manager_for_turn(None)
             .map_err(|err| RuntimeError {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
@@ -591,25 +554,29 @@ impl LashRuntime {
         turn_events: &dyn TurnEventSink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let prompt_bridge = HostPromptBridge::new();
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
+        let mut turn_policy = self.policy.clone();
+        if let Some(provider) = turn_context.provider().cloned() {
+            let model = provider.default_model().to_string();
+            let model_variant = provider.default_model_variant(&model).map(str::to_string);
+            turn_policy.provider = provider;
+            turn_policy.model = model;
+            turn_policy.model_variant = model_variant;
+        }
+        if let Some((model, variant)) = turn_context.model_selection() {
+            turn_policy.model = model.to_string();
+            turn_policy.model_variant = variant.map(str::to_string);
+        }
+        let effective_mode_turn_options = mode_turn_options
+            .clone()
+            .unwrap_or_else(|| self.mode_turn_options.clone());
         let manager = self
-            .runtime_session_manager_for_turn(
-                Some(prompt_bridge.clone()),
-                Some(child_usage_event_relay.clone()),
-            )
+            .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
             .map_err(|err| RuntimeError {
                 code: "plugin_session_manager".to_string(),
                 message: err.to_string(),
             })?;
-        let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PendingPrompt>();
-        prompt_bridge.set_sender(prompt_tx);
-        let prompt_hook_manager = manager.clone();
-        let prompt_plugins = self
-            .session
-            .as_ref()
-            .map(|session| Arc::clone(session.plugins()));
         let plugins = {
             let session = self
                 .session
@@ -618,7 +585,7 @@ impl LashRuntime {
             Arc::clone(session.plugins())
         };
         let capture_text_deltas =
-            self.policy.provider.requires_streaming() || plugins.has_assistant_stream_hooks();
+            turn_policy.provider.requires_streaming() || plugins.has_assistant_stream_hooks();
         let mut assembler = TurnAssembler::new(capture_text_deltas);
         self.mark_phase_begin(RuntimeTurnPhase::BeforeTurnHooks);
         // Block-scope the pinned future so it (and its captured
@@ -629,7 +596,11 @@ impl LashRuntime {
         let prepared = {
             let prepare_turn = plugins.prepare_turn(PrepareTurnRequest {
                 session_id: self.state.session_id.clone(),
-                state: self.read_view(),
+                state: crate::SessionReadView::from_runtime_state(
+                    &self.state,
+                    turn_policy.clone(),
+                    effective_mode_turn_options.clone(),
+                ),
                 messages,
                 host: manager.clone(),
                 turn_context: turn_context.clone(),
@@ -657,17 +628,6 @@ impl LashRuntime {
                             .await;
                         }
                     }
-                    maybe_prompt = prompt_rx.recv() => {
-                        if let Some(prompt) = maybe_prompt {
-                            Self::handle_pending_prompt(
-                                prompt,
-                                prompt_plugins.as_ref(),
-                                &prompt_hook_manager,
-                                events,
-                                &mut assembler,
-                            ).await;
-                        }
-                    }
                 }
             }
         };
@@ -676,7 +636,6 @@ impl LashRuntime {
         }
         emit_session_events_to_sink(events, prepared.events).await;
         if let Some(abort) = prepared.abort {
-            prompt_bridge.clear_sender();
             drop(event_tx);
 
             let mut turn_pipeline = TurnCommitPipeline::from_state(self.state.clone());
@@ -729,7 +688,7 @@ impl LashRuntime {
         turn_pipeline
             .prepared_checkpoint(
                 store.as_ref().map(|store| store.as_ref()),
-                self.policy.clone(),
+                turn_policy.clone(),
                 turn_index,
                 &prepared.messages,
                 self.session.as_mut(),
@@ -746,7 +705,7 @@ impl LashRuntime {
             .expect("lash runtime session must be available");
         let mut driver = RuntimeTurnDriver {
             session,
-            policy: self.policy.clone(),
+            policy: turn_policy.clone(),
             host: self.host.clone(),
             session_id: self.state.session_id.clone(),
             turn_id: trace_turn_id.clone(),
@@ -755,10 +714,7 @@ impl LashRuntime {
             llm_stream_summaries: HashMap::new(),
             next_llm_ordinal: 0,
             session_manager: manager,
-            prompt_bridge,
-            mode_turn_options: mode_turn_options
-                .clone()
-                .unwrap_or_else(|| self.mode_turn_options.clone()),
+            mode_turn_options: effective_mode_turn_options,
             mode_extension,
             turn_context,
             turn_phase_probe: self.turn_phase_probe.clone(),
@@ -784,17 +740,6 @@ impl LashRuntime {
                             &mut assembler,
                         )
                         .await;
-                    }
-                }
-                maybe_prompt = prompt_rx.recv() => {
-                    if let Some(prompt) = maybe_prompt {
-                        Self::handle_pending_prompt(
-                            prompt,
-                            prompt_plugins.as_ref(),
-                            &prompt_hook_manager,
-                            events,
-                            &mut assembler,
-                        ).await;
                     }
                 }
                 joined = &mut run_task => {
@@ -848,7 +793,7 @@ impl LashRuntime {
             ..
         } = driver;
         self.session = Some(session);
-        self.policy = policy;
+        self.policy = self.state.policy.clone();
         turn_pipeline.state_mut().policy = self.policy.clone();
         turn_pipeline.state_mut().turn_index = turn_index;
         let mut turn_usage_delta = child_ledger.clone();
@@ -872,10 +817,10 @@ impl LashRuntime {
 
         let last_prompt_usage = assembler
             .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(&self.policy.provider, usage));
+            .and_then(|usage| normalize_prompt_usage(&policy.provider, usage));
         let finalize_manager = if self.session.is_some() {
             Some(
-                self.runtime_session_manager_for_turn(None, None)
+                self.runtime_session_manager_for_turn(None)
                     .map_err(|err| RuntimeError {
                         code: "plugin_session_manager".to_string(),
                         message: err.to_string(),

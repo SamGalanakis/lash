@@ -246,14 +246,16 @@ pub fn apply_surface_event(
     }
 }
 
-pub fn desktop_notification_effect(event: &PluginSurfaceEvent) -> Option<lash_ui::UiHostEffect> {
+pub fn desktop_notification_effect(
+    event: &PluginSurfaceEvent,
+) -> Option<lash_tui_extensions::TuiHostEffect> {
     let PluginSurfaceEvent::Custom { name, payload } = event else {
         return None;
     };
     if name != "desktop_notification" {
         return None;
     }
-    Some(lash_ui::UiHostEffect::DesktopNotification {
+    Some(lash_tui_extensions::TuiHostEffect::DesktopNotification {
         title: payload
             .get("title")
             .and_then(|value| value.as_str())

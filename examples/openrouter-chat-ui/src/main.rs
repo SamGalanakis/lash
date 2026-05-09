@@ -184,7 +184,7 @@ async fn main() -> anyhow_like::Result<()> {
         .default_mode(ModeId::rlm())
         .register_plugin::<DemoPlugin>()
         .provider(provider)
-        .model(model.clone())
+        .model(model.clone(), None)
         .max_context_tokens(200_000)
         .store_factory(store_factory)
         .trace_sink(Some(Arc::new(StderrTraceSink::default())))

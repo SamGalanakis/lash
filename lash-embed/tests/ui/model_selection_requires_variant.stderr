@@ -1,0 +1,37 @@
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+ --> tests/ui/model_selection_requires_variant.rs:2:46
+  |
+2 |     let _ = lash_embed::LashCore::standard().model("model-only");
+  |                                              ^^^^^-------------- argument #2 of type `Option<String>` is missing
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
+  |            ^^^^^
+help: provide the argument
+  |
+2 |     let _ = lash_embed::LashCore::standard().model("model-only", /* Option<String> */);
+  |                                                                ++++++++++++++++++++++
+
+error[E0599]: no method named `model_variant` found for struct `LashCoreBuilder` in the current scope
+ --> tests/ui/model_selection_requires_variant.rs:3:46
+  |
+3 |     let _ = lash_embed::LashCore::standard().model_variant("low");
+  |                                              ^^^^^^^^^^^^^ method not found in `LashCoreBuilder`
+
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+ --> tests/ui/model_selection_requires_variant.rs:7:21
+  |
+7 |     let _ = builder.model("model-only");
+  |                     ^^^^^-------------- argument #2 of type `Option<String>` is missing
+  |
+note: method defined here
+ --> src/lib.rs
+  |
+  |     pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
+  |            ^^^^^
+help: provide the argument
+  |
+7 |     let _ = builder.model("model-only", /* Option<String> */);
+  |                                       ++++++++++++++++++++++

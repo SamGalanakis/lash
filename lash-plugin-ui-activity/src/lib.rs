@@ -16,8 +16,8 @@ impl PluginFactory for UiActivityPluginFactory {
         PluginSpecFactory::new(
             "ui_activity",
             Arc::new(|_ctx| {
-                Ok(lash::plugin::PluginSpec::new()
-                    .with_after_turn(Arc::new(|ctx| {
+                Ok(
+                    lash::plugin::PluginSpec::new().with_after_turn(Arc::new(|ctx| {
                         Box::pin(async move {
                             let body = match &ctx.turn.outcome {
                                 lash::TurnOutcome::Finished(_)
@@ -40,19 +40,8 @@ impl PluginFactory for UiActivityPluginFactory {
                                 },
                             ])])
                         })
-                    }))
-                    .with_prompt_request(Arc::new(|ctx| {
-                        Box::pin(async move {
-                            Ok(vec![lash::PluginSurfaceEvent::Custom {
-                                name: "desktop_notification".to_string(),
-                                payload: serde_json::json!({
-                                    "title": "lash",
-                                    "body": ctx.request.question,
-                                    "only_when_unfocused": true,
-                                }),
-                            }])
-                        })
-                    })))
+                    })),
+                )
             }),
         )
         .build(_ctx)

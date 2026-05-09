@@ -172,31 +172,17 @@ impl LashRuntime {
     pub(super) fn runtime_session_manager(
         &self,
     ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
-        self.runtime_session_manager_with_prompt_bridge(None)
+        Ok(Arc::new(RuntimeSessionManager::new(self, true, None)?))
     }
 
     pub(super) fn runtime_session_manager_for_turn(
         &self,
-        prompt_bridge: Option<HostPromptBridge>,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
-            prompt_bridge,
             false,
             child_usage_event_relay,
-        )?))
-    }
-
-    pub(super) fn runtime_session_manager_with_prompt_bridge(
-        &self,
-        prompt_bridge: Option<HostPromptBridge>,
-    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
-        Ok(Arc::new(RuntimeSessionManager::new(
-            self,
-            prompt_bridge,
-            true,
-            None,
         )?))
     }
 
@@ -207,6 +193,17 @@ impl LashRuntime {
     /// The plugin session bound to the currently active runtime session, if any.
     pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))
+    }
+
+    pub fn turn_input_injection_bridge(
+        &self,
+    ) -> Result<crate::TurnInputInjectionBridge, SessionError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SessionError::Protocol(
+                "runtime session not available".to_string(),
+            ));
+        };
+        Ok(session.turn_input_injection_bridge().clone())
     }
 
     /// Run the registered history rewrite pipeline against the current

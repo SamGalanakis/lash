@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use lash::*;
+use lash_embed::LashSession;
 use tokio::sync::mpsc;
 
 use crate::app::PreparedTurn;
-use crate::turn_runner::{make_turn_input, spawn_runtime_turn};
+use crate::turn_runner::{make_turn_input, spawn_session_turn};
 use crate::{plugin_surface, util};
 
 pub(crate) struct AutonomousPersistenceContext {
@@ -102,12 +103,6 @@ impl AutonomousRenderer {
             }
             SessionEvent::Error { message, .. } => {
                 eprintln!("error: {message}");
-            }
-            SessionEvent::Prompt { request, .. } => {
-                return Err(format!(
-                    "unexpected user prompt in autonomous mode: {}",
-                    request.question
-                ));
             }
             SessionEvent::PluginEvent { plugin_id, event } => match event {
                 PluginSurfaceEvent::PanelUpsert {
@@ -212,14 +207,14 @@ struct AutonomousTurnOutcome {
 }
 
 async fn run_autonomous_turn(
-    runtime: LashRuntime,
+    session: LashSession,
     turn_input: TurnInput,
     renderer: &mut AutonomousRenderer,
     stream_id: u64,
 ) -> anyhow::Result<AutonomousTurnOutcome> {
     let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
     let sink = AutonomousChannelSink { tx: event_tx };
-    let (cancel, return_rx) = spawn_runtime_turn(runtime, turn_input, sink, stream_id);
+    let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
     #[cfg(unix)]
     {
         let cancel = cancel.clone();
@@ -278,13 +273,11 @@ async fn run_autonomous_turn(
 }
 
 async fn autonomous_handoff_first_turn(
-    runtime: &LashRuntime,
+    session: &LashSession,
     session_id: &str,
 ) -> anyhow::Result<TurnInput> {
-    let session_manager = runtime
-        .session_manager()
-        .map_err(|err| anyhow::anyhow!("failed to access session manager: {err}"))?;
-    let seed = session_manager
+    let seed = session
+        .control()
         .take_first_turn_input(session_id)
         .await
         .map_err(|err| {
@@ -305,15 +298,14 @@ async fn autonomous_handoff_first_turn(
 
 /// Run the session autonomously: send prompt, consume events, print final response to stdout.
 pub(crate) async fn run_autonomous(
-    runtime: LashRuntime,
+    session: LashSession,
     prompt: String,
     skills: SkillCatalog,
     persistence: AutonomousPersistenceContext,
     rlm_projected_bindings: Option<lash_mode_rlm::RlmProjectedBindings>,
 ) -> anyhow::Result<()> {
-    let before_usage = runtime.usage_report();
+    let before_usage = session.usage_report().await;
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
-    let mut runtime = runtime;
     let mut turn_input = make_turn_input(&prepared);
     if let Some(bindings) = rlm_projected_bindings {
         turn_input = lash_mode_rlm::RlmTurnInputExt::rlm_project(turn_input, bindings)?;
@@ -321,7 +313,8 @@ pub(crate) async fn run_autonomous(
     let mut renderer = AutonomousRenderer::new();
     let mut stream_id = 1;
     let (mut done, cancel) = loop {
-        let outcome = run_autonomous_turn(runtime, turn_input, &mut renderer, stream_id).await?;
+        let outcome =
+            run_autonomous_turn(session.clone(), turn_input, &mut renderer, stream_id).await?;
         let turn_done = outcome.done;
         if let Some(session_id) = outcome.handoff_session_id {
             if !matches!(
@@ -330,18 +323,26 @@ pub(crate) async fn run_autonomous(
             ) {
                 break (turn_done, outcome.cancel);
             }
-            turn_input = autonomous_handoff_first_turn(&turn_done.runtime, &session_id).await?;
-            runtime = turn_done.runtime;
+            turn_input = autonomous_handoff_first_turn(&session, &session_id).await?;
             stream_id += 1;
             continue;
         }
         break (turn_done, outcome.cancel);
     };
     if persistence.await_background_work {
-        done.runtime.await_background_work().await?;
-        done.result.state = done.runtime.export_state();
+        session.await_background_work().await?;
+        let state = session.persist_current_state().await?;
+        done.result.state = lash::SessionStateEnvelope {
+            session_id: state.session_id,
+            policy: state.policy,
+            session_graph: state.session_graph,
+            turn_index: state.turn_index,
+            token_usage: state.token_usage,
+            last_prompt_usage: state.last_prompt_usage,
+            mode_turn_options: state.mode_turn_options,
+        };
     }
-    let cumulative_usage = done.runtime.usage_report();
+    let cumulative_usage = session.usage_report().await;
     if let Some(path) = &persistence.turn_usage_json {
         let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(
             &before_usage,

@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use lash::{PromptRequest, PromptResponse, SessionEvent};
 use lash_tui::ScreenSnapshot;
-use lash_ui::UiExtensions;
+use lash_tui_extensions::TuiExtensions;
 use tokio::sync::Mutex;
 
 use crate::app::{App, PreparedTurn, PromptState};
@@ -70,12 +70,12 @@ pub(crate) struct UiHarness {
     pub app: App,
     pub width: u16,
     pub height: u16,
-    ui_extensions: Arc<UiExtensions>,
+    ui_extensions: Arc<TuiExtensions>,
 }
 
 impl UiHarness {
     pub(crate) fn new(width: u16, height: u16) -> Self {
-        let ui_extensions = Arc::new(UiExtensions::builtin().expect("builtin ui extensions"));
+        let ui_extensions = Arc::new(TuiExtensions::builtin().expect("builtin ui extensions"));
         let mut app = App::new(
             "gpt-5.4".to_string(),
             "test-session".to_string(),
@@ -121,40 +121,14 @@ impl UiHarness {
     }
 
     pub(crate) fn dispatch_event(&mut self, event: SessionEvent) -> &mut Self {
-        match event {
-            SessionEvent::Prompt {
-                request,
-                response_tx,
-            } => {
-                let effects = self
-                    .ui_extensions
-                    .effects_for_session_event(&SessionEvent::Prompt {
-                        request: request.clone(),
-                        response_tx: response_tx.clone(),
-                    });
-                apply_ui_host_effects(&mut self.app, effects);
-                let focus = if request.is_freeform() {
-                    PromptFocus::Text
-                } else {
-                    PromptFocus::Options
-                };
-                self.app.show_prompt(PromptState {
-                    request,
-                    focus,
-                    cursor: 0,
-                    scroll_offset: 0,
-                    selected: Default::default(),
-                    reply_text: String::new(),
-                    reply_cursor: 0,
-                    response_tx,
-                });
-            }
-            other => {
-                let effects = self.ui_extensions.effects_for_session_event(&other);
-                self.app.handle_session_event(other);
-                apply_ui_host_effects(&mut self.app, effects);
-            }
+        let mut effects = crate::interactive::session_event_to_turn_event(&event)
+            .map(|event| self.ui_extensions.effects_for_turn_event(&event))
+            .unwrap_or_default();
+        if matches!(event, SessionEvent::Done) {
+            effects.extend(self.ui_extensions.effects_for_turn_finished());
         }
+        self.app.handle_session_event(event);
+        apply_ui_host_effects(&mut self.app, effects);
         self
     }
 
@@ -163,11 +137,30 @@ impl UiHarness {
         request: PromptRequest,
     ) -> std::sync::mpsc::Receiver<PromptResponse> {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.dispatch_event(SessionEvent::Prompt {
-            request,
-            response_tx: tx,
-        });
+        self.show_prompt(request, tx);
         rx
+    }
+
+    pub(crate) fn show_prompt(
+        &mut self,
+        request: PromptRequest,
+        response_tx: std::sync::mpsc::Sender<PromptResponse>,
+    ) {
+        let focus = if request.is_freeform() {
+            PromptFocus::Text
+        } else {
+            PromptFocus::Options
+        };
+        self.app.show_prompt(PromptState {
+            request,
+            focus,
+            cursor: 0,
+            scroll_offset: 0,
+            selected: Default::default(),
+            reply_text: String::new(),
+            reply_cursor: 0,
+            response_tx,
+        });
     }
 
     pub(crate) fn take_prompt_response(&mut self) -> Option<String> {
@@ -303,10 +296,10 @@ mod tests {
             .app
             .queue_pending_steer(PreparedTurn::new("follow up now".into(), Vec::new()));
         harness.dispatch_event(SessionEvent::InjectedTurnInputAccepted {
-            messages: vec![lash::PluginMessage::text(
-                lash::MessageRole::User,
-                "follow up now",
-            )],
+            inputs: vec![lash::AcceptedInjectedTurnInput {
+                id: None,
+                message: lash::PluginMessage::text(lash::MessageRole::User, "follow up now"),
+            }],
             checkpoint: lash::CheckpointKind::AfterWork,
         });
         harness.dispatch_event(SessionEvent::TextDelta {

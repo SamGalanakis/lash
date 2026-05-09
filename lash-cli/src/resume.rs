@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::{
-    CachedModelCatalog, DynamicStateSnapshot, DynamicToolProvider, ExecutionMode, LashRuntime,
-    PersistedSessionConfig, PersistedSessionState, PersistedTurnState, PromptUsage, ProviderHandle,
-    TokenUsage,
+    CachedModelCatalog, DynamicStateSnapshot, ExecutionMode, PersistedSessionConfig,
+    PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage,
 };
+use lash_embed::{LashSession, ModelSelection, SessionConfigPatch};
 use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
@@ -39,7 +39,7 @@ fn execution_state_reset_message() -> String {
 }
 
 async fn restore_execution_state_if_present<'a>(
-    runtime: &'a mut Option<LashRuntime>,
+    runtime: &'a mut Option<LashSession>,
     app: &'a mut App,
     history: &'a mut Vec<Message>,
     snapshot: Option<&'a [u8]>,
@@ -86,7 +86,7 @@ fn normalized_last_prompt_usage(last_prompt_usage: Option<PromptUsage>) -> Optio
 async fn restore_model_from_graph_config(
     config: Option<&PersistedSessionConfig>,
     app: &mut App,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     provider: &ProviderHandle,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
@@ -123,13 +123,13 @@ async fn restore_model_from_graph_config(
     app.context_window = Some(restored_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     if let Some(rt) = runtime.as_mut() {
-        rt.update_session_config(
-            None,
-            Some(app.model.clone()),
-            None,
-            Some(restored_context_window as usize),
-        )
-        .await;
+        let _ = rt
+            .update_config(SessionConfigPatch {
+                model: Some(ModelSelection::new(app.model.clone(), None)),
+                max_context_tokens: Some(restored_context_window as usize),
+                ..SessionConfigPatch::default()
+            })
+            .await;
     }
     Ok(())
 }
@@ -138,17 +138,16 @@ async fn restore_model_from_graph_config(
 async fn apply_graph_resume_state(
     graph: lash::SessionGraph,
     config: Option<lash::PersistedSessionConfig>,
-    token_ledger: Vec<lash::TokenLedgerEntry>,
+    _token_ledger: Vec<lash::TokenLedgerEntry>,
     checkpoint: Option<lash::HydratedSessionCheckpoint>,
-    checkpoint_ref: Option<lash::BlobRef>,
+    _checkpoint_ref: Option<lash::BlobRef>,
     history: &mut Vec<Message>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
@@ -165,15 +164,18 @@ async fn apply_graph_resume_state(
         ..lash::SessionStateEnvelope::default()
     });
     let messages = read_view.messages().to_vec();
-    let tool_calls = read_view.tool_calls().to_vec();
+    let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
 
     if let Some(dynamic_state) = checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.dynamic_state.clone())
+        && let Some(session) = runtime.as_ref()
     {
-        let _ = dynamic_tools.apply_state(dynamic_state);
-        *desired_dynamic = dynamic_tools.export_state();
+        let _ = session.apply_tool_state(dynamic_state).await;
+        if let Ok(state) = session.tool_state().await {
+            *desired_dynamic = state;
+        }
     }
 
     let turn_state = checkpoint.as_ref().map(|checkpoint| &checkpoint.turn_state);
@@ -223,56 +225,18 @@ async fn apply_graph_resume_state(
         .await;
 
     if let Some(rt) = runtime.as_mut() {
-        rt.update_session_config(None, None, Some(current_model_variant.clone()), None)
-            .await;
-        let _ = rt.refresh_session_tool_surface().await;
-        let mut restored_policy = rt.export_state().policy;
-        restored_policy.execution_mode = restored_execution_mode;
-        restored_policy.model = app.model.clone();
-        restored_policy.model_variant = current_model_variant.clone();
-        restored_policy.provider = provider.clone();
-        if let Some(context_window) = app.context_window {
-            restored_policy.max_context_tokens = Some(context_window as usize);
-        }
-        let mut restored_state = PersistedSessionState {
-            session_id: app.session_id.clone(),
-            policy: restored_policy,
-            session_graph: graph,
-            turn_index: *turn_counter,
-            token_usage: app.token_usage.clone(),
-            last_prompt_usage: app.last_prompt_usage.clone(),
-            mode_turn_options: checkpoint
-                .as_ref()
-                .map(|checkpoint| checkpoint.turn_state.mode_turn_options.clone())
-                .unwrap_or_default(),
-            dynamic_state_ref: checkpoint
-                .as_ref()
-                .and_then(|checkpoint| checkpoint.dynamic_state_ref.clone()),
-            dynamic_state_generation: checkpoint.as_ref().and_then(|checkpoint| {
-                checkpoint
-                    .dynamic_state
-                    .as_ref()
-                    .map(|snapshot| snapshot.base_generation)
-            }),
-            dynamic_state_snapshot: None,
-            plugin_snapshot_ref: checkpoint
-                .as_ref()
-                .and_then(|checkpoint| checkpoint.plugin_snapshot_ref.clone()),
-            plugin_snapshot_revision: checkpoint
-                .as_ref()
-                .and_then(|checkpoint| checkpoint.plugin_snapshot_revision),
-            plugin_snapshot: None,
-            execution_state_ref: checkpoint
-                .as_ref()
-                .and_then(|checkpoint| checkpoint.execution_state_ref.clone()),
-            execution_state_snapshot: None,
-            token_ledger,
-            checkpoint_ref,
-            head_revision: None,
-            graph_replace_required: false,
-        };
-        restored_state.replace_active_read_state(&messages, &tool_calls);
-        rt.set_persisted_state(restored_state);
+        rt.update_config(SessionConfigPatch {
+            provider: Some(provider.clone()),
+            model: Some(ModelSelection::new(
+                app.model.clone(),
+                current_model_variant.clone(),
+            )),
+            max_context_tokens: app.context_window.map(|window| window as usize),
+            ..SessionConfigPatch::default()
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+        let _ = rt.refresh_tool_surface().await;
     }
 
     Ok(())
@@ -284,12 +248,11 @@ pub async fn load_resumed_session(
     app: &mut App,
     logger: &mut session_log::SessionLogger,
     history: &mut Vec<Message>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
@@ -323,7 +286,6 @@ pub async fn load_resumed_session(
         execution_mode,
         provider,
         current_model_variant,
-        dynamic_tools,
         desired_dynamic,
         model_catalog,
     )
@@ -339,13 +301,12 @@ pub async fn load_resumed_session(
 pub async fn restore_session_state(
     session_filename: &str,
     history: &mut Vec<Message>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     app: &mut App,
     turn_counter: &mut usize,
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    dynamic_tools: &Arc<DynamicToolProvider>,
     desired_dynamic: &mut DynamicStateSnapshot,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
@@ -384,7 +345,6 @@ pub async fn restore_session_state(
             execution_mode,
             provider,
             current_model_variant,
-            dynamic_tools,
             desired_dynamic,
             model_catalog,
         )
@@ -402,10 +362,7 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
-    use lash::{
-        EmbeddedRuntimeHost, MemoryModelCatalogStore, PersistedSessionState, PluginFactory,
-        PluginHost, PluginSpecFactory, RuntimeCoreConfig, RuntimeServices, ToolProvider,
-    };
+    use lash::MemoryModelCatalogStore;
 
     fn persist_session_head(
         store: &Store,
@@ -459,64 +416,9 @@ mod tests {
         )
     }
 
-    async fn build_runtime(
-        provider: &ProviderHandle,
-    ) -> (
-        Arc<DynamicToolProvider>,
-        DynamicStateSnapshot,
-        CachedModelCatalog,
-        LashRuntime,
-    ) {
-        struct EmptyTools;
-
-        #[async_trait::async_trait]
-        impl ToolProvider for EmptyTools {
-            fn definitions(&self) -> Vec<lash::ToolDefinition> {
-                Vec::new()
-            }
-
-            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
-                lash::ToolResult::err(serde_json::json!("Unknown tool"))
-            }
-        }
-
-        let tools: Arc<dyn ToolProvider> = Arc::new(EmptyTools);
-        let model_catalog =
-            CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
-                .expect("catalog");
-        let plugins = PluginHost::new(vec![
-            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
-            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()) as Arc<dyn PluginFactory>,
-            Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory)
-                as Arc<dyn PluginFactory>,
-            Arc::new(PluginSpecFactory::new(
-                "resume_tools",
-                Arc::new(move |_ctx| {
-                    Ok(lash::PluginSpec::new().with_tool_provider(Arc::clone(&tools)))
-                }),
-            )),
-        ])
-        .with_dynamic_tools()
-        .build_standard_session("root", None)
-        .expect("plugins");
-        let dynamic_tools = plugins.dynamic_tools().expect("dynamic tools");
-        let desired_dynamic = dynamic_tools.export_state();
-        let runtime_services = RuntimeServices::new(plugins);
-        let runtime = LashRuntime::from_embedded_state(
-            lash::SessionPolicy {
-                execution_mode: ExecutionMode::standard(),
-                provider: provider.clone(),
-                model: "gpt-5".into(),
-                max_context_tokens: Some(200_000),
-                ..lash::SessionPolicy::default()
-            },
-            EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-            runtime_services,
-            PersistedSessionState::default(),
-        )
-        .await
-        .expect("runtime");
-        (dynamic_tools, desired_dynamic, model_catalog, runtime)
+    fn build_model_catalog() -> CachedModelCatalog {
+        CachedModelCatalog::models_dev(Arc::new(MemoryModelCatalogStore::new(None)), None)
+            .expect("catalog")
     }
 
     #[tokio::test]
@@ -554,8 +456,11 @@ mod tests {
             )
             .into_components(),
         );
-        let (dynamic_tools, mut desired_dynamic, model_catalog, runtime) =
-            build_runtime(&provider).await;
+        let mut desired_dynamic = DynamicStateSnapshot {
+            base_generation: 0,
+            tools: std::collections::BTreeMap::new(),
+        };
+        let model_catalog = build_model_catalog();
 
         let mut app = App::new(
             "gpt-5".into(),
@@ -563,7 +468,7 @@ mod tests {
             "test-session-id".into(),
         );
         let mut history = Vec::new();
-        let mut runtime = Some(runtime);
+        let mut runtime = None;
         let mut turn_counter = 0;
         let mut execution_mode = ExecutionMode::standard();
         let mut current_model_variant = None;
@@ -577,7 +482,6 @@ mod tests {
             &mut execution_mode,
             &provider,
             &mut current_model_variant,
-            &dynamic_tools,
             &mut desired_dynamic,
             &model_catalog,
         )
@@ -593,10 +497,5 @@ mod tests {
         let app_prompt_usage = app.last_prompt_usage.expect("app prompt usage");
         assert_eq!(app_prompt_usage.prompt_context_tokens, 4096);
         assert_eq!(app_prompt_usage.context_budget_tokens, 4096);
-
-        let restored_state = runtime.expect("runtime").export_state();
-        assert_eq!(restored_state.turn_index, 7);
-        assert_eq!(restored_state.token_usage.input_tokens, 1200);
-        assert_eq!(restored_state.token_usage.reasoning_tokens, 55);
     }
 }

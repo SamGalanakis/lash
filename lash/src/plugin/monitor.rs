@@ -13,9 +13,9 @@ use crate::monitor::{
     MonitorUpdateBatch, MonitorWakePolicy,
 };
 use crate::plugin::{
-    ExternalInvokeContext, ExternalOpDef, ExternalOpKind, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin,
-    SnapshotReader, SnapshotWriter,
+    ExternalInvokeContext, ExternalOpKind, PluginError, PluginFactory, PluginRegistrar,
+    PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader,
+    SnapshotWriter, TypedExternalOp, TypedExternalOpError,
 };
 
 pub const MONITOR_PLUGIN_ID: &str = "monitor";
@@ -36,6 +36,25 @@ impl PluginFactory for MonitorPluginFactory {
 #[derive(Default)]
 struct MonitorPlugin {
     state: Arc<Mutex<MonitorPluginState>>,
+}
+
+fn tool_result_output<T>(result: ToolResult) -> Result<T, TypedExternalOpError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if !result.success {
+        return Err(TypedExternalOpError::new(result.result.to_string()));
+    }
+    serde_json::from_value(result.result)
+        .map_err(|err| TypedExternalOpError::new(format!("invalid monitor output: {err}")))
+}
+
+fn tool_result_unit(result: ToolResult) -> Result<(), TypedExternalOpError> {
+    if result.success {
+        Ok(())
+    } else {
+        Err(TypedExternalOpError::new(result.result.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -65,33 +84,97 @@ struct MonitorPluginState {
     updates: Vec<MonitorEvent>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct OwnedMonitorSpec {
+#[derive(Clone, Debug, Serialize, Deserialize, crate::JsonSchema)]
+pub struct OwnedMonitorSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    plugin_id: Option<String>,
-    spec: MonitorSpec,
+    pub plugin_id: Option<String>,
+    pub spec: MonitorSpec,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct RegisterSpecsArgs {
+#[derive(Clone, Debug, Default, Serialize, Deserialize, crate::JsonSchema)]
+pub struct RegisterSpecsArgs {
     #[serde(default)]
-    specs: Vec<OwnedMonitorSpec>,
+    pub specs: Vec<OwnedMonitorSpec>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct StartMonitorArgs {
-    spec: MonitorSpec,
+#[derive(Clone, Debug, Serialize, Deserialize, crate::JsonSchema)]
+pub struct StartMonitorArgs {
+    pub spec: MonitorSpec,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct StopMonitorArgs {
-    id: String,
+#[derive(Clone, Debug, Serialize, Deserialize, crate::JsonSchema)]
+pub struct StopMonitorArgs {
+    pub id: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct AckWakeArgs {
+#[derive(Clone, Debug, Default, Serialize, Deserialize, crate::JsonSchema)]
+pub struct MonitorEmptyArgs {}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, crate::JsonSchema)]
+pub struct AckWakeArgs {
     #[serde(default)]
-    ids: Vec<String>,
+    pub ids: Vec<String>,
+}
+
+pub struct MonitorRegisterSpecsOp;
+pub struct MonitorStatusOp;
+pub struct MonitorTakeUpdatesOp;
+pub struct MonitorAckWakeOp;
+pub struct MonitorStartOp;
+pub struct MonitorStopOp;
+
+impl TypedExternalOp for MonitorRegisterSpecsOp {
+    const NAME: &'static str = "monitor.register_specs";
+    const DESCRIPTION: &'static str = "Register typed monitor specs for the current session.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = RegisterSpecsArgs;
+    type Output = ();
+}
+
+impl TypedExternalOp for MonitorStatusOp {
+    const NAME: &'static str = "monitor.status";
+    const DESCRIPTION: &'static str = "Return current monitor status.";
+    const KIND: ExternalOpKind = ExternalOpKind::Query;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = MonitorEmptyArgs;
+    type Output = MonitorSnapshot;
+}
+
+impl TypedExternalOp for MonitorTakeUpdatesOp {
+    const NAME: &'static str = "monitor.take_updates";
+    const DESCRIPTION: &'static str = "Drain pending monitor updates.";
+    const KIND: ExternalOpKind = ExternalOpKind::Task;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = MonitorEmptyArgs;
+    type Output = MonitorUpdateBatch;
+}
+
+impl TypedExternalOp for MonitorAckWakeOp {
+    const NAME: &'static str = "monitor.ack_wake";
+    const DESCRIPTION: &'static str = "Acknowledge pending monitor wake-ups.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AckWakeArgs;
+    type Output = ();
+}
+
+impl TypedExternalOp for MonitorStartOp {
+    const NAME: &'static str = "monitor.start";
+    const DESCRIPTION: &'static str = "Start a monitor.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = StartMonitorArgs;
+    type Output = MonitorSnapshot;
+}
+
+impl TypedExternalOp for MonitorStopOp {
+    const NAME: &'static str = "monitor.stop";
+    const DESCRIPTION: &'static str = "Stop a monitor.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = StopMonitorArgs;
+    type Output = MonitorSnapshot;
 }
 
 impl MonitorPlugin {
@@ -485,112 +568,85 @@ impl SessionPlugin for MonitorPlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.register_specs".to_string(),
-                description: "Register typed monitor specs for the current session.".to_string(),
-                kind: ExternalOpKind::Command,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |ctx, args| {
+        reg.external()
+            .typed::<MonitorRegisterSpecsOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_register_specs(ctx, args).await })
-            }),
-        )?;
+                async move {
+                    tool_result_unit(
+                        plugin
+                            .handle_register_specs(
+                                ctx,
+                                serde_json::to_value(args).unwrap_or_default(),
+                            )
+                            .await,
+                    )
+                }
+            })?;
 
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.status".to_string(),
-                description: "Return current monitor status.".to_string(),
-                kind: ExternalOpKind::Query,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |ctx, _args| {
+        reg.external()
+            .typed::<MonitorStatusOp, _, _>(move |ctx, _args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_status(ctx).await })
-            }),
-        )?;
+                async move { tool_result_output(plugin.handle_status(ctx).await) }
+            })?;
 
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.take_updates".to_string(),
-                description: "Drain pending monitor updates.".to_string(),
-                kind: ExternalOpKind::Task,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |ctx, _args| {
+        reg.external()
+            .typed::<MonitorTakeUpdatesOp, _, _>(move |ctx, _args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_take_updates(ctx).await })
-            }),
-        )?;
+                async move { tool_result_output(plugin.handle_take_updates(ctx).await) }
+            })?;
 
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.ack_wake".to_string(),
-                description: "Acknowledge pending monitor wake-ups.".to_string(),
-                kind: ExternalOpKind::Command,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |_ctx, args| {
+        reg.external()
+            .typed::<MonitorAckWakeOp, _, _>(move |_ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_ack_wake(args).await })
-            }),
-        )?;
+                async move {
+                    tool_result_unit(
+                        plugin
+                            .handle_ack_wake(serde_json::to_value(args).unwrap_or_default())
+                            .await,
+                    )
+                }
+            })?;
 
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.start".to_string(),
-                description: "Start a monitor.".to_string(),
-                kind: ExternalOpKind::Command,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |ctx, args| {
+        reg.external()
+            .typed::<MonitorStartOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_start(ctx, args).await })
-            }),
-        )?;
+                async move {
+                    tool_result_output(
+                        plugin
+                            .handle_start(ctx, serde_json::to_value(args).unwrap_or_default())
+                            .await,
+                    )
+                }
+            })?;
 
         let state = Arc::clone(&self.state);
-        reg.external().op(
-            ExternalOpDef {
-                name: "monitor.stop".to_string(),
-                description: "Stop a monitor.".to_string(),
-                kind: ExternalOpKind::Command,
-                session_param: SessionParam::Required,
-                input_schema: serde_json::json!({}),
-                output_schema: serde_json::json!({}),
-            },
-            Arc::new(move |ctx, args| {
+        reg.external()
+            .typed::<MonitorStopOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
                 };
-                Box::pin(async move { plugin.handle_stop(ctx, args).await })
-            }),
-        )?;
+                async move {
+                    tool_result_output(
+                        plugin
+                            .handle_stop(ctx, serde_json::to_value(args).unwrap_or_default())
+                            .await,
+                    )
+                }
+            })?;
         Ok(())
     }
 

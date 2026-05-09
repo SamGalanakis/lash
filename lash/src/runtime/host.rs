@@ -408,19 +408,12 @@ pub struct RuntimeCoreConfig {
     pub base_dir: PathBuf,
     pub path_resolver: Arc<dyn PathResolver>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
-    pub prompt_template: crate::PromptTemplate,
-    pub prompt_contributions: Vec<crate::PromptContribution>,
+    pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
     pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
-    /// Host-owned destination for refreshed OAuth credentials. When
-    /// `Some`, lash writes refreshed provider tokens here so they
-    /// persist across runs. When `None`, token refresh succeeds but
-    /// nothing is written — the host either doesn't need persistence
-    /// (tests, one-shot calls) or handles it via a different channel.
-    pub credential_store_path: Option<PathBuf>,
 }
 
 impl Default for RuntimeCoreConfig {
@@ -429,14 +422,12 @@ impl Default for RuntimeCoreConfig {
             base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             path_resolver: Arc::new(DefaultPathResolver),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            prompt_template: crate::default_prompt_template(),
-            prompt_contributions: Vec::new(),
+            prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
-            credential_store_path: None,
         }
     }
 }
@@ -461,15 +452,31 @@ impl RuntimeCoreConfig {
     }
 
     pub fn with_prompt_template(mut self, prompt_template: crate::PromptTemplate) -> Self {
-        self.prompt_template = prompt_template;
+        self.prompt.template = Some(prompt_template);
         self
     }
 
-    pub fn with_prompt_contributions(
+    pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
+        self.prompt.add_contribution(contribution);
+        self
+    }
+
+    pub fn with_replaced_prompt_slot(
         mut self,
-        prompt_contributions: Vec<crate::PromptContribution>,
+        slot: crate::PromptSlot,
+        contributions: impl IntoIterator<Item = crate::PromptContribution>,
     ) -> Self {
-        self.prompt_contributions = prompt_contributions;
+        self.prompt.replace_slot(slot, contributions);
+        self
+    }
+
+    pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
+        self.prompt.clear_slot(slot);
+        self
+    }
+
+    pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
+        self.prompt = prompt;
         self
     }
 
@@ -501,11 +508,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.termination = termination;
-        self
-    }
-
-    pub fn with_credential_store_path(mut self, path: Option<PathBuf>) -> Self {
-        self.credential_store_path = path;
         self
     }
 }

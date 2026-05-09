@@ -7,7 +7,7 @@ mod tests;
 
 use lash::{SkillCatalog, collect_skill_mentions_with_ranges};
 use lash_tui::{Line, Modifier, Rect, Span, Style};
-use lash_ui::UiSurfaceSlot;
+use lash_tui_extensions::TuiSurfaceSlot;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::activity::{
@@ -115,11 +115,11 @@ fn chrome_layout(app: &App, frame_width: u16, frame_height: u16) -> ChromeLayout
     let footer_available = frame_height
         .saturating_sub(1 + queue_height)
         .saturating_sub(MIN_HISTORY_HEIGHT);
-    let footer_height = surfaces.stack_height(UiSurfaceSlot::Footer, footer_available);
+    let footer_height = surfaces.stack_height(TuiSurfaceSlot::Footer, footer_available);
     let dock_available = frame_height
         .saturating_sub(1 + queue_height + footer_height)
         .saturating_sub(MIN_HISTORY_HEIGHT);
-    let dock_height = surfaces.stack_height(UiSurfaceSlot::Dock, dock_available);
+    let dock_height = surfaces.stack_height(TuiSurfaceSlot::Dock, dock_available);
     let reserved_height = 1 + dock_height + queue_height + footer_height;
     let input_height = input_height(app, frame_width, frame_height, reserved_height);
     let history_height =
@@ -456,12 +456,8 @@ fn inline_command_argument_hint(app: &App) -> Option<String> {
         return None;
     }
 
-    let hint = crate::command::argument_hint(
-        &format!("/{command}"),
-        &app.skills,
-        &app.plugin_commands,
-        app.ui_extensions(),
-    )?;
+    let hint =
+        crate::command::argument_hint(&format!("/{command}"), &app.skills, app.ui_extensions())?;
 
     let needs_leading_space = !app.input().chars().last().is_some_and(char::is_whitespace);
     Some(if needs_leading_space {
@@ -963,7 +959,7 @@ fn slash_command_slash_ranges(text: &str, skills: &SkillCatalog) -> Vec<(usize, 
         // treated the same way as builtins regardless, so passing an empty catalog
         // is sufficient here and avoids threading the app-level catalog through
         // the rendering layer.
-        if crate::command::parse(trimmed, skills, &[]).is_some()
+        if crate::command::parse(trimmed, skills).is_some()
             || crate::command::slash_skill_prompt(trimmed, skills).is_some()
         {
             ranges.push((slash_start, slash_start + 1));

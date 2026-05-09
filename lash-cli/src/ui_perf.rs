@@ -15,9 +15,9 @@ use lash_tui::{
     Color, Column, ColumnWidth, Frame, Line, PerfCounters, PerfPhase, Rect, Style, Table, TableRow,
     TableState,
 };
-use lash_ui::{
-    UiExtension, UiExtensions, UiHostEffect, UiRenderContext, UiSurfaceSize, UiSurfaceSlot,
-    UiSurfaceSpec,
+use lash_tui_extensions::{
+    TuiExtension, TuiExtensions, TuiHostEffect, TuiRenderContext, TuiSurfaceSize, TuiSurfaceSlot,
+    TuiSurfaceSpec,
 };
 use serde::Serialize;
 
@@ -1036,13 +1036,13 @@ impl SurfaceBenchmarkState {
     }
 }
 
-struct SurfaceBenchmarkExtension {
+struct SurfaceBenchmarkTuiExtension {
     table: Table<'static>,
     state: Arc<SurfaceBenchmarkState>,
 }
 
 #[async_trait::async_trait]
-impl UiExtension for SurfaceBenchmarkExtension {
+impl TuiExtension for SurfaceBenchmarkTuiExtension {
     fn id(&self) -> &'static str {
         "ui_perf_surface"
     }
@@ -1051,12 +1051,12 @@ impl UiExtension for SurfaceBenchmarkExtension {
         &self,
         _action: &str,
         _arg: Option<&str>,
-        _ctx: lash_ui::UiContext<'_>,
-    ) -> Result<Vec<UiHostEffect>, String> {
+        _ctx: lash_tui_extensions::TuiExtensionContext<'_>,
+    ) -> Result<Vec<TuiHostEffect>, String> {
         Ok(Vec::new())
     }
 
-    fn render_surface(&self, surface_key: &str, ctx: UiRenderContext<'_>, frame: &mut Frame<'_>) {
+    fn render_surface(&self, surface_key: &str, ctx: TuiRenderContext<'_>, frame: &mut Frame<'_>) {
         match surface_key {
             "workspace" => {
                 let mut state = TableState::default();
@@ -1103,41 +1103,41 @@ impl UiExtension for SurfaceBenchmarkExtension {
         }
     }
 
-    fn handle_session_event(&self, event: &lash::SessionEvent) -> Vec<UiHostEffect> {
+    fn handle_turn_event(&self, event: &lash::TurnEvent) -> Vec<TuiHostEffect> {
         match event {
-            lash::SessionEvent::TextDelta { content } if content == "ui_perf_mount" => vec![
-                UiHostEffect::MountSurface {
-                    spec: UiSurfaceSpec {
+            lash::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_mount" => vec![
+                TuiHostEffect::MountSurface {
+                    spec: TuiSurfaceSpec {
                         key: "workspace".to_string(),
-                        slot: UiSurfaceSlot::Workspace,
-                        size: UiSurfaceSize::Auto,
+                        slot: TuiSurfaceSlot::Workspace,
+                        size: TuiSurfaceSize::Auto,
                         order: 0,
                         focusable: true,
                         visible: true,
                         modal: false,
                     },
                 },
-                UiHostEffect::MountSurface {
-                    spec: UiSurfaceSpec {
+                TuiHostEffect::MountSurface {
+                    spec: TuiSurfaceSpec {
                         key: "footer".to_string(),
-                        slot: UiSurfaceSlot::Footer,
-                        size: UiSurfaceSize::Lines(1),
+                        slot: TuiSurfaceSlot::Footer,
+                        size: TuiSurfaceSize::Lines(1),
                         order: 0,
                         focusable: false,
                         visible: true,
                         modal: false,
                     },
                 },
-                UiHostEffect::FocusSurface {
+                TuiHostEffect::FocusSurface {
                     key: "workspace".to_string(),
                 },
             ],
-            lash::SessionEvent::TextDelta { content } if content == "ui_perf_overlay" => vec![
-                UiHostEffect::MountSurface {
-                    spec: UiSurfaceSpec {
+            lash::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_overlay" => vec![
+                TuiHostEffect::MountSurface {
+                    spec: TuiSurfaceSpec {
                         key: "overlay".to_string(),
-                        slot: UiSurfaceSlot::Overlay,
-                        size: UiSurfaceSize::Fixed {
+                        slot: TuiSurfaceSlot::Overlay,
+                        size: TuiSurfaceSize::Fixed {
                             width: 36,
                             height: 4,
                         },
@@ -1147,7 +1147,7 @@ impl UiExtension for SurfaceBenchmarkExtension {
                         modal: true,
                     },
                 },
-                UiHostEffect::FocusSurface {
+                TuiHostEffect::FocusSurface {
                     key: "overlay".to_string(),
                 },
             ],
@@ -1162,23 +1162,24 @@ fn build_benchmark_harness(scenario: UiPerfScenario, workload: UiPerfWorkload) -
         UiPerfScenario::HistoryRender => None,
         UiPerfScenario::WorkspaceSurface | UiPerfScenario::WorkspaceOverlay => {
             let state = Arc::new(SurfaceBenchmarkState::default());
-            let extension = Arc::new(SurfaceBenchmarkExtension {
+            let extension = Arc::new(SurfaceBenchmarkTuiExtension {
                 table: build_surface_table(workload.surface_row_count),
                 state: Arc::clone(&state),
             });
-            let ui_extensions =
-                Arc::new(UiExtensions::new(vec![extension]).expect("surface benchmark extensions"));
+            let ui_extensions = Arc::new(
+                TuiExtensions::new(vec![extension]).expect("surface benchmark extensions"),
+            );
             apply_ui_host_effects(
                 &mut app,
-                ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
-                    content: "ui_perf_mount".to_string(),
+                ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+                    text: "ui_perf_mount".to_string(),
                 }),
             );
             if scenario == UiPerfScenario::WorkspaceOverlay {
                 apply_ui_host_effects(
                     &mut app,
-                    ui_extensions.effects_for_session_event(&lash::SessionEvent::TextDelta {
-                        content: "ui_perf_overlay".to_string(),
+                    ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+                        text: "ui_perf_overlay".to_string(),
                     }),
                 );
             }
@@ -1554,7 +1555,7 @@ fn git_dirty() -> bool {
 
 fn make_temp_bench_dir() -> anyhow::Result<PathBuf> {
     let root = std::env::temp_dir().join(format!(
-        "lash-ui-perf-file-index-{}-{}",
+        "lash-tui-extensions-perf-file-index-{}-{}",
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));

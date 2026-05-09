@@ -5,7 +5,7 @@ use lash::provider::ProviderHandle;
 use lash::*;
 #[cfg(test)]
 use lash_sqlite_store::Store;
-use lash_ui::{UiContext, UiExtensions, UiHostEffect};
+use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 use sha2::{Digest, Sha256};
 
 use crate::app::{App, PreparedTurn, UiTimelineItem};
@@ -122,13 +122,16 @@ pub(crate) fn copy_binding_from_env(value: Option<&str>) -> CopyBinding {
     }
 }
 
-pub(crate) fn controls_text(ui_extensions: &UiExtensions) -> String {
+pub(crate) fn controls_text(ui_extensions: &TuiExtensions) -> String {
     let mut lines = vec!["Controls:".to_string()];
     lines.extend(render_shortcut_lines(ui_extensions, true));
     lines.join("\n")
 }
 
-fn render_shortcut_lines(ui_extensions: &UiExtensions, spaced_history_arrows: bool) -> Vec<String> {
+fn render_shortcut_lines(
+    ui_extensions: &TuiExtensions,
+    spaced_history_arrows: bool,
+) -> Vec<String> {
     let history_arrows = if spaced_history_arrows {
         "  Up / Down          Input history"
     } else {
@@ -581,7 +584,7 @@ pub(crate) fn info_text(
     lines.join("\n")
 }
 
-pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> String {
+pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &TuiExtensions) -> String {
     let mut lines = vec!["Commands:".to_string()];
     for spec in command::catalog() {
         let aliases = if spec.aliases.is_empty() {
@@ -637,7 +640,6 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> 
         String::new(),
         "Dynamic Runtime:".to_string(),
         "  /tools".to_string(),
-        "  /tools add <name> <handler> [description]".to_string(),
         "  /tools rm <name>".to_string(),
         "  /tools update <name> key=value ...".to_string(),
         "  /tools enable <name> | /tools disable <name>".to_string(),
@@ -651,11 +653,11 @@ pub(crate) fn help_text(skills: &SkillCatalog, ui_extensions: &UiExtensions) -> 
     lines.join("\n")
 }
 
-pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
+pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) {
     for effect in effects {
         match effect {
-            UiHostEffect::PushSystemMessage(message) => push_system_message(app, message),
-            UiHostEffect::DesktopNotification {
+            TuiHostEffect::PushSystemMessage(message) => push_system_message(app, message),
+            TuiHostEffect::DesktopNotification {
                 title,
                 body,
                 only_when_unfocused,
@@ -664,13 +666,13 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
                     crate::interactive::notify_desktop(&title, &body);
                 }
             }
-            UiHostEffect::UpsertModeIndicator { key, label } => {
+            TuiHostEffect::UpsertModeIndicator { key, label } => {
                 app.upsert_mode_indicator(key, label);
             }
-            UiHostEffect::ClearModeIndicator { key } => {
+            TuiHostEffect::ClearModeIndicator { key } => {
                 app.clear_mode_indicator(&key);
             }
-            UiHostEffect::UpsertPanel {
+            TuiHostEffect::UpsertPanel {
                 plugin_id,
                 key,
                 title,
@@ -685,17 +687,17 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
                     },
                 });
             }
-            UiHostEffect::ClearPanel { plugin_id, key } => {
+            TuiHostEffect::ClearPanel { plugin_id, key } => {
                 app.handle_session_event(SessionEvent::PluginEvent {
                     plugin_id,
                     event: PluginSurfaceEvent::PanelClear { key },
                 });
             }
-            UiHostEffect::QueueTurn { input } => {
+            TuiHostEffect::QueueTurn { input } => {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
                 app.dirty = true;
             }
-            UiHostEffect::QueuePreparedTurn {
+            TuiHostEffect::QueuePreparedTurn {
                 display_text,
                 effective_text,
             } => {
@@ -706,14 +708,14 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
                 ));
                 app.dirty = true;
             }
-            UiHostEffect::WakeSession { input } => {
+            TuiHostEffect::WakeSession { input } => {
                 app.queue_monitor_wake(input);
             }
-            UiHostEffect::MountSurface { .. }
-            | UiHostEffect::UpdateSurface { .. }
-            | UiHostEffect::UnmountSurface { .. }
-            | UiHostEffect::FocusSurface { .. }
-            | UiHostEffect::BlurSurface { .. } => {
+            TuiHostEffect::MountSurface { .. }
+            | TuiHostEffect::UpdateSurface { .. }
+            | TuiHostEffect::UnmountSurface { .. }
+            | TuiHostEffect::FocusSurface { .. }
+            | TuiHostEffect::BlurSurface { .. } => {
                 app.dirty = true;
             }
         }
@@ -722,7 +724,7 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<UiHostEffect>) {
 
 pub(crate) async fn collect_ui_snapshot(
     session_id: String,
-    ui_extensions: &UiExtensions,
+    ui_extensions: &TuiExtensions,
     plugin_host: &PluginHost,
     session_manager: Arc<dyn RuntimeSessionHost>,
 ) -> crate::event::UiSnapshotResult {
@@ -735,11 +737,14 @@ pub(crate) async fn collect_ui_snapshot(
             None
         }
     };
+    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
+        plugin_host,
+        session_id: &session_id,
+        session_manager: Arc::clone(&session_manager),
+    };
     let effects = match ui_extensions
-        .snapshot_all(UiContext {
-            plugin_host,
-            session_id: &session_id,
-            session_manager: Arc::clone(&session_manager),
+        .snapshot_all(TuiExtensionContext {
+            session: &tui_session,
         })
         .await
     {
@@ -785,7 +790,7 @@ mod tests {
 
         apply_ui_host_effects(
             &mut app,
-            vec![UiHostEffect::DesktopNotification {
+            vec![TuiHostEffect::DesktopNotification {
                 title: "lash".into(),
                 body: "Response complete".into(),
                 only_when_unfocused: true,

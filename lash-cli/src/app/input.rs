@@ -115,7 +115,6 @@ impl App {
         self.editor.update_suggestions(
             &self.skills,
             self.ui_extensions.as_ref(),
-            &self.plugin_commands,
             self.file_index.as_ref(),
         );
     }
@@ -137,14 +136,11 @@ impl App {
 
     /// Accept the selected suggestion.
     pub fn complete_suggestion(&mut self) {
-        self.editor.complete_suggestion(
-            &self.skills,
-            self.ui_extensions.as_ref(),
-            &self.plugin_commands,
-        );
+        self.editor
+            .complete_suggestion(&self.skills, self.ui_extensions.as_ref());
     }
 
-    pub fn ui_extensions(&self) -> &UiExtensions {
+    pub fn ui_extensions(&self) -> &TuiExtensions {
         self.ui_extensions.as_ref()
     }
 

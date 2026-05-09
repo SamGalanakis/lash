@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use lash::plugin::{
-    ExternalInvokeContext, ExternalOpDef, ExternalOpKind, PluginDirective, PluginError,
-    PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, PromptHookContext,
-    SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter, ToolCallHookContext,
-    ToolResultHookContext, TurnResultHookContext,
+    ExternalInvokeContext, ExternalOpKind, PluginDirective, PluginError, PluginFactory,
+    PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, PromptHookContext, SessionParam,
+    SessionPlugin, SnapshotReader, SnapshotWriter, ToolCallHookContext, ToolResultHookContext,
+    TurnResultHookContext, TypedExternalOp, TypedExternalOpError,
 };
 use lash::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolDefinition,
@@ -70,6 +70,82 @@ struct SummaryState {
     mode: ModeSnapshot,
     running: Option<RunningStatus>,
     last_run: Option<LastRunSummary>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, lash::JsonSchema)]
+pub struct AutoresearchEmptyArgs {}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, lash::JsonSchema)]
+pub struct AutoresearchStartArgs {
+    pub objective: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, lash::JsonSchema)]
+pub struct AutoresearchCommandOutput {
+    pub status: StatusSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_input: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, lash::JsonSchema)]
+pub struct AutoresearchExportOutput {
+    pub status: StatusSummary,
+    pub path: String,
+    pub message: String,
+}
+
+pub struct AutoresearchStatusOp;
+pub struct AutoresearchStartOp;
+pub struct AutoresearchStopOp;
+pub struct AutoresearchClearOp;
+pub struct AutoresearchExportOp;
+
+impl TypedExternalOp for AutoresearchStatusOp {
+    const NAME: &'static str = "autoresearch.status";
+    const DESCRIPTION: &'static str =
+        "Return the current autoresearch runtime and journal summary.";
+    const KIND: ExternalOpKind = ExternalOpKind::Query;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AutoresearchEmptyArgs;
+    type Output = StatusSummary;
+}
+
+impl TypedExternalOp for AutoresearchStartOp {
+    const NAME: &'static str = "autoresearch.start";
+    const DESCRIPTION: &'static str =
+        "Enable autoresearch mode and optionally seed a new objective.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AutoresearchStartArgs;
+    type Output = AutoresearchCommandOutput;
+}
+
+impl TypedExternalOp for AutoresearchStopOp {
+    const NAME: &'static str = "autoresearch.stop";
+    const DESCRIPTION: &'static str = "Disable autoresearch mode for the current session.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AutoresearchEmptyArgs;
+    type Output = AutoresearchCommandOutput;
+}
+
+impl TypedExternalOp for AutoresearchClearOp {
+    const NAME: &'static str = "autoresearch.clear";
+    const DESCRIPTION: &'static str = "Delete autoresearch session files and clear runtime state.";
+    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AutoresearchEmptyArgs;
+    type Output = AutoresearchCommandOutput;
+}
+
+impl TypedExternalOp for AutoresearchExportOp {
+    const NAME: &'static str = "autoresearch.export";
+    const DESCRIPTION: &'static str = "Write an HTML export of the current autoresearch summary.";
+    const KIND: ExternalOpKind = ExternalOpKind::Task;
+    const SESSION_PARAM: SessionParam = SessionParam::Required;
+    type Args = AutoresearchEmptyArgs;
+    type Output = AutoresearchExportOutput;
 }
 
 struct AutoresearchPlugin {
@@ -219,66 +295,61 @@ impl SessionPlugin for AutoresearchPlugin {
             })
         }));
 
-        reg.external().op(
-            status_external_def(),
-            Arc::new({
-                let root = self.workdir.clone();
-                let state = Arc::clone(&self.state);
-                move |_ctx: ExternalInvokeContext, _args: Value| {
-                    let root = root.clone();
-                    let state = Arc::clone(&state);
-                    Box::pin(async move { status_tool_result(&root, &state) })
+        reg.external().typed::<AutoresearchStatusOp, _, _>({
+            let root = self.workdir.clone();
+            let state = Arc::clone(&self.state);
+            move |_ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+                let root = root.clone();
+                let state = Arc::clone(&state);
+                async move { tool_result_output(status_tool_result(&root, &state)) }
+            }
+        })?;
+        reg.external().typed::<AutoresearchStartOp, _, _>({
+            let root = self.workdir.clone();
+            let state = Arc::clone(&self.state);
+            move |ctx: ExternalInvokeContext, args: AutoresearchStartArgs| {
+                let root = root.clone();
+                let state = Arc::clone(&state);
+                async move {
+                    tool_result_output(
+                        start_mode_command(
+                            ctx,
+                            &root,
+                            &state,
+                            serde_json::to_value(args).unwrap_or_default(),
+                        )
+                        .await,
+                    )
                 }
-            }),
-        )?;
-        reg.external().op(
-            start_external_def(),
-            Arc::new({
-                let root = self.workdir.clone();
-                let state = Arc::clone(&self.state);
-                move |ctx: ExternalInvokeContext, args: Value| {
-                    let root = root.clone();
-                    let state = Arc::clone(&state);
-                    Box::pin(async move { start_mode_command(ctx, &root, &state, args).await })
-                }
-            }),
-        )?;
-        reg.external().op(
-            stop_external_def(),
-            Arc::new({
-                let root = self.workdir.clone();
-                let state = Arc::clone(&self.state);
-                move |ctx: ExternalInvokeContext, _args: Value| {
-                    let root = root.clone();
-                    let state = Arc::clone(&state);
-                    Box::pin(async move { stop_mode_command(ctx, &root, &state).await })
-                }
-            }),
-        )?;
-        reg.external().op(
-            clear_external_def(),
-            Arc::new({
-                let root = self.workdir.clone();
-                let state = Arc::clone(&self.state);
-                move |ctx: ExternalInvokeContext, _args: Value| {
-                    let root = root.clone();
-                    let state = Arc::clone(&state);
-                    Box::pin(async move { clear_mode_command(ctx, &root, &state).await })
-                }
-            }),
-        )?;
-        reg.external().op(
-            export_external_def(),
-            Arc::new({
-                let root = self.workdir.clone();
-                let state = Arc::clone(&self.state);
-                move |_ctx: ExternalInvokeContext, _args: Value| {
-                    let root = root.clone();
-                    let state = Arc::clone(&state);
-                    Box::pin(async move { export_summary(&root, &state) })
-                }
-            }),
-        )?;
+            }
+        })?;
+        reg.external().typed::<AutoresearchStopOp, _, _>({
+            let root = self.workdir.clone();
+            let state = Arc::clone(&self.state);
+            move |ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+                let root = root.clone();
+                let state = Arc::clone(&state);
+                async move { tool_result_output(stop_mode_command(ctx, &root, &state).await) }
+            }
+        })?;
+        reg.external().typed::<AutoresearchClearOp, _, _>({
+            let root = self.workdir.clone();
+            let state = Arc::clone(&self.state);
+            move |ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+                let root = root.clone();
+                let state = Arc::clone(&state);
+                async move { tool_result_output(clear_mode_command(ctx, &root, &state).await) }
+            }
+        })?;
+        reg.external().typed::<AutoresearchExportOp, _, _>({
+            let root = self.workdir.clone();
+            let state = Arc::clone(&self.state);
+            move |_ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+                let root = root.clone();
+                let state = Arc::clone(&state);
+                async move { tool_result_output(export_summary(&root, &state)) }
+            }
+        })?;
 
         Ok(())
     }
@@ -917,6 +988,17 @@ fn status_tool_result(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResu
     }
 }
 
+fn tool_result_output<T>(result: ToolResult) -> Result<T, TypedExternalOpError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if !result.success {
+        return Err(TypedExternalOpError::new(result.result.to_string()));
+    }
+    serde_json::from_value(result.result)
+        .map_err(|err| TypedExternalOpError::new(format!("invalid autoresearch output: {err}")))
+}
+
 fn autoresearch_tool_names() -> Vec<String> {
     AUTORESEARCH_TOOL_NAMES
         .iter()
@@ -1093,64 +1175,6 @@ fn export_summary(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResult {
             "message": format!("Wrote {}.", EXPORT_FILE),
         })),
         Err(err) => ToolResult::err_fmt(err),
-    }
-}
-
-fn status_external_def() -> ExternalOpDef {
-    ExternalOpDef {
-        name: "autoresearch.status".to_string(),
-        description: "Return the current autoresearch runtime and journal summary.".to_string(),
-        kind: ExternalOpKind::Query,
-        session_param: SessionParam::Required,
-        input_schema: json!({ "type": "object" }),
-        output_schema: json!({ "type": "object" }),
-    }
-}
-
-fn start_external_def() -> ExternalOpDef {
-    ExternalOpDef {
-        name: "autoresearch.start".to_string(),
-        description: "Enable autoresearch mode and optionally seed a new objective.".to_string(),
-        kind: ExternalOpKind::Command,
-        session_param: SessionParam::Required,
-        input_schema: json!({
-            "type": "object",
-            "properties": { "objective": { "type": "string" } }
-        }),
-        output_schema: json!({ "type": "object" }),
-    }
-}
-
-fn stop_external_def() -> ExternalOpDef {
-    ExternalOpDef {
-        name: "autoresearch.stop".to_string(),
-        description: "Disable autoresearch mode for the current session.".to_string(),
-        kind: ExternalOpKind::Command,
-        session_param: SessionParam::Required,
-        input_schema: json!({ "type": "object" }),
-        output_schema: json!({ "type": "object" }),
-    }
-}
-
-fn clear_external_def() -> ExternalOpDef {
-    ExternalOpDef {
-        name: "autoresearch.clear".to_string(),
-        description: "Delete autoresearch session files and clear runtime state.".to_string(),
-        kind: ExternalOpKind::Command,
-        session_param: SessionParam::Required,
-        input_schema: json!({ "type": "object" }),
-        output_schema: json!({ "type": "object" }),
-    }
-}
-
-fn export_external_def() -> ExternalOpDef {
-    ExternalOpDef {
-        name: "autoresearch.export".to_string(),
-        description: "Write an HTML export of the current autoresearch summary.".to_string(),
-        kind: ExternalOpKind::Task,
-        session_param: SessionParam::Required,
-        input_schema: json!({ "type": "object" }),
-        output_schema: json!({ "type": "object" }),
     }
 }
 

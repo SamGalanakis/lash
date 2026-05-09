@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use lash::SkillCatalog;
 use lash_file_index::FileIndex;
 use lash_file_index::MatchResult;
-use lash_ui::UiExtensions;
+use lash_tui_extensions::TuiExtensions;
 
 use crate::command;
 use crate::input_items::image_marker_ranges;
@@ -876,14 +876,13 @@ impl EditorState {
     pub fn update_suggestions(
         &mut self,
         skills: &SkillCatalog,
-        ui_extensions: &UiExtensions,
-        plugin_commands: &[lash::CommandDef],
+        ui_extensions: &TuiExtensions,
         file_index: Option<&FileIndex>,
     ) {
         if let Some(context) = self.slash_completion_context() {
             match context {
                 SlashCompletionContext::CommandName { prefix, .. } => {
-                    self.suggestions = command::completions(&prefix, skills, plugin_commands)
+                    self.suggestions = command::completions(&prefix, skills)
                         .into_iter()
                         .map(Suggestion::from)
                         .collect();
@@ -901,16 +900,11 @@ impl EditorState {
                 SlashCompletionContext::CommandArgument {
                     command, prefix, ..
                 } => {
-                    self.suggestions = command::argument_completions(
-                        &command,
-                        &prefix,
-                        skills,
-                        plugin_commands,
-                        ui_extensions,
-                    )
-                    .into_iter()
-                    .map(Suggestion::from)
-                    .collect();
+                    self.suggestions =
+                        command::argument_completions(&command, &prefix, skills, ui_extensions)
+                            .into_iter()
+                            .map(Suggestion::from)
+                            .collect();
                     self.suggestion_kind = SuggestionKind::CommandArgument;
                 }
             }
@@ -1032,12 +1026,7 @@ impl EditorState {
         }
     }
 
-    pub fn complete_suggestion(
-        &mut self,
-        skills: &SkillCatalog,
-        ui_extensions: &UiExtensions,
-        plugin_commands: &[lash::CommandDef],
-    ) {
+    pub fn complete_suggestion(&mut self, skills: &SkillCatalog, ui_extensions: &TuiExtensions) {
         match self.suggestion_kind {
             SuggestionKind::Command => {
                 if let Some(SlashCompletionContext::CommandName { slash_pos, .. }) =
@@ -1046,12 +1035,9 @@ impl EditorState {
                 {
                     let cmd = suggestion.name;
                     self.record_undo(UndoAction::Bulk);
-                    let needs_arg =
-                        ui_extensions
-                            .command_takes_argument(&cmd)
-                            .unwrap_or_else(|| {
-                                command::completion_inserts_space(&cmd, skills, plugin_commands)
-                            });
+                    let needs_arg = ui_extensions
+                        .command_takes_argument(&cmd)
+                        .unwrap_or_else(|| command::completion_inserts_space(&cmd, skills));
                     let replacement = if needs_arg { format!("{} ", cmd) } else { cmd };
                     let before = self.input[..slash_pos].to_string();
                     let after = self.input[self.cursor_pos..].to_string();

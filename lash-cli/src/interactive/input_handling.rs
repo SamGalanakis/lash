@@ -6,8 +6,9 @@ use crossterm::event::{
 };
 use lash::session_model::Message;
 use lash::*;
+use lash_embed::LashSession;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
-use lash_ui::{UiContext, UiExtensions, UiInputOutcome, UiSurfaceSlot};
+use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
@@ -40,22 +41,25 @@ use super::runtime::{
 };
 
 pub(super) fn handle_surface_input(
-    ui_extensions: &UiExtensions,
+    ui_extensions: &TuiExtensions,
     event: &TuiInputEvent,
     plugin_host: &PluginHost,
     session_manager: &Arc<dyn RuntimeSessionHost>,
     app: &mut App,
 ) -> bool {
+    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
+        plugin_host,
+        session_id: app.session_id.as_str(),
+        session_manager: Arc::clone(session_manager),
+    };
     match ui_extensions.handle_input(
         event,
-        UiContext {
-            plugin_host,
-            session_id: app.session_id.as_str(),
-            session_manager: Arc::clone(session_manager),
+        TuiExtensionContext {
+            session: &tui_session,
         },
     ) {
-        UiInputOutcome::Ignored => false,
-        UiInputOutcome::Handled(effects) => {
+        TuiInputOutcome::Ignored => false,
+        TuiInputOutcome::Handled(effects) => {
             apply_ui_host_effects(app, effects);
             app.dirty = true;
             true
@@ -83,7 +87,7 @@ pub(super) fn current_ui_action_context(app: &App, terminal: &Terminal) -> UiAct
 
 pub(super) fn selected_slash_command_suggestion(
     app: &App,
-    ui_extensions: &UiExtensions,
+    ui_extensions: &TuiExtensions,
 ) -> Option<(String, super::commands::ParsedSlashCommand)> {
     if app.suggestion_kind() != SuggestionKind::Command {
         return None;
@@ -92,13 +96,8 @@ pub(super) fn selected_slash_command_suggestion(
         .suggestions()
         .get(app.suggestion_idx())
         .map(|suggestion| suggestion.name.clone())?;
-    parse_slash_command(
-        &command_text,
-        &app.skills,
-        ui_extensions,
-        &app.plugin_commands,
-    )
-    .map(|command| (command_text, command))
+    parse_slash_command(&command_text, &app.skills, ui_extensions)
+        .map(|command| (command_text, command))
 }
 
 pub(super) fn apply_terminal_action(
@@ -218,12 +217,12 @@ pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
     session_id: String,
     _history: &mut Vec<lash::session_model::Message>,
-    _runtime: &mut Option<LashRuntime>,
+    _runtime: &mut Option<LashSession>,
     _turn_counter: &mut usize,
     _current_execution_mode: &mut ExecutionMode,
     _current_model_variant: &mut Option<String>,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    _ui_extensions: &UiExtensions,
+    _ui_extensions: &TuiExtensions,
     _plugin_host: &PluginHost,
 ) -> bool {
     let queued_turn = match session_manager.take_first_turn_input(&session_id).await {
@@ -253,9 +252,9 @@ pub(super) async fn activate_foreground_session_handoff(
     true
 }
 
-pub(super) fn enqueue_pending_monitor_wakes(
+pub(super) async fn enqueue_pending_monitor_wakes(
     app: &mut App,
-    turn_input_injection_bridge: &TurnInputInjectionBridge,
+    session: &LashSession,
 ) -> Result<usize, String> {
     let wakes = app.take_pending_monitor_wakes();
     if wakes.is_empty() {
@@ -264,10 +263,15 @@ pub(super) fn enqueue_pending_monitor_wakes(
     let messages = wakes
         .iter()
         .map(|input| InjectedTurnInput {
+            id: None,
             message: monitor_wake_message(input),
         })
         .collect::<Vec<_>>();
-    turn_input_injection_bridge.enqueue(messages)?;
+    session
+        .control()
+        .inject_turn_inputs(messages)
+        .await
+        .map_err(|err| err.to_string())?;
     app.mark_monitor_wakes_in_flight(&wakes);
     Ok(wakes.len())
 }
@@ -277,19 +281,21 @@ pub(super) async fn process_pending_monitor_wakes(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
     logger: &mut SessionLogger,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<lash::session_model::Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     app_tx: &crate::event::AppEventTx,
-    turn_input_injection_bridge: &TurnInputInjectionBridge,
     desired_dynamic: &DynamicStateSnapshot,
 ) -> Result<bool, String> {
     if !app.running && runtime_return_rx.is_none() && runtime.is_none() {
         return Ok(false);
     }
-    let injected = enqueue_pending_monitor_wakes(app, turn_input_injection_bridge)?;
+    let Some(session) = runtime.as_ref() else {
+        return Ok(false);
+    };
+    let injected = enqueue_pending_monitor_wakes(app, session).await?;
     if injected == 0 {
         return Ok(false);
     }
@@ -331,7 +337,7 @@ pub(super) fn handle_mouse_event(
     app: &mut App,
     terminal: &Terminal,
     ui_trace: &mut Option<UiTraceRecorder>,
-    ui_extensions: &UiExtensions,
+    ui_extensions: &TuiExtensions,
     plugin_host: &PluginHost,
     session_manager: &Arc<dyn RuntimeSessionHost>,
 ) -> anyhow::Result<()> {
@@ -346,7 +352,7 @@ pub(super) fn handle_mouse_event(
     let input_area = render::input_content_area(app, term_width, term_height);
     let workspace_active = app
         .ui_extensions()
-        .has_surface_in_slot(UiSurfaceSlot::Workspace);
+        .has_surface_in_slot(TuiSurfaceSlot::Workspace);
     let in_history = !workspace_active
         && mouse.row >= ha.y
         && mouse.row < ha.y + ha.height
@@ -548,11 +554,10 @@ pub(super) async fn handle_key_event(
     args: &Args,
     paused: &Arc<AtomicBool>,
     plugin_host: &PluginHost,
-    ui_extensions: &UiExtensions,
-    runtime_factory: &crate::session_bootstrap::CliRuntimeFactory,
+    ui_extensions: &TuiExtensions,
+    runtime_factory: &crate::session_bootstrap::CliSessionOpener,
     lash_config: &lash::provider::LashConfig,
-    dynamic_tools: &mut Arc<DynamicToolProvider>,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     last_turn: &mut Option<TurnReplayPayload>,
@@ -569,7 +574,6 @@ pub(super) async fn handle_key_event(
     toolset_hash: &mut String,
     app_tx: &crate::event::AppEventTx,
     pending_clear_after_return: &mut bool,
-    turn_input_injection_bridge: &TurnInputInjectionBridge,
 ) -> anyhow::Result<bool> {
     // With kitty keyboard protocol, ignore Release/Repeat events
     if key.kind != KeyEventKind::Press {
@@ -807,7 +811,6 @@ pub(super) async fn handle_key_event(
                         logger,
                         runtime_factory,
                         lash_config,
-                        dynamic_tools,
                         runtime,
                         history,
                         turn_counter,
@@ -863,8 +866,8 @@ pub(super) async fn handle_key_event(
                 if let UiActionOutcome::TreePicked(Some(selection)) =
                     apply_terminal_action(app, terminal, UiAction::SubmitTree)
                 {
-                    let current_dynamic_state = dynamic_tools.export_state();
-                    let Some(rt) = runtime.as_mut() else {
+                    let current_dynamic_state = desired_dynamic.clone();
+                    let Some(rt) = runtime.as_ref() else {
                         push_system_message(
                             app,
                             "Branch navigation is unavailable while a turn is running.",
@@ -882,7 +885,7 @@ pub(super) async fn handle_key_event(
                     .await
                     {
                         Ok(()) => {
-                            match rt.session_manager() {
+                            match rt.session_manager().await {
                                 Ok(manager) => *session_manager = manager,
                                 Err(err) => push_system_message(
                                     app,
@@ -973,13 +976,16 @@ pub(super) async fn handle_key_event(
     if let Some(chord) = key_chord_from_event(key)
         && let Some(shortcut) = ui_extensions.shortcut_for(chord)
     {
+        let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
+            plugin_host,
+            session_id: app.session_id.as_str(),
+            session_manager: Arc::clone(session_manager),
+        };
         match ui_extensions
             .invoke_shortcut(
                 &shortcut,
-                UiContext {
-                    plugin_host,
-                    session_id: app.session_id.as_str(),
-                    session_manager: Arc::clone(session_manager),
+                TuiExtensionContext {
+                    session: &tui_session,
                 },
             )
             .await
@@ -1008,12 +1014,8 @@ pub(super) async fn handle_key_event(
             };
             let queued = normalize_prepared_turn_for_dispatch(queued, &app.skills);
             app.update_suggestions();
-            let parsed_command = parse_slash_command(
-                &queued.display_text,
-                &app.skills,
-                ui_extensions,
-                &app.plugin_commands,
-            );
+            let parsed_command =
+                parse_slash_command(&queued.display_text, &app.skills, ui_extensions);
             let is_host_slash_command = parsed_command.is_some();
             if queued.is_empty()
                 || shell_escape_command(&queued.display_text).is_some()
@@ -1024,7 +1026,7 @@ pub(super) async fn handle_key_event(
             }
             if app.running {
                 if let Some(cmd) = parsed_command
-                    && slash_command_runs_out_of_band_while_running(&cmd, &app.plugin_commands)
+                    && slash_command_runs_out_of_band_while_running(&cmd)
                 {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_slash_command(queued.display_text.clone());
@@ -1040,7 +1042,6 @@ pub(super) async fn handle_key_event(
                         ui_extensions,
                         runtime_factory,
                         lash_config,
-                        dynamic_tools,
                         runtime,
                         history,
                         turn_counter,
@@ -1082,7 +1083,7 @@ pub(super) async fn handle_key_event(
             }
 
             let turn_input = make_turn_input(&queued);
-            let current_dynamic_state = dynamic_tools.export_state();
+            let current_dynamic_state = desired_dynamic.clone();
             send_user_message(
                 queued.clone(),
                 turn_input.clone(),
@@ -1134,7 +1135,7 @@ pub(super) async fn handle_key_event(
                 app.set_input(String::new());
                 app.update_suggestions();
                 if app.running {
-                    if slash_command_runs_out_of_band_while_running(&cmd, &app.plugin_commands) {
+                    if slash_command_runs_out_of_band_while_running(&cmd) {
                         if handle_parsed_slash_command(
                             cmd,
                             terminal,
@@ -1146,7 +1147,6 @@ pub(super) async fn handle_key_event(
                             ui_extensions,
                             runtime_factory,
                             lash_config,
-                            dynamic_tools,
                             runtime,
                             history,
                             turn_counter,
@@ -1188,7 +1188,6 @@ pub(super) async fn handle_key_event(
                     ui_extensions,
                     runtime_factory,
                     lash_config,
-                    dynamic_tools,
                     runtime,
                     history,
                     turn_counter,
@@ -1241,17 +1240,13 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
 
-            let parsed_command = parse_slash_command(
-                &queued.display_text,
-                &app.skills,
-                ui_extensions,
-                &app.plugin_commands,
-            );
+            let parsed_command =
+                parse_slash_command(&queued.display_text, &app.skills, ui_extensions);
             let is_host_slash_command = parsed_command.is_some();
 
             if app.running {
                 if let Some(cmd) = parsed_command
-                    && slash_command_runs_out_of_band_while_running(&cmd, &app.plugin_commands)
+                    && slash_command_runs_out_of_band_while_running(&cmd)
                 {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_slash_command(queued.display_text.clone());
@@ -1267,7 +1262,6 @@ pub(super) async fn handle_key_event(
                         ui_extensions,
                         runtime_factory,
                         lash_config,
-                        dynamic_tools,
                         runtime,
                         history,
                         turn_counter,
@@ -1306,9 +1300,18 @@ pub(super) async fn handle_key_event(
                     return Ok(false);
                 }
                 let injection = lash::InjectedTurnInput {
+                    id: None,
                     message: make_injected_plugin_message(&queued),
                 };
-                match turn_input_injection_bridge.enqueue(vec![injection]) {
+                let Some(session) = runtime.as_ref() else {
+                    push_system_message(
+                        app,
+                        "Current-turn injection is unavailable while the session is switching.",
+                    );
+                    app.restore_prepared_turn(queued);
+                    return Ok(false);
+                };
+                match session.control().inject_turn_inputs(vec![injection]).await {
                     Ok(()) => {
                         record_queue_pending_steer(ui_trace, &queued);
                         app.queue_pending_steer(queued.clone());
@@ -1392,12 +1395,8 @@ pub(super) async fn handle_key_event(
             }
 
             // Try slash command
-            if let Some(cmd) = parse_slash_command(
-                &queued.display_text,
-                &app.skills,
-                ui_extensions,
-                &app.plugin_commands,
-            ) {
+            if let Some(cmd) = parse_slash_command(&queued.display_text, &app.skills, ui_extensions)
+            {
                 if let Some(recorder) = ui_trace.as_mut() {
                     recorder.record_slash_command(queued.display_text.clone());
                 }
@@ -1412,7 +1411,6 @@ pub(super) async fn handle_key_event(
                     ui_extensions,
                     runtime_factory,
                     lash_config,
-                    dynamic_tools,
                     runtime,
                     history,
                     turn_counter,
@@ -1444,13 +1442,8 @@ pub(super) async fn handle_key_event(
             }
 
             // Regular user message — send to the active session
-            if let Err(e) = apply_pending_reconfigure(
-                dynamic_tools,
-                desired_dynamic,
-                pending_reconfigure,
-                runtime,
-            )
-            .await
+            if let Err(e) =
+                apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
             {
                 push_system_message(
                     app,
@@ -1462,11 +1455,17 @@ pub(super) async fn handle_key_event(
                 return Ok(false);
             }
             *toolset_hash = hash12(
-                &serde_json::to_vec(&dynamic_tools.definitions())
-                    .unwrap_or_else(|_| b"[]".to_vec()),
+                &serde_json::to_vec(
+                    &desired_dynamic
+                        .tools
+                        .values()
+                        .map(|spec| spec.definition.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|_| b"[]".to_vec()),
             );
             let turn_input = make_turn_input(&queued);
-            let current_dynamic_state = dynamic_tools.export_state();
+            let current_dynamic_state = desired_dynamic.clone();
             send_user_message(
                 queued.clone(),
                 turn_input.clone(),

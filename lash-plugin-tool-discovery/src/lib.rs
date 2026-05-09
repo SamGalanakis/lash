@@ -189,9 +189,9 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
 mod tests {
     use super::*;
     use lash::plugin::{
-        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, PromptHost,
-        SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionSnapshot,
-        SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
+        DirectCompletionHost, DynamicToolHost, MonitorHost, PluginError, SessionGraphHost,
+        SessionHandle, SessionLifecycleHost, SessionSnapshot, SessionSnapshotHost,
+        SessionTurnHandle, TaskHost, ToolCatalogHost, TraceHost, TurnHost,
     };
     use lash::{
         AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolExecutionContext,
@@ -336,7 +336,6 @@ mod tests {
     impl TaskHost for FakeSessionManager {}
     impl MonitorHost for FakeSessionManager {}
     impl SessionGraphHost for FakeSessionManager {}
-    impl PromptHost for FakeSessionManager {}
     impl TraceHost for FakeSessionManager {}
 
     fn catalog_tool_with_metadata(

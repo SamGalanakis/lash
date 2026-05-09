@@ -32,7 +32,7 @@ lash-provider-google = { path = "../lash-provider-google" }
 lash-provider-openai = { path = "../lash-provider-openai" }
 lash-providers-builtin = { path = "../lash-providers-builtin" }
 lash-subagents = { path = "../lash-subagents" }
-lash-ui = { path = "../lash-ui" }
+lash-tui-extensions = { path = "../lash-tui-extensions" }
 lash-tui = { path = "../lash-tui" }
 lash-autoresearch = { path = "../lash-autoresearch" }
 lash-export = { path = "../lash-export" }

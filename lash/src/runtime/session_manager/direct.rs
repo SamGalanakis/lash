@@ -22,10 +22,6 @@ impl DirectCompletionCapability {
                 .validate_variant(&model, variant)
                 .map_err(crate::PluginError::Session)?;
         }
-        provider
-            .ensure_ready()
-            .await
-            .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let originating_tool_call_id = request.originating_tool_call_id.clone();
         let trace_context = |id: Option<&str>| {
             let mut ctx =
@@ -122,10 +118,6 @@ impl DirectCompletionCapability {
         )
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
         let model = request.model.clone();
-        provider
-            .ensure_ready()
-            .await
-            .map_err(|err| crate::PluginError::Session(err.message.clone()))?;
         let llm_call_id = if current.host.core.trace_sink.is_some() {
             let id = uuid::Uuid::new_v4().to_string();
             crate::trace::emit_trace(

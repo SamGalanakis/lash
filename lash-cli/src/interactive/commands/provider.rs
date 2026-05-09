@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lash::provider::LashConfig;
 use lash::*;
+use lash_embed::{LashSession, ModelSelection, SessionConfigPatch};
 use lash_tui::Terminal;
 
 use crate::app::App;
@@ -32,10 +33,19 @@ fn save_model_default(
     }
 }
 
+fn persist_provider_config(
+    cfg: &mut LashConfig,
+    provider: &ProviderHandle,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    cfg.upsert_provider(provider);
+    cfg.save(path)
+}
+
 pub(super) async fn handle_model(
     new_model: Option<String>,
     app: &mut App,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     model_catalog: &CachedModelCatalog,
@@ -80,13 +90,16 @@ pub(super) async fn handle_model(
         .default_model_variant(&selection.model)
         .map(str::to_string);
     if let Some(rt) = runtime.as_mut() {
-        rt.update_session_config(
-            None,
-            Some(selection.model.clone()),
-            Some(model_variant.clone()),
-            Some(resolved_model_spec.context_window() as usize),
-        )
-        .await;
+        let _ = rt
+            .update_config(SessionConfigPatch {
+                model: Some(ModelSelection::new(
+                    selection.model.clone(),
+                    model_variant.clone(),
+                )),
+                max_context_tokens: Some(resolved_model_spec.context_window() as usize),
+                ..SessionConfigPatch::default()
+            })
+            .await;
     }
     *current_model_variant = model_variant;
     app.context_window = Some(resolved_model_spec.context_window());
@@ -116,7 +129,7 @@ pub(super) async fn handle_model(
 pub(super) async fn handle_variant(
     new_variant: Option<String>,
     app: &mut App,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
 ) -> anyhow::Result<bool> {
@@ -141,7 +154,11 @@ pub(super) async fn handle_variant(
         }
     };
     if let Some(rt) = runtime.as_mut() {
-        rt.update_session_config(None, None, Some(variant.clone()), None)
+        let _ = rt
+            .update_config(SessionConfigPatch {
+                model: Some(ModelSelection::new(app.model.clone(), variant.clone())),
+                ..SessionConfigPatch::default()
+            })
             .await;
     }
     *current_model_variant = variant;
@@ -215,7 +232,7 @@ pub(super) async fn handle_change_provider(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     model_catalog: &CachedModelCatalog,
-    runtime: &mut Option<LashRuntime>,
+    runtime: &mut Option<LashSession>,
 ) -> anyhow::Result<bool> {
     paused.store(true, Ordering::Relaxed);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
@@ -234,7 +251,7 @@ pub(super) async fn handle_change_provider(
 
     match setup_result {
         Ok(new_cfg) => {
-            let mut new_provider = match new_cfg.build_active_provider() {
+            let new_provider = match new_cfg.build_active_provider() {
                 Ok(p) => p,
                 Err(err) => {
                     push_system_message(
@@ -253,22 +270,10 @@ pub(super) async fn handle_change_provider(
                     return Ok(false);
                 }
             };
-            if let Err(e) = new_provider.ensure_fresh().await {
-                push_system_message(
-                    app,
-                    format!("Provider setup completed, but token refresh failed: {}", e),
-                );
-                *provider = previous_provider;
-                app.model = previous_model;
-                app.context_window = previous_context_window;
-                app.context_usage_excludes_cached_input = previous_context_usage;
-                *current_model_variant = previous_variant;
-                app.set_model_variant(current_model_variant.clone());
-                return Ok(false);
-            }
             let mut new_cfg = new_cfg;
-            new_cfg.upsert_provider(&new_provider);
-            if let Err(e) = new_cfg.save(&crate::paths::config_file()) {
+            if let Err(e) =
+                persist_provider_config(&mut new_cfg, &new_provider, &crate::paths::config_file())
+            {
                 push_system_message(
                     app,
                     format!("Provider updated, but saving config failed: {}", e),
@@ -360,13 +365,17 @@ pub(super) async fn handle_change_provider(
                     .map(str::to_string),
             };
             if let Some(rt) = runtime.as_mut() {
-                rt.update_session_config(
-                    Some(provider.clone()),
-                    Some(selection.model.clone()),
-                    Some(model_variant.clone()),
-                    Some(resolved_model_spec.context_window() as usize),
-                )
-                .await;
+                let _ = rt
+                    .update_config(SessionConfigPatch {
+                        provider: Some(provider.clone()),
+                        model: Some(ModelSelection::new(
+                            selection.model.clone(),
+                            model_variant.clone(),
+                        )),
+                        max_context_tokens: Some(resolved_model_spec.context_window() as usize),
+                        ..SessionConfigPatch::default()
+                    })
+                    .await;
             }
             *current_model_variant = model_variant;
             app.context_window = Some(resolved_model_spec.context_window());
@@ -456,4 +465,36 @@ pub(super) fn handle_logout(app: &mut App, provider: &ProviderHandle) -> anyhow:
         None => push_system_message(app, "No stored provider credentials found."),
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
+
+    #[test]
+    fn provider_change_persists_refreshed_provider_config_explicitly() {
+        let _guard = env_lock().blocking_lock();
+        let temp = TempDirGuard::new("lash-provider-persist");
+        let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
+        let path = crate::paths::config_file();
+        let provider = lash::testing::TestProvider::builder()
+            .kind("persist-provider")
+            .serialize_config(|| serde_json::json!({ "token": "refreshed" }))
+            .build()
+            .into_handle();
+        let mut cfg = LashConfig::new(&provider);
+
+        persist_provider_config(&mut cfg, &provider, &path).expect("persist provider config");
+
+        let saved = LashConfig::load(&path).expect("saved config");
+        assert_eq!(saved.active_provider_kind(), "persist-provider");
+        let spec = saved
+            .provider_spec("persist-provider")
+            .expect("provider spec");
+        assert_eq!(
+            spec.config.get("token").and_then(serde_json::Value::as_str),
+            Some("refreshed")
+        );
+    }
 }

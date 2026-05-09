@@ -1,9 +1,9 @@
 //! Provider components and registry for pluggable LLM backends.
 //!
-//! A provider is split into narrow capabilities: persisted state,
-//! authentication refresh, readiness/warmup, request transport, and
-//! model policy. [`ProviderHandle`] owns those components and is the
-//! persisted handle stored by session policy and config.
+//! A provider is split into narrow capabilities: configured state,
+//! request transport, failure classification, and model policy.
+//! [`ProviderHandle`] owns those components and is the executable handle
+//! stored by session policy and host config.
 //!
 //! Serialization: [`ProviderHandle`] is the owning handle that
 //! [`SessionPolicy`] stores. It round-trips through [`ProviderSpec`] —
@@ -25,7 +25,6 @@ use crate::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureK
 use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
 use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
-use crate::oauth::OAuthError;
 use tokio::time::Instant;
 
 /// Per-request tuning a provider produces for a model + variant. Each
@@ -377,7 +376,7 @@ pub struct ModelDefault {
     pub variant: Option<String>,
 }
 
-/// Persisted provider state: stable kind, serializable config, and
+/// Configured provider state: stable kind, serializable config, and
 /// request timeout options.
 pub trait ProviderState: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
@@ -394,28 +393,12 @@ pub trait ProviderState: Send + Sync + std::fmt::Debug {
 }
 
 #[async_trait]
-pub trait ProviderAuth: Send + Sync + std::fmt::Debug {
-    /// Refresh OAuth tokens if needed. Returns `true` if persisted
-    /// credentials changed.
-    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError>;
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth>;
-}
-
-#[async_trait]
-pub trait ProviderReadiness: Send + Sync + std::fmt::Debug {
-    /// Adapter-level warmup (project-id discovery, handshake, etc.).
-    /// Returns `true` if provider state changed and should be persisted.
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError>;
-
-    fn requires_streaming(&self) -> bool;
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness>;
-}
-
-#[async_trait]
 pub trait ProviderTransport: Send + Sync + std::fmt::Debug {
     async fn complete(&mut self, request: LlmRequest) -> Result<LlmResponse, LlmTransportError>;
+
+    fn requires_streaming(&self) -> bool {
+        false
+    }
 
     fn clone_boxed(&self) -> Box<dyn ProviderTransport>;
 }
@@ -657,54 +640,6 @@ fn estimate_request_tokens(request: &LlmRequest) -> u32 {
     ((chars / 4).max(1)).try_into().unwrap_or(u32::MAX)
 }
 
-/// Provider auth component for API-key providers.
-#[derive(Clone, Debug, Default)]
-pub struct NoopProviderAuth;
-
-#[async_trait]
-impl ProviderAuth for NoopProviderAuth {
-    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        Ok(false)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-/// Readiness component for providers with no warmup requirement.
-#[derive(Clone, Debug, Default)]
-pub struct NoopProviderReadiness {
-    requires_streaming: bool,
-}
-
-impl NoopProviderReadiness {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn requiring_streaming() -> Self {
-        Self {
-            requires_streaming: true,
-        }
-    }
-}
-
-#[async_trait]
-impl ProviderReadiness for NoopProviderReadiness {
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        Ok(false)
-    }
-
-    fn requires_streaming(&self) -> bool {
-        self.requires_streaming
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-        Box::new(self.clone())
-    }
-}
-
 /// Static model policy for simple providers and tests.
 #[derive(Clone, Debug)]
 pub struct StaticModelPolicy {
@@ -810,47 +745,6 @@ where
 }
 
 #[async_trait]
-impl<T> ProviderAuth for SharedProviderComponent<T>
-where
-    T: ProviderAuth + Clone + Send + Sync + std::fmt::Debug + 'static,
-{
-    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        let mut provider = self.inner.lock().expect("provider auth lock").clone();
-        let result = provider.ensure_fresh().await;
-        *self.inner.lock().expect("provider auth lock") = provider;
-        result
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl<T> ProviderReadiness for SharedProviderComponent<T>
-where
-    T: ProviderReadiness + Clone + Send + Sync + std::fmt::Debug + 'static,
-{
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        let mut provider = self.inner.lock().expect("provider readiness lock").clone();
-        let result = provider.ensure_ready().await;
-        *self.inner.lock().expect("provider readiness lock") = provider;
-        result
-    }
-
-    fn requires_streaming(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("provider readiness lock")
-            .requires_streaming()
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
 impl<T> ProviderTransport for SharedProviderComponent<T>
 where
     T: ProviderTransport + Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -862,6 +756,13 @@ where
         result
     }
 
+    fn requires_streaming(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("provider transport lock")
+            .requires_streaming()
+    }
+
     fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
         Box::new(self.clone())
     }
@@ -871,8 +772,6 @@ where
 #[derive(Debug)]
 pub struct ProviderComponents {
     pub state: Box<dyn ProviderState>,
-    pub auth: Box<dyn ProviderAuth>,
-    pub readiness: Box<dyn ProviderReadiness>,
     pub transport: Box<dyn ProviderTransport>,
     pub model_policy: Arc<dyn ProviderModelPolicy>,
     pub failure_classifier: Arc<dyn ProviderFailureClassifier>,
@@ -882,16 +781,12 @@ pub struct ProviderComponents {
 impl ProviderComponents {
     pub fn new(
         state: Box<dyn ProviderState>,
-        auth: Box<dyn ProviderAuth>,
-        readiness: Box<dyn ProviderReadiness>,
         transport: Box<dyn ProviderTransport>,
         model_policy: Arc<dyn ProviderModelPolicy>,
     ) -> Self {
         let options = state.options();
         Self {
             state,
-            auth,
-            readiness,
             transport,
             model_policy,
             failure_classifier: Arc::new(DefaultProviderFailureClassifier),
@@ -901,22 +796,12 @@ impl ProviderComponents {
 
     pub fn shared<T>(provider: T, model_policy: Arc<dyn ProviderModelPolicy>) -> Self
     where
-        T: ProviderState
-            + ProviderAuth
-            + ProviderReadiness
-            + ProviderTransport
-            + Clone
-            + Send
-            + Sync
-            + std::fmt::Debug
-            + 'static,
+        T: ProviderState + ProviderTransport + Clone + Send + Sync + std::fmt::Debug + 'static,
     {
         let inner = Arc::new(Mutex::new(provider));
         let options = inner.lock().expect("provider state lock").options();
         Self {
             state: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
-            auth: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
-            readiness: Box::new(SharedProviderComponent::new(Arc::clone(&inner))),
             transport: Box::new(SharedProviderComponent::new(inner)),
             model_policy,
             failure_classifier: Arc::new(DefaultProviderFailureClassifier),
@@ -945,8 +830,6 @@ impl Clone for ProviderComponents {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone_boxed(),
-            auth: self.auth.clone_boxed(),
-            readiness: self.readiness.clone_boxed(),
             transport: self.transport.clone_boxed(),
             model_policy: Arc::clone(&self.model_policy),
             failure_classifier: Arc::clone(&self.failure_classifier),
@@ -1052,15 +935,7 @@ impl ProviderHandle {
     }
 
     pub fn requires_streaming(&self) -> bool {
-        self.components.readiness.requires_streaming()
-    }
-
-    pub async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        self.components.auth.ensure_fresh().await
-    }
-
-    pub async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        self.components.readiness.ensure_ready().await
+        self.components.transport.requires_streaming()
     }
 
     pub async fn complete(
@@ -1092,6 +967,14 @@ impl ProviderHandle {
                         err = %failure.message,
                         "provider call failed with retryable failure; sleeping before retry"
                     );
+                    if let Some(events) = request.stream_events.as_ref() {
+                        events.send(crate::llm::types::LlmStreamEvent::RetryStatus {
+                            wait_seconds: delay.as_secs(),
+                            attempt: (attempt + 1) as usize,
+                            max_attempts: attempts as usize,
+                            reason: failure.message.clone(),
+                        });
+                    }
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
@@ -1220,32 +1103,6 @@ impl ProviderState for UnconfiguredProvider {
     }
 
     fn clone_boxed(&self) -> Box<dyn ProviderState> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderAuth for UnconfiguredProvider {
-    async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-        Ok(false)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-        Box::new(self.clone())
-    }
-}
-
-#[async_trait]
-impl ProviderReadiness for UnconfiguredProvider {
-    async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-        Ok(false)
-    }
-
-    fn requires_streaming(&self) -> bool {
-        false
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
         Box::new(self.clone())
     }
 }
@@ -1597,20 +1454,6 @@ impl LashConfig {
     }
 }
 
-/// Write back the active provider's refreshed credentials, preserving
-/// other fields in the stored config. Called by the runtime after each
-/// successful OAuth refresh.
-pub fn save_provider(
-    path: &std::path::Path,
-    provider: &ProviderHandle,
-) -> Result<(), std::io::Error> {
-    let spec = provider.to_spec();
-    let mut config = LashConfig::load(path).unwrap_or_else(|| LashConfig::from_spec(spec.clone()));
-    config.upsert_provider_spec(spec.clone());
-    config.active_provider = spec.kind;
-    config.save(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1684,59 +1527,6 @@ mod tests {
         }
 
         fn clone_boxed(&self) -> Box<dyn ProviderState> {
-            Box::new(self.clone())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProviderAuth for MutatingProvider {
-        async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-            self.marker = "fresh".to_string();
-            Ok(true)
-        }
-
-        fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-            Box::new(self.clone())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProviderAuth for FailingProvider {
-        async fn ensure_fresh(&mut self) -> Result<bool, OAuthError> {
-            Ok(false)
-        }
-
-        fn clone_boxed(&self) -> Box<dyn ProviderAuth> {
-            Box::new(self.clone())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProviderReadiness for MutatingProvider {
-        async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-            Ok(false)
-        }
-
-        fn requires_streaming(&self) -> bool {
-            false
-        }
-
-        fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
-            Box::new(self.clone())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProviderReadiness for FailingProvider {
-        async fn ensure_ready(&mut self) -> Result<bool, LlmTransportError> {
-            Ok(false)
-        }
-
-        fn requires_streaming(&self) -> bool {
-            false
-        }
-
-        fn clone_boxed(&self) -> Box<dyn ProviderReadiness> {
             Box::new(self.clone())
         }
     }
@@ -1986,21 +1776,6 @@ mod tests {
         assert_eq!(handle.default_model_variant("model-a"), Some("high"));
         assert!(handle.validate_variant("model-a", "low").is_ok());
         assert!(handle.validate_variant("model-a", "medium").is_err());
-    }
-
-    #[tokio::test]
-    async fn refreshed_provider_state_is_visible_to_serialization() {
-        let mut handle = ProviderHandle::new(
-            MutatingProvider::default()
-                .into_components(Arc::new(StaticModelPolicy::new("model-a"))),
-        );
-
-        assert!(handle.ensure_fresh().await.expect("refresh succeeds"));
-
-        assert_eq!(
-            handle.to_spec().config["marker"],
-            serde_json::json!("fresh")
-        );
     }
 
     #[tokio::test]
