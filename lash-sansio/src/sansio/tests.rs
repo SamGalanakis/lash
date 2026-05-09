@@ -60,7 +60,6 @@ fn user_message(content: &str) -> Message {
             response_meta: None,
         }]
         .into(),
-        user_input: None,
         origin: None,
     }
 }
@@ -88,7 +87,6 @@ fn text_message(role: MessageRole, content: impl Into<String>) -> Message {
             response_meta: None,
         }]
         .into(),
-        user_input: None,
         origin: None,
     }
 }
@@ -336,7 +334,6 @@ fn llm_request_includes_image_prompt_parts_for_attached_images() {
             },
         ]
         .into(),
-        user_input: None,
         origin: None,
     }];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);

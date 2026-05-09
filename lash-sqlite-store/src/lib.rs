@@ -97,7 +97,7 @@ fn apply_pragmas(conn: &Connection, backing: StoreBacking) -> rusqlite::Result<(
 pub enum PersistedArtifactKind {
     GenericBlob,
     CheckpointManifest,
-    DynamicStateSnapshot,
+    ToolState,
     PluginSessionSnapshot,
     ExecutionStateSnapshot,
 }
@@ -137,9 +137,9 @@ impl BlobArtifactDescriptor {
         )
     }
 
-    pub fn dynamic_state_snapshot() -> Self {
+    pub fn tool_state_snapshot() -> Self {
         Self::new(
-            PersistedArtifactKind::DynamicStateSnapshot,
+            PersistedArtifactKind::ToolState,
             vec![BlobStorageHint::Compressible, BlobStorageHint::LargePayload],
         )
     }
@@ -199,10 +199,10 @@ pub struct StoredSessionCheckpoint {
 
 fn retained_artifact_refs(checkpoint: &SessionCheckpoint) -> Vec<RetainedArtifactRef> {
     let mut refs = Vec::new();
-    if let Some(blob_ref) = &checkpoint.dynamic_state_ref {
+    if let Some(blob_ref) = &checkpoint.tool_state_ref {
         refs.push(RetainedArtifactRef {
             blob_ref: blob_ref.clone(),
-            kind: PersistedArtifactKind::DynamicStateSnapshot,
+            kind: PersistedArtifactKind::ToolState,
         });
     }
     if let Some(blob_ref) = &checkpoint.plugin_snapshot_ref {
@@ -468,19 +468,19 @@ impl Store {
         checkpoint: &HydratedSessionCheckpoint,
         profile: BuiltinBlobProfile,
     ) -> rusqlite::Result<StoredSessionCheckpoint> {
-        let dynamic_state_ref = checkpoint
-            .dynamic_state
+        let tool_state_ref = checkpoint
+            .tool_state
             .as_ref()
             .map(|snapshot| {
                 Self::put_typed_artifact_blob_conn(
                     conn,
-                    BlobArtifactDescriptor::dynamic_state_snapshot(),
+                    BlobArtifactDescriptor::tool_state_snapshot(),
                     snapshot,
                     profile,
                 )
             })
             .transpose()?
-            .or_else(|| checkpoint.dynamic_state_ref.clone());
+            .or_else(|| checkpoint.tool_state_ref.clone());
         let plugin_snapshot_ref = checkpoint
             .plugin_snapshot
             .as_ref()
@@ -509,7 +509,7 @@ impl Store {
             .or_else(|| checkpoint.execution_state_ref.clone());
         let manifest = SessionCheckpoint {
             turn_state: checkpoint.turn_state.clone(),
-            dynamic_state_ref,
+            tool_state_ref,
             plugin_snapshot_ref,
             plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
             execution_state_ref,
@@ -552,9 +552,9 @@ impl Store {
         let record: SessionCheckpoint = Self::get_typed_blob_conn(conn, blob_ref)?;
         Some(HydratedSessionCheckpoint {
             turn_state: record.turn_state,
-            dynamic_state_ref: record.dynamic_state_ref.clone(),
-            dynamic_state: record
-                .dynamic_state_ref
+            tool_state_ref: record.tool_state_ref.clone(),
+            tool_state: record
+                .tool_state_ref
                 .as_ref()
                 .and_then(|blob_ref| Self::get_typed_blob_conn(conn, blob_ref)),
             plugin_snapshot_ref: record.plugin_snapshot_ref.clone(),
@@ -748,16 +748,16 @@ impl Store {
         &self,
         checkpoint: &HydratedSessionCheckpoint,
     ) -> StoredSessionCheckpoint {
-        let dynamic_state_ref = checkpoint
-            .dynamic_state
+        let tool_state_ref = checkpoint
+            .tool_state
             .as_ref()
             .map(|snapshot| {
                 self.put_typed_artifact_blob(
-                    BlobArtifactDescriptor::dynamic_state_snapshot(),
+                    BlobArtifactDescriptor::tool_state_snapshot(),
                     snapshot,
                 )
             })
-            .or_else(|| checkpoint.dynamic_state_ref.clone());
+            .or_else(|| checkpoint.tool_state_ref.clone());
         let plugin_snapshot_ref = checkpoint
             .plugin_snapshot
             .as_ref()
@@ -780,7 +780,7 @@ impl Store {
             .or_else(|| checkpoint.execution_state_ref.clone());
         let manifest = SessionCheckpoint {
             turn_state: checkpoint.turn_state.clone(),
-            dynamic_state_ref,
+            tool_state_ref,
             plugin_snapshot_ref,
             plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
             execution_state_ref,
@@ -1005,7 +1005,7 @@ impl Store {
                 && let Some(record) = source.get_typed_blob::<SessionCheckpoint>(checkpoint_ref)
             {
                 for blob_ref in [
-                    record.dynamic_state_ref.as_ref(),
+                    record.tool_state_ref.as_ref(),
                     record.plugin_snapshot_ref.as_ref(),
                 ]
                 .into_iter()
@@ -1013,11 +1013,11 @@ impl Store {
                 {
                     if let Some(blob) = source.get_blob(blob_ref) {
                         let descriptor = match record
-                            .dynamic_state_ref
+                            .tool_state_ref
                             .as_ref()
                             .filter(|candidate| *candidate == blob_ref)
                         {
-                            Some(_) => BlobArtifactDescriptor::dynamic_state_snapshot(),
+                            Some(_) => BlobArtifactDescriptor::tool_state_snapshot(),
                             None => BlobArtifactDescriptor::plugin_session_snapshot(),
                         };
                         let _ = self.put_artifact_blob(descriptor, &blob);

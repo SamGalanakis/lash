@@ -7,6 +7,7 @@ pub(crate) use session::switch_to_session_identifier;
 use super::runtime::send_user_message;
 use super::runtime::sync_runtime_tool_surface;
 use super::*;
+use crate::SkillCatalog;
 use crate::turn_runner::make_turn_input;
 
 #[derive(Clone)]
@@ -101,7 +102,7 @@ pub(super) async fn dispatch_next_queued_turn(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -145,7 +146,7 @@ pub(super) async fn dispatch_next_queued_turn(
                 current_model_variant,
                 current_execution_mode,
                 session_manager,
-                desired_dynamic,
+                desired_tool_state,
                 pending_reconfigure,
                 model_catalog,
                 toolset_hash,
@@ -160,7 +161,7 @@ pub(super) async fn dispatch_next_queued_turn(
         }
 
         if let Err(e) =
-            apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
+            apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
         {
             push_system_message(
                 app,
@@ -173,17 +174,11 @@ pub(super) async fn dispatch_next_queued_turn(
             return Ok(());
         }
         *toolset_hash = hash12(
-            &serde_json::to_vec(
-                &desired_dynamic
-                    .tools
-                    .values()
-                    .map(|spec| spec.definition.clone())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap_or_else(|_| b"[]".to_vec()),
+            &serde_json::to_vec(&desired_tool_state.definitions())
+                .unwrap_or_else(|_| b"[]".to_vec()),
         );
         let turn_input = make_turn_input(&queued);
-        let current_dynamic_state = desired_dynamic.clone();
+        let current_tool_state = desired_tool_state.clone();
         send_user_message(
             queued.clone(),
             turn_input.clone(),
@@ -196,7 +191,7 @@ pub(super) async fn dispatch_next_queued_turn(
             cancel_token,
             active_stream_id,
             app_tx,
-            &current_dynamic_state,
+            &current_tool_state,
         )
         .await;
         *last_turn = Some(TurnReplayPayload {
@@ -232,7 +227,7 @@ pub(super) async fn handle_parsed_slash_command(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -262,7 +257,7 @@ pub(super) async fn handle_parsed_slash_command(
                 current_model_variant,
                 current_execution_mode,
                 session_manager,
-                desired_dynamic,
+                desired_tool_state,
                 pending_reconfigure,
                 model_catalog,
                 toolset_hash,
@@ -308,7 +303,7 @@ async fn handle_slash_command(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -332,7 +327,7 @@ async fn handle_slash_command(
                 current_model_variant,
                 current_execution_mode,
                 session_manager,
-                desired_dynamic,
+                desired_tool_state,
                 pending_clear_after_return,
             )
             .await
@@ -363,7 +358,7 @@ async fn handle_slash_command(
                     current_execution_mode,
                     standard_context_approach.as_ref(),
                     context_window,
-                    Some((desired_dynamic.tools.len(), toolset_hash)),
+                    Some((desired_tool_state.len(), toolset_hash)),
                     &cwd,
                     Some(&session_name),
                     Some(&logger.session_id),
@@ -414,7 +409,7 @@ async fn handle_slash_command(
                 cancel_token,
                 active_stream_id,
                 current_execution_mode,
-                desired_dynamic,
+                desired_tool_state,
                 pending_reconfigure,
                 toolset_hash,
                 app_tx,
@@ -457,7 +452,7 @@ async fn handle_slash_command(
                 current_model_variant,
                 current_execution_mode,
                 session_manager,
-                desired_dynamic,
+                desired_tool_state,
                 model_catalog,
                 toolset_hash,
             )
@@ -468,7 +463,7 @@ async fn handle_slash_command(
                 raw,
                 app,
                 runtime,
-                desired_dynamic,
+                desired_tool_state,
                 pending_reconfigure,
                 current_execution_mode.clone(),
             )
@@ -479,7 +474,7 @@ async fn handle_slash_command(
                 raw,
                 app,
                 runtime,
-                desired_dynamic,
+                desired_tool_state,
                 pending_reconfigure,
                 toolset_hash,
             )

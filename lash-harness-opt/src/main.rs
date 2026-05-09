@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use lash::provider::LashConfig;
-use lash_embed::{Input, LashCore, ModeTurnOptions};
+use lash_embed::{Input, LashCore, ModeTurnOptions, TurnActivity, TurnEvent};
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{
     ReflectiveGepaStrategy, ReflectiveProposalRequest, ReflectiveProposer,
@@ -440,15 +440,17 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .await
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
 
+        let assistant_prose = assistant_prose(&turn.activities);
         match turn.outcome {
-            lash::TurnOutcome::Finished(lash::TurnFinish::Value { value, .. }) => {
+            lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { value })
+            | lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { value, .. }) => {
                 let output_path = request.artifact_dir.join("output.json");
                 tokio::fs::write(
                     &output_path,
                     serde_json::to_vec_pretty(&json!({
                         "value": value,
                         "errors": turn.errors,
-                        "assistant_prose": turn.transcript.assistant_prose,
+                        "assistant_prose": assistant_prose,
                     }))
                     .map_err(lash_harness_opt::HarnessOptError::Json)?,
                 )
@@ -462,10 +464,20 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             }
             other => Err(lash_harness_opt::HarnessOptError::Strategy(format!(
                 "GEPA RLM proposer did not submit a proposal: outcome={other:?} errors={:?} output={}",
-                turn.errors, turn.transcript.assistant_prose
+                turn.errors, assistant_prose
             ))),
         }
     }
+}
+
+fn assistant_prose(activities: &[TurnActivity]) -> String {
+    activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn with_proposal_artifact_refs(mut value: Value, prompt_path: &Path, output_path: &Path) -> Value {

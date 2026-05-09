@@ -1,6 +1,4 @@
-use crate::{ToolDefinition, ToolExecutionMode};
-
-use super::object_schema;
+use lash::{ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode};
 
 pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
@@ -31,6 +29,18 @@ pub fn batch_tool_definition() -> ToolDefinition {
     .with_examples(vec![
             r#"batch(tool_calls=[{"tool":"read_file","parameters":{"path":"src/main.rs"}},{"tool":"grep","parameters":{"query":"ToolProvider lash/src/"}}])"#.to_string(),
         ])
-    .with_discovery(crate::tools::discovery_metadata("runtime", &["parallel_tools"]))
+    .with_discovery(ToolDiscoveryMetadata {
+        namespace: Some("runtime".to_string()),
+        aliases: vec!["parallel_tools".to_string()],
+    })
     .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
+fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
 }

@@ -15,25 +15,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
-/// Provider kinds the CLI setup UI knows how to walk through, in the
-/// order they appear in the menu. Matches `ProviderFactory::kind()` for
-/// the four first-party provider crates lash-cli links.
-const KIND_ORDER: &[&str] = &["anthropic", "openai-compatible", "codex", "google_oauth"];
-
 fn kind_index(kind: &str) -> Option<usize> {
-    KIND_ORDER.iter().position(|k| *k == kind)
-}
-
-fn kind_setup_name(kind: &str) -> &'static str {
-    lash::provider_factory(kind)
-        .map(|f| f.setup_name())
-        .unwrap_or("Unknown")
-}
-
-fn kind_setup_description(kind: &str) -> &'static str {
-    lash::provider_factory(kind)
-        .map(|f| f.setup_description())
-        .unwrap_or("")
+    crate::provider_metadata::PROVIDER_SETUP_ORDER
+        .iter()
+        .position(|k| *k == kind)
 }
 
 enum SetupStep {
@@ -254,10 +239,14 @@ async fn run_setup_inner(
                     *selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *selected = (*selected + 1).min(KIND_ORDER.len().saturating_sub(1));
+                    *selected = (*selected + 1).min(
+                        crate::provider_metadata::PROVIDER_SETUP_ORDER
+                            .len()
+                            .saturating_sub(1),
+                    );
                 }
                 KeyCode::Enter => {
-                    let kind = KIND_ORDER[*selected];
+                    let kind = crate::provider_metadata::PROVIDER_SETUP_ORDER[*selected];
                     if let Some(saved_spec) = existing_config
                         .as_ref()
                         .and_then(|cfg| cfg.provider_spec(kind))
@@ -285,7 +274,7 @@ async fn run_setup_inner(
                     }
                 }
                 KeyCode::Char('r') => {
-                    let kind = KIND_ORDER[*selected];
+                    let kind = crate::provider_metadata::PROVIDER_SETUP_ORDER[*selected];
                     start_provider_flow(&mut app, kind, existing_config.as_ref()).await;
                 }
                 _ => {}
@@ -602,7 +591,10 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 Line::from(""),
             ];
 
-            for (idx, kind) in KIND_ORDER.iter().enumerate() {
+            for (idx, kind) in crate::provider_metadata::PROVIDER_SETUP_ORDER
+                .iter()
+                .enumerate()
+            {
                 let selected_marker = if *selected == idx { "▸" } else { " " };
                 let name_style = if *selected == idx {
                     Style::default()
@@ -611,7 +603,8 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                 } else {
                     Style::default().fg(theme::text_subtle())
                 };
-                let mut meta = kind_setup_description(kind).to_string();
+                let mut meta =
+                    crate::provider_metadata::provider_setup_description(kind).to_string();
                 if app.active_kind.as_deref() == Some(*kind) {
                     meta.push_str(" · active");
                 } else if app.saved_kinds.contains(*kind) {
@@ -624,7 +617,13 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                             .fg(theme::brand())
                             .add_modifier(Modifier::Bold),
                     ),
-                    Span::styled(format!("{:<22}", kind_setup_name(kind)), name_style),
+                    Span::styled(
+                        format!(
+                            "{:<22}",
+                            crate::provider_metadata::provider_setup_name(kind)
+                        ),
+                        name_style,
+                    ),
                     Span::styled(meta, Style::default().fg(theme::text_faint())),
                 ]));
             }

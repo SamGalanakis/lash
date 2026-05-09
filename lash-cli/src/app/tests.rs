@@ -12,7 +12,6 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
         id: id.to_string(),
         role,
         parts: vec![part(&format!("{id}.p0"), PartKind::Text, content)].into(),
-        user_input: None,
         origin: None,
     }
 }
@@ -47,7 +46,6 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let started_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
     app.update_background_tasks(vec![lash::ManagedTaskStatus {
         id: "subagent:smoke".into(),
-        label: "smoke".into(),
         kind: lash::ManagedTaskKind::Subagent,
         producer: "subagent".into(),
         run_state: lash::ManagedRunState::Running,
@@ -58,7 +56,6 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
 
     app.update_background_tasks(vec![lash::ManagedTaskStatus {
         id: "subagent:smoke".into(),
-        label: "smoke".into(),
         kind: lash::ManagedTaskKind::Subagent,
         producer: "subagent".into(),
         run_state: lash::ManagedRunState::Completed,
@@ -637,7 +634,6 @@ fn finish_turn_from_read_view_uses_authoritative_reasoning_and_text() {
             part("a1.t", PartKind::Text, "Neon rain on midnight street."),
         ]
         .into(),
-        user_input: None,
         origin: None,
     };
     let messages = vec![
@@ -680,7 +676,6 @@ fn read_view_timeline_places_reasoning_before_text() {
             part("a1.r", PartKind::Reasoning, "Late summary."),
         ]
         .into(),
-        user_input: None,
         origin: None,
     };
 
@@ -1525,7 +1520,6 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
             response_meta: None,
         }]
         .into(),
-        user_input: None,
         origin: None,
     };
     let tool_calls = vec![ToolCallRecord {
@@ -1767,10 +1761,10 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
 fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_text_differs() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let mut turn = PreparedTurn::new("/localref lash for context if needed".into(), Vec::new());
-    turn.input_provenance.transforms = vec![lash::UserInputTransform::SkillBlockAppend {
-        skill_name: "localref".into(),
-        skill_path: "/tmp/localref/SKILL.md".into(),
-    }];
+    turn.effective_text =
+        "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>"
+            .into();
+    turn.input_metadata.effective_text = turn.effective_text.clone();
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
@@ -1803,11 +1797,6 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
                 content: "runtime content".into(),
                 parts: Vec::new(),
                 images: Vec::new(),
-                user_input: Some(lash::UserInputProvenance {
-                    display_text: "visible text".into(),
-                    effective_text: "runtime content".into(),
-                    transforms: Vec::new(),
-                }),
             },
         }],
         checkpoint: lash::CheckpointKind::AfterWork,
@@ -1819,11 +1808,6 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
             content: "runtime content".into(),
             parts: Vec::new(),
             images: Vec::new(),
-            user_input: Some(lash::UserInputProvenance {
-                display_text: "visible text".into(),
-                effective_text: "runtime content".into(),
-                transforms: Vec::new(),
-            }),
         }],
         checkpoint: lash::CheckpointKind::AfterWork,
     });
@@ -1831,7 +1815,9 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
     let matching_blocks = app
         .timeline
         .iter()
-        .filter(|block| matches!(block, UiTimelineItem::UserInput(text) if text == "visible text"))
+        .filter(
+            |block| matches!(block, UiTimelineItem::UserInput(text) if text == "runtime content"),
+        )
         .count();
     assert_eq!(matching_blocks, 1);
 }

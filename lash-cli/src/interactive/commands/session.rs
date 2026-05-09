@@ -13,7 +13,7 @@ use crate::resume;
 use crate::session_bootstrap::{CliSessionOpener, OpenedCliLashSession};
 use crate::session_log::{self, SessionLogger};
 use crate::turn_runner::RuntimeRunResult;
-use crate::{hash12, push_system_message};
+use crate::{SkillCatalog, hash12, push_system_message};
 
 use super::super::helpers::TurnReplayPayload;
 use super::super::runtime::{apply_pending_reconfigure, send_user_message};
@@ -29,7 +29,7 @@ async fn activate_opened_session(
     current_execution_mode: &mut ExecutionMode,
     current_model_variant: &mut Option<String>,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     provider: &ProviderHandle,
     lash_config: &LashConfig,
@@ -46,7 +46,7 @@ async fn activate_opened_session(
         current_execution_mode,
         provider,
         current_model_variant,
-        desired_dynamic,
+        desired_tool_state,
         model_catalog,
     )
     .await?;
@@ -61,7 +61,7 @@ async fn activate_opened_session(
         .refresh_tool_surface()
         .await
         .map_err(|err| err.to_string())?;
-    *desired_dynamic = session.tool_state().await.map_err(|err| err.to_string())?;
+    *desired_tool_state = session.tool_state().await.map_err(|err| err.to_string())?;
     if let Some(rt) = runtime.as_ref() {
         match rt.session_manager().await {
             Ok(manager) => *session_manager = manager,
@@ -105,7 +105,7 @@ pub(super) async fn handle_clear(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
     *active_stream_id = active_stream_id.wrapping_add(1);
@@ -147,7 +147,7 @@ pub(super) async fn handle_clear(
         }
     }
     app.session_name = opened.bootstrap.session_name();
-    *desired_dynamic = session.tool_state().await?;
+    *desired_tool_state = session.tool_state().await?;
     history.clear();
     *turn_counter = 0;
     *last_turn = None;
@@ -172,14 +172,14 @@ pub(super) async fn handle_retry(
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
     current_execution_mode: &mut ExecutionMode,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     toolset_hash: &mut String,
     app_tx: &crate::event::AppEventTx,
 ) -> anyhow::Result<bool> {
     if let Some(previous) = last_turn.clone() {
         if let Err(e) =
-            apply_pending_reconfigure(desired_dynamic, pending_reconfigure, runtime).await
+            apply_pending_reconfigure(desired_tool_state, pending_reconfigure, runtime).await
         {
             push_system_message(
                 app,
@@ -194,7 +194,7 @@ pub(super) async fn handle_retry(
         *toolset_hash =
             hash12(&serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()));
         *current_execution_mode = previous.execution_mode;
-        let current_dynamic_state = desired_dynamic.clone();
+        let current_tool_state = desired_tool_state.clone();
         send_user_message(
             previous.prepared_turn.clone(),
             previous.turn_input.clone(),
@@ -207,7 +207,7 @@ pub(super) async fn handle_retry(
             cancel_token,
             active_stream_id,
             app_tx,
-            &current_dynamic_state,
+            &current_tool_state,
         )
         .await;
     } else {
@@ -328,7 +328,7 @@ pub(crate) async fn switch_to_session_identifier(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
 ) -> anyhow::Result<()> {
@@ -350,7 +350,7 @@ pub(crate) async fn switch_to_session_identifier(
         current_execution_mode,
         current_model_variant,
         session_manager,
-        desired_dynamic,
+        desired_tool_state,
         model_catalog,
         provider,
         lash_config,
@@ -358,14 +358,7 @@ pub(crate) async fn switch_to_session_identifier(
     .await
     .map_err(anyhow::Error::msg)?;
     *toolset_hash = hash12(
-        &serde_json::to_vec(
-            &desired_dynamic
-                .tools
-                .values()
-                .map(|spec| spec.definition.clone())
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| b"[]".to_vec()),
+        &serde_json::to_vec(&desired_tool_state.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
     );
     Ok(())
 }
@@ -385,7 +378,7 @@ pub(super) async fn handle_resume(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
     session_manager: &mut Arc<dyn RuntimeSessionHost>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
 ) -> anyhow::Result<bool> {
@@ -403,7 +396,7 @@ pub(super) async fn handle_resume(
             current_model_variant,
             current_execution_mode,
             session_manager,
-            desired_dynamic,
+            desired_tool_state,
             model_catalog,
             toolset_hash,
         )

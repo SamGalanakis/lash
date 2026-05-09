@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fresh_message_id};
 use lash::{
-    CachedModelCatalog, DynamicStateSnapshot, ExecutionMode, PersistedSessionConfig,
-    PersistedTurnState, PromptUsage, ProviderHandle, TokenUsage,
+    CachedModelCatalog, ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage,
+    ProviderHandle, TokenUsage, ToolState,
 };
 use lash_embed::{LashSession, ModelSelection, SessionConfigPatch};
 use lash_sqlite_store::Store;
@@ -29,7 +29,6 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: None,
     });
 }
@@ -148,7 +147,7 @@ async fn apply_graph_resume_state(
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let mut graph = graph;
@@ -167,14 +166,14 @@ async fn apply_graph_resume_state(
     let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
 
-    if let Some(dynamic_state) = checkpoint
+    if let Some(tool_state) = checkpoint
         .as_ref()
-        .and_then(|checkpoint| checkpoint.dynamic_state.clone())
+        .and_then(|checkpoint| checkpoint.tool_state.clone())
         && let Some(session) = runtime.as_ref()
     {
-        let _ = session.apply_tool_state(dynamic_state).await;
+        let _ = session.apply_tool_state(tool_state).await;
         if let Ok(state) = session.tool_state().await {
-            *desired_dynamic = state;
+            *desired_tool_state = state;
         }
     }
 
@@ -253,7 +252,7 @@ pub async fn load_resumed_session(
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let filename = session_log::filename_for_session_identifier(identifier)
@@ -286,7 +285,7 @@ pub async fn load_resumed_session(
         execution_mode,
         provider,
         current_model_variant,
-        desired_dynamic,
+        desired_tool_state,
         model_catalog,
     )
     .await?;
@@ -307,7 +306,7 @@ pub async fn restore_session_state(
     execution_mode: &mut ExecutionMode,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
-    desired_dynamic: &mut DynamicStateSnapshot,
+    desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let db_path = session_log::sessions_dir().join(session_filename);
@@ -345,7 +344,7 @@ pub async fn restore_session_state(
             execution_mode,
             provider,
             current_model_variant,
-            desired_dynamic,
+            desired_tool_state,
             model_catalog,
         )
         .await;
@@ -402,11 +401,8 @@ mod tests {
                     last_prompt_usage,
                     mode_turn_options: Default::default(),
                 },
-                dynamic_state_ref: None,
-                dynamic_state: Some(DynamicStateSnapshot {
-                    base_generation: 0,
-                    tools: std::collections::BTreeMap::new(),
-                }),
+                tool_state_ref: None,
+                tool_state: Some(ToolState::default()),
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
@@ -456,10 +452,7 @@ mod tests {
             )
             .into_components(),
         );
-        let mut desired_dynamic = DynamicStateSnapshot {
-            base_generation: 0,
-            tools: std::collections::BTreeMap::new(),
-        };
+        let mut desired_tool_state = ToolState::default();
         let model_catalog = build_model_catalog();
 
         let mut app = App::new(
@@ -482,7 +475,7 @@ mod tests {
             &mut execution_mode,
             &provider,
             &mut current_model_variant,
-            &mut desired_dynamic,
+            &mut desired_tool_state,
             &model_catalog,
         )
         .await

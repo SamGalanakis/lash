@@ -440,11 +440,7 @@ fn append_transcript_items(
                     }
                 }
             } else {
-                let text = message
-                    .user_input
-                    .as_ref()
-                    .map(|user_input| user_input.display_text.clone())
-                    .unwrap_or_else(|| rendered_message_text(message));
+                let text = rendered_message_text(message);
                 if !text.is_empty() {
                     timeline.push_user_turn_start();
                     timeline.push(UiTimelineItem::UserInput(text));

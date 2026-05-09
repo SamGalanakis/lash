@@ -20,7 +20,6 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
     TurnInput {
         items,
         image_blobs,
-        user_input: Some(turn.input_provenance.clone()),
         mode: Some(RunMode::Normal),
         mode_turn_options: None,
         trace_turn_id: None,
@@ -46,7 +45,7 @@ where
         tracing::debug!(stream_id, "runtime turn task spawned");
         let result = match session
             .control()
-            .stream_raw_assembled(turn_input, &sink, &lash::NoopTurnEventSink, task_cancel)
+            .stream_raw_assembled(turn_input, &sink, &lash::NoopTurnActivitySink, task_cancel)
             .await
         {
             Ok(turn) => turn,
@@ -77,7 +76,6 @@ where
                         raw_text: String::new(),
                         state: OutputState::EmptyOutput,
                     },
-                    has_plugin_visible_output: false,
                     token_usage: TokenUsage::default(),
                     tool_calls: Vec::new(),
                     errors: vec![TurnIssue {
@@ -122,7 +120,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         });
         let ledger = vec![TokenLedgerEntry {
@@ -148,8 +145,8 @@ mod tests {
                     last_prompt_usage: None,
                     mode_turn_options: Default::default(),
                 },
-                dynamic_state_ref: None,
-                dynamic_state: None,
+                tool_state_ref: None,
+                tool_state: None,
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,

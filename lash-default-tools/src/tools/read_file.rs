@@ -3,12 +3,12 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::instructions::InstructionSource;
-use crate::plugin::{
+use lash::instructions::InstructionSource;
+use lash::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use crate::{
+use lash::{
     MessageRole, PluginMessage, ToolDefinition, ToolExecutionMode, ToolImage, ToolProvider,
     ToolResult,
 };
@@ -131,7 +131,7 @@ impl ToolProvider for ReadFile {
                 r#"read_file(path="Cargo.toml")"#.into(),
                 r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata("filesystem", &["cat", "view_file"]))
+            .with_discovery(super::discovery_metadata("filesystem", &["cat", "view_file"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }
@@ -547,7 +547,7 @@ fn truncate_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolProvider;
+    use lash::ToolProvider;
     use serde_json::json;
     use tempfile::TempDir;
 

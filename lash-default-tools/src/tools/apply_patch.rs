@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{compact_diff, object_schema, require_str, run_blocking};
 
@@ -134,7 +134,7 @@ impl ToolProvider for ApplyPatchTool {
                 "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
                     .into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata("filesystem", &["patch", "edit_file"]))
+            .with_discovery(super::discovery_metadata("filesystem", &["patch", "edit_file"]))
             .with_execution_mode(ToolExecutionMode::Serial),
         ]
     }

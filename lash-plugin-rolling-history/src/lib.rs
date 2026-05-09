@@ -599,7 +599,6 @@ async fn summarize_compaction_prefix(
             TurnInput {
                 items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -641,7 +640,6 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
             reasoning_meta: None,
             response_meta: None,
         }]),
-        user_input: None,
         origin: Some(MessageOrigin::Plugin {
             plugin_id: ROLLING_HISTORY_PLUGIN_ID.to_string(),
             transient: false,
@@ -955,7 +953,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }
     }
@@ -987,7 +984,6 @@ mod tests {
                 response_meta: None,
             }]
             .into(),
-            user_input: None,
             origin: None,
         }
     }
@@ -1111,7 +1107,6 @@ mod tests {
                     })
                     .collect(),
             ),
-            user_input: None,
             origin: None,
         });
         messages.push(text_message("u2", MessageRole::User, "recent"));

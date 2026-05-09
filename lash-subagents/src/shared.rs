@@ -10,13 +10,12 @@
 use std::collections::HashSet;
 
 use lash::plugin::PluginError;
-use lash::tools::unwrap_projected_arg;
 use lash::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
     SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
     ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
 };
-use lash_rlm_types::{ClassifiedSeed, RlmTermination};
+use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
 use serde_json::{Value, json};
 
 use crate::capability::{
@@ -218,7 +217,6 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
     TurnInput {
         items: vec![InputItem::Text { text }],
         image_blobs: std::collections::HashMap::new(),
-        user_input: None,
         mode: None,
         mode_turn_options: None,
         trace_turn_id: None,
@@ -310,11 +308,11 @@ pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
 
 pub(crate) fn explore_tools(output_schema: Option<Value>) -> Vec<ToolDefinition> {
     let mut tools = Vec::new();
-    tools.extend(lash::tools::ReadFile::new().definitions());
-    tools.extend(lash::tools::Grep::new().definitions());
-    tools.extend(lash::tools::WebSearch::new("").definitions());
-    tools.extend(lash::tools::FetchUrl::new("").definitions());
-    tools.extend(lash::tools::StandardShell::new().definitions());
+    tools.extend(lash_default_tools::tools::ReadFile::new().definitions());
+    tools.extend(lash_default_tools::tools::Grep::new().definitions());
+    tools.extend(lash_default_tools::tools::WebSearch::new("").definitions());
+    tools.extend(lash_default_tools::tools::FetchUrl::new("").definitions());
+    tools.extend(lash_default_tools::tools::StandardShell::new().definitions());
     tools.retain(|tool| {
         matches!(
             tool.name.as_str(),

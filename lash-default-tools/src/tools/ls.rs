@@ -5,7 +5,7 @@ use super::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
 };
-use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -74,7 +74,7 @@ impl ToolProvider for Ls {
                 r#"ls(path=".", depth=1, limit=100)"#.into(),
                 r#"ls(path="lash/src/tools", with_lines=true)"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata(
+            .with_discovery(super::discovery_metadata(
                 "filesystem",
                 &["list_files", "list_directory"],
             ))
@@ -184,7 +184,7 @@ fn collect_ls_paths(base: &Path, files: &[PathBuf], max_depth: Option<usize>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolProvider;
+    use lash::ToolProvider;
     use serde_json::json;
     use tempfile::TempDir;
 

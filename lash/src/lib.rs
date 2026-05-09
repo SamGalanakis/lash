@@ -1,7 +1,6 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
-pub mod dynamic;
 pub mod instructions;
 pub mod llm;
 pub mod mcp;
@@ -16,16 +15,14 @@ pub mod search;
 pub mod session;
 pub mod session_graph;
 pub mod session_model;
-pub mod skill_catalog;
-pub mod skill_prompt;
 pub mod standard_context_approach;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool_dispatch;
 mod tool_provider;
+pub mod tool_registry;
 mod tool_schema;
-pub mod tools;
 mod trace;
 
 pub use lash_sansio::sansio;
@@ -43,10 +40,6 @@ pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
 };
-pub use dynamic::{
-    DynamicStateSnapshot, DynamicToolProvider, DynamicToolSpec, InProcessToolExecutionAdapter,
-    InProcessToolFuture, InProcessToolHandler, ReconfigureError, ToolExecutionAdapter,
-};
 pub use instructions::InstructionLoaderConfig;
 pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
@@ -59,20 +52,21 @@ pub use lash_sansio::{
     PromptLayer, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot,
     PromptSlotLayer, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
     RenderedPrompt, ResolvedPromptLayer, Response, SchemaProjectionOverride, SessionEvent,
-    TerminalOutputSource, TextProjectionMetadata, TokenUsage, ToolActivation, ToolAvailability,
-    ToolAvailabilityConfig, ToolCallRecord, ToolControl, ToolDefinition, ToolDiscoveryMetadata,
-    ToolExecutionMode, ToolImage, ToolOutputContract, ToolResult, ToolSurface,
-    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, TurnFinish, TurnOutcome,
-    TurnStop, UserInputProvenance, UserInputTransform, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, reasoning_part, render_terminal_output_value,
-    render_value_schema_contract, resolve_prompt_layers, shared_parts,
-    turn_limit_exhausted_message,
+    TextProjectionMetadata, TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
+    ToolCallRecord, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
+    ToolImage, ToolOutputContract, ToolResult, ToolSurface, ToolSurfaceBuildInput,
+    ToolSurfaceEntry, ToolSurfaceOverride, TurnFinish, TurnOutcome, TurnStop,
+    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part,
+    resolve_prompt_layers, shared_parts, turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
     StandardContextApproachKind,
+};
+pub use tool_registry::{
+    ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModeTurnOptions {
@@ -142,7 +136,7 @@ pub use lash_trace::{
     TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSink, TraceSinkError,
     TraceTokenUsage, TraceToolSpec,
 };
-pub use mcp::{McpError, McpServerConfig, McpToolExecutionAdapter, attach_mcp_servers};
+pub use mcp::{McpError, McpServerConfig, attach_mcp_servers};
 pub use model_info::{
     CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
@@ -155,48 +149,48 @@ pub use plugin::{
     AckWakeArgs, AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CheckpointHookHost,
-    DirectCompletion, DirectCompletionHost, DirectLlmCompletion, DynamicToolHost,
-    ExternalInvokeContext, ExternalInvokeError, ExternalInvokeHost, ExternalOpDef, ExternalOpKind,
-    HistoryError, HistoryHost, HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter,
-    HistoryState, ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorAckWakeOp,
-    MonitorEmptyArgs, MonitorHost, MonitorRegisterSpecsOp, MonitorRegistrations, MonitorStartOp,
-    MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec,
-    PersistentRuntimeServices, PluginDirective, PluginError, PluginFactory, PluginHost,
-    PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, PromptHookHost,
-    RegisterSpecsArgs, RewriteContext, RewriteTrigger, RuntimeServices, RuntimeSessionHost,
-    SessionAppendNode, SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest,
-    SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionParam, SessionPlugin,
-    SessionPluginMode, SessionReadView, SessionRelation, SessionSnapshot, SessionSnapshotHost,
-    SessionStartPoint, SessionStateChangedContext, SessionToolAccess, SessionTurnHandle,
-    SnapshotReader, SnapshotWriter, StandardCreateExtras, StartMonitorArgs, StopMonitorArgs,
+    DirectCompletion, DirectCompletionHost, DirectLlmCompletion, ExternalInvokeContext,
+    ExternalInvokeError, ExternalInvokeHost, ExternalOpDef, ExternalOpKind, HistoryError,
+    HistoryHost, HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
+    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorAckWakeOp, MonitorEmptyArgs,
+    MonitorHost, MonitorRegisterSpecsOp, MonitorRegistrations, MonitorStartOp, MonitorStatusOp,
+    MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec, PersistentRuntimeServices,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
+    PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PluginSpec, PluginSpecFactory, PromptHookContext, PromptHookHost, RegisterSpecsArgs,
+    RewriteContext, RewriteTrigger, RuntimeServices, RuntimeSessionHost, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphHost,
+    SessionHandle, SessionLifecycleHost, SessionParam, SessionPlugin, SessionPluginMode,
+    SessionReadView, SessionRelation, SessionSnapshot, SessionSnapshotHost, SessionStartPoint,
+    SessionStateChangedContext, SessionToolAccess, SessionTurnHandle, SnapshotReader,
+    SnapshotWriter, StandardCreateExtras, StartMonitorArgs, StopMonitorArgs,
     SubagentSessionAuthority, TaskHost, ToolCatalogHost, ToolDiscoveryContext,
     ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
     ToolHookHost, ToolResultProjectionContext, ToolResultProjectionHook, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig, ToolResultProjector, ToolSurfaceContribution, TraceHost,
-    TurnContextTransform, TurnHookContext, TurnHookHost, TurnHost, TurnResultHookContext,
-    TurnResultHookHost, TurnResultSummary, TurnTransformContext, TypedExternalOp,
-    TypedExternalOpError, plugin_surface_event_renders_visible_output, typed_external_op_def,
+    ToolResultProjectionPluginConfig, ToolResultProjector, ToolStateHost, ToolSurfaceContribution,
+    TraceHost, TurnContextTransform, TurnHookContext, TurnHookHost, TurnHost,
+    TurnResultHookContext, TurnResultHookHost, TurnResultSummary, TurnTransformContext,
+    TypedExternalOp, TypedExternalOpError, typed_external_op_def,
 };
 pub use provider::{
     AgentModelSelection, LashConfig, ProviderComponents, ProviderFactory, ProviderHandle,
     ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
-    ProviderTransport, RequestTimeout, StaticModelPolicy, VariantRequestConfig, build_provider,
-    provider_cli_label, provider_factory, register_provider_factory,
+    ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
+    VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord, DefaultPathResolver,
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
     ManagedTaskStatus, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
-    ModeTurnExtensionHandle, NoopEventSink, NoopTurnEventSink, OutputState, ParkedSession,
+    ModeTurnExtensionHandle, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
     PathResolver, PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig,
     RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, SanitizerPolicy,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
     SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor,
-    ToolResultView, TurnContext, TurnEvent, TurnEventSink, TurnInput, TurnIssue, UsageReportRow,
-    UsageTotals, diff_token_ledger, diff_usage_reports,
+    ToolResultView, TurnActivity, TurnActivityId, TurnActivitySink, TurnContext, TurnEvent,
+    TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use schemars::JsonSchema;
@@ -212,10 +206,6 @@ pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;
 pub use session_model::{
     ConversationRecord, ModeEvent, SessionEventRecord, StateSnapshotEvent, ToolEvent,
-};
-pub use skill_catalog::{LoadedSkill, SkillCatalog};
-pub use skill_prompt::{
-    append_skill_blocks, collect_skill_mentions, collect_skill_mentions_with_ranges,
 };
 pub use store::{
     BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,

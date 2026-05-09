@@ -45,12 +45,9 @@ impl CurrentSessionCapability {
                 let runtime = runtime.lock().await;
                 return Ok(runtime.active_tool_catalog());
             }
-            if self.plugins.dynamic_tools().is_some() {
-                return Ok(self
-                    .plugins
-                    .tool_catalog(session_id, self.policy.execution_mode.clone()));
-            }
-            return Ok(self.tool_catalog.as_ref().clone());
+            return Ok(self
+                .plugins
+                .tool_catalog(session_id, self.policy.execution_mode.clone()));
         }
         let runtime = {
             let registry = managed.registry.lock().await;
@@ -65,24 +62,17 @@ impl CurrentSessionCapability {
         &self,
         snapshot: &mut SessionSnapshot,
     ) {
-        if let Some(dynamic_tools) = self.plugins.dynamic_tools() {
-            let dynamic_state = dynamic_tools.export_state();
-            snapshot.dynamic_state_generation = Some(dynamic_state.base_generation);
-            snapshot.dynamic_state_snapshot = Some(dynamic_state);
-        } else {
-            snapshot.dynamic_state_generation = None;
-            snapshot.dynamic_state_snapshot = None;
-        }
+        let tool_state = self.plugins.tool_registry().export_state();
+        snapshot.tool_state_generation = Some(tool_state.generation());
+        snapshot.tool_state_snapshot = Some(tool_state);
         snapshot.plugin_snapshot = self.plugins.snapshot().ok();
         snapshot.plugin_snapshot_revision = Some(self.plugins.snapshot_revision_fingerprint());
     }
 
-    pub(in crate::runtime::session_manager) fn current_dynamic_tools(
+    pub(in crate::runtime::session_manager) fn current_tool_registry(
         &self,
-    ) -> Result<Arc<crate::DynamicToolProvider>, crate::PluginError> {
-        self.plugins.dynamic_tools().ok_or_else(|| {
-            crate::PluginError::Session("dynamic tools are unavailable in this session".to_string())
-        })
+    ) -> Result<Arc<crate::ToolRegistry>, crate::PluginError> {
+        Ok(self.plugins.tool_registry())
     }
 
     pub(in crate::runtime::session_manager) async fn snapshot_current(
@@ -110,19 +100,19 @@ impl CurrentSessionCapability {
         self.tool_catalog_by_id(managed, session_id).await
     }
 
-    pub(in crate::runtime::session_manager) async fn dynamic_tool_state(
+    pub(in crate::runtime::session_manager) async fn tool_state(
         &self,
         managed: &ManagedSessionCapability,
         session_id: &str,
-    ) -> Result<crate::DynamicStateSnapshot, crate::PluginError> {
+    ) -> Result<crate::ToolState, crate::PluginError> {
         if session_id == self.session_id {
             if let Some(runtime) = managed.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.lock().await;
                 return runtime
-                    .dynamic_tool_state()
+                    .tool_state()
                     .map_err(|err| crate::PluginError::Session(err.to_string()));
             }
-            return Ok(self.current_dynamic_tools()?.export_state());
+            return Ok(self.current_tool_registry()?.export_state());
         }
 
         let runtime = {
@@ -132,26 +122,26 @@ impl CurrentSessionCapability {
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let runtime = runtime.lock().await;
         runtime
-            .dynamic_tool_state()
+            .tool_state()
             .map_err(|err| crate::PluginError::Session(err.to_string()))
     }
 
-    pub(in crate::runtime::session_manager) async fn apply_dynamic_tool_state(
+    pub(in crate::runtime::session_manager) async fn apply_tool_state(
         &self,
         managed: &ManagedSessionCapability,
         session_id: &str,
-        snapshot: crate::DynamicStateSnapshot,
+        snapshot: crate::ToolState,
     ) -> Result<u64, crate::PluginError> {
         if session_id == self.session_id {
             if let Some(runtime) = managed.registry.lock().await.get(session_id).cloned() {
                 let mut runtime = runtime.lock().await;
                 return runtime
-                    .apply_dynamic_tool_state(snapshot)
+                    .apply_tool_state(snapshot)
                     .await
                     .map_err(|err| crate::PluginError::Session(err.to_string()));
             }
-            let dynamic_tools = self.current_dynamic_tools()?;
-            return dynamic_tools
+            let tool_registry = self.current_tool_registry()?;
+            return tool_registry
                 .apply_state(snapshot)
                 .map_err(|err| crate::PluginError::Session(err.to_string()));
         }
@@ -163,7 +153,7 @@ impl CurrentSessionCapability {
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let mut runtime = runtime.lock().await;
         runtime
-            .apply_dynamic_tool_state(snapshot)
+            .apply_tool_state(snapshot)
             .await
             .map_err(|err| crate::PluginError::Session(err.to_string()))
     }

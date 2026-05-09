@@ -55,7 +55,6 @@ impl ManagedRunState {
 #[derive(Clone, Debug)]
 pub struct ManagedTaskSpec {
     pub id: String,
-    pub label: String,
     pub kind: ManagedTaskKind,
     pub producer: &'static str,
 }
@@ -64,7 +63,6 @@ pub struct ManagedTaskSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ManagedTaskStatus {
     pub id: String,
-    pub label: String,
     pub kind: ManagedTaskKind,
     pub producer: String,
     pub run_state: ManagedRunState,
@@ -272,7 +270,6 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         let record = ManagedTaskRecord {
             status: ManagedTaskStatus {
                 id: spec.id.clone(),
-                label: spec.label,
                 kind: spec.kind,
                 producer: spec.producer.to_string(),
                 run_state: ManagedRunState::Running,
@@ -305,7 +302,6 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
         let record = ManagedTaskRecord {
             status: ManagedTaskStatus {
                 id: spec.id.clone(),
-                label: spec.label,
                 kind: spec.kind,
                 producer: spec.producer.to_string(),
                 run_state: ManagedRunState::Running,
@@ -590,7 +586,6 @@ mod tests {
     fn spec(id: &str, kind: ManagedTaskKind) -> ManagedTaskSpec {
         ManagedTaskSpec {
             id: id.to_string(),
-            label: id.to_string(),
             kind,
             producer: "test",
         }

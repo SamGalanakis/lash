@@ -673,7 +673,6 @@ async fn run_instance(
             TurnInput {
                 items: vec![InputItem::Text { text: prompt }],
                 image_blobs: Default::default(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
@@ -785,7 +784,8 @@ fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
         lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
             "assistant_message"
         }
-        lash::TurnOutcome::Finished(lash::TurnFinish::Value { .. }) => "value",
+        lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. }) => "submitted_value",
+        lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { .. }) => "tool_value",
         lash::TurnOutcome::Handoff { .. } => "handoff",
         lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
         lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
@@ -794,7 +794,8 @@ fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
         lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
         lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
         lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::TerminalError { .. }) => "terminal_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
+        lash::TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 

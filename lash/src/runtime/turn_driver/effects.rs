@@ -107,7 +107,7 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
-        let (turn_event_tx, mut turn_event_rx) = mpsc::channel::<TurnEvent>(100);
+        let (turn_event_tx, mut turn_event_rx) = mpsc::channel::<TurnActivity>(100);
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<SandboxMessage>();
         self.session.set_message_sender(msg_tx);
         let relay_tx = event_tx.clone();
@@ -144,7 +144,7 @@ impl RuntimeTurnDriver {
                             turn_closed = true;
                             continue;
                         };
-                        send_turn_event(&relay_tx, event).await;
+                        let _ = relay_tx.send(RuntimeStreamEvent::Turn(event)).await;
                     }
                 }
             }

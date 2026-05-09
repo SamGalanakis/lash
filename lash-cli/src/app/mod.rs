@@ -2,18 +2,17 @@ mod input;
 mod projection;
 mod view;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use lash::{
     ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
-    PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent, SkillCatalog, TokenUsage,
-    ToolCallRecord, UserInputProvenance, UserInputTransform, append_skill_blocks,
-    collect_skill_mentions, plugin_surface_event_renders_visible_output,
+    PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
 
+use crate::SkillCatalog;
 use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
     is_batch_tool_name,
@@ -27,6 +26,7 @@ use crate::overlay::{OverlayState, PickerState};
 use crate::plugin_surface;
 use crate::render;
 use crate::repo_status::RepoStatus;
+use crate::skill_prompt::append_skill_blocks;
 use crate::stream_markdown::LiveMarkdown;
 use crate::util::{is_cancelled_error, manual_interrupt_message};
 
@@ -130,9 +130,9 @@ impl BackgroundTaskView {
         transient_until: Option<std::time::Instant>,
     ) -> Self {
         Self {
-            task_id: status.id,
+            task_id: status.id.clone(),
             kind: status.kind,
-            label: status.label,
+            label: status.id,
             run_state: status.run_state,
             started_at: status.started_at,
             terminal_duration,
@@ -292,13 +292,29 @@ fn expand_large_paste_placeholders(text: &str, large_pastes: &[LargePaste]) -> S
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreparedInputTransform {
+    LargePasteExpand {
+        placeholder: String,
+        expanded_char_count: usize,
+        display_replacement: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedInputMetadata {
+    pub display_text: String,
+    pub effective_text: String,
+    pub transforms: Vec<PreparedInputTransform>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTurn {
     pub draft_id: String,
     pub display_text: String,
     pub effective_text: String,
     pub images: Vec<PendingImage>,
     pub large_pastes: Vec<LargePaste>,
-    pub input_provenance: UserInputProvenance,
+    pub input_metadata: PreparedInputMetadata,
 }
 
 impl PreparedTurn {
@@ -319,7 +335,7 @@ impl PreparedTurn {
                 })
                 .collect(),
             large_pastes: Vec::new(),
-            input_provenance: UserInputProvenance {
+            input_metadata: PreparedInputMetadata {
                 display_text,
                 effective_text,
                 transforms: Vec::new(),
@@ -342,7 +358,7 @@ impl PreparedTurn {
             effective_text: effective_text.clone(),
             images,
             large_pastes: Vec::new(),
-            input_provenance: UserInputProvenance {
+            input_metadata: PreparedInputMetadata {
                 display_text,
                 effective_text,
                 transforms: Vec::new(),
@@ -357,22 +373,12 @@ impl PreparedTurn {
         large_pastes: Vec<LargePaste>,
     ) -> Self {
         let mut transforms = Vec::new();
-        let mut seen = HashSet::new();
-        for name in collect_skill_mentions(&text) {
-            if seen.insert(name.clone()) && skills.get(&name).is_some() {
-                let skill = skills.get(&name).expect("skill checked above");
-                transforms.push(UserInputTransform::SkillBlockAppend {
-                    skill_name: name,
-                    skill_path: skill.path_to_skill_md.display().to_string(),
-                });
-            }
-        }
         let large_pastes = large_pastes
             .into_iter()
             .filter(|paste| text.contains(&paste.placeholder))
             .collect::<Vec<_>>();
         for paste in &large_pastes {
-            transforms.push(UserInputTransform::LargePasteExpand {
+            transforms.push(PreparedInputTransform::LargePasteExpand {
                 placeholder: paste.placeholder.clone(),
                 expanded_char_count: paste.content.chars().count(),
                 display_replacement: format!("[pasted {} chars]", paste.content.chars().count()),
@@ -387,7 +393,7 @@ impl PreparedTurn {
             effective_text: effective_text.clone(),
             images,
             large_pastes,
-            input_provenance: UserInputProvenance {
+            input_metadata: PreparedInputMetadata {
                 display_text,
                 effective_text,
                 transforms,
@@ -1298,12 +1304,7 @@ impl App {
             if let Some(turn) = self.take_matching_pending_steer(&message.content) {
                 self.push_prepared_user_input(&turn);
             } else {
-                let history_text = message
-                    .user_input
-                    .as_ref()
-                    .map(|input| input.display_text.clone())
-                    .unwrap_or_else(|| message.content.clone());
-                self.push_user_input_history_text(history_text);
+                self.push_user_input_history_text(message.content.clone());
             }
         }
         if accepted_user_message {
@@ -1321,12 +1322,7 @@ impl App {
                     if let Some(turn) = self.take_matching_pending_steer(&message.content) {
                         self.push_prepared_user_input(&turn);
                     } else {
-                        let history_text = message
-                            .user_input
-                            .as_ref()
-                            .map(|input| input.display_text.clone())
-                            .unwrap_or_else(|| message.content.clone());
-                        self.push_user_input_history_text(history_text);
+                        self.push_user_input_history_text(message.content.clone());
                     }
                 }
                 MessageRole::System => {
@@ -1606,7 +1602,7 @@ impl App {
                     self.set_transient_status(status, detail, duration);
                     self.dirty = true;
                 }
-                let renders_visible_output = plugin_surface_event_renders_visible_output(&event);
+                let renders_visible_output = plugin_surface::event_renders_visible_output(&event);
                 let mutation = plugin_surface::apply_surface_event(
                     &mut self.timeline,
                     &mut self.plugin_mode_indicators,
@@ -1729,7 +1725,7 @@ impl App {
         let idx = self.pending_steers.iter().position(|turn| {
             turn.display_text == content
                 || turn.effective_text == content
-                || (!turn.input_provenance.transforms.is_empty()
+                || (!turn.input_metadata.transforms.is_empty()
                     && content.starts_with(&turn.display_text))
         })?;
         self.pending_steers.remove(idx)

@@ -1,12 +1,13 @@
 use super::artifact::render_snippet_preview;
 use super::prompt::prompt_content_lines_snapshot;
 use super::*;
+use crate::SkillCatalog;
 use crate::activity::ActivityState;
 use crate::app::timeline_from_read_view;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
-use lash::{Part, PartKind, PromptRequest, SkillCatalog};
+use lash::{Part, PartKind, PromptRequest};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };
@@ -351,15 +352,6 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             response_meta: None,
         }]
         .into(),
-        user_input: Some(lash::UserInputProvenance {
-            display_text: "Use /wholehog".into(),
-            effective_text: "Use /wholehog\n\n<skill>\n<name>wholehog</name>\nbody\n</skill>"
-                .into(),
-            transforms: vec![lash::UserInputTransform::SkillBlockAppend {
-                skill_name: "wholehog".into(),
-                skill_path: "/tmp/wholehog/SKILL.md".into(),
-            }],
-        }),
         origin: None,
     };
 
@@ -374,12 +366,8 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
     assert!(matches!(blocks.first(), Some(UiTimelineItem::TurnStart(_))));
     assert!(matches!(
         blocks.get(1),
-        Some(UiTimelineItem::UserInput(text)) if text == "Use /wholehog"
+        Some(UiTimelineItem::UserInput(text)) if text.contains("Use /wholehog")
     ));
-    assert!(!blocks.iter().any(|block| match block {
-        UiTimelineItem::UserInput(text) => text.contains("<skill>") || text.contains("<name>"),
-        _ => false,
-    }));
 }
 
 #[test]

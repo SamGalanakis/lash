@@ -1,53 +1,35 @@
 mod apply_patch;
-pub mod batch;
-mod composite;
 mod fetch_url;
-#[cfg(feature = "tool-impls")]
 mod glob;
-#[cfg(feature = "tool-impls")]
 mod grep;
-#[cfg(feature = "tool-impls")]
 mod ls;
-#[cfg(feature = "tool-impls")]
 mod read_file;
-#[cfg(feature = "tool-impls")]
 mod shell;
 mod web_search;
 
 pub use apply_patch::ApplyPatchTool;
 pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
-pub(crate) use composite::CompositeToolProvider;
 pub use fetch_url::FetchUrl;
-#[cfg(feature = "tool-impls")]
 pub use glob::Glob;
-#[cfg(feature = "tool-impls")]
 pub use grep::Grep;
-#[cfg(feature = "tool-impls")]
 pub use ls::Ls;
-#[cfg(feature = "tool-impls")]
 pub use read_file::{ReadFile, ReadFilePluginFactory};
-#[cfg(feature = "tool-impls")]
 pub use shell::{StandardShell, StandardShellPluginFactory};
-#[cfg(feature = "tool-impls")]
 pub use shell::{shell_prompt_contributions, shell_prompt_contributions_for_access};
 pub use web_search::WebSearch;
 
-use crate::ToolResult;
-#[cfg(feature = "tool-impls")]
+use lash::ToolResult;
+use lash_rlm_types::unwrap_projected_arg;
 use std::io::{BufRead, BufReader};
-#[cfg(feature = "tool-impls")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "tool-impls")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Shared preamble describing default filesystem-listing behavior.
 /// Used by `ls` and `glob` so both tools document hidden-file and
 /// `.gitignore` handling in identical wording.
-#[cfg(feature = "tool-impls")]
 pub(crate) const FS_DEFAULTS_PREAMBLE: &str =
     "By default this includes hidden files and respects `.gitignore` only inside Git repos.";
 
-#[cfg(feature = "tool-impls")]
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct PathEntry {
     pub path: String,
@@ -57,22 +39,11 @@ pub(crate) struct PathEntry {
     pub modified_at: String,
 }
 
-#[cfg(feature = "tool-impls")]
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct TruncationMeta {
     pub shown: usize,
     pub total: usize,
     pub omitted: usize,
-}
-
-pub use lash_rlm_types::{PROJECTED_JSON_TAG, projection_inner};
-
-/// Strip the canonical `Value::Projected` wrapper if present, returning the
-/// inner value. No-op for any value that isn't a single-key object whose key is
-/// [`PROJECTED_JSON_TAG`]. Used at the top of every standard arg-extraction
-/// helper so tools see bare data regardless of source kind.
-pub fn unwrap_projected_arg(value: &serde_json::Value) -> &serde_json::Value {
-    projection_inner(value).unwrap_or(value)
 }
 
 /// Extract a required non-empty string arg, or return ToolResult::err.
@@ -88,7 +59,6 @@ pub(crate) fn require_str<'a>(
 }
 
 /// Parse optional bool arg with a default.
-#[cfg(feature = "tool-impls")]
 pub(crate) fn parse_optional_bool(
     args: &serde_json::Value,
     key: &str,
@@ -108,7 +78,6 @@ pub(crate) fn parse_optional_bool(
 
 /// Parse an optional positive integer arg.
 /// Accepts `null` or `"none"` when `allow_none` is true.
-#[cfg(feature = "tool-impls")]
 pub(crate) fn parse_optional_usize_arg(
     args: &serde_json::Value,
     key: &str,
@@ -166,59 +135,6 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
-pub(crate) fn project_tool_catalog<I>(entries: I) -> Vec<serde_json::Value>
-where
-    I: IntoIterator<Item = crate::ToolSurfaceEntry>,
-{
-    entries
-        .into_iter()
-        .filter(|entry| entry.availability.is_discoverable())
-        .map(|entry| {
-            let definition = entry.definition;
-            let availability = entry.availability;
-            let signature = definition.compact_contract().render_signature();
-            let loadable = matches!(definition.activation, crate::ToolActivation::Loadable);
-            let activation_hint = if loadable && !availability.is_callable() {
-                format!(
-                    "Call `load_tools(names=[\"{}\"])` to make this tool callable in the current session.",
-                    definition.name
-                )
-            } else if matches!(definition.activation, crate::ToolActivation::Internal) {
-                "This tool is internal and cannot be activated directly.".to_string()
-            } else {
-                String::new()
-            };
-            let mut projected = serde_json::json!({
-                "name": definition.name,
-                "signature": signature,
-                "namespace": definition.discovery.namespace,
-                "description": definition.description,
-                "params": definition.parameter_metadata(),
-                "input_schema": definition.input_schema,
-                "output_schema": definition.output_schema,
-                "examples": definition.examples,
-                "aliases": definition.discovery.aliases,
-                "availability": availability,
-                "callable": availability.is_callable(),
-                "documented": availability.is_documented(),
-                "discoverable": availability.is_discoverable(),
-                "activation": definition.activation,
-                "loadable": loadable,
-                "activation_hint": activation_hint,
-            });
-            if !definition.output_contract.is_static()
-                && let Some(object) = projected.as_object_mut()
-            {
-                object.insert(
-                    "output_contract".to_string(),
-                    serde_json::json!(definition.output_contract),
-                );
-            }
-            projected
-        })
-        .collect()
-}
-
 pub(crate) fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -228,11 +144,8 @@ pub(crate) fn object_schema(properties: serde_json::Value, required: &[&str]) ->
     })
 }
 
-pub(crate) fn discovery_metadata(
-    namespace: &str,
-    aliases: &[&str],
-) -> crate::ToolDiscoveryMetadata {
-    crate::ToolDiscoveryMetadata {
+pub(crate) fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash::ToolDiscoveryMetadata {
+    lash::ToolDiscoveryMetadata {
         namespace: if namespace.is_empty() {
             None
         } else {
@@ -255,7 +168,6 @@ where
 
 /// Build a normalized filesystem entry for tool output.
 /// Returns the entry plus raw mtime for optional sorting.
-#[cfg(feature = "tool-impls")]
 pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {
     let fallback_mtime = UNIX_EPOCH;
     let path_str = path.to_string_lossy().to_string();
@@ -302,7 +214,6 @@ pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, Sys
     (entry, mtime)
 }
 
-#[cfg(feature = "tool-impls")]
 pub(crate) fn rg_file_list(
     base: &Path,
     include_hidden: bool,
@@ -356,7 +267,6 @@ pub(crate) fn rg_file_list(
 }
 
 /// Build the standard result envelope returned by filesystem listing tools.
-#[cfg(feature = "tool-impls")]
 pub(crate) fn filesystem_entries_result(
     items: Vec<PathEntry>,
     total_count: usize,
@@ -377,7 +287,6 @@ pub(crate) fn filesystem_entries_result(
     })
 }
 
-#[cfg(feature = "tool-impls")]
 fn count_text_lines(path: &Path) -> Option<u64> {
     let file = std::fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -391,7 +300,6 @@ fn count_text_lines(path: &Path) -> Option<u64> {
     Some(count)
 }
 
-#[cfg(feature = "tool-impls")]
 fn format_time_rfc3339(ts: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(ts).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -414,61 +322,5 @@ pub(crate) fn compact_diff(old: &str, new: &str, path: &str, max_lines: usize) -
         let mut truncated: String = lines[..max_lines].join("\n");
         truncated.push_str(&format!("\n... ({} more lines)", lines.len() - max_lines));
         truncated
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dummy_tool(name: &str) -> crate::ToolDefinition {
-        crate::ToolDefinition::new(
-            name,
-            format!("desc for {name}"),
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({}),
-        )
-    }
-
-    #[test]
-    fn project_tool_catalog_keeps_discoverable_tools_with_surface_metadata() {
-        let catalog = project_tool_catalog([
-            crate::ToolSurfaceEntry {
-                definition: dummy_tool("read_file"),
-                availability: crate::ToolAvailability::Documented,
-            },
-            crate::ToolSurfaceEntry {
-                definition: dummy_tool("search_tools"),
-                availability: crate::ToolAvailability::Callable,
-            },
-        ]);
-        assert_eq!(catalog.len(), 2);
-        assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
-        assert_eq!(
-            catalog[0]["signature"],
-            serde_json::json!("read_file() -> any")
-        );
-        assert_eq!(catalog[0]["documented"], serde_json::json!(true));
-        assert_eq!(catalog[1]["callable"], serde_json::json!(true));
-    }
-
-    #[test]
-    fn project_tool_catalog_preserves_dynamic_output_contracts() {
-        let catalog = project_tool_catalog([crate::ToolSurfaceEntry {
-            definition: dummy_tool("llm_query").with_output_from_input_schema(
-                "output",
-                Some(serde_json::json!({ "type": "string" })),
-            ),
-            availability: crate::ToolAvailability::Discoverable,
-        }]);
-
-        assert_eq!(
-            catalog[0]["output_contract"],
-            serde_json::json!({
-                "kind": "from_input_schema",
-                "input_field": "output",
-                "default_schema": { "type": "string" }
-            })
-        );
     }
 }

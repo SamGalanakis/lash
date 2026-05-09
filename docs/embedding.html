@@ -57,7 +57,11 @@ let core = LashCore::builder()
 
 let session = core.session("chat-123").rlm().open().await?;
 let result = session.turn(Input::text("Use the app tools.")).run().await?;
-println!("{}", result.transcript.rendered_output());</code></pre>
+let assistant_text: String = result.activities.iter().filter_map(|activity| match &amp;activity.event {
+    TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+    _ =&gt; None,
+}).collect();
+println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
@@ -67,14 +71,14 @@ println!("{}", result.transcript.rendered_output());</code></pre>
             <dt><code>LashSession</code></dt>
             <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(Input)</code>, <code>run(Input)</code>, <code>read_view()</code>, and <code>rlm_project(...)</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected transcript.</dd>
+            <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
           </dl>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Run A Turn</h2>
-            <p><code>TurnBuilder::run()</code> is the smallest path. It internally uses a <code>TurnCollector</code>, returns a <code>CollectedTurnResult</code>, and exposes the same visible output the stream produced.</p>
+            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>CollectedTurnResult</code> with the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
           </div>
           <div class="two-col">
             <article class="panel">
@@ -84,28 +88,26 @@ println!("{}", result.transcript.rendered_output());</code></pre>
     .run()
     .await?;
 
-let visible_answer = collected.transcript.rendered_output();
+let visible_answer: String = collected.activities.iter().filter_map(|activity| match &amp;activity.event {
+    TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+    _ =&gt; None,
+}).collect();
 let usage = collected.usage;
 let outcome = collected.outcome;</code></pre>
             </article>
             <article class="panel">
               <h3>Live stream</h3>
-              <pre><code>let collector = TurnCollector::default();
-let ui_sink = Arc::new(AppEvents::new(tx));
-let sink = lash_embed::TurnEventFanout::new(vec![
-    collector.sink(),
-    ui_sink,
-]);
+              <pre><code>let ui_sink = Arc::new(AppEvents::new(tx));
 
 let turn = session
     .turn(Input::text(user_text))
-    .stream(&amp;sink)
+    .stream(ui_sink.as_ref())
     .await?;
 
-persist(collector.rendered_output(), turn.usage)?;</code></pre>
+persist(app_turn_state.assistant_text(), turn.usage)?;</code></pre>
             </article>
           </div>
-          <p>Use <code>rendered_output()</code> when an app wants to persist what the user saw. It concatenates assistant prose and terminal output in stream order, without inventing a duplicated final-output event.</p>
+          <p>Apps own their projection policy. Fold <code>TurnActivity</code> directly when persisting assistant prose, terminal values, tool summaries, or timelines.</p>
         </div>
 
         <div class="section">
@@ -114,16 +116,16 @@ persist(collector.rendered_output(), turn.usage)?;</code></pre>
             <p>The app stream is additive. Assistant prose arrives as deltas, tool and code activity arrive as structured events, and terminal values authored by <code>submit</code> or tool controls arrive as <code>TerminalOutput</code>.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">TurnEvent sink</div>
+            <div class="diagram-title">TurnActivity sink</div>
             <pre><code>use async_trait::async_trait;
-use lash_embed::{TurnEvent, TurnEventSink};
+use lash_embed::{TurnActivity, TurnActivitySink, TurnEvent};
 
 struct AppEvents;
 
 #[async_trait]
-impl TurnEventSink for AppEvents {
-    async fn emit(&amp;self, event: TurnEvent) {
-        match event {
+impl TurnActivitySink for AppEvents {
+    async fn emit(&amp;self, activity: TurnActivity) {
+        match activity.event {
             TurnEvent::AssistantProseDelta { text } =&gt; {
                 append_live_text(text).await;
             }
@@ -145,7 +147,8 @@ impl TurnEventSink for AppEvents {
             }
             TurnEvent::ReasoningDelta { .. }
             | TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::Error { .. } =&gt; {}
+            | TurnEvent::Error { .. }
+            | _ =&gt; {}
         }
     }
 }
@@ -377,7 +380,7 @@ let result = session
         <div class="section">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn context, semantic stream events, terminal output rendering, and final persistence through <code>TurnCollector::rendered_output()</code>.</p>
+            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn context, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p openrouter-chat-ui
 # then open http://127.0.0.1:3000</code></pre>

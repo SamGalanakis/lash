@@ -8,19 +8,11 @@ license.workspace = true
 # Keep core portable by default.
 default = []
 otel-trace = ["lash-trace/otel"]
-tool-impls = [
-    "dep:fff-search",
-    "dep:globset",
-    "dep:ignore",
-    "dep:pdf-extract",
-    "dep:portable-pty",
-]
-fff-zlob = ["tool-impls", "fff-search/zlob"]
 # Expose `lash::testing` for downstream plugin crates to share mock
 # session-manager/turn fixtures with lash's own tests.
 testing = []
 # Convenience umbrella for first-party consumers (e.g. lash-cli).
-full = ["tool-impls"]
+full = []
 
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
@@ -38,16 +30,10 @@ tempfile = "3"
 tracing = "0.1"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
-globset = { version = "0.4", optional = true }
-ignore = { version = "0.4", optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
 bytes = "1"
 sha2 = "0.10"
 chrono = "0.4"
-similar = "2"
-pdf-extract = { version = "0.7", optional = true }
-portable-pty = { version = "0.9", optional = true }
 futures-util = "0.3"
-fff-search = { version = "0.6.2-nightly.a677d64", default-features = false, optional = true }
 libc = "0.2"

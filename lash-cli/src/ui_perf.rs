@@ -7,9 +7,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::SkillCatalog;
 use anyhow::Context;
 use chrono::Utc;
-use lash::{SkillCatalog, TokenUsage};
+use lash::TokenUsage;
 use lash_file_index::{FileIndex, MatchResult};
 use lash_tui::{
     Color, Column, ColumnWidth, Frame, Line, PerfCounters, PerfPhase, Rect, Style, Table, TableRow,

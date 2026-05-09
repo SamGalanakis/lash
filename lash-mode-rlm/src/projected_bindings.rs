@@ -215,7 +215,6 @@ mod tests {
         let input = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            user_input: None,
             mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
@@ -243,7 +242,6 @@ mod tests {
         let input = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            user_input: None,
             mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("stable".to_string()),
@@ -270,7 +268,6 @@ mod tests {
         let first = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            user_input: None,
             mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
@@ -286,7 +283,6 @@ mod tests {
         let second = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            user_input: None,
             mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),

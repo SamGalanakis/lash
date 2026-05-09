@@ -361,18 +361,6 @@ pub(crate) fn plugin_surface_session_events(
         .collect()
 }
 
-pub fn plugin_surface_event_renders_visible_output(event: &PluginSurfaceEvent) -> bool {
-    match event {
-        PluginSurfaceEvent::PanelUpsert { .. } => true,
-        PluginSurfaceEvent::PanelAppend { content, .. } => !content.is_empty(),
-        PluginSurfaceEvent::ModeIndicatorUpsert { .. }
-        | PluginSurfaceEvent::ModeIndicatorClear { .. }
-        | PluginSurfaceEvent::Status { .. }
-        | PluginSurfaceEvent::PanelClear { .. }
-        | PluginSurfaceEvent::Custom { .. } => false,
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginDirective {
@@ -453,22 +441,19 @@ pub trait ToolCatalogHost: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub trait DynamicToolHost: Send + Sync {
-    async fn dynamic_tool_state(
-        &self,
-        _session_id: &str,
-    ) -> Result<crate::DynamicStateSnapshot, PluginError> {
+pub trait ToolStateHost: Send + Sync {
+    async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
         Err(PluginError::Session(
-            "dynamic tool state is unavailable in this session".to_string(),
+            "tool state is unavailable in this session".to_string(),
         ))
     }
-    async fn apply_dynamic_tool_state(
+    async fn apply_tool_state(
         &self,
         _session_id: &str,
-        _snapshot: crate::DynamicStateSnapshot,
+        _snapshot: crate::ToolState,
     ) -> Result<u64, PluginError> {
         Err(PluginError::Session(
-            "dynamic tool state mutation is unavailable in this session".to_string(),
+            "tool state mutation is unavailable in this session".to_string(),
         ))
     }
     async fn set_tools_availability(
@@ -477,16 +462,13 @@ pub trait DynamicToolHost: Send + Sync {
         tool_names: &[String],
         availability: Option<crate::ToolAvailability>,
     ) -> Result<u64, PluginError> {
-        let mut snapshot = self.dynamic_tool_state(session_id).await?;
+        let mut snapshot = self.tool_state(session_id).await?;
         for name in tool_names {
-            let Some(spec) = snapshot.tools.get_mut(name) else {
-                return Err(PluginError::Session(format!(
-                    "unknown dynamic tool `{name}`"
-                )));
-            };
-            spec.definition.availability_override = availability;
+            snapshot
+                .set_availability(name, availability)
+                .map_err(|err| PluginError::Session(err.to_string()))?;
         }
-        self.apply_dynamic_tool_state(session_id, snapshot).await
+        self.apply_tool_state(session_id, snapshot).await
     }
     async fn set_tool_availability(
         &self,
@@ -494,14 +476,11 @@ pub trait DynamicToolHost: Send + Sync {
         tool_name: &str,
         availability: Option<ToolAvailability>,
     ) -> Result<u64, PluginError> {
-        let mut snapshot = self.dynamic_tool_state(session_id).await?;
-        let Some(spec) = snapshot.tools.get_mut(tool_name) else {
-            return Err(PluginError::Session(format!(
-                "unknown dynamic tool `{tool_name}`"
-            )));
-        };
-        spec.definition.availability_override = availability;
-        self.apply_dynamic_tool_state(session_id, snapshot).await
+        let mut snapshot = self.tool_state(session_id).await?;
+        snapshot
+            .set_availability(tool_name, availability)
+            .map_err(|err| PluginError::Session(err.to_string()))?;
+        self.apply_tool_state(session_id, snapshot).await
     }
 }
 
@@ -742,18 +721,18 @@ impl<T> PromptHookHost for T where
 }
 
 pub trait TurnHookHost:
-    SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + TraceHost
+    SessionSnapshotHost + ToolStateHost + SessionLifecycleHost + TraceHost
 {
 }
 impl<T> TurnHookHost for T where
-    T: SessionSnapshotHost + DynamicToolHost + SessionLifecycleHost + TraceHost + ?Sized
+    T: SessionSnapshotHost + ToolStateHost + SessionLifecycleHost + TraceHost + ?Sized
 {
 }
 
 pub trait ToolHookHost:
     SessionSnapshotHost
     + ToolCatalogHost
-    + DynamicToolHost
+    + ToolStateHost
     + SessionLifecycleHost
     + TurnHost
     + TaskHost
@@ -768,7 +747,7 @@ pub trait ToolHookHost:
 impl<T> ToolHookHost for T where
     T: SessionSnapshotHost
         + ToolCatalogHost
-        + DynamicToolHost
+        + ToolStateHost
         + SessionLifecycleHost
         + TurnHost
         + TaskHost
@@ -809,7 +788,7 @@ impl<T> HistoryHost for T where
 pub trait ExternalInvokeHost:
     SessionSnapshotHost
     + ToolCatalogHost
-    + DynamicToolHost
+    + ToolStateHost
     + SessionLifecycleHost
     + TurnHost
     + TaskHost
@@ -822,7 +801,7 @@ pub trait ExternalInvokeHost:
 impl<T> ExternalInvokeHost for T where
     T: SessionSnapshotHost
         + ToolCatalogHost
-        + DynamicToolHost
+        + ToolStateHost
         + SessionLifecycleHost
         + TurnHost
         + TaskHost
@@ -920,7 +899,6 @@ pub enum PluginRuntimeEvent {
 pub struct TurnResultSummary {
     pub outcome: crate::TurnOutcome,
     pub assistant_output: crate::runtime::AssistantOutput,
-    pub has_plugin_visible_output: bool,
     pub execution: crate::runtime::ExecutionSummary,
     pub token_usage: crate::TokenUsage,
     pub tool_calls: Arc<Vec<crate::ToolCallRecord>>,
@@ -932,7 +910,6 @@ impl TurnResultSummary {
         Self {
             outcome: turn.outcome.clone(),
             assistant_output: turn.assistant_output.clone(),
-            has_plugin_visible_output: turn.has_plugin_visible_output,
             execution: turn.execution.clone(),
             token_usage: turn.token_usage.clone(),
             tool_calls: Arc::new(turn.tool_calls.clone()),

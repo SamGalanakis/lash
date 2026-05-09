@@ -164,7 +164,6 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                     text: clbench_turn_text(&request),
                 }],
                 image_blobs: Default::default(),
-                user_input: None,
                 mode: None,
                 mode_turn_options: Some(lash::ModeTurnOptions::typed(
                     ExecutionMode::new("rlm"),
@@ -188,7 +187,8 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         .context("handoff chain did not produce a turn")?;
 
     let action = match &turn.outcome {
-        TurnOutcome::Finished(TurnFinish::Value { value, .. }) => value.clone(),
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { value })
+        | TurnOutcome::Finished(TurnFinish::ToolValue { value, .. }) => value.clone(),
         other => bail!(
             "turn did not submit an action: status={} reason={} errors={:?} output={}",
             turn_status_label(other),
@@ -391,7 +391,8 @@ fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
 fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => "assistant_message",
-        TurnOutcome::Finished(TurnFinish::Value { .. }) => "value",
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => "submitted_value",
+        TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
         TurnOutcome::Handoff { .. } => "handoff",
         TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
         TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
@@ -400,7 +401,8 @@ fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
         TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
         TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        TurnOutcome::Stopped(lash::TurnStop::TerminalError { .. }) => "terminal_error",
+        TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 

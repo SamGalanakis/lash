@@ -14,7 +14,7 @@ use fff_search::{
 };
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{object_schema, require_str};
 
@@ -308,7 +308,7 @@ impl ToolProvider for Grep {
                 r#"grep(query="*.rs apply_patch", path=".")"#.into(),
                 r#"grep(query="current_query")"#.into(),
             ])
-            .with_discovery(crate::tools::discovery_metadata(
+            .with_discovery(super::discovery_metadata(
                 "filesystem",
                 &["search_files", "ripgrep"],
             ))
@@ -325,7 +325,7 @@ impl ToolProvider for Grep {
         _name: &str,
         args: &serde_json::Value,
         context: &ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
+        _progress: Option<&lash::ProgressSender>,
     ) -> ToolResult {
         self.execute_inner(args, context.cancellation_token.clone())
             .await

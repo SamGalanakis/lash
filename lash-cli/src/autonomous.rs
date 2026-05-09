@@ -5,6 +5,7 @@ use lash::*;
 use lash_embed::LashSession;
 use tokio::sync::mpsc;
 
+use crate::SkillCatalog;
 use crate::app::PreparedTurn;
 use crate::turn_runner::{make_turn_input, spawn_session_turn};
 use crate::{plugin_surface, util};
@@ -384,10 +385,8 @@ pub(crate) async fn run_autonomous(
             let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
-            } else if turn.has_plugin_visible_output {
-                if let Some(rendered) = renderer.rendered_plugin_output() {
-                    renderer.finish_output(&rendered);
-                }
+            } else if let Some(rendered) = renderer.rendered_plugin_output() {
+                renderer.finish_output(&rendered);
             } else {
                 let raw = turn.assistant_output.raw_text.trim();
                 if raw.is_empty() {

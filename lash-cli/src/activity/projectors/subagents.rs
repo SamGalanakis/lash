@@ -71,7 +71,7 @@ fn summarize_seed_arg(seed: Option<&Value>) -> Option<String> {
     }
     let mut parts = Vec::with_capacity(map.len());
     for (name, value) in map.iter() {
-        if lash::tools::projection_inner(value).is_some() {
+        if lash_rlm_types::projection_inner(value).is_some() {
             parts.push(format!("{name} (projected)"));
         } else {
             parts.push(name.clone());

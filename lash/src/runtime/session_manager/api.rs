@@ -27,23 +27,18 @@ impl crate::plugin::ToolCatalogHost for RuntimeSessionManager {
 }
 
 #[async_trait::async_trait]
-impl crate::plugin::DynamicToolHost for RuntimeSessionManager {
-    async fn dynamic_tool_state(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::DynamicStateSnapshot, crate::PluginError> {
-        self.current
-            .dynamic_tool_state(&self.managed, session_id)
-            .await
+impl crate::plugin::ToolStateHost for RuntimeSessionManager {
+    async fn tool_state(&self, session_id: &str) -> Result<crate::ToolState, crate::PluginError> {
+        self.current.tool_state(&self.managed, session_id).await
     }
 
-    async fn apply_dynamic_tool_state(
+    async fn apply_tool_state(
         &self,
         session_id: &str,
-        snapshot: crate::DynamicStateSnapshot,
+        snapshot: crate::ToolState,
     ) -> Result<u64, crate::PluginError> {
         self.current
-            .apply_dynamic_tool_state(&self.managed, session_id, snapshot)
+            .apply_tool_state(&self.managed, session_id, snapshot)
             .await
     }
 }

@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use super::{object_schema, require_str};
 
@@ -58,7 +58,7 @@ impl ToolProvider for FetchUrl {
                 }),
             )
             .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
-            .with_discovery(crate::tools::discovery_metadata(
+            .with_discovery(super::discovery_metadata(
                 "web",
                 &["fetch", "open_url"],
             ))
@@ -150,10 +150,10 @@ mod tests {
             definition.output_schema["additionalProperties"],
             serde_json::json!(false)
         );
-        assert_eq!(definition.activation, crate::ToolActivation::Always);
+        assert_eq!(definition.activation, lash::ToolActivation::Always);
         assert_eq!(
             definition.availability.standard,
-            crate::ToolAvailability::Documented
+            lash::ToolAvailability::Documented
         );
     }
 }

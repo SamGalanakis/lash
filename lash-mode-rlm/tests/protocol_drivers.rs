@@ -57,7 +57,6 @@ fn user_message(content: &str) -> Message {
             response_meta: None,
         }]
         .into(),
-        user_input: None,
         origin: None,
     }
 }
@@ -776,8 +775,8 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash::TurnOutcome::Stopped(lash::TurnStop::TerminalError {
-                source: lash::TerminalOutputSource::Tool { name },
+            outcome: lash::TurnOutcome::Stopped(lash::TurnStop::ToolError {
+                tool_name: name,
                 value,
             })
         }) if name == "custom_fail" && value == &serde_json::json!({ "reason": "no valid result" })
@@ -851,10 +850,9 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
         e,
         Effect::Emit(lash_sansio::SessionEvent::TurnOutcome {
             outcome: lash_sansio::TurnOutcome::Finished(
-                lash_sansio::TurnFinish::Value { source, value }
+                lash_sansio::TurnFinish::SubmittedValue { value }
             )
-        }) if matches!(source, lash_sansio::TerminalOutputSource::RlmSubmit)
-            && *value == serde_json::json!({ "ok": true })
+        }) if *value == serde_json::json!({ "ok": true })
     )));
     assert!(find_done(&effects).is_some());
 }
@@ -919,10 +917,9 @@ fn prose_or_submit_allows_submit_value() {
             effect,
             Effect::Emit(lash_sansio::SessionEvent::TurnOutcome {
                 outcome: lash_sansio::TurnOutcome::Finished(
-                    lash_sansio::TurnFinish::Value { source, value }
+                    lash_sansio::TurnFinish::SubmittedValue { value }
                 )
-            }) if matches!(source, lash_sansio::TerminalOutputSource::RlmSubmit)
-                && *value == serde_json::json!({ "ok": true })
+            }) if *value == serde_json::json!({ "ok": true })
         )
     }));
     assert!(find_done(&effects).is_some());

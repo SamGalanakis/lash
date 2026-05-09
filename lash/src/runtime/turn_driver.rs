@@ -6,8 +6,6 @@ mod effects;
 mod streaming;
 mod tools;
 
-pub(in crate::runtime) use streaming::llm_response_has_content;
-
 async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: SessionEvent) {
     if !event_tx.is_closed() {
         match &event {
@@ -16,7 +14,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 usage,
                 cumulative,
             } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::Usage {
                         mode_iteration: *mode_iteration,
@@ -27,7 +25,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 .await;
             }
             SessionEvent::LlmRequest { mode_iteration, .. } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::ModelRequestStarted {
                         mode_iteration: *mode_iteration,
@@ -42,7 +40,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 reason,
                 ..
             } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::RetryStatus {
                         wait_seconds: *wait_seconds,
@@ -54,7 +52,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 .await;
             }
             SessionEvent::PluginEvent { plugin_id, event } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::PluginSurface {
                         plugin_id: plugin_id.clone(),
@@ -64,7 +62,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 .await;
             }
             SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::QueuedInputAccepted {
                         checkpoint: *checkpoint,
@@ -77,7 +75,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 messages,
                 checkpoint,
             } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::QueuedMessagesCommitted {
                         messages: messages.clone(),
@@ -87,7 +85,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 .await;
             }
             SessionEvent::Error { message, .. } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
                     TurnEvent::Error {
                         message: message.clone(),
@@ -96,12 +94,23 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 .await;
             }
             SessionEvent::TurnOutcome {
-                outcome: TurnOutcome::Finished(TurnFinish::Value { source, value }),
+                outcome: TurnOutcome::Finished(TurnFinish::SubmittedValue { value }),
             } => {
-                send_turn_event(
+                send_independent_turn_event(
                     event_tx,
-                    TurnEvent::TerminalOutput {
-                        source: source.clone(),
+                    TurnEvent::SubmittedValue {
+                        value: value.clone(),
+                    },
+                )
+                .await;
+            }
+            SessionEvent::TurnOutcome {
+                outcome: TurnOutcome::Finished(TurnFinish::ToolValue { tool_name, value }),
+            } => {
+                send_independent_turn_event(
+                    event_tx,
+                    TurnEvent::ToolValue {
+                        tool_name: tool_name.clone(),
                         value: value.clone(),
                     },
                 )
@@ -113,10 +122,22 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
     }
 }
 
-async fn send_turn_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: TurnEvent) {
+async fn send_turn_activity(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    correlation_id: TurnActivityId,
+    event: TurnEvent,
+) {
     if !event_tx.is_closed() {
-        let _ = event_tx.send(RuntimeStreamEvent::Turn(event)).await;
+        let activity = TurnActivity::new(correlation_id, event);
+        let _ = event_tx.send(RuntimeStreamEvent::Turn(activity)).await;
     }
+}
+
+async fn send_independent_turn_event(
+    event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+    event: TurnEvent,
+) {
+    send_turn_activity(event_tx, TurnActivityId::fresh(), event).await;
 }
 
 async fn emit_semantic_response_parts(
@@ -127,29 +148,47 @@ async fn emit_semantic_response_parts(
     let mut emitted_text = false;
     for part in &response.parts {
         match part {
-            LlmOutputPart::Text { text, .. } if !text.is_empty() => {
+            LlmOutputPart::Text {
+                text,
+                response_meta,
+            } if !text.is_empty() => {
                 let text = semantic_text_part(text, strip_lashlang_fences);
                 if text.is_empty() {
                     continue;
                 }
                 emitted_text = true;
-                send_turn_event(
+                let correlation_id = response_meta
+                    .as_ref()
+                    .and_then(|meta| meta.id.clone())
+                    .map(TurnActivityId::new)
+                    .unwrap_or_else(TurnActivityId::fresh);
+                send_turn_activity(
                     event_tx,
+                    correlation_id,
                     TurnEvent::AssistantProseDelta {
                         text: text.to_string(),
                     },
                 )
                 .await;
             }
-            LlmOutputPart::Reasoning { text, .. } if !text.is_empty() => {
-                send_turn_event(event_tx, TurnEvent::ReasoningDelta { text: text.clone() }).await;
+            LlmOutputPart::Reasoning { text, item_id, .. } if !text.is_empty() => {
+                let correlation_id = item_id
+                    .clone()
+                    .map(TurnActivityId::new)
+                    .unwrap_or_else(TurnActivityId::fresh);
+                send_turn_activity(
+                    event_tx,
+                    correlation_id,
+                    TurnEvent::ReasoningDelta { text: text.clone() },
+                )
+                .await;
             }
             _ => {}
         }
     }
     let full_text = semantic_text_part(&response.full_text, strip_lashlang_fences);
     if !emitted_text && !full_text.is_empty() {
-        send_turn_event(
+        send_independent_turn_event(
             event_tx,
             TurnEvent::AssistantProseDelta {
                 text: full_text.to_string(),
@@ -537,6 +576,7 @@ impl RuntimeTurnDriver {
                     Effect::Log { event } => self.handle_log_event(event),
                     Effect::CancelLlm { .. } => {}
                     Effect::ExecCode { id, code } => {
+                        let code_correlation_id = TurnActivityId::new(format!("code:{id:?}"));
                         let iteration = machine.mode_iteration();
                         if self.host.core.trace_sink.is_some() {
                             self.emit_rlm_diagnostic_trace(
@@ -548,8 +588,9 @@ impl RuntimeTurnDriver {
                                 }),
                             );
                         }
-                        send_turn_event(
+                        send_turn_activity(
                             &event_tx,
+                            code_correlation_id.clone(),
                             TurnEvent::CodeBlockStarted {
                                 language: "lashlang".to_string(),
                                 code: code.clone(),
@@ -562,8 +603,9 @@ impl RuntimeTurnDriver {
                             .await;
                         match &result {
                             Ok(output) => {
-                                send_turn_event(
+                                send_turn_activity(
                                     &event_tx,
+                                    code_correlation_id.clone(),
                                     TurnEvent::CodeBlockCompleted {
                                         language: "lashlang".to_string(),
                                         output: output.output.clone(),
@@ -575,8 +617,9 @@ impl RuntimeTurnDriver {
                                 .await;
                             }
                             Err(error) => {
-                                send_turn_event(
+                                send_turn_activity(
                                     &event_tx,
+                                    code_correlation_id.clone(),
                                     TurnEvent::CodeBlockCompleted {
                                         language: "lashlang".to_string(),
                                         output: String::new(),

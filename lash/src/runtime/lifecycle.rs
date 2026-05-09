@@ -32,11 +32,10 @@ impl LashRuntime {
             state.policy.execution_mode.clone(),
         )
         .await?;
-        if let Some(dynamic_state) = state.dynamic_state_snapshot.clone()
-            && let Some(dynamic_tools) = session.plugins().dynamic_tools()
-            && let Err(err) = dynamic_tools.apply_state(dynamic_state)
+        if let Some(tool_state) = state.tool_state_snapshot.clone()
+            && let Err(err) = session.plugins().tool_registry().apply_state(tool_state)
         {
-            tracing::warn!("failed to restore dynamic tool state from checkpoint: {err}");
+            tracing::warn!("failed to restore tool state from checkpoint: {err}");
         }
         if let Some(snapshot) = state.plugin_snapshot.clone() {
             session

@@ -7,7 +7,6 @@ use super::*;
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
-    dynamic_tools_enabled: bool,
     background_tasks_available: bool,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
@@ -19,7 +18,7 @@ struct BuildPluginSessionRequest<'a> {
     standard_context_approach: Option<crate::StandardContextApproach>,
     snapshot: Option<&'a PluginSessionSnapshot>,
     tool_surface_overlay: ToolSurfaceContribution,
-    tool_snapshot: Option<crate::DynamicStateSnapshot>,
+    tool_snapshot: Option<crate::ToolState>,
     authority: SessionAuthorityContext,
 }
 
@@ -44,7 +43,6 @@ impl PluginHost {
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),
-            dynamic_tools_enabled: false,
             background_tasks_available: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
@@ -60,15 +58,9 @@ impl PluginHost {
         self
     }
 
-    pub fn with_dynamic_tools(mut self) -> Self {
-        self.dynamic_tools_enabled = true;
-        self
-    }
-
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
-            dynamic_tools_enabled: self.dynamic_tools_enabled,
             background_tasks_available: self.background_tasks_available,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
@@ -158,7 +150,7 @@ impl PluginHost {
         standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
-        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+        tool_snapshot: Option<crate::ToolState>,
         authority: SessionAuthorityContext,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
@@ -180,7 +172,7 @@ impl PluginHost {
         standard_context_approach: Option<crate::StandardContextApproach>,
         snapshot: Option<&PluginSessionSnapshot>,
         tool_surface_overlay: ToolSurfaceContribution,
-        tool_snapshot: Option<crate::DynamicStateSnapshot>,
+        tool_snapshot: Option<crate::ToolState>,
     ) -> Result<Arc<PluginSession>, PluginError> {
         self.build_session_inner(BuildPluginSessionRequest {
             session_id: session_id.into(),
@@ -220,8 +212,8 @@ impl PluginHost {
             ) && !self.supports_standard_context_approach(approach)
             {
                 return Err(PluginError::Registration(format!(
-                    "standard context approach `{}` requires a supporting plugin factory on this plugin host",
-                    approach.label()
+                    "standard context approach `{:?}` requires a supporting plugin factory on this plugin host",
+                    approach.kind()
                 )));
             }
         } else if standard_context_approach.is_some() {
@@ -275,40 +267,26 @@ impl PluginHost {
             }
         }
         let base_tools: Arc<dyn ToolProvider> = Arc::new(
-            crate::tools::CompositeToolProvider::from_providers(reg.tool_providers.clone()),
+            crate::tool_provider::CompositeToolProvider::from_providers(reg.tool_providers.clone()),
         );
-        let (tools, dynamic_tools) = if self.dynamic_tools_enabled {
-            let dynamic = match tool_snapshot {
-                Some(snapshot) => Arc::new(
-                    crate::DynamicToolProvider::from_tool_provider(base_tools)
-                        .map_err(|err| {
-                            PluginError::Registration(format!(
-                                "failed to build dynamic tool provider: {err}"
-                            ))
-                        })?
-                        .fork_with_snapshot(snapshot)
-                        .map_err(|err| {
-                            PluginError::Session(format!(
-                                "tool state cannot be applied to this plugin host session: {err}"
-                            ))
-                        })?,
-                ),
-                None => Arc::new(
-                    crate::DynamicToolProvider::from_tool_provider(base_tools).map_err(|err| {
-                        PluginError::Registration(format!(
-                            "failed to build dynamic tool provider: {err}"
+        let registry = match tool_snapshot {
+            Some(snapshot) => Arc::new(
+                crate::ToolRegistry::from_tool_provider(base_tools)
+                    .map_err(|err| {
+                        PluginError::Registration(format!("failed to build tool registry: {err}"))
+                    })?
+                    .fork_with_state(snapshot)
+                    .map_err(|err| {
+                        PluginError::Session(format!(
+                            "tool state cannot be applied to this plugin host session: {err}"
                         ))
                     })?,
-                ),
-            };
-            (Arc::clone(&dynamic) as Arc<dyn ToolProvider>, Some(dynamic))
-        } else if tool_snapshot.is_some() {
-            return Err(PluginError::Session(
-                "tool state requires dynamic tools on this plugin host".to_string(),
-            ));
-        } else {
-            (base_tools, None)
+            ),
+            None => Arc::new(crate::ToolRegistry::from_tool_provider(base_tools).map_err(
+                |err| PluginError::Registration(format!("failed to build tool registry: {err}")),
+            )?),
         };
+        let tools = Arc::clone(&registry) as Arc<dyn ToolProvider>;
 
         let session = Arc::new(PluginSession {
             host: self.clone(),
@@ -316,7 +294,7 @@ impl PluginHost {
             execution_mode: execution_mode.clone(),
             plugins,
             tools,
-            dynamic_tools,
+            tool_registry: registry,
             tool_surface_overlay,
             tool_access: authority.tool_access,
             subagent: authority.subagent,

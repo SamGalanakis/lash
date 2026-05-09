@@ -11,12 +11,12 @@ use lash::plugin::{
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash::{
-    AssembledTurn, DynamicToolProvider, ExecutionMode, MessageRole, PersistedSessionState,
-    PluginHost, RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionPolicy,
-    SessionReadView, SessionSnapshot, SessionSnapshotHost, SessionStateEnvelope, ToolCatalogHost,
-    ToolDefinition, ToolProvider, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
+    RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView,
+    SessionSnapshot, SessionSnapshotHost, SessionStateEnvelope, ToolCatalogHost, ToolDefinition,
+    ToolProvider, ToolRegistry, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
-use lash::{DynamicToolHost, SessionLifecycleHost, TurnHost};
+use lash::{SessionLifecycleHost, ToolStateHost, TurnHost};
 
 use lash::testing::{MockSessionManager, mock_assembled_turn};
 
@@ -25,21 +25,18 @@ trait PlanTestHostCore: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
     async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
     async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
-    async fn dynamic_tool_state(
-        &self,
-        _session_id: &str,
-    ) -> Result<lash::DynamicStateSnapshot, PluginError> {
+    async fn tool_state(&self, _session_id: &str) -> Result<lash::ToolState, PluginError> {
         Err(PluginError::Session(
-            "dynamic tool state is unavailable in this session".to_string(),
+            "tool state is unavailable in this session".to_string(),
         ))
     }
-    async fn apply_dynamic_tool_state(
+    async fn apply_tool_state(
         &self,
         _session_id: &str,
-        _snapshot: lash::DynamicStateSnapshot,
+        _snapshot: lash::ToolState,
     ) -> Result<u64, PluginError> {
         Err(PluginError::Session(
-            "dynamic tool state mutation is unavailable in this session".to_string(),
+            "tool state mutation is unavailable in this session".to_string(),
         ))
     }
     async fn create_session(
@@ -88,19 +85,16 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash::DynamicToolHost for $ty {
-            async fn dynamic_tool_state(
-                &self,
-                session_id: &str,
-            ) -> Result<lash::DynamicStateSnapshot, PluginError> {
-                PlanTestHostCore::dynamic_tool_state(self, session_id).await
+        impl lash::ToolStateHost for $ty {
+            async fn tool_state(&self, session_id: &str) -> Result<lash::ToolState, PluginError> {
+                PlanTestHostCore::tool_state(self, session_id).await
             }
-            async fn apply_dynamic_tool_state(
+            async fn apply_tool_state(
                 &self,
                 session_id: &str,
-                snapshot: lash::DynamicStateSnapshot,
+                snapshot: lash::ToolState,
             ) -> Result<u64, PluginError> {
-                PlanTestHostCore::apply_dynamic_tool_state(self, session_id, snapshot).await
+                PlanTestHostCore::apply_tool_state(self, session_id, snapshot).await
             }
         }
 
@@ -185,10 +179,10 @@ fn test_tool(
     .with_execution_mode(execution_mode)
 }
 
-struct PlanModeDynamicTools;
+struct PlanModeTestTools;
 
 #[async_trait::async_trait]
-impl ToolProvider for PlanModeDynamicTools {
+impl ToolProvider for PlanModeTestTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
             test_tool(
@@ -210,9 +204,9 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
     MockSessionManager::default()
         .with_snapshot(mock_snapshot(run_session_id))
         .with_turn(mock_assembled_turn(run_session_id, ""))
-        .with_dynamic_tool_provider(
-            DynamicToolProvider::from_tool_provider(Arc::new(PlanModeDynamicTools))
-                .expect("plan mode dynamic tools"),
+        .with_tool_registry(
+            ToolRegistry::from_tool_provider(Arc::new(PlanModeTestTools))
+                .expect("plan mode tool registry"),
         )
 }
 
@@ -352,11 +346,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     let manager_host: Arc<dyn RuntimeSessionHost> = manager.clone();
 
     let initial = manager
-        .dynamic_tool_state("root")
+        .tool_state("root")
         .await
-        .expect("initial dynamic tool state");
-    assert!(initial.tools.get("plan_exit").is_some_and(|tool| {
-        tool.definition
+        .expect("initial tool state");
+    assert!(initial.get("plan_exit").is_some_and(|tool| {
+        tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));
@@ -373,11 +367,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("enable");
 
     let enabled = manager
-        .dynamic_tool_state("root")
+        .tool_state("root")
         .await
-        .expect("enabled dynamic tool state");
-    assert!(enabled.tools.get("plan_exit").is_some_and(|tool| {
-        tool.definition
+        .expect("enabled tool state");
+    assert!(enabled.get("plan_exit").is_some_and(|tool| {
+        tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Documented
     }));
@@ -388,11 +382,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("disable");
 
     let disabled = manager
-        .dynamic_tool_state("root")
+        .tool_state("root")
         .await
-        .expect("disabled dynamic tool state");
-    assert!(disabled.tools.get("plan_exit").is_some_and(|tool| {
-        tool.definition
+        .expect("disabled tool state");
+    assert!(disabled.get("plan_exit").is_some_and(|tool| {
+        tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));
@@ -760,21 +754,16 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             self.base.tool_catalog(session_id).await
         }
 
-        async fn dynamic_tool_state(
-            &self,
-            session_id: &str,
-        ) -> Result<lash::DynamicStateSnapshot, PluginError> {
-            self.base.dynamic_tool_state(session_id).await
+        async fn tool_state(&self, session_id: &str) -> Result<lash::ToolState, PluginError> {
+            self.base.tool_state(session_id).await
         }
 
-        async fn apply_dynamic_tool_state(
+        async fn apply_tool_state(
             &self,
             session_id: &str,
-            snapshot: lash::DynamicStateSnapshot,
+            snapshot: lash::ToolState,
         ) -> Result<u64, PluginError> {
-            self.base
-                .apply_dynamic_tool_state(session_id, snapshot)
-                .await
+            self.base.apply_tool_state(session_id, snapshot).await
         }
 
         async fn create_session(
@@ -900,11 +889,11 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic = lash::DynamicToolHost::dynamic_tool_state(manager.as_ref(), "root")
+    let dynamic = lash::ToolStateHost::tool_state(manager.as_ref(), "root")
         .await
-        .expect("dynamic tool state");
-    assert!(dynamic.tools.get("plan_exit").is_some_and(|tool| {
-        tool.definition
+        .expect("tool state");
+    assert!(dynamic.get("plan_exit").is_some_and(|tool| {
+        tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
             == lash::ToolAvailability::Hidden
     }));

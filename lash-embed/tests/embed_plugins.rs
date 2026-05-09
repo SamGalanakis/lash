@@ -7,6 +7,17 @@ use lash::{
 use lash_embed::{EmbedError, EmbedPlugin, Input, LashCore, ModePreset};
 use serde_json::json;
 
+fn assistant_prose(result: &lash_embed::CollectedTurnResult) -> String {
+    result
+        .activities
+        .iter()
+        .filter_map(|activity| match &activity.event {
+            lash_embed::TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 struct TestPlugin;
 
@@ -236,7 +247,7 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
         .await
         .expect("turn");
 
-    assert_eq!(result.transcript.assistant_prose, "done");
+    assert_eq!(assistant_prose(&result), "done");
     assert_eq!(
         prompt_seen.lock().expect("prompt seen lock").as_slice(),
         ["page-a", "page-a"]
@@ -264,5 +275,5 @@ async fn optional_turn_input_can_be_absent() {
         .expect("session");
 
     let result = session.run(Input::text("hello")).await.expect("turn");
-    assert_eq!(result.transcript.assistant_prose, "ok");
+    assert_eq!(assistant_prose(&result), "ok");
 }

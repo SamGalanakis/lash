@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{
-    DynamicToolHost, PluginError, SessionCreateRequest, SessionHandle, SessionLifecycleHost,
-    SessionSnapshot, SessionSnapshotHost, ToolCatalogHost, TurnHost,
+    PluginError, SessionCreateRequest, SessionHandle, SessionLifecycleHost, SessionSnapshot,
+    SessionSnapshotHost, ToolCatalogHost, ToolStateHost, TurnHost,
 };
 use crate::provider::{
     AgentModelSelection, ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState,
@@ -311,7 +311,6 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
             raw_text: summary.to_string(),
             state: OutputState::Usable,
         },
-        has_plugin_visible_output: false,
         execution: ExecutionSummary {
             mode: ExecutionMode::standard(),
             had_tool_calls: false,
@@ -331,7 +330,7 @@ pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
-    pub dynamic_tools: Option<crate::DynamicToolProvider>,
+    pub tool_registry: Option<crate::ToolRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub cancelled: Mutex<Vec<String>>,
     pub closed: Mutex<Vec<String>>,
@@ -343,7 +342,7 @@ impl Default for MockSessionManager {
             snapshot: PersistedSessionState::default(),
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
-            dynamic_tools: None,
+            tool_registry: None,
             created: Mutex::new(Vec::new()),
             cancelled: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -369,8 +368,8 @@ impl MockSessionManager {
     }
 
     #[allow(dead_code)]
-    pub fn with_dynamic_tool_provider(mut self, dynamic_tools: crate::DynamicToolProvider) -> Self {
-        self.dynamic_tools = Some(dynamic_tools);
+    pub fn with_tool_registry(mut self, tool_registry: crate::ToolRegistry) -> Self {
+        self.tool_registry = Some(tool_registry);
         self
     }
 
@@ -400,32 +399,27 @@ impl ToolCatalogHost for MockSessionManager {
 }
 
 #[async_trait::async_trait]
-impl DynamicToolHost for MockSessionManager {
-    async fn dynamic_tool_state(
-        &self,
-        _session_id: &str,
-    ) -> Result<crate::DynamicStateSnapshot, PluginError> {
-        self.dynamic_tools
+impl ToolStateHost for MockSessionManager {
+    async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
+        self.tool_registry
             .as_ref()
-            .map(crate::DynamicToolProvider::export_state)
+            .map(crate::ToolRegistry::export_state)
             .ok_or_else(|| {
-                PluginError::Session(
-                    "dynamic tool state is unavailable in this session".to_string(),
-                )
+                PluginError::Session("tool state is unavailable in this session".to_string())
             })
     }
 
-    async fn apply_dynamic_tool_state(
+    async fn apply_tool_state(
         &self,
         _session_id: &str,
-        snapshot: crate::DynamicStateSnapshot,
+        snapshot: crate::ToolState,
     ) -> Result<u64, PluginError> {
-        let Some(dynamic_tools) = self.dynamic_tools.as_ref() else {
+        let Some(tool_registry) = self.tool_registry.as_ref() else {
             return Err(PluginError::Session(
-                "dynamic tool state mutation is unavailable in this session".to_string(),
+                "tool state mutation is unavailable in this session".to_string(),
             ));
         };
-        dynamic_tools
+        tool_registry
             .apply_state(snapshot)
             .map_err(|err| PluginError::Session(err.to_string()))
     }
@@ -674,8 +668,7 @@ mod test_mode_fakes {
     #[async_trait]
     impl crate::plugin::ModeNativeToolsPlugin for TestModeNativeTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            use crate::tools::batch::batch_tool_definition;
-            vec![batch_tool_definition()]
+            vec![test_batch_tool_definition()]
         }
 
         async fn execute(
@@ -690,6 +683,44 @@ mod test_mode_fakes {
                 _ => None,
             }
         }
+    }
+
+    /// Minimal `batch` tool definition used by lash's own tests. Mirrors
+    /// the schema from `lash_mode_standard::batch::batch_tool_definition`,
+    /// but lives here so lash's tests don't need a dev-dep on
+    /// `lash-mode-standard`.
+    fn test_batch_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::new(
+            "batch",
+            "Execute up to 25 independent tool calls concurrently.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_calls": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 25,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": { "type": "string" },
+                                "parameters": { "type": "object", "additionalProperties": true }
+                            },
+                            "required": ["tool", "parameters"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["tool_calls"],
+                "additionalProperties": false,
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_discovery(crate::ToolDiscoveryMetadata {
+            namespace: Some("runtime".to_string()),
+            aliases: vec!["parallel_tools".to_string()],
+        })
+        .with_execution_mode(crate::ToolExecutionMode::Parallel)
     }
 
     /// Minimal batch executor used by lash's own tests (mirrors the
@@ -921,7 +952,6 @@ mod test_mode_fakes {
                         id: asst_id,
                         role: MessageRole::Assistant,
                         parts: lash_sansio::shared_parts(parts_out),
-                        user_input: None,
                         origin: None,
                     })),
                 ]));
@@ -981,7 +1011,6 @@ mod test_mode_fakes {
                         id: asst_id,
                         role: MessageRole::Assistant,
                         parts: lash_sansio::shared_parts(assistant_parts),
-                        user_input: None,
                         origin: None,
                     })),
                 ]));
@@ -1016,18 +1045,14 @@ mod test_mode_fakes {
                             })
                         }
                         Some(crate::ToolControl::Finish { value }) => {
-                            Some(TurnOutcome::Finished(TurnFinish::Value {
-                                source: crate::TerminalOutputSource::Tool {
-                                    name: outcome.tool_name.clone(),
-                                },
+                            Some(TurnOutcome::Finished(TurnFinish::ToolValue {
+                                tool_name: outcome.tool_name.clone(),
                                 value: value.clone(),
                             }))
                         }
                         Some(crate::ToolControl::Fail { value }) => {
-                            Some(TurnOutcome::Stopped(TurnStop::TerminalError {
-                                source: crate::TerminalOutputSource::Tool {
-                                    name: outcome.tool_name.clone(),
-                                },
+                            Some(TurnOutcome::Stopped(TurnStop::ToolError {
+                                tool_name: outcome.tool_name.clone(),
                                 value: value.clone(),
                             }))
                         }
@@ -1059,7 +1084,6 @@ mod test_mode_fakes {
                         id: user_id,
                         role: MessageRole::User,
                         parts: lash_sansio::shared_parts(result_parts),
-                        user_input: None,
                         origin: None,
                     })),
                 ]));

@@ -107,10 +107,7 @@ pub(crate) async fn send_event(tx: &mpsc::Sender<SessionEvent>, event: SessionEv
     }
 }
 
-pub(crate) fn plugin_message_to_message(
-    plugin_message: &PluginMessage,
-    user_input: Option<crate::UserInputProvenance>,
-) -> Message {
+pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Message {
     let message_id = fresh_message_id();
     let mut parts = if plugin_message.parts.is_empty() {
         vec![Part {
@@ -134,7 +131,6 @@ pub(crate) fn plugin_message_to_message(
         id: message_id,
         role: plugin_message.role,
         parts: Arc::new(parts),
-        user_input,
         origin: Some(crate::MessageOrigin::Plugin {
             plugin_id: "plugin".to_string(),
             transient: false,

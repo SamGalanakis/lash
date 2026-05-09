@@ -723,7 +723,6 @@ impl SubagentHost for LocalSubagentHost {
                 &context.session_id,
                 ManagedTaskSpec {
                     id: format!("subagent:{path}"),
-                    label: normalized_agent_name.clone(),
                     kind: ManagedTaskKind::Subagent,
                     producer: "subagent",
                 },

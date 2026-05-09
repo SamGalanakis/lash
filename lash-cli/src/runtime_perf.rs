@@ -438,7 +438,7 @@ impl RuntimePersistence for RuntimePerfStore {
         let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
         let manifest = SessionCheckpoint {
             turn_state: commit.checkpoint.turn_state,
-            dynamic_state_ref: commit.checkpoint.dynamic_state_ref,
+            tool_state_ref: commit.checkpoint.tool_state_ref,
             plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
             plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
             execution_state_ref: commit.checkpoint.execution_state_ref,
@@ -871,7 +871,6 @@ async fn run_once(
                 text: benchmark_prompt(scenario, turn_index),
             }],
             image_blobs: Default::default(),
-            user_input: None,
             mode: Some(RunMode::Normal),
             mode_turn_options: None,
             trace_turn_id: None,
@@ -1199,7 +1198,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     factories.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
-    let plugin_host = PluginHost::new(factories).with_dynamic_tools();
+    let plugin_host = PluginHost::new(factories);
     let builder = LashRuntime::builder()
         .with_policy(policy.clone())
         .with_store(Arc::clone(&store))

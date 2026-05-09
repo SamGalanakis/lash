@@ -1,4 +1,4 @@
-use lash::SkillCatalog;
+use crate::SkillCatalog;
 use lash_tui_extensions::TuiExtensions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,7 +172,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "/tools",
         aliases: &[],
         usage: "/tools ...",
-        description: "Inspect or edit dynamic tools",
+        description: "Inspect or edit tool registry",
         argument_hint: Some("..."),
         argument_options: &[],
         takes_argument: true,

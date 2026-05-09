@@ -269,7 +269,6 @@ pub async fn execute_monitor_tool_call(
     let id = uuid::Uuid::new_v4().simple().to_string();
     let monitor_spec = MonitorSpec {
         id: id.clone(),
-        label: spec.description,
         command: spec.command,
         cwd: None,
         env: Default::default(),
@@ -294,7 +293,7 @@ pub async fn execute_monitor_tool_call(
                 Some(status) => ToolResult::ok(serde_json::json!({
                     "task_id": format!("monitor:{}", status.spec.id),
                     "monitor_id": status.spec.id,
-                    "description": status.spec.label,
+                    "description": status.spec.command,
                     "command": status.spec.command,
                     "persistent": status.spec.persistent,
                     "timeout_ms": status.spec.timeout_ms,
@@ -327,7 +326,6 @@ pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext) -> Tool
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                     serde_json::json!({
                         "task_id": task.id,
-                        "label": task.label,
                         "kind": kind_label(task.kind),
                         "producer": task.producer,
                         "run_state": run_state_label(task.run_state),

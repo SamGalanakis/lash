@@ -1,11 +1,13 @@
+pub mod tools;
+
 use std::sync::Arc;
 
-use lash::instructions::InstructionSource;
-use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::tools::{
+use crate::tools::{
     ApplyPatchTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, StandardShellPluginFactory,
     WebSearch,
 };
+use lash::instructions::InstructionSource;
+use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
     BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
     StandardContextApproach, ToolProvider,
@@ -180,7 +182,7 @@ impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
             options.execution_mode = policy.execution_mode.clone();
             options.standard_context_approach = policy.standard_context_approach.clone();
         }
-        self.with_plugin_host(plugin_host_with_bundles(options).with_dynamic_tools())
+        self.with_plugin_host(plugin_host_with_bundles(options))
     }
 
     fn with_default_tool_surface_profile(
