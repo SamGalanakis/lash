@@ -13,16 +13,16 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
     RuntimePersistence, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
-    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    TokioSessionTaskExecutor, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider,
+    ToolResult, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
 };
+use lash_cli::config::LashConfig;
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::{
@@ -885,15 +885,16 @@ impl ToolProvider for LongCoTAsyncHandlesTool {
         vec![longcot_list_async_handles_tool_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!(
-            "`{name}` is handled by the RLM session runtime and cannot run directly"
+            "`{}` is handled by the RLM session runtime and cannot run directly",
+            call.name
         ))
     }
 }
 
 fn longcot_list_async_handles_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "list_async_handles",
         "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
         ToolDefinition::default_input_schema(),

@@ -26,11 +26,11 @@ pub type PluginSessionTask = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionPolicy) -> PluginFuture<SessionPolicy> + Send + Sync,
 >;
-pub type ExternalInvokeFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
-pub type ExternalInvokeHandler =
-    Arc<dyn Fn(ExternalInvokeContext, serde_json::Value) -> ExternalInvokeFuture + Send + Sync>;
-pub type TypedExternalOpFuture<T> =
-    Pin<Box<dyn Future<Output = Result<T, TypedExternalOpError>> + Send>>;
+pub type PluginActionInvokeFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
+pub type PluginActionHandler =
+    Arc<dyn Fn(PluginActionContext, serde_json::Value) -> PluginActionInvokeFuture + Send + Sync>;
+pub type PluginActionFuture<T> =
+    Pin<Box<dyn Future<Output = Result<T, PluginActionFailure>> + Send>>;
 pub type BeforeTurnHook =
     Arc<dyn Fn(TurnHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type BeforeToolCallHook =
@@ -785,7 +785,7 @@ impl<T> HistoryHost for T where
 {
 }
 
-pub trait ExternalInvokeHost:
+pub trait PluginActionHost:
     SessionSnapshotHost
     + ToolCatalogHost
     + ToolStateHost
@@ -798,7 +798,7 @@ pub trait ExternalInvokeHost:
     + TraceHost
 {
 }
-impl<T> ExternalInvokeHost for T where
+impl<T> PluginActionHost for T where
     T: SessionSnapshotHost
         + ToolCatalogHost
         + ToolStateHost
@@ -814,11 +814,11 @@ impl<T> ExternalInvokeHost for T where
 }
 
 pub trait RuntimeSessionHost:
-    ExternalInvokeHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost
+    PluginActionHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost
 {
 }
 impl<T> RuntimeSessionHost for T where
-    T: ExternalInvokeHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost + ?Sized
+    T: PluginActionHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost + ?Sized
 {
 }
 
@@ -938,27 +938,8 @@ pub struct ToolResultHookContext {
     pub turn_context: crate::TurnContext,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolResultProjectionHook {
-    BeforeState,
-    BeforeModel,
-    BeforeHistory,
-}
-
-impl ToolResultProjectionHook {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::BeforeState => "before_state",
-            Self::BeforeModel => "before_model",
-            Self::BeforeHistory => "before_history",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ToolResultProjectionContext {
-    pub hook: ToolResultProjectionHook,
     pub session_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
@@ -1033,17 +1014,17 @@ pub enum SessionParam {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExternalOpKind {
+pub enum PluginActionKind {
     Query,
     Command,
     Task,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ExternalOpDef {
+pub struct PluginActionDef {
     pub name: String,
     pub description: String,
-    pub kind: ExternalOpKind,
+    pub kind: PluginActionKind,
     pub session_param: SessionParam,
     #[serde(default)]
     pub input_schema: serde_json::Value,
@@ -1051,10 +1032,10 @@ pub struct ExternalOpDef {
     pub output_schema: serde_json::Value,
 }
 
-pub trait TypedExternalOp: Send + Sync + 'static {
+pub trait PluginAction: Send + Sync + 'static {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
-    const KIND: ExternalOpKind;
+    const KIND: PluginActionKind;
     const SESSION_PARAM: SessionParam;
     type Args: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
     type Output: Serialize + DeserializeOwned + JsonSchema + Send + 'static;
@@ -1062,11 +1043,11 @@ pub trait TypedExternalOp: Send + Sync + 'static {
 
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{message}")]
-pub struct TypedExternalOpError {
+pub struct PluginActionFailure {
     message: String,
 }
 
-impl TypedExternalOpError {
+impl PluginActionFailure {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -1074,26 +1055,26 @@ impl TypedExternalOpError {
     }
 }
 
-impl From<String> for TypedExternalOpError {
+impl From<String> for PluginActionFailure {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-impl From<&str> for TypedExternalOpError {
+impl From<&str> for PluginActionFailure {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
 }
 
-impl From<PluginError> for TypedExternalOpError {
+impl From<PluginError> for PluginActionFailure {
     fn from(value: PluginError) -> Self {
         Self::new(value.to_string())
     }
 }
 
-pub fn typed_external_op_def<Op: TypedExternalOp>() -> ExternalOpDef {
-    ExternalOpDef {
+pub fn plugin_action_def<Op: PluginAction>() -> PluginActionDef {
+    PluginActionDef {
         name: Op::NAME.to_string(),
         description: Op::DESCRIPTION.to_string(),
         kind: Op::KIND,
@@ -1106,15 +1087,15 @@ pub fn typed_external_op_def<Op: TypedExternalOp>() -> ExternalOpDef {
 }
 
 #[derive(Clone)]
-pub struct ExternalInvokeContext {
+pub struct PluginActionContext {
     pub session_id: Option<String>,
-    pub host: Arc<dyn ExternalInvokeHost>,
+    pub host: Arc<dyn PluginActionHost>,
 }
 
 #[derive(Clone)]
-pub(crate) struct RegisteredExternalOp {
-    pub(crate) def: ExternalOpDef,
-    pub(crate) handler: ExternalInvokeHandler,
+pub(crate) struct RegisteredPluginAction {
+    pub(crate) def: PluginActionDef,
+    pub(crate) handler: PluginActionHandler,
 }
 
 mod registry;
@@ -1136,15 +1117,15 @@ mod session_obj;
 mod tool_result_projection_builtin;
 
 pub use registrar::{
-    ExternalRegistrations, HistoryRegistrations, ModeRegistrations, MonitorRegistrations,
-    OutputRegistrations, PluginRegistrar, PromptRegistrations, SessionRegistrations,
+    HistoryRegistrations, ModeRegistrations, MonitorRegistrations, OutputRegistrations,
+    PluginActionRegistrations, PluginRegistrar, PromptRegistrations, SessionRegistrations,
     SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
     TurnRegistrations,
 };
 pub(crate) use registrar::{RegisteredExclusiveHook, RegisteredHook};
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;
-pub use services::{ExternalInvokeError, PersistentRuntimeServices, RuntimeServices};
+pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use tool_result_projection_builtin::{
     BuiltinToolResultProjectionPluginFactory, DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
@@ -1193,10 +1174,10 @@ mod tests {
 
     struct TypedEchoOp;
 
-    impl TypedExternalOp for TypedEchoOp {
+    impl PluginAction for TypedEchoOp {
         const NAME: &'static str = "mock.typed_echo";
         const DESCRIPTION: &'static str = "typed echo";
-        const KIND: ExternalOpKind = ExternalOpKind::Query;
+        const KIND: PluginActionKind = PluginActionKind::Query;
         const SESSION_PARAM: SessionParam = SessionParam::Optional;
         type Args = TypedEchoArgs;
         type Output = TypedEchoOutput;
@@ -1206,7 +1187,7 @@ mod tests {
     impl ToolProvider for MockToolProvider {
         fn definitions(&self) -> Vec<ToolDefinition> {
             vec![
-                ToolDefinition::new(
+                ToolDefinition::raw(
                     "mock_tool",
                     "",
                     json!({
@@ -1221,8 +1202,8 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-            ToolResult::ok(args.clone())
+        async fn execute(&self, call: crate::ToolCall<'_>) -> ToolResult {
+            ToolResult::ok(call.args.clone())
         }
     }
 
@@ -1263,11 +1244,11 @@ mod tests {
                 })
             }));
             let session_id = self.session_id.clone();
-            reg.external().op(
-                ExternalOpDef {
+            reg.actions().op(
+                PluginActionDef {
                     name: "mock.echo".to_string(),
                     description: "echo".to_string(),
-                    kind: ExternalOpKind::Query,
+                    kind: PluginActionKind::Query,
                     session_param: SessionParam::Optional,
                     input_schema: json!({}),
                     output_schema: json!({}),
@@ -1283,7 +1264,7 @@ mod tests {
                     })
                 }),
             )?;
-            reg.external()
+            reg.actions()
                 .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
                     Ok(TypedEchoOutput {
                         value: args.value,
@@ -1335,7 +1316,7 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_standard_session("root", None).expect("session");
         let result = session
-            .invoke_external(
+            .invoke_plugin_action(
                 "mock.echo",
                 json!({"ok":true}),
                 None,
@@ -1352,16 +1333,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_external_op_generates_schema_and_invokes_typed_output() {
+    async fn plugin_action_generates_schema_and_invokes_typed_output() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_standard_session("root", None).expect("session");
 
         let def = session
-            .external_ops()
+            .plugin_actions()
             .into_iter()
             .find(|def| def.name == TypedEchoOp::NAME)
             .expect("typed op definition");
-        assert_eq!(def.kind, ExternalOpKind::Query);
+        assert_eq!(def.kind, PluginActionKind::Query);
         assert_eq!(def.session_param, SessionParam::Optional);
         let value_type = def
             .input_schema
@@ -1371,7 +1352,7 @@ mod tests {
         assert_eq!(value_type, Some("string"));
 
         let output = session
-            .invoke_external_typed::<TypedEchoOp>(
+            .call_plugin_action::<TypedEchoOp>(
                 TypedEchoArgs {
                     value: "hello".to_string(),
                 },
@@ -1386,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_external_op_rejects_duplicate_names() {
+    fn plugin_action_rejects_duplicate_names() {
         struct DuplicatePlugin;
 
         impl SessionPlugin for DuplicatePlugin {
@@ -1395,14 +1376,14 @@ mod tests {
             }
 
             fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-                reg.external()
+                reg.actions()
                     .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
                         Ok(TypedEchoOutput {
                             value: args.value,
                             session_id: ctx.session_id,
                         })
                     })?;
-                reg.external()
+                reg.actions()
                     .typed::<TypedEchoOp, _, _>(move |ctx, args| async move {
                         Ok(TypedEchoOutput {
                             value: args.value,
@@ -1429,19 +1410,19 @@ mod tests {
         let err = match PluginHost::new(vec![Arc::new(DuplicateFactory)])
             .build_standard_session("root", None)
         {
-            Ok(_) => panic!("duplicate typed external op should fail"),
+            Ok(_) => panic!("duplicate typed plugin action should fail"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("duplicate external invoke name"));
+        assert!(err.to_string().contains("duplicate plugin action name"));
     }
 
     #[tokio::test]
     async fn typed_external_invoke_errors_on_failed_or_invalid_output() {
         struct BadOp;
-        impl TypedExternalOp for BadOp {
+        impl PluginAction for BadOp {
             const NAME: &'static str = "mock.echo";
             const DESCRIPTION: &'static str = "bad typed projection over raw op";
-            const KIND: ExternalOpKind = ExternalOpKind::Query;
+            const KIND: PluginActionKind = PluginActionKind::Query;
             const SESSION_PARAM: SessionParam = SessionParam::Optional;
             type Args = TypedEchoArgs;
             type Output = TypedEchoOutput;
@@ -1450,7 +1431,7 @@ mod tests {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_standard_session("root", None).expect("session");
         let err = session
-            .invoke_external_typed::<BadOp>(
+            .call_plugin_action::<BadOp>(
                 TypedEchoArgs {
                     value: "hello".to_string(),
                 },
@@ -1464,12 +1445,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_host_can_invoke_external_for_registered_session() {
+    async fn plugin_host_can_invoke_plugin_action_for_registered_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let _session = host.build_standard_session("root", None).expect("session");
 
         let result = host
-            .invoke_external_for_session(
+            .invoke_plugin_action_for_session(
                 "root",
                 "mock.echo",
                 json!({"ok":true}),
@@ -1492,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_host_can_invoke_external_for_forked_session() {
+    async fn plugin_host_can_invoke_plugin_action_for_forked_session() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let root = host.build_standard_session("root", None).expect("root");
         let child = root
@@ -1504,7 +1485,7 @@ mod tests {
             .expect("child");
 
         let result = host
-            .invoke_external_for_session(
+            .invoke_plugin_action_for_session(
                 "child",
                 "mock.echo",
                 json!({"ok":true}),
@@ -1535,7 +1516,7 @@ mod tests {
         assert!(host.session("root").is_ok());
         host.unregister_session("root").expect("unregister");
         match host.session("root") {
-            Err(ExternalInvokeError::UnknownSession(id)) => assert_eq!(id, "root"),
+            Err(PluginActionInvokeError::UnknownSession(id)) => assert_eq!(id, "root"),
             Ok(_) => panic!("expected missing session"),
             Err(other) => panic!("unexpected error: {other}"),
         }
@@ -1576,7 +1557,6 @@ mod tests {
 
     struct ProjectorPluginFactory {
         plugin_id: &'static str,
-        hook: ToolResultProjectionHook,
     }
 
     impl PluginFactory for ProjectorPluginFactory {
@@ -1590,14 +1570,12 @@ mod tests {
         ) -> Result<Arc<dyn SessionPlugin>, PluginError> {
             Ok(Arc::new(ProjectorPlugin {
                 plugin_id: self.plugin_id,
-                hook: self.hook,
             }))
         }
     }
 
     struct ProjectorPlugin {
         plugin_id: &'static str,
-        hook: ToolResultProjectionHook,
     }
 
     impl SessionPlugin for ProjectorPlugin {
@@ -1606,23 +1584,19 @@ mod tests {
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-            reg.tool_results().projector(
-                self.hook,
-                Arc::new(|ctx| Box::pin(async move { Ok(ctx.result) })),
-            )
+            reg.tool_results()
+                .projector(Arc::new(|ctx| Box::pin(async move { Ok(ctx.result) })))
         }
     }
 
     #[test]
-    fn duplicate_state_tool_result_projectors_are_rejected() {
+    fn duplicate_tool_result_projectors_are_rejected() {
         let host = PluginHost::new(vec![
             Arc::new(ProjectorPluginFactory {
                 plugin_id: "projector-a",
-                hook: ToolResultProjectionHook::BeforeState,
             }),
             Arc::new(ProjectorPluginFactory {
                 plugin_id: "projector-b",
-                hook: ToolResultProjectionHook::BeforeState,
             }),
         ]);
         let err = match host.build_standard_session("root", None) {
@@ -1632,66 +1606,5 @@ mod tests {
         assert!(err.to_string().contains("duplicate tool result projector"));
         assert!(err.to_string().contains("projector-a"));
         assert!(err.to_string().contains("projector-b"));
-    }
-
-    #[test]
-    fn duplicate_model_tool_result_projectors_are_rejected() {
-        let host = PluginHost::new(vec![
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-a",
-                hook: ToolResultProjectionHook::BeforeModel,
-            }),
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-b",
-                hook: ToolResultProjectionHook::BeforeModel,
-            }),
-        ]);
-        let err = match host.build_standard_session("root", None) {
-            Ok(_) => panic!("duplicate projector"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("duplicate tool result projector"));
-        assert!(err.to_string().contains("projector-a"));
-        assert!(err.to_string().contains("projector-b"));
-    }
-
-    #[test]
-    fn duplicate_history_tool_result_projectors_are_rejected() {
-        let host = PluginHost::new(vec![
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-a",
-                hook: ToolResultProjectionHook::BeforeHistory,
-            }),
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-b",
-                hook: ToolResultProjectionHook::BeforeHistory,
-            }),
-        ]);
-        let err = match host.build_standard_session("root", None) {
-            Ok(_) => panic!("duplicate projector"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("duplicate tool result projector"));
-        assert!(err.to_string().contains("projector-a"));
-        assert!(err.to_string().contains("projector-b"));
-    }
-
-    #[test]
-    fn different_tool_result_projector_hooks_can_coexist() {
-        let host = PluginHost::new(vec![
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-state",
-                hook: ToolResultProjectionHook::BeforeState,
-            }),
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-model",
-                hook: ToolResultProjectionHook::BeforeModel,
-            }),
-            Arc::new(ProjectorPluginFactory {
-                plugin_id: "projector-history",
-                hook: ToolResultProjectionHook::BeforeHistory,
-            }),
-        ]);
-        host.build_standard_session("root", None).expect("session");
     }
 }

@@ -9,11 +9,11 @@ description = "Google OAuth (Gemini via Code Assist) provider for lash."
 lash = { path = "../lash" }
 lash-llm-transport = { path = "../lash-llm-transport" }
 lash-provider-auth = { path = "../lash-provider-auth" }
-async-trait = "0.1"
-base64 = "0.22"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-tokio = { version = "1", features = ["sync"] }
-uuid = { version = "1", features = ["v4"] }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+uuid = { workspace = true, features = ["v4"] }

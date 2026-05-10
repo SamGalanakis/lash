@@ -147,9 +147,7 @@ mod tests {
         SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
         ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{
-        SessionCreateRequest, ToolDefinition, ToolExecutionContext, ToolOutputContract, TurnInput,
-    };
+    use lash::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
     use serde_json::json;
 
     #[test]
@@ -317,19 +315,12 @@ mod tests {
             &BTreeMap::new(),
             lash::ExecutionMode::new("rlm"),
         ));
-        let context = ToolExecutionContext {
-            session_id: "root".to_string(),
-            host: Arc::new(SnapshotManager {
-                snapshot: PersistedSessionState {
-                    policy: live_policy.clone(),
-                    ..PersistedSessionState::default()
-                },
-            }),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(Arc::new(SnapshotManager {
+            snapshot: PersistedSessionState {
+                policy: live_policy.clone(),
+                ..PersistedSessionState::default()
+            },
+        }));
 
         let noop = NoopSubagentSessionConfigurator;
         let request = build_spawn_create_request(
@@ -438,7 +429,7 @@ mod tests {
     }
 
     fn dummy_tool(name: &str) -> ToolDefinition {
-        ToolDefinition::new(
+        ToolDefinition::raw(
             name,
             format!("{name} description"),
             ToolDefinition::default_input_schema(),

@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ProgressSender, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult};
+use crate::{ProgressSender, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult};
 
 const PLUGIN_SOURCE_ID: &str = "plugins";
 
@@ -133,7 +133,7 @@ pub(crate) trait ToolSourceExecutor: Send + Sync + 'static {
         &self,
         tool: &str,
         args: &serde_json::Value,
-        context: Option<ToolExecutionContext>,
+        context: &ToolContext,
         progress: Option<&ProgressSender>,
     ) -> ToolResult;
 }
@@ -166,17 +166,17 @@ impl ToolSourceExecutor for ToolProviderSource {
         &self,
         tool: &str,
         args: &serde_json::Value,
-        context: Option<ToolExecutionContext>,
+        context: &ToolContext,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
-        match context.as_ref() {
-            Some(context) => {
-                self.provider
-                    .execute_streaming_with_context(tool, args, context, progress)
-                    .await
-            }
-            None => self.provider.execute_streaming(tool, args, progress).await,
-        }
+        self.provider
+            .execute(ToolCall {
+                name: tool,
+                args,
+                context,
+                progress,
+            })
+            .await
     }
 }
 
@@ -408,56 +408,8 @@ impl ToolProvider for ToolRegistry {
         self.export_state().definitions()
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        self.execute_streaming(name, args, None).await
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        self.execute_streaming_with_context(name, args, context, None)
-            .await
-    }
-
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        let source_id = {
-            let state = self
-                .state
-                .read()
-                .expect("tool registry state lock poisoned");
-            state.tools.get(name).map(|entry| entry.source_id.clone())
-        };
-        let Some(source_id) = source_id else {
-            return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
-        };
-        let source = {
-            self.sources
-                .read()
-                .expect("tool source lock poisoned")
-                .get(&source_id)
-                .cloned()
-        };
-        let Some(source) = source else {
-            return ToolResult::err_fmt(format_args!("Tool source missing for tool `{name}`"));
-        };
-        source.execute(name, args, None, progress).await
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let name = call.name;
         let source_id = {
             let state = self
                 .state
@@ -479,7 +431,7 @@ impl ToolProvider for ToolRegistry {
             return ToolResult::err_fmt(format_args!("Tool source missing for tool `{name}`"));
         };
         source
-            .execute(name, args, Some(context.clone()), progress)
+            .execute(name, call.args, call.context, call.progress)
             .await
     }
 }
@@ -516,7 +468,7 @@ mod tests {
         description: &str,
         availability: crate::ToolAvailabilityConfig,
     ) -> ToolDefinition {
-        ToolDefinition::new(
+        ToolDefinition::raw(
             name,
             description,
             ToolDefinition::default_input_schema(),
@@ -535,7 +487,7 @@ mod tests {
             )]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
             ToolResult::ok(serde_json::json!("ok"))
         }
     }
@@ -552,12 +504,12 @@ mod tests {
                 test_tool(
                     "disabled_tool",
                     "disabled",
-                    crate::ToolAvailabilityConfig::hidden(),
+                    crate::ToolAvailabilityConfig::off(),
                 ),
             ]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
             ToolResult::ok(serde_json::json!("ok"))
         }
     }
@@ -569,7 +521,7 @@ mod tests {
         }
 
         fn advertised_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition::new(
+            vec![ToolDefinition::raw(
                 "mcp__demo__search",
                 "search",
                 json!({
@@ -588,7 +540,7 @@ mod tests {
             &self,
             tool: &str,
             args: &serde_json::Value,
-            _context: Option<ToolExecutionContext>,
+            _context: &ToolContext,
             _progress: Option<&ProgressSender>,
         ) -> ToolResult {
             ToolResult::ok(json!({
@@ -617,7 +569,7 @@ mod tests {
                 .unwrap()
                 .definition()
                 .effective_availability(&crate::ExecutionMode::standard()),
-            crate::ToolAvailability::Hidden
+            crate::ToolAvailability::Off
         );
     }
 
@@ -652,8 +604,20 @@ mod tests {
         let defs = registry.definitions();
         assert!(defs.iter().any(|def| def.name == "mcp__demo__search"));
 
+        let context = crate::ToolContext::new(
+            "registry-test".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            crate::TurnContext::default(),
+            None,
+        );
+        let args = json!({ "query": "hello" });
         let result = registry
-            .execute("mcp__demo__search", &json!({ "query": "hello" }))
+            .execute(crate::ToolCall {
+                name: "mcp__demo__search",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
         assert!(result.success);
         assert_eq!(result.result["tool"], json!("mcp__demo__search"));
@@ -668,7 +632,7 @@ mod tests {
             .expect("source registered");
         let mut snapshot = registry.export_state();
         snapshot
-            .set_availability("mcp__demo__search", Some(crate::ToolAvailability::Hidden))
+            .set_availability("mcp__demo__search", Some(crate::ToolAvailability::Off))
             .unwrap();
         registry.apply_state(snapshot).unwrap();
         registry
@@ -681,7 +645,7 @@ mod tests {
                 .unwrap()
                 .definition()
                 .effective_availability(&crate::ExecutionMode::standard()),
-            crate::ToolAvailability::Hidden
+            crate::ToolAvailability::Off
         );
     }
 
@@ -699,9 +663,9 @@ mod tests {
     }
 
     #[test]
-    fn project_tool_catalog_keeps_discoverable_tools_with_surface_metadata() {
+    fn project_tool_catalog_keeps_searchable_tools_with_surface_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            crate::ToolDefinition::new(
+            crate::ToolDefinition::raw(
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
@@ -711,7 +675,7 @@ mod tests {
         let catalog = project_tool_catalog([
             crate::ToolSurfaceEntry {
                 definition: dummy_tool("read_file"),
-                availability: crate::ToolAvailability::Documented,
+                availability: crate::ToolAvailability::Showcased,
             },
             crate::ToolSurfaceEntry {
                 definition: dummy_tool("search_tools"),
@@ -724,14 +688,14 @@ mod tests {
             catalog[0]["signature"],
             serde_json::json!("read_file() -> any")
         );
-        assert_eq!(catalog[0]["documented"], serde_json::json!(true));
+        assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
     }
 
     #[test]
     fn project_tool_catalog_preserves_dynamic_output_contracts() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            crate::ToolDefinition::new(
+            crate::ToolDefinition::raw(
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
@@ -743,7 +707,7 @@ mod tests {
                 "output",
                 Some(serde_json::json!({ "type": "string" })),
             ),
-            availability: crate::ToolAvailability::Discoverable,
+            availability: crate::ToolAvailability::Searchable,
         }]);
 
         assert_eq!(
@@ -763,7 +727,7 @@ where
 {
     entries
         .into_iter()
-        .filter(|entry| entry.availability.is_discoverable())
+        .filter(|entry| entry.availability.is_searchable())
         .map(|entry| {
             let definition = entry.definition;
             let availability = entry.availability;
@@ -791,8 +755,8 @@ where
                 "aliases": definition.discovery.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
-                "documented": availability.is_documented(),
-                "discoverable": availability.is_discoverable(),
+                "showcased": availability.is_showcased(),
+                "searchable": availability.is_searchable(),
                 "activation": definition.activation,
                 "loadable": loadable,
                 "activation_hint": activation_hint,

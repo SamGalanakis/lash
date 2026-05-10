@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::object_schema;
 
@@ -23,7 +23,7 @@ impl WebSearch {
 impl ToolProvider for WebSearch {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "search_web",
                 "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
                 object_schema(
@@ -74,7 +74,8 @@ impl ToolProvider for WebSearch {
         ]
     }
 
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -170,7 +171,7 @@ mod tests {
         assert_eq!(definition.activation, lash::ToolActivation::Always);
         assert_eq!(
             definition.availability.standard,
-            lash::ToolAvailability::Documented
+            lash::ToolAvailability::Showcased
         );
     }
 }

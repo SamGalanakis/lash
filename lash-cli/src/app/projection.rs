@@ -362,6 +362,7 @@ pub(crate) fn smart_truncate_preview_line(text: &str, max_chars: usize) -> Strin
     format!("{prefix}{marker}{suffix}")
 }
 
+#[cfg(test)]
 pub(crate) fn strip_ansi_escape_sequences(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -533,7 +534,7 @@ fn append_tool_call_record_items(
 
 /// True when a legacy user-message part carries an RLM exec result.
 /// Current RLM history uses trajectory events instead; these old
-/// messages should stay hidden rather than render as fake tool calls.
+/// messages should stay off rather than render as fake tool calls.
 fn part_is_rlm_exec_result(part: &lash::Part) -> bool {
     matches!(part.kind, PartKind::Text)
         && part.tool_call_id.is_some()

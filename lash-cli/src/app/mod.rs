@@ -5,9 +5,12 @@ mod view;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use lash::SessionEvent;
 use lash::{
     ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
-    PluginMessage, PluginSurfaceEvent, PromptUsage, SessionEvent, TokenUsage, ToolCallRecord,
+    PluginMessage, PluginSurfaceEvent, PromptUsage, TokenUsage, ToolCallRecord, TurnActivity,
+    TurnEvent,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -32,9 +35,10 @@ use crate::util::{is_cancelled_error, manual_interrupt_message};
 
 pub(crate) use self::projection::{
     UiTimeline, UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_view,
-    preview_text_lines, smart_truncate_preview_line, strip_ansi_escape_sequences,
-    timeline_from_read_view,
+    preview_text_lines, timeline_from_read_view,
 };
+#[cfg(test)]
+pub(crate) use self::projection::{smart_truncate_preview_line, strip_ansi_escape_sequences};
 
 fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
     blocks
@@ -209,6 +213,7 @@ impl LiveToolOutput {
         usize::from(self.hidden > 0) + self.lines.len() + usize::from(!self.partial.is_empty())
     }
 
+    #[cfg(test)]
     fn push_text(&mut self, text: &str, line_char_limit: usize, max_lines: usize) {
         let sanitized = strip_ansi_escape_sequences(text);
         let mut chars = sanitized.chars().peekable();
@@ -244,6 +249,7 @@ impl LiveToolOutput {
         }
     }
 
+    #[cfg(test)]
     fn push_line(&mut self, line: String, line_char_limit: usize, max_lines: usize) {
         if self.lines.len() == max_lines {
             self.lines.remove(0);
@@ -495,7 +501,9 @@ impl UiProjectionState {
 
 pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
 pub(crate) const SPLASH_SCROLLBACK_HEIGHT: usize = SPLASH_CONTENT_HEIGHT + 2;
+#[cfg(test)]
 const STREAMING_OUTPUT_MAX_LINES: usize = 48;
+#[cfg(test)]
 const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
 const FOLLOW_OUTPUT_CONTEXT_LINES: usize = 2;
 
@@ -583,8 +591,17 @@ pub struct App {
     pub overlay: Option<OverlayState>,
     /// Whether the terminal window is currently focused.
     pub focused: bool,
-    /// Cumulative token usage for the current session.
+    /// Cumulative token usage for the current session: parent's own
+    /// LLM tokens plus the latest cumulative reported by each child
+    /// session. Recomputed on every [`TurnEvent::Usage`] and
+    /// [`TurnEvent::ChildUsage`].
     pub token_usage: TokenUsage,
+    /// Parent's own LLM cumulative, kept separately so we can recompute
+    /// `token_usage` when child sessions update.
+    pub parent_session_cumulative: TokenUsage,
+    /// Latest cumulative reported per child session (subagents,
+    /// compaction, observers). Keyed by child session id.
+    pub child_session_cumulatives: HashMap<String, TokenUsage>,
     /// Context window size for the current model (from models.dev).
     pub context_window: Option<u64>,
     /// Whether provider-reported input tokens exclude cached prompt tokens.
@@ -906,6 +923,8 @@ impl App {
             overlay: None,
             focused: true,
             token_usage: TokenUsage::default(),
+            parent_session_cumulative: TokenUsage::default(),
+            child_session_cumulatives: HashMap::new(),
             context_window: None,
             context_usage_excludes_cached_input: false,
             model_variant: None,
@@ -981,6 +1000,16 @@ impl App {
     pub fn invalidate_height_cache(&mut self) {
         self.height_cache_dirty_from = 0;
         self.block_render_cache.clear();
+    }
+
+    /// Recompute the session-wide cumulative token usage from the parent's
+    /// cumulative plus the latest cumulative reported by each child session.
+    fn recompute_session_token_usage(&mut self) {
+        let mut total = self.parent_session_cumulative.clone();
+        for child in self.child_session_cumulatives.values() {
+            total.add(child);
+        }
+        self.token_usage = total;
     }
 
     fn invalidate_height_cache_from(&mut self, idx: usize) {
@@ -1219,6 +1248,7 @@ impl App {
         false
     }
 
+    #[cfg(test)]
     fn set_live_assistant_from_final(&mut self, text: &str) {
         let cleaned = normalize_assistant_text(text);
         if cleaned.is_empty() {
@@ -1384,44 +1414,44 @@ impl App {
         );
     }
 
-    /// Process a session event, updating display blocks.
-    pub fn handle_session_event(&mut self, event: SessionEvent) {
-        match event {
-            SessionEvent::ReasoningDelta { content } => {
-                if content.is_empty() {
+    /// Process a semantic turn activity, updating display blocks.
+    pub fn handle_turn_activity(&mut self, activity: TurnActivity) {
+        match activity.event {
+            TurnEvent::ReasoningDelta { text } => {
+                if text.is_empty() {
                     return;
                 }
                 self.mark_first_token_arrived();
                 if self.live_assistant.has_renderable_output()
-                    && self.merge_into_trailing_reasoning_block(&content)
+                    && self.merge_into_trailing_reasoning_block(&text)
                 {
                     self.scroll_to_bottom();
                     return;
                 }
                 let had_output = self.live_reasoning.has_renderable_output();
-                self.live_reasoning.append(&content);
+                self.live_reasoning.append(&text);
                 if !had_output && self.live_reasoning.has_renderable_output() {
                     self.mark_visible_output();
                 }
                 self.mark_visible_output();
                 self.scroll_to_bottom();
             }
-            SessionEvent::TextDelta { content } => {
+            TurnEvent::AssistantProseDelta { text } => {
                 self.mark_first_token_arrived();
-                self.live_output_chars_estimate += content.chars().count() as i64;
+                self.live_output_chars_estimate += text.chars().count() as i64;
                 self.live_output_tokens_estimate =
                     estimate_tokens_from_char_count(self.live_output_chars_estimate);
                 if self.live_reasoning.has_renderable_output() {
                     self.commit_live_reasoning_block();
                 }
                 let had_output = self.live_assistant.has_renderable_output();
-                self.live_assistant.append(&content);
+                self.live_assistant.append(&text);
                 if !had_output && self.live_assistant.has_renderable_output() {
                     self.mark_visible_output();
                 }
                 self.scroll_to_bottom();
             }
-            SessionEvent::ToolCall {
+            TurnEvent::ToolCallCompleted {
                 name,
                 args,
                 result,
@@ -1460,7 +1490,7 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
-            SessionEvent::ToolCallStart {
+            TurnEvent::ToolCallStarted {
                 call_id,
                 name,
                 args,
@@ -1470,51 +1500,20 @@ impl App {
                 self.live_tool_output.start(call_id, title);
                 self.invalidate_live_tool_output_cache();
             }
-            SessionEvent::Message { text, kind } => {
-                if kind == "lashlang_code" {
-                    // Captured source of the fenced lashlang block the
-                    // model just emitted. Pushed as its own UiTimelineItem
-                    // so the renderer can hide it by default and reveal
-                    // it when the user hits Alt+O (full expansion).
-                    self.finalize_live_markdown();
-                    let changed_idx = self.timeline.len();
-                    let invalidate_from = self.append_invalidation_start();
-                    self.timeline.push(UiTimelineItem::LashlangCode(text));
-                    self.invalidate_height_cache_from(
-                        invalidate_from
-                            .min(changed_idx)
-                            .min(self.timeline.len().saturating_sub(1)),
-                    );
-                    self.invalidate_live_tool_output_cache();
-                    self.scroll_to_bottom();
-                } else if kind == "tool_output" {
-                    // Explicit policy:
-                    // - live tool output can be disabled via env var
-                    // - shell result streams can render text to the TUI
-                    let current_status = self
-                        .live_turn
-                        .as_ref()
-                        .map(|turn| turn.status_text.as_str());
-                    let stream_active = self.running
-                        || current_status.is_some_and(|status| status.contains("shell"));
-                    if stream_active {
-                        self.live_tool_output.push_text(
-                            &text,
-                            STREAMING_OUTPUT_LINE_CHAR_LIMIT,
-                            STREAMING_OUTPUT_MAX_LINES,
-                        );
-                        self.invalidate_live_tool_output_cache();
-                        self.mark_visible_output();
-                        self.scroll_to_bottom();
-                    }
-                } else if kind == "final" {
-                    self.set_live_assistant_from_final(&text);
-                    self.scroll_to_bottom();
-                } else {
-                    // Unknown message kinds are intentionally dropped.
-                }
+            TurnEvent::CodeBlockStarted { code, .. } => {
+                self.finalize_live_markdown();
+                let changed_idx = self.timeline.len();
+                let invalidate_from = self.append_invalidation_start();
+                self.timeline.push(UiTimelineItem::LashlangCode(code));
+                self.invalidate_height_cache_from(
+                    invalidate_from
+                        .min(changed_idx)
+                        .min(self.timeline.len().saturating_sub(1)),
+                );
+                self.invalidate_live_tool_output_cache();
+                self.scroll_to_bottom();
             }
-            SessionEvent::LlmRequest { mode_iteration, .. } => {
+            TurnEvent::ModelRequestStarted { mode_iteration } => {
                 self.finalize_live_markdown();
                 self.iteration = mode_iteration + 1;
                 if let Some(detail) = self.pending_retry_status.take() {
@@ -1526,12 +1525,11 @@ impl App {
                 self.live_output_tokens_estimate = 0;
                 self.keep_latest_user_block_visible();
             }
-            SessionEvent::RetryStatus {
+            TurnEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
                 reason,
-                envelope: _,
             } => {
                 let mut reason_short: String = reason.chars().take(60).collect();
                 if reason.chars().count() > 60 {
@@ -1547,15 +1545,9 @@ impl App {
                 );
                 self.scroll_to_bottom();
             }
-            SessionEvent::Done => {
+            TurnEvent::Error { message } => {
                 self.finalize_live_markdown();
-                self.stop_turn();
-                self.scroll_to_bottom();
-            }
-            SessionEvent::Error { message, envelope } => {
-                self.finalize_live_markdown();
-                let code = envelope.as_ref().and_then(|err| err.code.as_deref());
-                if is_cancelled_error(&message, code) {
+                if is_cancelled_error(&message, None) {
                     let manual_interrupt_requested = self.manual_interrupt_requested;
                     self.stop_turn();
                     self.timeline
@@ -1583,21 +1575,30 @@ impl App {
                 self.mark_visible_output();
                 self.scroll_to_bottom();
             }
-            SessionEvent::TokenUsage {
+            TurnEvent::Usage {
                 usage, cumulative, ..
             } => {
                 let should_clear_live_estimate = usage.output_tokens > 0
                     || usage.reasoning_tokens > 0
                     || usage.cached_input_tokens > 0;
                 self.last_response_usage = usage.clone();
-                self.token_usage = cumulative;
+                self.parent_session_cumulative = cumulative;
+                self.recompute_session_token_usage();
                 if should_clear_live_estimate {
                     self.live_output_chars_estimate = 0;
                     self.live_output_tokens_estimate = 0;
                 }
             }
-            SessionEvent::ChildTokenUsage { .. } => {}
-            SessionEvent::PluginEvent { plugin_id, event } => {
+            TurnEvent::ChildUsage {
+                session_id,
+                cumulative,
+                ..
+            } => {
+                self.child_session_cumulatives
+                    .insert(session_id, cumulative);
+                self.recompute_session_token_usage();
+            }
+            TurnEvent::PluginSurface { plugin_id, event } => {
                 if let Some((status, detail, duration)) = runtime_status_from_plugin_event(&event) {
                     self.set_transient_status(status, detail, duration);
                     self.dirty = true;
@@ -1629,18 +1630,54 @@ impl App {
                     self.dirty = true;
                 }
             }
-            SessionEvent::InjectedTurnInputAccepted { inputs, .. } => {
+            TurnEvent::QueuedInputAccepted { inputs, .. } => {
                 let messages = inputs
                     .iter()
                     .map(|input| input.message.clone())
                     .collect::<Vec<_>>();
                 self.accept_injected_turn_input(&messages);
             }
-            SessionEvent::InjectedMessagesCommitted { messages, .. } => {
+            TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            SessionEvent::TurnOutcome { .. } => {}
-            SessionEvent::LlmResponse { .. } => {}
+            TurnEvent::CodeBlockCompleted { .. }
+            | TurnEvent::SubmittedValue { .. }
+            | TurnEvent::ToolValue { .. } => {}
+        }
+    }
+
+    #[cfg(test)]
+    pub fn handle_session_event(&mut self, event: SessionEvent) {
+        if matches!(event, SessionEvent::Done) {
+            self.finalize_live_markdown();
+            self.stop_turn();
+            self.scroll_to_bottom();
+        } else if let SessionEvent::Message { text, kind } = &event
+            && kind == "tool_output"
+        {
+            let current_status = self
+                .live_turn
+                .as_ref()
+                .map(|turn| turn.status_text.as_str());
+            let stream_active =
+                self.running || current_status.is_some_and(|status| status.contains("shell"));
+            if stream_active {
+                self.live_tool_output.push_text(
+                    text,
+                    STREAMING_OUTPUT_LINE_CHAR_LIMIT,
+                    STREAMING_OUTPUT_MAX_LINES,
+                );
+                self.invalidate_live_tool_output_cache();
+                self.mark_visible_output();
+                self.scroll_to_bottom();
+            }
+        } else if let SessionEvent::Message { text, kind } = &event
+            && kind == "final"
+        {
+            self.set_live_assistant_from_final(text);
+            self.scroll_to_bottom();
+        } else if let Some(activity) = test_session_event_to_turn_activity(event) {
+            self.handle_turn_activity(activity);
         }
     }
 
@@ -1802,6 +1839,88 @@ impl App {
         self.model_variant = model_variant;
         self.dirty = true;
     }
+}
+
+#[cfg(test)]
+fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivity> {
+    let turn_event = match event {
+        SessionEvent::LlmRequest { mode_iteration, .. } => {
+            TurnEvent::ModelRequestStarted { mode_iteration }
+        }
+        SessionEvent::TextDelta { content } => TurnEvent::AssistantProseDelta { text: content },
+        SessionEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { text: content },
+        SessionEvent::ToolCallStart {
+            call_id,
+            name,
+            args,
+        } => TurnEvent::ToolCallStarted {
+            call_id,
+            name,
+            args,
+        },
+        SessionEvent::ToolCall {
+            call_id,
+            name,
+            args,
+            result,
+            success,
+            duration_ms,
+        } => TurnEvent::ToolCallCompleted {
+            call_id,
+            name,
+            args,
+            result,
+            success,
+            duration_ms,
+        },
+        SessionEvent::Message { text, kind } if kind == "lashlang_code" => {
+            TurnEvent::CodeBlockStarted {
+                language: "lashlang".to_string(),
+                code: text,
+            }
+        }
+        SessionEvent::TokenUsage {
+            mode_iteration,
+            usage,
+            cumulative,
+        } => TurnEvent::Usage {
+            mode_iteration,
+            usage,
+            cumulative,
+        },
+        SessionEvent::RetryStatus {
+            wait_seconds,
+            attempt,
+            max_attempts,
+            reason,
+            ..
+        } => TurnEvent::RetryStatus {
+            wait_seconds,
+            attempt,
+            max_attempts,
+            reason,
+        },
+        SessionEvent::Error { message, .. } => TurnEvent::Error { message },
+        SessionEvent::PluginEvent { plugin_id, event } => {
+            TurnEvent::PluginSurface { plugin_id, event }
+        }
+        SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
+            TurnEvent::QueuedInputAccepted { checkpoint, inputs }
+        }
+        SessionEvent::InjectedMessagesCommitted {
+            messages,
+            checkpoint,
+        } => TurnEvent::QueuedMessagesCommitted {
+            messages,
+            checkpoint,
+        },
+        SessionEvent::Done
+        | SessionEvent::ChildTokenUsage { .. }
+        | SessionEvent::TurnOutcome { .. }
+        | SessionEvent::LlmResponse { .. }
+        | SessionEvent::Message { .. } => return None,
+    };
+    Some(TurnActivity::independent(turn_event))
 }
 
 /// Compute the visual height of pending streaming text.

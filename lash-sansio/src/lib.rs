@@ -151,24 +151,35 @@ fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAvailability {
+    /// Keep the tool out of the current surface entirely.
+    ///
+    /// The definition can remain in registry state so host or authority
+    /// overrides survive refreshes, but the model cannot search, see, or call
+    /// the tool.
     #[default]
-    Hidden,
-    Discoverable,
+    Off,
+    /// Include the tool in the searchable catalog, but not in the model's
+    /// callable tool list.
+    Searchable,
+    /// Include the tool in the model's callable tool list, without featuring
+    /// it in prompt-side tool documentation.
     Callable,
-    Documented,
+    /// Include the tool in the callable list and feature it in prompt-side
+    /// tool documentation.
+    Showcased,
 }
 
 impl ToolAvailability {
-    pub fn is_discoverable(self) -> bool {
-        self >= Self::Discoverable
+    pub fn is_searchable(self) -> bool {
+        self >= Self::Searchable
     }
 
     pub fn is_callable(self) -> bool {
         self >= Self::Callable
     }
 
-    pub fn is_documented(self) -> bool {
-        self >= Self::Documented
+    pub fn is_showcased(self) -> bool {
+        self >= Self::Showcased
     }
 }
 
@@ -187,16 +198,16 @@ impl ToolAvailabilityConfig {
         }
     }
 
-    pub fn documented() -> Self {
-        Self::same(ToolAvailability::Documented)
+    pub fn showcased() -> Self {
+        Self::same(ToolAvailability::Showcased)
     }
 
     pub fn callable() -> Self {
         Self::same(ToolAvailability::Callable)
     }
 
-    pub fn hidden() -> Self {
-        Self::same(ToolAvailability::Hidden)
+    pub fn off() -> Self {
+        Self::same(ToolAvailability::Off)
     }
 
     pub fn for_mode(&self, mode: &ExecutionMode) -> ToolAvailability {
@@ -209,7 +220,7 @@ impl ToolAvailabilityConfig {
 
 impl Default for ToolAvailabilityConfig {
     fn default() -> Self {
-        Self::documented()
+        Self::showcased()
     }
 }
 
@@ -459,7 +470,7 @@ impl CompactToolContract {
 }
 
 impl ToolDefinition {
-    pub fn new(
+    pub fn raw(
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: serde_json::Value,
@@ -474,7 +485,7 @@ impl ToolDefinition {
             output_schema_projections: Vec::new(),
             output_contract: ToolOutputContract::Static,
             examples: Vec::new(),
-            availability: ToolAvailabilityConfig::documented(),
+            availability: ToolAvailabilityConfig::showcased(),
             activation: ToolActivation::Always,
             availability_override: None,
             discovery: ToolDiscoveryMetadata::default(),
@@ -482,27 +493,12 @@ impl ToolDefinition {
         }
     }
 
-    pub fn native<Args>(name: impl Into<String>, description: impl Into<String>) -> Self
-    where
-        Args: schemars::JsonSchema,
-    {
-        Self::new(
-            name,
-            description,
-            schema_for::<Args>(),
-            serde_json::json!({}),
-        )
-    }
-
-    pub fn native_with_output<Args, Output>(
-        name: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self
+    pub fn typed<Args, Output>(name: impl Into<String>, description: impl Into<String>) -> Self
     where
         Args: schemars::JsonSchema,
         Output: schemars::JsonSchema,
     {
-        Self::new(
+        Self::raw(
             name,
             description,
             schema_for::<Args>(),
@@ -1270,8 +1266,8 @@ mod tests {
     use serde::ser::{Error as _, Serializer};
 
     #[test]
-    fn tool_definition_uses_canonical_schemas_for_model_tools() {
-        let tool = ToolDefinition::new(
+    fn tool_definition_uses_canonical_model_schemas() {
+        let tool = ToolDefinition::raw(
             "mcp__demo__search",
             "Search demo server",
             serde_json::json!({
@@ -1306,7 +1302,7 @@ mod tests {
 
     #[test]
     fn model_tool_preserves_schema_projection_overrides() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "demo",
             "Demo",
             serde_json::json!({
@@ -1345,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_definition_generates_schema_from_typed_args() {
+    fn typed_tool_definition_generates_input_and_output_schema() {
         #[derive(schemars::JsonSchema)]
         #[allow(dead_code)]
         enum Mode {
@@ -1364,7 +1360,15 @@ mod tests {
             mode: Option<Mode>,
         }
 
-        let tool = ToolDefinition::native::<Args>("demo", "Demo");
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Output {
+            answer: String,
+            #[schemars(range(min = 0))]
+            confidence: f32,
+        }
+
+        let tool = ToolDefinition::typed::<Args, Output>("demo", "Demo");
         let metadata = tool.parameter_metadata();
         assert!(metadata.iter().any(|param| {
             param["name"] == "page_limit"
@@ -1382,11 +1386,46 @@ mod tests {
                 .iter()
                 .any(|param| { param["name"] == "mode" && param["nullable"] == true })
         );
+        assert_eq!(tool.output_schema["properties"]["answer"]["type"], "string");
+        assert_eq!(
+            tool.output_schema["properties"]["confidence"]["minimum"].as_f64(),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn raw_tool_definition_preserves_caller_provided_schemas() {
+        let input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 3 }
+            },
+            "required": ["query"],
+            "x-custom": { "keep": true }
+        });
+        let output_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" }
+            },
+            "required": ["ok"],
+            "x-result": ["exact"]
+        });
+
+        let tool = ToolDefinition::raw(
+            "raw_demo",
+            "Raw demo",
+            input_schema.clone(),
+            output_schema.clone(),
+        );
+
+        assert_eq!(tool.input_schema, input_schema);
+        assert_eq!(tool.output_schema, output_schema);
     }
 
     #[test]
     fn compact_tool_contract_renders_prompt_and_search_shape_from_schemas() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "search_docs",
             "Search indexed docs",
             serde_json::json!({
@@ -1458,7 +1497,7 @@ mod tests {
 
     #[test]
     fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "read_text",
             "Read text",
             ToolDefinition::default_input_schema(),
@@ -1482,7 +1521,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_schema_from_input_without_return_fields() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "spawn_agent",
             "Run a subagent",
             serde_json::json!({
@@ -1511,7 +1550,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_default_schema() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "llm_query",
             "Run a lightweight LLM query",
             serde_json::json!({
@@ -2047,7 +2086,7 @@ mod tests {
 
     #[test]
     fn tool_discovery_metadata_does_not_render_prompt_docs() {
-        let mut with_metadata = ToolDefinition::new(
+        let mut with_metadata = ToolDefinition::raw(
             "read_file",
             "Read a file",
             ToolDefinition::default_input_schema(),

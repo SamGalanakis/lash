@@ -6,10 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::{
-    ProgressSender, ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider,
-    ToolResult,
-};
+use lash::{ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 use serde_json::Value;
 
 use crate::SubagentSessionConfigurator;
@@ -30,11 +27,7 @@ pub(crate) struct RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
-    async fn spawn_agent(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
+    async fn spawn_agent(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
         let agent_name = required_string(args, "agent_name")?;
         let task = required_string(args, "task")?;
         let capability_name = required_string(args, "capability")?;
@@ -80,8 +73,7 @@ impl RlmSubagentToolsProvider {
             )
             .await?;
         if context
-            .cancellation_token
-            .as_ref()
+            .cancellation_token()
             .is_some_and(|token| token.is_cancelled())
         {
             let _ = self
@@ -119,37 +111,13 @@ impl ToolProvider for RlmSubagentToolsProvider {
         definitions
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        if name == "submit_error" {
-            return shared::submit_error_tool_result(_args);
-        }
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let result = match name {
-            "spawn_agent" => self.spawn_agent(args, context).await,
-            "submit_error" => return shared::submit_error_tool_result(args),
-            _ => Err(format!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let result = match call.name {
+            "spawn_agent" => self.spawn_agent(call.args, call.context).await,
+            "submit_error" => return shared::submit_error_tool_result(call.args),
+            other => Err(format!("Unknown tool: {other}")),
         };
         finalise_tool_result(result)
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 

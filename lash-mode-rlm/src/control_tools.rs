@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use lash::session_model::SessionEventRecord;
 use lash::{
-    MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
-    SessionCreateRequest, SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation,
-    SessionSnapshotHost, SessionStartPoint, ToolControl, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolProvider, ToolResult,
+    MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
+    SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation, SessionSnapshotHost,
+    SessionStartPoint, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolExecutionMode,
+    ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -14,7 +14,7 @@ impl RlmControlToolsProvider {
     async fn continue_as(
         &self,
         args: &Value,
-        context: &ToolExecutionContext,
+        context: &ToolContext,
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         // Projected entries (sourced from the parent's host bindings) get
@@ -24,8 +24,8 @@ impl RlmControlToolsProvider {
             lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
 
         let successor_session_id = create_continue_as_successor(
-            context.host.as_ref(),
-            &context.session_id,
+            context.host().as_ref(),
+            context.session_id(),
             task.clone(),
             seed,
             ContinueAsHandoff {
@@ -55,38 +55,17 @@ impl ToolProvider for RlmControlToolsProvider {
         vec![continue_as_tool_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let result = match name {
-            "continue_as" => self.continue_as(args, context).await,
-            _ => Err(format!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let result = match call.name {
+            "continue_as" => self.continue_as(call.args, call.context).await,
+            _ => Err(format!("Unknown tool: {}", call.name)),
         };
         finalise_tool_result(result)
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 
 pub fn continue_as_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "continue_as",
         "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.",
         continue_as_input_schema(),
@@ -382,24 +361,19 @@ mod tests {
             created: Mutex::new(Vec::new()),
         });
         let provider = RlmControlToolsProvider;
-        let context = ToolExecutionContext {
-            session_id: "parent".to_string(),
-            host: manager.clone(),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(manager.clone());
 
+        let args = json!({
+            "task": "finish from here",
+            "seed": { "x": 1, "query": "original" }
+        });
         let result = provider
-            .execute_with_context(
-                "continue_as",
-                &json!({
-                    "task": "finish from here",
-                    "seed": { "x": 1, "query": "original" }
-                }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "continue_as",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
 
         assert!(result.success, "{:?}", result.result);
@@ -416,7 +390,7 @@ mod tests {
         let request = &created[0];
         assert!(matches!(request.start, SessionStartPoint::Empty));
         assert_eq!(request.plugin_mode, SessionPluginMode::InheritCurrent);
-        assert_eq!(request.relation.parent_session_id(), Some("parent"));
+        assert_eq!(request.relation.parent_session_id(), Some("test-session"));
         assert_eq!(
             request
                 .policy
@@ -479,27 +453,22 @@ mod tests {
             created: Mutex::new(Vec::new()),
         });
         let provider = RlmControlToolsProvider;
-        let context = ToolExecutionContext {
-            session_id: "parent".to_string(),
-            host: manager.clone(),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(manager.clone());
 
+        let args = json!({
+            "task": "finish from here",
+            "seed": {
+                "proj": { "__projected__": "carry-over" },
+                "glob": 7
+            }
+        });
         let result = provider
-            .execute_with_context(
-                "continue_as",
-                &json!({
-                    "task": "finish from here",
-                    "seed": {
-                        "proj": { "__projected__": "carry-over" },
-                        "glob": 7
-                    }
-                }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "continue_as",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
         assert!(result.success, "{:?}", result.result);
 

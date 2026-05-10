@@ -10,7 +10,7 @@ use crate::plugin::{
 };
 use crate::tool_schema::validate_tool_input;
 use crate::{
-    ProgressSender, SessionEvent, ToolCallRecord, ToolExecutionContext, ToolExecutionMode,
+    ProgressSender, SessionEvent, ToolCall, ToolCallRecord, ToolContext, ToolExecutionMode,
     ToolImage, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
 };
 
@@ -53,14 +53,12 @@ pub(crate) async fn dispatch_tool_call(
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
 ) -> ToolDispatchOutcome {
-    let tool_context = ToolExecutionContext {
-        session_id: context.session_id.clone(),
-        host: Arc::clone(&context.host),
-        cancellation_token: None,
-        async_task_id: None,
-        turn_context: context.turn_context.clone(),
-        tool_call_id: None,
-    };
+    let tool_context = ToolContext::new(
+        context.session_id.clone(),
+        Arc::clone(&context.host),
+        context.turn_context.clone(),
+        None,
+    );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
         .await
 }
@@ -70,7 +68,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
-    tool_context: ToolExecutionContext,
+    tool_context: ToolContext,
 ) -> ToolDispatchOutcome {
     if !context.surface.has_callable_tool(&tool_name) {
         return outcome(
@@ -189,7 +187,12 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     } else {
         context
             .tools
-            .execute_streaming_with_context(&tool_name, &args, &tool_context, progress)
+            .execute(ToolCall {
+                name: &tool_name,
+                args: &args,
+                context: &tool_context,
+                progress,
+            })
             .await
     };
     let duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -429,7 +432,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     fn test_tool(name: &str, execution_mode: ToolExecutionMode) -> crate::ToolDefinition {
-        crate::ToolDefinition::new(
+        crate::ToolDefinition::raw(
             name,
             "",
             crate::ToolDefinition::default_input_schema(),
@@ -439,7 +442,7 @@ mod tests {
     }
 
     fn beta_tool() -> crate::ToolDefinition {
-        crate::ToolDefinition::new(
+        crate::ToolDefinition::raw(
             "beta",
             "",
             json!({
@@ -463,17 +466,19 @@ mod tests {
             vec![test_tool("alpha", ToolExecutionMode::Parallel), beta_tool()]
         }
 
-        async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-            match name {
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            match call.name {
                 "alpha" => ToolResult::ok(json!("alpha")),
                 "beta" => {
-                    if args.get("value").and_then(|value| value.as_str()) == Some("fail") {
+                    if call.args.get("value").and_then(|value| value.as_str()) == Some("fail") {
                         ToolResult::err_fmt("beta failed")
                     } else {
-                        ToolResult::ok(json!(args.get("value").cloned().unwrap_or(json!(null))))
+                        ToolResult::ok(json!(
+                            call.args.get("value").cloned().unwrap_or(json!(null))
+                        ))
                     }
                 }
-                _ => ToolResult::err_fmt(format!("Unknown tool: {name}")),
+                other => ToolResult::err_fmt(format!("Unknown tool: {other}")),
             }
         }
     }
@@ -492,12 +497,12 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
             self.started.fetch_add(1, Ordering::SeqCst);
             let waited = timeout(Duration::from_millis(100), self.barrier.wait()).await;
             match waited {
-                Ok(_) => ToolResult::ok(json!(name)),
-                Err(_) => ToolResult::err_fmt(format!("{name} did not overlap with peer")),
+                Ok(_) => ToolResult::ok(json!(call.name)),
+                Err(_) => ToolResult::err_fmt(format!("{} did not overlap with peer", call.name)),
             }
         }
     }
@@ -509,7 +514,7 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolProvider for StrictMcpTools {
         fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![crate::ToolDefinition::new(
+            vec![crate::ToolDefinition::raw(
                 "mcp__appworld__venmo_show_transactions",
                 "Show Venmo transactions",
                 json!({
@@ -525,7 +530,7 @@ mod tests {
             )]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
             self.executed.fetch_add(1, Ordering::SeqCst);
             ToolResult::ok(json!({ "executed": true }))
         }
@@ -768,7 +773,7 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
             let start = Instant::now();
             // Sleep long enough that if the two tools *were* dispatched
             // concurrently, their windows would overlap by a detectable
@@ -778,8 +783,8 @@ mod tests {
             self.log
                 .lock()
                 .expect("serial probe log")
-                .push((name.to_string(), start, end));
-            ToolResult::ok(json!(name))
+                .push((call.name.to_string(), start, end));
+            ToolResult::ok(json!(call.name))
         }
     }
 
@@ -874,7 +879,8 @@ mod tests {
                 ]
             }
 
-            async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
+            async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+                let name = call.name;
                 if name == "ser" {
                     let start = Instant::now();
                     tokio::time::sleep(Duration::from_millis(30)).await;

@@ -7,16 +7,15 @@
 //! Split out of `plugin/mod.rs` for file size; outer path preserved by
 //! `pub use` in `plugin/mod.rs`.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
-    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, ExternalInvokeHandler, ExternalOpDef,
-    HistoryRewriter, PluginError, PluginHost, PluginRegistrar, PluginRuntimeEventHook,
-    PluginSnapshotMeta, PromptContributor, SessionConfigMutator, SessionToolAccess, SnapshotReader,
-    SnapshotWriter, SubagentSessionAuthority, ToolDiscoveryContributor, ToolResultProjectionHook,
-    ToolResultProjector, ToolSurfaceContributor, TurnContextTransform, TypedExternalOp,
+    BeforeToolCallHook, BeforeTurnHook, CheckpointHook, HistoryRewriter, PluginAction,
+    PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginRegistrar,
+    PluginRuntimeEventHook, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
+    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionAuthority,
+    ToolDiscoveryContributor, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
 };
 use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
 
@@ -33,10 +32,10 @@ pub struct PluginSpec {
     pub checkpoint_hooks: Vec<CheckpointHook>,
     pub assistant_stream_hooks: Vec<AssistantStreamHook>,
     pub assistant_response_hooks: Vec<AssistantResponseHook>,
-    pub tool_result_projectors: BTreeMap<ToolResultProjectionHook, ToolResultProjector>,
+    pub tool_result_projector: Option<ToolResultProjector>,
     pub runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
-    pub external_ops: Vec<(ExternalOpDef, ExternalInvokeHandler)>,
+    pub plugin_actions: Vec<(PluginActionDef, PluginActionHandler)>,
     pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
 }
@@ -104,12 +103,8 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_tool_result_projector(
-        mut self,
-        hook: ToolResultProjectionHook,
-        projector: ToolResultProjector,
-    ) -> Self {
-        self.tool_result_projectors.insert(hook, projector);
+    pub fn with_tool_result_projector(mut self, projector: ToolResultProjector) -> Self {
+        self.tool_result_projector = Some(projector);
         self
     }
 
@@ -123,21 +118,25 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_external_op(mut self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Self {
-        self.external_ops.push((def, handler));
+    pub fn with_plugin_action(
+        mut self,
+        def: PluginActionDef,
+        handler: PluginActionHandler,
+    ) -> Self {
+        self.plugin_actions.push((def, handler));
         self
     }
 
-    pub fn with_typed_external_op<Op, F, Fut>(self, handler: F) -> Self
+    pub fn with_plugin_action_typed<Op, F, Fut>(self, handler: F) -> Self
     where
-        Op: TypedExternalOp,
-        F: Fn(super::ExternalInvokeContext, Op::Args) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Op::Output, super::TypedExternalOpError>>
+        Op: PluginAction,
+        F: Fn(super::PluginActionContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Op::Output, super::PluginActionFailure>>
             + Send
             + 'static,
     {
-        self.with_external_op(
-            super::typed_external_op_def::<Op>(),
+        self.with_plugin_action(
+            super::plugin_action_def::<Op>(),
             Arc::new(move |ctx, args| {
                 let parsed = serde_json::from_value::<Op::Args>(args);
                 match parsed {
@@ -169,18 +168,18 @@ impl PluginSpec {
         )
     }
 
-    pub fn with_typed_external_op_sync<Op, F>(self, handler: F) -> Self
+    pub fn with_plugin_action_sync<Op, F>(self, handler: F) -> Self
     where
-        Op: TypedExternalOp,
+        Op: PluginAction,
         F: Fn(
-                super::ExternalInvokeContext,
+                super::PluginActionContext,
                 Op::Args,
-            ) -> Result<Op::Output, super::TypedExternalOpError>
+            ) -> Result<Op::Output, super::PluginActionFailure>
             + Send
             + Sync
             + 'static,
     {
-        self.with_typed_external_op::<Op, _, _>(move |ctx, args| {
+        self.with_plugin_action_typed::<Op, _, _>(move |ctx, args| {
             let result = handler(ctx, args);
             async move { result }
         })
@@ -431,8 +430,8 @@ impl SessionPlugin for SpecPlugin {
         for hook in &self.spec.assistant_response_hooks {
             reg.output().response(Arc::clone(hook));
         }
-        for (hook, projector) in &self.spec.tool_result_projectors {
-            reg.tool_results().projector(*hook, Arc::clone(projector))?;
+        if let Some(projector) = &self.spec.tool_result_projector {
+            reg.tool_results().projector(Arc::clone(projector))?;
         }
         for hook in &self.spec.runtime_event_hooks {
             reg.session().on_event(Arc::clone(hook));
@@ -440,8 +439,8 @@ impl SessionPlugin for SpecPlugin {
         for hook in &self.spec.session_config_mutators {
             reg.session().config_mutator(Arc::clone(hook));
         }
-        for (def, handler) in &self.spec.external_ops {
-            reg.external().op(def.clone(), Arc::clone(handler))?;
+        for (def, handler) in &self.spec.plugin_actions {
+            reg.actions().op(def.clone(), Arc::clone(handler))?;
         }
         for (priority, transform) in &self.spec.turn_context_transforms {
             reg.history().prepare_turn(*priority, Arc::clone(transform));

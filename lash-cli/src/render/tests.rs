@@ -1158,7 +1158,7 @@ fn shell_output_is_hidden_at_l0_and_visible_at_l1() {
         .collect();
     assert!(
         !l0_text.iter().any(|line| line.contains("world")),
-        "shell body must stay hidden at L0; got {l0_text:?}",
+        "shell body must stay off at L0; got {l0_text:?}",
     );
 
     let l1 = render_block(&blocks, 0, 1, 40, 10);

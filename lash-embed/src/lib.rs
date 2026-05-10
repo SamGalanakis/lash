@@ -15,7 +15,11 @@ mod support;
 #[cfg(test)]
 mod tests;
 pub mod turn;
+pub mod usage;
 
+pub use crate::control::{
+    AdvancedToolsControl, BackgroundTasks, Handoffs, PluginActions, ToolsControl,
+};
 pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset, ModelSelection};
@@ -30,8 +34,9 @@ pub use lash::{TurnActivity, TurnActivityId, TurnEvent, TurnInput};
 
 pub mod prelude {
     pub use crate::{
-        AdvancedLashCoreBuilder, EmbedError, LashCore, LashCoreBuilder, LashSession, ModeId,
-        ModePreset, ObservableSession, PluginBinding, Result, SessionBuilder, TurnActivity,
+        AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError, Handoffs,
+        LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
+        PluginActions, PluginBinding, Result, SessionBuilder, ToolsControl, TurnActivity,
         TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash::TurnActivitySink;
@@ -40,18 +45,18 @@ pub mod prelude {
 pub mod tools {
     pub use crate::ToolState;
     pub use lash::{
-        AckWakeArgs, McpServerConfig, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp,
-        MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
-        MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch,
-        RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolDefinition,
-        ToolProvider, ToolResult, ToolResultView, ToolSourceHandle,
+        AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState,
+        MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
+        MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
+        StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolDefinition, ToolProvider,
+        ToolResult, ToolSourceHandle,
     };
 }
 
 pub mod persistence {
     pub use lash::{
         AttachmentStore, PersistedSessionState, RuntimePersistence, SessionReadView,
-        SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
+        SessionStoreCreateRequest, SessionStoreFactory,
     };
 }
 

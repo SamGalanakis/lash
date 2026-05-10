@@ -3,6 +3,7 @@ name = "lashlang"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+publish = false
 
 [dependencies]
 compact_str = { version = "0.9.0", features = ["serde"] }

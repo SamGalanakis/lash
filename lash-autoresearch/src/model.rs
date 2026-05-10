@@ -423,7 +423,7 @@ pub fn render_export_html(summary: &StatusSummary) -> String {
 body{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0d1117;color:#e6edf3;padding:32px;}}\
 .grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:24px 0;}}\
 .card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:16px;}}\
-table{{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:12px;overflow:hidden;}}\
+table{{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:12px;overflow:off;}}\
 th,td{{padding:10px 12px;border-bottom:1px solid #21262d;text-align:left;vertical-align:top;}}\
 h1{{margin:0 0 12px 0;}}\
 p{{color:#8b949e;max-width:72ch;}}\

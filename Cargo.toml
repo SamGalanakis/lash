@@ -12,6 +12,7 @@ members = [
     "lash-embed",
     "lash-mode-rlm",
     "lash-mode-standard",
+    "lash-plugin-mcp",
     "lash-plugin-observational-memory",
     "lash-plugin-plan-mode",
     "lash-plugin-prompt-context",
@@ -46,11 +47,73 @@ members = [
     "bench/swebench/runner",
     "bench/continual-learning-bench/runner",
 ]
+# `cargo build` from the repo root compiles only the publishable SDK surface.
+# Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.
+default-members = [
+    "lash",
+    "lash-embed",
+    "lash-trace",
+    "lash-rlm-types",
+    "lash-llm-transport",
+    "lash-llm-tools",
+    "lash-openai-schema",
+    "lash-mode-standard",
+    "lash-mode-rlm",
+    "lash-provider-auth",
+    "lash-provider-openai",
+    "lash-provider-anthropic",
+    "lash-provider-codex",
+    "lash-provider-google",
+    "lash-providers-builtin",
+    "lash-sqlite-store",
+    "lash-tool-support",
+    "lash-tool-apply-patch",
+    "lash-tool-files",
+    "lash-tool-search",
+    "lash-tool-shell",
+    "lash-tool-web",
+    "lash-standard-plugins",
+    "lash-plugin-mcp",
+    "lash-plugin-observational-memory",
+    "lash-plugin-plan-mode",
+    "lash-plugin-prompt-context",
+    "lash-plugin-rolling-history",
+    "lash-plugin-tool-discovery",
+    "lash-plugin-ui-activity",
+    "lash-subagents",
+]
 resolver = "3"
 
 [workspace.package]
 version = "0.2.110"
 license = "MIT"
+
+# Centralized external versions. Members opt in with
+# `dep = { workspace = true, features = [...] }`.
+[workspace.dependencies]
+anyhow = "1"
+arc-swap = "1"
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+chrono = "0.4"
+clap = "4"
+futures-util = "0.3"
+jsonschema = "0.18"
+pulldown-cmark = "0.13"
+regex = "1"
+reqwest = { version = "0.13", default-features = false }
+rmcp = { version = "1.6", default-features = false }
+schemars = "0.8"
+serde = "1"
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = "1"
+tokio-util = "0.7"
+tracing = "0.1"
+uuid = "1"
 
 [profile.release]
 lto = "thin"

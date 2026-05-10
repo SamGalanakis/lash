@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn tool_result_projectors_split_state_model_and_history_views() {
+async fn tool_result_projector_only_changes_model_observation() {
     let committed_results = Arc::new(tokio::sync::Mutex::new(Vec::<(
         serde_json::Value,
         serde_json::Value,
@@ -13,35 +13,12 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
             Ok(Arc::new(RuntimeTestPlugin {
                 before_turn: None,
                 checkpoint: None,
-                tool_result_projectors: vec![
-                    (
-                        crate::ToolResultProjectionHook::BeforeState,
-                        Arc::new(|mut ctx| {
-                            Box::pin(async move {
-                                ctx.result.result = serde_json::json!("state projection");
-                                Ok(ctx.result)
-                            })
-                        }),
-                    ),
-                    (
-                        crate::ToolResultProjectionHook::BeforeModel,
-                        Arc::new(|mut ctx| {
-                            Box::pin(async move {
-                                ctx.result.result = serde_json::json!("model projection");
-                                Ok(ctx.result)
-                            })
-                        }),
-                    ),
-                    (
-                        crate::ToolResultProjectionHook::BeforeHistory,
-                        Arc::new(|mut ctx| {
-                            Box::pin(async move {
-                                ctx.result.result = serde_json::json!("history projection");
-                                Ok(ctx.result)
-                            })
-                        }),
-                    ),
-                ],
+                tool_result_projector: Some(Arc::new(|mut ctx| {
+                    Box::pin(async move {
+                        ctx.result.result = serde_json::json!("model projection");
+                        Ok(ctx.result)
+                    })
+                })),
                 runtime_event: Some(Arc::new(move |event| {
                     let committed_results = Arc::clone(&committed_results);
                     Box::pin(async move {
@@ -133,8 +110,8 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
     assert_eq!(
         committed.as_slice(),
         &[(
-            serde_json::json!("history projection"),
-            serde_json::json!("history projection"),
+            serde_json::json!({ "payload": "raw:sample" }),
+            serde_json::json!({ "payload": "raw:sample" }),
         )]
     );
     assert_eq!(active_tool_calls(&turn.state).len(), 1);
@@ -146,11 +123,11 @@ async fn tool_result_projectors_split_state_model_and_history_views() {
     assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
     assert_eq!(
         active_tool_calls(&turn.state)[0].result,
-        serde_json::json!("state projection")
+        serde_json::json!({ "payload": "raw:sample" })
     );
     assert_eq!(
         turn.tool_calls[0].result,
-        serde_json::json!("state projection")
+        serde_json::json!({ "payload": "raw:sample" })
     );
 }
 

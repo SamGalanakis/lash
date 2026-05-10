@@ -156,14 +156,14 @@ impl LashRuntime {
 
     pub(super) fn runtime_session_manager(
         &self,
-    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(self, true, None)?))
     }
 
     pub(super) fn runtime_session_manager_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
+    ) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             false,
@@ -171,7 +171,7 @@ impl LashRuntime {
         )?))
     }
 
-    pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, ExternalInvokeError> {
+    pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
         self.runtime_session_manager()
     }
 
@@ -198,10 +198,10 @@ impl LashRuntime {
     pub async fn rewrite_history(
         &mut self,
         trigger: crate::RewriteTrigger,
-    ) -> Result<bool, ExternalInvokeError> {
+    ) -> Result<bool, PluginActionInvokeError> {
         let manager = self.runtime_session_manager()?;
         let Some(plugin_session) = self.session.as_ref().map(|s| Arc::clone(s.plugins())) else {
-            return Err(ExternalInvokeError::Unknown(
+            return Err(PluginActionInvokeError::Unknown(
                 "runtime session not available".to_string(),
             ));
         };
@@ -217,7 +217,7 @@ impl LashRuntime {
             .rewrite_history(&ctx, input)
             .await
             .map_err(|err| {
-                ExternalInvokeError::Unknown(format!("rewrite_history failed: {err}"))
+                PluginActionInvokeError::Unknown(format!("rewrite_history failed: {err}"))
             })?;
         let mutated =
             outcome.metadata.produced_summary || outcome.messages.len() != baseline_messages;

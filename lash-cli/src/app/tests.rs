@@ -1,7 +1,7 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use async_trait::async_trait;
-use lash::{Part, PruneState, ToolResultView, TurnEvent};
+use lash::{Part, PruneState, SessionEvent, TurnEvent};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };
@@ -1202,17 +1202,13 @@ fn plan_exit_tool_queues_follow_up_turn() {
             call_id: Some("tc-plan-exit".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: ToolResultView {
-                raw: serde_json::json!({
+            result: serde_json::json!({
                 "approved": true,
                 "confirmation_display": "Start implementing now\n\nNote: safe slice first",
                 "plan_path": ".lash/plans/session.md",
                 "execution_mode": "current_session",
                 "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
-                }),
-                for_model: serde_json::json!({}),
-                for_state: serde_json::json!({}),
-            },
+            }),
             success: true,
             duration_ms: 5,
         }),
@@ -1290,15 +1286,11 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
             call_id: Some("tc-plan-exit-fresh".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: ToolResultView {
-                raw: serde_json::json!({
+            result: serde_json::json!({
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
-                }),
-                for_model: serde_json::json!({}),
-                for_state: serde_json::json!({}),
-            },
+            }),
             success: true,
             duration_ms: 5,
         }),

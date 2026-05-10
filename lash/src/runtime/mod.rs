@@ -42,7 +42,7 @@ use crate::session_model::{
     fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
 use crate::{
-    CheckpointKind, ExecutionMode, ExternalInvokeError, PersistentRuntimeServices,
+    CheckpointKind, ExecutionMode, PersistentRuntimeServices, PluginActionInvokeError,
     PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
     SessionCreateRequest, SessionError, SessionHandle, SessionSnapshot, SessionStartPoint,
     ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
@@ -377,6 +377,12 @@ pub struct AssembledTurn {
     pub execution: ExecutionSummary,
     #[serde(default)]
     pub token_usage: TokenUsage,
+    /// Per-(session, source, model) ledger entries for child sessions whose
+    /// LLM calls completed during this turn. `token_usage` above is the
+    /// parent's own LLM tokens; `total_usage` (on the embed-facing
+    /// `TurnResult`) sums both.
+    #[serde(default)]
+    pub children_usage: Vec<TokenLedgerEntry>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
@@ -463,14 +469,6 @@ impl EventSink for NoopEventSink {
     async fn emit(&self, _event: SessionEvent) {}
 }
 
-/// Canonical semantic view of a completed tool result.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ToolResultView {
-    pub raw: serde_json::Value,
-    pub for_model: serde_json::Value,
-    pub for_state: serde_json::Value,
-}
-
 /// Stable identifier for a semantic turn activity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
@@ -551,7 +549,7 @@ pub enum TurnEvent {
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
-        result: ToolResultView,
+        result: serde_json::Value,
         success: bool,
         duration_ms: u64,
     },
@@ -563,6 +561,14 @@ pub enum TurnEvent {
         value: serde_json::Value,
     },
     Usage {
+        mode_iteration: usize,
+        usage: TokenUsage,
+        cumulative: TokenUsage,
+    },
+    ChildUsage {
+        session_id: String,
+        source: String,
+        model: String,
         mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,

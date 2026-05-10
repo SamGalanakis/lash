@@ -174,7 +174,12 @@ async fn apply_graph_resume_state(
         .and_then(|checkpoint| checkpoint.tool_state.clone())
         && let Some(session) = runtime.as_ref()
     {
-        let _ = session.control().tools().apply_state(tool_state).await;
+        let _ = session
+            .control()
+            .tools()
+            .advanced()
+            .apply_state(tool_state)
+            .await;
         if let Ok(state) = session.control().tools().state().await {
             *desired_tool_state = state;
         }

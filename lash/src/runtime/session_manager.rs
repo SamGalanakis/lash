@@ -200,9 +200,11 @@ impl RuntimeSessionManager {
         runtime: &LashRuntime,
         persist_usage_to_store: bool,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Self, ExternalInvokeError> {
+    ) -> Result<Self, PluginActionInvokeError> {
         let Some(session) = runtime.session.as_ref() else {
-            return Err(ExternalInvokeError::Unknown("session_manager".to_string()));
+            return Err(PluginActionInvokeError::Unknown(
+                "session_manager".to_string(),
+            ));
         };
         Ok(Self {
             current: CurrentSessionCapability::new(

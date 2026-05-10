@@ -3,14 +3,14 @@ use std::sync::Arc;
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ExternalInvokeError {
-    #[error("unknown external invoke `{0}`")]
+pub enum PluginActionInvokeError {
+    #[error("unknown plugin action `{0}`")]
     Unknown(String),
     #[error("unknown plugin session `{0}`")]
     UnknownSession(String),
-    #[error("external invoke `{0}` requires a session")]
+    #[error("plugin action `{0}` requires a session")]
     MissingSession(String),
-    #[error("external invoke `{0}` does not accept a session")]
+    #[error("plugin action `{0}` does not accept a session")]
     UnexpectedSession(String),
     #[error("plugin session registry is unavailable")]
     SessionRegistryPoisoned,

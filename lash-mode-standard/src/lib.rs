@@ -595,8 +595,8 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         let mut terminal_outcome = None;
 
         for outcome in completed {
-            if terminal_outcome.is_none() && outcome.raw_result.success {
-                terminal_outcome = match outcome.raw_result.control.as_ref() {
+            if terminal_outcome.is_none() && outcome.result.success {
+                terminal_outcome = match outcome.result.control.as_ref() {
                     Some(lash::ToolControl::Handoff { session_id })
                         if !session_id.trim().is_empty() =>
                     {

@@ -7,10 +7,10 @@ license.workspace = true
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full"] }
 lashlang = { path = "../lashlang" }
-async-trait = "0.1"
-jsonschema = "0.18"
-serde_json = "1"
+async-trait = { workspace = true }
+jsonschema = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }

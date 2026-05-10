@@ -29,11 +29,11 @@ fn has_hidden_content_at(activity: &ActivityBlock, expand_level: u8) -> bool {
             let non_empty_diffs = files.iter().any(|file| !file.diff.trim().is_empty());
             let over_cap = files.len() > COMPACT_PATCH_PREVIEW_MAX_FILES;
             if expand_level >= 1 {
-                // L1 renders diffs but caps files; hidden only when
+                // L1 renders diffs but caps files; off only when
                 // there are more files than the cap.
                 over_cap
             } else {
-                // L0 drops diffs entirely; hidden when either diffs
+                // L0 drops diffs entirely; off when either diffs
                 // exist or the file list is truncated.
                 non_empty_diffs || over_cap
             }

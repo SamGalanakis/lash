@@ -11,18 +11,17 @@
 //! legacy `#[serde(tag = "type")]` enum exactly, so existing
 //! `~/.lash/config.json` files load without migration.
 
-mod config;
 mod handle;
 mod model_policy;
 mod options;
 mod rate_limit;
 mod registry;
+mod spec;
 mod support;
 #[cfg(test)]
 mod tests;
 mod traits;
 
-pub use config::{AuxiliarySecrets, LashConfig, ModelDefault, ProviderSpec, RuntimeSettings};
 pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
 pub use model_policy::StaticModelPolicy;
 pub use options::{
@@ -35,6 +34,7 @@ pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
 pub use registry::{
     ProviderFactory, ProviderRegistry, build_provider, provider_factory, register_provider_factory,
 };
+pub use spec::ProviderSpec;
 pub use traits::{
     DefaultProviderFailureClassifier, ProviderFailureClassifier, ProviderModelPolicy,
     ProviderState, ProviderTransport,

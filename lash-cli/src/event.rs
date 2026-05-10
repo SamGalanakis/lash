@@ -1,6 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use lash::SessionEvent;
-use lash::{ManagedTaskStatus, PromptRequest, PromptResponse};
+use lash::{ManagedTaskStatus, PromptRequest, PromptResponse, TurnActivity};
 use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
 
@@ -16,7 +15,7 @@ pub enum AppEvent {
     },
     Session {
         stream_id: u64,
-        event: SessionEvent,
+        activity: TurnActivity,
     },
     Prompt {
         request: PromptRequest,

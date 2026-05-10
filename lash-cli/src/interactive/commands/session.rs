@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use lash::provider::LashConfig;
 use lash::session_model::Message;
 use lash::*;
 use lash_embed::LashSession;
@@ -28,11 +25,9 @@ async fn activate_opened_session(
     turn_counter: &mut usize,
     current_execution_mode: &mut ExecutionMode,
     current_model_variant: &mut Option<String>,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     provider: &ProviderHandle,
-    lash_config: &LashConfig,
 ) -> Result<(), String> {
     *runtime = Some(opened.session);
     *logger = opened.logger;
@@ -56,12 +51,6 @@ async fn activate_opened_session(
     session
         .control()
         .tools()
-        .attach_mcp_servers(lash_config.mcp_servers())
-        .await
-        .map_err(|err| format!("failed to attach MCP servers: {err}"))?;
-    session
-        .control()
-        .tools()
         .refresh_surface()
         .await
         .map_err(|err| err.to_string())?;
@@ -71,14 +60,6 @@ async fn activate_opened_session(
         .state()
         .await
         .map_err(|err| err.to_string())?;
-    if let Some(rt) = runtime.as_ref() {
-        match rt.control().state().session_manager().await {
-            Ok(manager) => *session_manager = manager,
-            Err(err) => {
-                push_system_message(app, format!("Failed to refresh session manager: {}", err))
-            }
-        }
-    }
     Ok(())
 }
 
@@ -103,7 +84,6 @@ fn fallback_policy_for_session_switch(
 pub(super) async fn handle_clear(
     app: &mut App,
     runtime_factory: &CliSessionOpener,
-    lash_config: &LashConfig,
     logger: &mut SessionLogger,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
@@ -113,7 +93,6 @@ pub(super) async fn handle_clear(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     pending_clear_after_return: &mut bool,
 ) -> anyhow::Result<bool> {
@@ -135,12 +114,6 @@ pub(super) async fn handle_clear(
     let Some(session) = runtime.as_ref() else {
         return Err(anyhow::anyhow!("opened session was not installed"));
     };
-    session
-        .control()
-        .tools()
-        .attach_mcp_servers(lash_config.mcp_servers())
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
     if let Some(rt) = runtime.as_ref() {
         rt.control()
             .tools()
@@ -152,12 +125,6 @@ pub(super) async fn handle_clear(
         app.session_id = session_id;
         *current_execution_mode = policy.execution_mode;
         *current_model_variant = policy.model_variant;
-        match rt.control().state().session_manager().await {
-            Ok(manager) => *session_manager = manager,
-            Err(err) => {
-                push_system_message(app, format!("Failed to refresh session manager: {}", err))
-            }
-        }
     }
     app.session_name = opened.bootstrap.session_name();
     *desired_tool_state = session.control().tools().state().await?;
@@ -338,14 +305,12 @@ pub(crate) async fn switch_to_session_identifier(
     app: &mut App,
     logger: &mut SessionLogger,
     runtime_factory: &CliSessionOpener,
-    lash_config: &LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -367,11 +332,9 @@ pub(crate) async fn switch_to_session_identifier(
         turn_counter,
         current_execution_mode,
         current_model_variant,
-        session_manager,
         desired_tool_state,
         model_catalog,
         provider,
-        lash_config,
     )
     .await
     .map_err(anyhow::Error::msg)?;
@@ -387,7 +350,6 @@ pub(super) async fn handle_resume(
     app: &mut App,
     logger: &mut SessionLogger,
     runtime_factory: &CliSessionOpener,
-    lash_config: &LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -395,7 +357,6 @@ pub(super) async fn handle_resume(
     provider: &ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     model_catalog: &CachedModelCatalog,
     toolset_hash: &mut String,
@@ -406,14 +367,12 @@ pub(super) async fn handle_resume(
             app,
             logger,
             runtime_factory,
-            lash_config,
             runtime,
             history,
             turn_counter,
             provider,
             current_model_variant,
             current_execution_mode,
-            session_manager,
             desired_tool_state,
             model_catalog,
             toolset_hash,

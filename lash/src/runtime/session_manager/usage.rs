@@ -36,11 +36,38 @@ impl ChildUsageEventRelay {
 
     async fn emit(&self, event: SessionEvent) {
         let tx = self.tx.lock().expect("child usage relay lock").clone();
-        if let Some(tx) = tx
-            && !tx.is_closed()
-        {
-            let _ = tx.send(RuntimeStreamEvent::Session(event)).await;
+        let Some(tx) = tx else { return };
+        if tx.is_closed() {
+            return;
         }
+        // Project ChildTokenUsage onto the embed-facing TurnActivity stream
+        // before forwarding the SessionEvent itself. Other variants reach the
+        // turn-activity stream through `send_session_event` in `turn_driver`,
+        // but child usage skips that path because it originates in the
+        // session manager rather than the parent's turn driver.
+        if let SessionEvent::ChildTokenUsage {
+            session_id,
+            source,
+            model,
+            mode_iteration,
+            usage,
+            cumulative,
+        } = &event
+        {
+            let activity = TurnActivity::new(
+                TurnActivityId::fresh(),
+                TurnEvent::ChildUsage {
+                    session_id: session_id.clone(),
+                    source: source.clone(),
+                    model: model.clone(),
+                    mode_iteration: *mode_iteration,
+                    usage: usage.clone(),
+                    cumulative: cumulative.clone(),
+                },
+            );
+            let _ = tx.send(RuntimeStreamEvent::Turn(activity)).await;
+        }
+        let _ = tx.send(RuntimeStreamEvent::Session(event)).await;
     }
 }
 

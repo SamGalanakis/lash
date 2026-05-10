@@ -4,15 +4,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_embed::control::TypedExternalOp;
-#[cfg(test)]
-use lash_embed::tools::ToolResultView;
+use lash_embed::control::PluginAction;
 use lash_embed::tools::{
     AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec,
     MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp,
-    MonitorUpdateBatch, StartMonitorArgs, StopMonitorArgs, ToolResult,
+    MonitorUpdateBatch, StartMonitorArgs, StopMonitorArgs,
 };
-use lash_embed::{LashSession, TurnEvent};
+use lash_embed::{PluginActions, TurnEvent};
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{
@@ -164,49 +162,21 @@ pub enum TuiHostEffect {
     },
 }
 
-#[async_trait]
-pub trait TuiExtensionSession: Send + Sync {
-    async fn invoke_external(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<ToolResult, String>;
-}
-
-pub async fn invoke_typed_external<Op>(
-    session: &dyn TuiExtensionSession,
+pub async fn call_plugin_action<Op>(
+    actions: &PluginActions,
     args: Op::Args,
 ) -> Result<Op::Output, String>
 where
-    Op: TypedExternalOp,
+    Op: PluginAction,
 {
-    let args =
-        serde_json::to_value(args).map_err(|err| format!("invalid {} args: {err}", Op::NAME))?;
-    let result = session.invoke_external(Op::NAME, args).await?;
-    if !result.success {
-        return Err(format!("{} failed: {}", Op::NAME, result.result));
-    }
-    serde_json::from_value(result.result)
-        .map_err(|err| format!("invalid {} output: {err}", Op::NAME))
-}
-
-#[async_trait]
-impl TuiExtensionSession for LashSession {
-    async fn invoke_external(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<ToolResult, String> {
-        self.control()
-            .external()
-            .invoke(name, args)
-            .await
-            .map_err(|err| err.to_string())
-    }
+    actions
+        .call::<Op>(args)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 pub struct TuiExtensionContext<'a> {
-    pub session: &'a dyn TuiExtensionSession,
+    pub actions: &'a PluginActions,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -460,7 +430,7 @@ impl TuiExtensions {
         for extension in &self.extensions {
             let extension_effects = extension
                 .snapshot(TuiExtensionContext {
-                    session: ctx.session,
+                    actions: ctx.actions,
                 })
                 .await?;
             effects.extend(self.process_effects(extension.id(), extension_effects));
@@ -694,22 +664,22 @@ async fn invoke_plan_mode_action(
 ) -> Result<PlanModeStatus, String> {
     let status = match op_name {
         "plan_mode.toggle" => {
-            invoke_typed_external::<lash_plugin_plan_mode::PlanModeToggleOp>(
-                ctx.session,
+            call_plugin_action::<lash_plugin_plan_mode::PlanModeToggleOp>(
+                ctx.actions,
                 lash_plugin_plan_mode::PlanModeExternalArgs {},
             )
             .await?
         }
         "plan_mode.enable" => {
-            invoke_typed_external::<lash_plugin_plan_mode::PlanModeEnableOp>(
-                ctx.session,
+            call_plugin_action::<lash_plugin_plan_mode::PlanModeEnableOp>(
+                ctx.actions,
                 lash_plugin_plan_mode::PlanModeExternalArgs {},
             )
             .await?
         }
         "plan_mode.disable" => {
-            invoke_typed_external::<lash_plugin_plan_mode::PlanModeDisableOp>(
-                ctx.session,
+            call_plugin_action::<lash_plugin_plan_mode::PlanModeDisableOp>(
+                ctx.actions,
                 lash_plugin_plan_mode::PlanModeExternalArgs {},
             )
             .await?
@@ -797,8 +767,8 @@ impl TuiExtension for MonitorTuiExtension {
     }
 
     async fn snapshot(&self, ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
-        let updates = monitor_updates(ctx.session).await?;
-        let snapshot = monitor_status(ctx.session).await?;
+        let updates = monitor_updates(ctx.actions).await?;
+        let snapshot = monitor_status(ctx.actions).await?;
         let (effects, ack_ids) = {
             let mut state = self.lock_state()?;
             state.snapshot = snapshot.clone();
@@ -826,7 +796,7 @@ impl TuiExtension for MonitorTuiExtension {
             (effects, ack_ids)
         };
         if !ack_ids.is_empty() {
-            monitor_ack_wakes(ctx.session, ack_ids).await?;
+            monitor_ack_wakes(ctx.actions, ack_ids).await?;
         }
         Ok(effects)
     }
@@ -858,15 +828,15 @@ impl TuiExtension for MonitorTuiExtension {
                 Ok(monitor_effects(&state))
             }
             "list" => {
-                let snapshot = monitor_status(ctx.session).await?;
+                let snapshot = monitor_status(ctx.actions).await?;
                 Ok(vec![TuiHostEffect::PushSystemMessage(
                     format_monitor_summary(&snapshot),
                 )])
             }
             _ if command.starts_with("stop ") => {
                 let id = command["stop ".len()..].trim();
-                monitor_stop(ctx.session, id).await?;
-                let snapshot = monitor_status(ctx.session).await?;
+                monitor_stop(ctx.actions, id).await?;
+                let snapshot = monitor_status(ctx.actions).await?;
                 let mut state = self.lock_state()?;
                 state.snapshot = snapshot;
                 Ok(monitor_effects(&state))
@@ -883,8 +853,8 @@ impl TuiExtension for MonitorTuiExtension {
                         .map(|status| status.spec.clone())
                 }
                 .ok_or_else(|| format!("unknown monitor `{id}`"))?;
-                monitor_start(ctx.session, spec).await?;
-                let snapshot = monitor_status(ctx.session).await?;
+                monitor_start(ctx.actions, spec).await?;
+                let snapshot = monitor_status(ctx.actions).await?;
                 let mut state = self.lock_state()?;
                 state.snapshot = snapshot;
                 Ok(monitor_effects(&state))
@@ -1050,29 +1020,26 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
     lines.join("\n")
 }
 
-async fn monitor_status(session: &dyn TuiExtensionSession) -> Result<MonitorSnapshot, String> {
-    invoke_typed_external::<MonitorStatusOp>(session, MonitorEmptyArgs {}).await
+async fn monitor_status(session: &PluginActions) -> Result<MonitorSnapshot, String> {
+    call_plugin_action::<MonitorStatusOp>(session, MonitorEmptyArgs {}).await
 }
 
-async fn monitor_updates(session: &dyn TuiExtensionSession) -> Result<MonitorUpdateBatch, String> {
-    invoke_typed_external::<MonitorTakeUpdatesOp>(session, MonitorEmptyArgs {}).await
+async fn monitor_updates(session: &PluginActions) -> Result<MonitorUpdateBatch, String> {
+    call_plugin_action::<MonitorTakeUpdatesOp>(session, MonitorEmptyArgs {}).await
 }
 
-async fn monitor_ack_wakes(
-    session: &dyn TuiExtensionSession,
-    ids: Vec<String>,
-) -> Result<(), String> {
-    invoke_typed_external::<MonitorAckWakeOp>(session, AckWakeArgs { ids }).await
+async fn monitor_ack_wakes(session: &PluginActions, ids: Vec<String>) -> Result<(), String> {
+    call_plugin_action::<MonitorAckWakeOp>(session, AckWakeArgs { ids }).await
 }
 
-async fn monitor_stop(session: &dyn TuiExtensionSession, id: &str) -> Result<(), String> {
-    let _ = invoke_typed_external::<MonitorStopOp>(session, StopMonitorArgs { id: id.to_string() })
+async fn monitor_stop(session: &PluginActions, id: &str) -> Result<(), String> {
+    let _ = call_plugin_action::<MonitorStopOp>(session, StopMonitorArgs { id: id.to_string() })
         .await?;
     Ok(())
 }
 
-async fn monitor_start(session: &dyn TuiExtensionSession, spec: MonitorSpec) -> Result<(), String> {
-    let _ = invoke_typed_external::<MonitorStartOp>(session, StartMonitorArgs { spec }).await?;
+async fn monitor_start(session: &PluginActions, spec: MonitorSpec) -> Result<(), String> {
+    let _ = call_plugin_action::<MonitorStartOp>(session, StartMonitorArgs { spec }).await?;
     Ok(())
 }
 
@@ -1147,7 +1114,6 @@ impl TuiExtension for PlanModeTuiExtension {
             return Vec::new();
         }
         let approved = result
-            .raw
             .get("approved")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
@@ -1162,18 +1128,15 @@ impl TuiExtension for PlanModeTuiExtension {
                 },
             ];
             if result
-                .raw
                 .get("execution_mode")
                 .and_then(|value| value.as_str())
                 == Some("current_session")
                 && let Some(input) = result
-                    .raw
                     .get("next_turn_input")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
             {
                 let display_text = result
-                    .raw
                     .get("confirmation_display")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
@@ -1199,29 +1162,12 @@ mod tests {
     use lash_tui::{Rect, Style};
     use serde_json::json;
 
-    struct MockSession;
-
-    #[async_trait]
-    impl TuiExtensionSession for MockSession {
-        async fn invoke_external(
-            &self,
-            _name: &str,
-            _args: serde_json::Value,
-        ) -> Result<ToolResult, String> {
-            panic!("mock session should not be invoked")
-        }
-    }
-
     fn completed_tool_event(name: &str, result: serde_json::Value) -> TurnEvent {
         TurnEvent::ToolCallCompleted {
             call_id: None,
             name: name.to_string(),
             args: json!({}),
-            result: ToolResultView {
-                raw: result.clone(),
-                for_model: result.clone(),
-                for_state: result,
-            },
+            result,
             success: true,
             duration_ms: 12,
         }
@@ -1283,19 +1229,6 @@ mod tests {
                 }
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn plan_mode_snapshot_is_event_driven() {
-        let extensions =
-            TuiExtensions::new(vec![Arc::new(PlanModeTuiExtension)]).expect("extensions");
-        let session = MockSession;
-        let effects = extensions
-            .snapshot_all(TuiExtensionContext { session: &session })
-            .await
-            .expect("sync");
-
-        assert!(effects.is_empty());
     }
 
     #[test]

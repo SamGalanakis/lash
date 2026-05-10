@@ -52,7 +52,7 @@ impl ToolDiscoveryIndex {
         let docs: Vec<DiscoveryDoc> = catalog
             .into_iter()
             .filter_map(CatalogTool::from_value)
-            .filter(|tool| tool.discoverable)
+            .filter(|tool| tool.searchable)
             .map(DiscoveryDoc::from_tool)
             .collect();
         let avg_len = if docs.is_empty() {

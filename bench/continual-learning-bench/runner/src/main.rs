@@ -6,16 +6,16 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Parser;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     EmbeddedRuntimeHost, EventSink, ExecutionMode, FollowedTurn, InputItem, LashRuntime,
     NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
     RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
     SessionUsageReport, StandardContextApproach, TokenLedgerEntry, TokioSessionTaskExecutor,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, TurnOutcome,
+    ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnFinish,
+    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, TurnOutcome,
 };
+use lash_cli::config::LashConfig;
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -294,9 +294,10 @@ impl ToolProvider for ClbenchAsyncHandlesTool {
         vec![list_async_handles_tool_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!(
-            "`{name}` is handled by the RLM session runtime and cannot run directly"
+            "`{}` is handled by the RLM session runtime and cannot run directly",
+            call.name
         ))
     }
 }
@@ -316,7 +317,7 @@ fn list_async_handles_tool_definition() -> ToolDefinition {
 }
 
 fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "list_async_handles",
         "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
         ToolDefinition::default_input_schema(),

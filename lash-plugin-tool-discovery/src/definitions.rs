@@ -34,7 +34,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         Many(Vec<String>),
     }
 
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "search_tools",
         "Search catalogued tool names, namespaces, aliases, descriptions, signatures, return fields, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result names and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms.",
         serde_json::to_value(schemars::schema_for!(SearchToolsArgs))
@@ -65,7 +65,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
             "search_tools(query=\"spotify song details play_count genre title song_id\", namespace=\"appworld\")".into(),
             "search_tools(query=\"venmo send money private payment_card receiver_email\", namespace=\"appworld\")".into(),
         ])
-        .with_availability(ToolAvailabilityConfig::documented())
+        .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
         .with_discovery(lash::ToolDiscoveryMetadata {
             namespace: Some("runtime".to_string()),
@@ -81,12 +81,12 @@ pub(crate) fn load_tools_definition() -> ToolDefinition {
         names: Option<Vec<String>>,
     }
 
-    ToolDefinition::native::<LoadToolsArgs>(
+    ToolDefinition::typed::<LoadToolsArgs, serde_json::Value>(
         "load_tools",
-        "Promote loadable tools into the documented surface. Callable omitted tools do not need loading and can be called directly.",
+        "Promote loadable tools into the showcased surface. Callable omitted tools do not need loading and can be called directly.",
     )
         .with_examples(vec!["load_tools(names=[\"tool_name\"])".into()])
-        .with_availability(ToolAvailabilityConfig::documented())
+        .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
         .with_discovery(lash::ToolDiscoveryMetadata {
             namespace: Some("runtime".to_string()),

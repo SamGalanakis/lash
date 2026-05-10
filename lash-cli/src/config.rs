@@ -1,4 +1,16 @@
-use super::support::*;
+//! User config-file schema (`~/.lash/config.json`) and helpers.
+//!
+//! `LashConfig` owns the data shape that the CLI persists to disk. The lash
+//! runtime itself takes already-built primitives (`ProviderHandle`, plugin
+//! factories) — it does not load this file.
+
+use std::collections::BTreeMap;
+
+use lash::ProviderSpec;
+use lash::provider::build_provider;
+use lash::{ExecutionMode, ProviderHandle};
+use lash_plugin_mcp::McpServerConfig;
+use serde::{Deserialize, Serialize};
 
 /// Auxiliary service secrets that are independent of LLM provider auth.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -17,7 +29,7 @@ impl AuxiliarySecrets {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub explore_tier_subagent_execution_mode: Option<crate::ExecutionMode>,
+    pub explore_tier_subagent_execution_mode: Option<ExecutionMode>,
 }
 
 impl RuntimeSettings {
@@ -34,57 +46,8 @@ pub struct ModelDefault {
     pub variant: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderSpec {
-    pub kind: String,
-    pub config: serde_json::Value,
-}
-
-impl Serialize for ProviderSpec {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut value = match &self.config {
-            serde_json::Value::Object(map) => serde_json::Value::Object(map.clone()),
-            serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
-            other => {
-                return Err(serde::ser::Error::custom(format!(
-                    "ProviderSpec.config must serialize to a JSON object, got {}",
-                    other
-                )));
-            }
-        };
-        if let serde_json::Value::Object(ref mut map) = value {
-            map.insert(
-                "type".to_string(),
-                serde_json::Value::String(self.kind.clone()),
-            );
-        }
-        value.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ProviderSpec {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut value = serde_json::Value::deserialize(deserializer)?;
-        let kind = if let serde_json::Value::Object(ref mut map) = value {
-            let raw = map
-                .remove("type")
-                .ok_or_else(|| serde::de::Error::missing_field("type"))?;
-            raw.as_str()
-                .ok_or_else(|| serde::de::Error::custom("provider `type` must be a string"))?
-                .to_string()
-        } else {
-            return Err(serde::de::Error::custom(
-                "provider spec must be a JSON object",
-            ));
-        };
-        Ok(Self {
-            kind,
-            config: value,
-        })
-    }
-}
-
-/// Stored configuration: provider credentials + service API keys.
+/// Stored configuration: provider credentials + service API keys + MCP
+/// servers + per-session defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LashConfig {
@@ -112,21 +75,6 @@ impl LashConfig {
     /// provider's current spec becomes the active entry.
     pub fn new(provider: &ProviderHandle) -> Self {
         let spec = provider.to_spec();
-        let kind = spec.kind.clone();
-        let mut providers = BTreeMap::new();
-        providers.insert(kind.clone(), spec);
-        Self {
-            active_provider: kind,
-            providers,
-            auxiliary_secrets: AuxiliarySecrets::default(),
-            mcp_servers: BTreeMap::new(),
-            agent_models: BTreeMap::new(),
-            model_defaults: BTreeMap::new(),
-            runtime: RuntimeSettings::default(),
-        }
-    }
-
-    pub fn from_spec(spec: ProviderSpec) -> Self {
         let kind = spec.kind.clone();
         let mut providers = BTreeMap::new();
         providers.insert(kind.clone(), spec);
@@ -224,8 +172,7 @@ impl LashConfig {
     }
 
     /// Load from the given config path. Returns `None` if missing or
-    /// malformed. Host decides where the file lives (e.g. lash-cli uses
-    /// `~/.lash/config.json`).
+    /// malformed.
     pub fn load(path: &std::path::Path) -> Option<Self> {
         if let Ok(data) = std::fs::read_to_string(path)
             && let Ok(config) = serde_json::from_str::<Self>(&data)
@@ -266,15 +213,108 @@ impl LashConfig {
         &self.mcp_servers
     }
 
-    pub fn set_mcp_servers(&mut self, servers: BTreeMap<String, McpServerConfig>) {
-        self.mcp_servers = servers;
-    }
-
     /// Delete the config file at `path`.
     pub fn clear(path: &std::path::Path) -> Result<(), std::io::Error> {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lash_config_roundtrips_existing_shape() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            }
+        });
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
+        assert_eq!(cfg.active_provider, "openai-compatible");
+        let spec = cfg.active_provider_spec();
+        assert_eq!(spec.kind, "openai-compatible");
+        assert_eq!(spec.config["api_key"], serde_json::json!("k"));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_config_fields() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            },
+            "tavily_api_key": "legacy-key"
+        });
+        let err = serde_json::from_value::<LashConfig>(raw).expect_err("unknown field rejected");
+        assert!(err.to_string().contains("unknown field `tavily_api_key`"));
+    }
+
+    #[test]
+    fn auxiliary_secrets_preserved() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            },
+            "auxiliary_secrets": {
+                "tavily_api_key": "new-key"
+            }
+        });
+        let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        assert_eq!(cfg.tavily_api_key(), Some("new-key"));
+    }
+
+    #[test]
+    fn model_defaults_are_provider_scoped() {
+        let raw = serde_json::json!({
+            "active_provider": "openai-compatible",
+            "providers": {
+                "openai-compatible": {
+                    "type": "openai-compatible",
+                    "api_key": "k",
+                    "base_url": "https://example.com/v1"
+                }
+            },
+            "model_defaults": {
+                "openai-compatible": {
+                    "model": "gpt-5.4",
+                    "variant": "high"
+                }
+            }
+        });
+        let mut cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
+        assert_eq!(
+            cfg.model_default("openai-compatible"),
+            Some(&ModelDefault {
+                model: "gpt-5.4".to_string(),
+                variant: Some("high".to_string()),
+            })
+        );
+
+        cfg.set_model_default("anthropic", "claude-sonnet-4.6", None);
+        assert_eq!(
+            cfg.model_default("anthropic"),
+            Some(&ModelDefault {
+                model: "claude-sonnet-4.6".to_string(),
+                variant: None,
+            })
+        );
     }
 }

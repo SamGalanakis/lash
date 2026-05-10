@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
@@ -18,7 +18,7 @@ const MAX_RESULTS: usize = 100;
 impl ToolProvider for Glob {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "glob",
                 [
                     "Find filesystem entries by glob. ",
@@ -68,7 +68,8 @@ impl ToolProvider for Glob {
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
         let pattern = match require_str(args, "pattern") {
             Ok(s) => s,
             Err(e) => return e,
@@ -183,13 +184,12 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         let arr = items(&result);
         let paths: Vec<&str> = arr
@@ -217,13 +217,12 @@ mod tests {
     async fn test_glob_no_matches() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         assert!(items(&result).is_empty());
     }
@@ -233,13 +232,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         let arr = items(&result);
         let paths: Vec<&str> = arr
@@ -255,13 +253,12 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": 2}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": 2}),
+        )
+        .await;
         assert!(result.success);
         let arr = items(&result);
         assert_eq!(arr.len(), 2);
@@ -281,13 +278,12 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": null}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": null}),
+        )
+        .await;
         assert!(result.success);
         let arr = items(&result);
         assert_eq!(arr.len(), 3);
@@ -304,13 +300,12 @@ mod tests {
     async fn test_glob_with_lines() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.rs"), "line1\nline2\nline3\n").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
+        )
+        .await;
         assert!(result.success);
         let arr = items(&result);
         assert_eq!(arr.len(), 1);
@@ -321,13 +316,12 @@ mod tests {
     async fn test_glob_includes_hidden_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".hidden.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
             .iter()
@@ -346,17 +340,16 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({
-                    "pattern": "*.rs",
-                    "path": dir.path().to_str().unwrap(),
-                    "respect_gitignore": false
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({
+                "pattern": "*.rs",
+                "path": dir.path().to_str().unwrap(),
+                "respect_gitignore": false
+            }),
+        )
+        .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
             .iter()
@@ -375,16 +368,15 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({
-                    "pattern": "*.rs",
-                    "path": dir.path().to_str().unwrap()
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({
+                "pattern": "*.rs",
+                "path": dir.path().to_str().unwrap()
+            }),
+        )
+        .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
             .iter()
@@ -401,13 +393,12 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let tool = Glob;
-        let result = tool
-            .execute(
-                "glob",
-                &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &Glob,
+            "glob",
+            &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
             .iter()

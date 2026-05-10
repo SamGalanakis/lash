@@ -152,9 +152,10 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(ChildSessionTool);
     let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
     let sink = RecordingSink::default();
+    let turn_events = RecordingTurnEvents::default();
 
     let turn = runtime
-        .stream_turn(
+        .stream_turn_with_semantic_events(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: "run child".to_string(),
@@ -167,6 +168,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 turn_context: crate::TurnContext::default(),
             },
             &sink,
+            &turn_events,
             CancellationToken::new(),
         )
         .await
@@ -200,6 +202,47 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     assert_eq!(child_usage_event.3.cached_input_tokens, 4);
     assert_eq!(child_usage_event.3.reasoning_tokens, 1);
     assert_eq!(child_usage_event.4.cached_input_tokens, 4);
+
+    // The session-event projection should also surface a TurnEvent::ChildUsage
+    // on the embed-facing TurnActivity stream.
+    let activities = turn_events.snapshot();
+    let projected = activities
+        .iter()
+        .find_map(|activity| match &activity.event {
+            crate::TurnEvent::ChildUsage {
+                session_id,
+                source,
+                model,
+                usage,
+                cumulative,
+                ..
+            } => Some((
+                session_id.clone(),
+                source.clone(),
+                model.clone(),
+                usage.clone(),
+                cumulative.clone(),
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("TurnEvent::ChildUsage missing from {activities:?}"));
+    assert_eq!(projected.0, "subagent-child");
+    assert_eq!(projected.1, "subagent");
+    assert_eq!(projected.2, "mock-model");
+    assert_eq!(projected.3.input_tokens, 7);
+    assert_eq!(projected.4.cached_input_tokens, 4);
+
+    // AssembledTurn carries per-(source, model) child entries so embed
+    // consumers can compute per-turn breakdowns without diffing reports.
+    let child_entry = turn
+        .children_usage
+        .iter()
+        .find(|entry| entry.source == "subagent" && entry.model == "mock-model")
+        .unwrap_or_else(|| panic!("missing subagent ledger entry: {:?}", turn.children_usage));
+    assert_eq!(child_entry.usage.input_tokens, 7);
+    assert_eq!(child_entry.usage.output_tokens, 2);
+    assert_eq!(child_entry.usage.cached_input_tokens, 4);
+    assert_eq!(child_entry.usage.reasoning_tokens, 1);
 
     let usage = runtime.usage_report();
     assert_eq!(usage.by_source["subagent"].input_tokens, 7);

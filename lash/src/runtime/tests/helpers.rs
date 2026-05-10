@@ -461,7 +461,7 @@ impl crate::ToolProvider for EmptyTools {
         Vec::new()
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
+    async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
         crate::ToolResult::err(serde_json::json!("Unknown tool"))
     }
 }
@@ -509,10 +509,7 @@ impl crate::PluginFactory for RuntimeTestPluginFactory {
 pub(super) struct RuntimeTestPlugin {
     pub(super) before_turn: Option<crate::plugin::BeforeTurnHook>,
     pub(super) checkpoint: Option<crate::plugin::CheckpointHook>,
-    pub(super) tool_result_projectors: Vec<(
-        crate::ToolResultProjectionHook,
-        crate::plugin::ToolResultProjector,
-    )>,
+    pub(super) tool_result_projector: Option<crate::plugin::ToolResultProjector>,
     pub(super) runtime_event: Option<crate::plugin::PluginRuntimeEventHook>,
     pub(super) external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
 }
@@ -529,8 +526,8 @@ impl crate::SessionPlugin for RuntimeTestPlugin {
         if let Some(hook) = &self.checkpoint {
             reg.turn().checkpoint(Arc::clone(hook));
         }
-        for (hook, projector) in &self.tool_result_projectors {
-            reg.tool_results().projector(*hook, Arc::clone(projector))?;
+        if let Some(projector) = &self.tool_result_projector {
+            reg.tool_results().projector(Arc::clone(projector))?;
         }
         if let Some(hook) = &self.runtime_event {
             reg.session().on_event(Arc::clone(hook));
@@ -596,7 +593,7 @@ pub(super) struct EchoTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for EchoTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+        vec![crate::ToolDefinition::raw(
             "echo_tool",
             "Return a tool payload",
             serde_json::json!({
@@ -609,9 +606,10 @@ impl crate::ToolProvider for EchoTool {
         )]
     }
 
-    async fn execute(&self, tool_name: &str, args: &serde_json::Value) -> crate::ToolResult {
-        assert_eq!(tool_name, "echo_tool");
-        let value = args
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        assert_eq!(call.name, "echo_tool");
+        let value = call
+            .args
             .get("value")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
@@ -630,7 +628,7 @@ impl crate::ToolProvider for TerminalControlTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
         (0..self.controls.len())
             .map(|index| {
-                crate::ToolDefinition::new(
+                crate::ToolDefinition::raw(
                     format!("terminal_tool_{index}"),
                     "Return a terminal control result",
                     crate::ToolDefinition::default_input_schema(),
@@ -640,27 +638,8 @@ impl crate::ToolProvider for TerminalControlTool {
             .collect()
     }
 
-    async fn execute(&self, name: &str, _args: &serde_json::Value) -> crate::ToolResult {
-        self.result_for(name)
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        _args: &serde_json::Value,
-        _context: &crate::ToolExecutionContext,
-    ) -> crate::ToolResult {
-        self.result_for(name)
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        _args: &serde_json::Value,
-        _context: &crate::ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
-    ) -> crate::ToolResult {
-        self.result_for(name)
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        self.result_for(call.name)
     }
 }
 
@@ -685,7 +664,7 @@ pub(super) struct SlowTool {
 #[async_trait::async_trait]
 impl crate::ToolProvider for SlowTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+        vec![crate::ToolDefinition::raw(
             "slow_tool",
             "Sleep for a long time; respects cancellation.",
             crate::ToolDefinition::default_input_schema(),
@@ -693,20 +672,9 @@ impl crate::ToolProvider for SlowTool {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        crate::ToolResult::ok(serde_json::json!({"status": "completed"}))
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        _name: &str,
-        _args: &serde_json::Value,
-        context: &crate::ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
-    ) -> crate::ToolResult {
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
         let observed = Arc::clone(&self.observed_cancel);
-        if let Some(token) = context.cancellation_token.as_ref() {
+        if let Some(token) = call.context.cancellation_token() {
             let token = token.clone();
             tokio::select! {
                 _ = token.cancelled() => {
@@ -729,7 +697,7 @@ pub(super) struct MemoryProbeTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for MemoryProbeTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+        vec![crate::ToolDefinition::raw(
             "memory_probe",
             "probe",
             crate::ToolDefinition::default_input_schema(),
@@ -737,7 +705,7 @@ impl crate::ToolProvider for MemoryProbeTool {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
+    async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
         crate::ToolResult::ok(json!("ok"))
     }
 }
@@ -747,7 +715,7 @@ pub(super) struct ChildSessionTool;
 #[async_trait::async_trait]
 impl crate::ToolProvider for ChildSessionTool {
     fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::new(
+        vec![crate::ToolDefinition::raw(
             "spawn_child",
             "spawn a child session",
             crate::ToolDefinition::default_input_schema(),
@@ -755,22 +723,14 @@ impl crate::ToolProvider for ChildSessionTool {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> crate::ToolResult {
-        crate::ToolResult::err(json!("session context required"))
-    }
-
-    async fn execute_with_context(
-        &self,
-        _name: &str,
-        _args: &serde_json::Value,
-        context: &crate::ToolExecutionContext,
-    ) -> crate::ToolResult {
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        let context = call.context;
         let child = match context
-            .host
+            .host()
             .create_session(crate::SessionCreateRequest {
                 session_id: Some("subagent-child".to_string()),
                 relation: crate::SessionRelation::Child {
-                    parent_session_id: context.session_id.clone(),
+                    parent_session_id: context.session_id().to_string(),
                 },
                 start: crate::SessionStartPoint::Empty,
                 policy: None,
@@ -790,7 +750,7 @@ impl crate::ToolProvider for ChildSessionTool {
         };
 
         let turn = match context
-            .host
+            .host()
             .start_turn_stream(
                 &child.session_id,
                 TurnInput {
@@ -813,22 +773,12 @@ impl crate::ToolProvider for ChildSessionTool {
 
         drop(turn.events);
 
-        let result = context.host.await_turn(&turn.turn_id).await;
-        let _ = context.host.close_session(&child.session_id).await;
+        let result = context.host().await_turn(&turn.turn_id).await;
+        let _ = context.host().close_session(&child.session_id).await;
         match result {
             Ok(_) => crate::ToolResult::ok(json!({ "status": "ok" })),
             Err(err) => crate::ToolResult::err_fmt(format_args!("{err}")),
         }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &crate::ToolExecutionContext,
-        _progress: Option<&crate::ProgressSender>,
-    ) -> crate::ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 

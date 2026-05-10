@@ -1,5 +1,4 @@
 use crate::support::*;
-use lash::{SessionEvent, ToolResultView};
 use std::collections::VecDeque;
 
 use lash::LlmOutputPart;
@@ -205,30 +204,12 @@ fn assistant_prose(events: &[TurnActivity]) -> String {
         .collect()
 }
 
-#[derive(Default)]
-struct RecordingSessionEvents {
-    events: TokioMutex<Vec<SessionEvent>>,
-}
-
-impl RecordingSessionEvents {
-    async fn snapshot(&self) -> Vec<SessionEvent> {
-        self.events.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl EventSink for RecordingSessionEvents {
-    async fn emit(&self, event: SessionEvent) {
-        self.events.lock().await.push(event);
-    }
-}
-
 struct AppTools;
 
 #[async_trait]
 impl ToolProvider for AppTools {
     fn definitions(&self) -> Vec<lash::ToolDefinition> {
-        vec![lash::ToolDefinition::new(
+        vec![lash::ToolDefinition::raw(
             "app_lookup",
             "Look up app state.",
             serde_json::json!({
@@ -240,7 +221,7 @@ impl ToolProvider for AppTools {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
+    async fn execute(&self, _call: lash::ToolCall<'_>) -> lash::ToolResult {
         lash::ToolResult::ok(serde_json::json!({ "ok": true }))
     }
 }
@@ -250,7 +231,7 @@ struct LongTextTools;
 #[async_trait]
 impl ToolProvider for LongTextTools {
     fn definitions(&self) -> Vec<lash::ToolDefinition> {
-        vec![lash::ToolDefinition::new(
+        vec![lash::ToolDefinition::raw(
             "app_lookup",
             "Look up verbose app state.",
             serde_json::json!({
@@ -262,7 +243,7 @@ impl ToolProvider for LongTextTools {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
+    async fn execute(&self, _call: lash::ToolCall<'_>) -> lash::ToolResult {
         lash::ToolResult::ok(serde_json::json!("abcdefghijklmnopqrstuvwxyz0123456789"))
     }
 }
@@ -882,34 +863,21 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
 }
 
 #[tokio::test]
-async fn session_control_stream_receives_runtime_and_semantic_events() -> Result<()> {
+async fn turn_stream_receives_semantic_activities() -> Result<()> {
     let core = standard_core();
-    let session = core.session("raw-control").open().await?;
-    let raw_events = RecordingSessionEvents::default();
+    let session = core.session("semantic-stream").open().await?;
     let turn_events = RecordingEvents::default();
 
     let result = session
-        .control()
-        .raw_turns()
-        .stream(
-            TurnInput::text("raw stream"),
-            &raw_events,
-            &turn_events,
-            CancellationToken::new(),
-        )
+        .turn(TurnInput::text("semantic stream"))
+        .cancel(CancellationToken::new())
+        .stream(&turn_events)
         .await?;
 
     assert!(matches!(
         result.outcome,
         TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
     ));
-    assert!(
-        raw_events
-            .snapshot()
-            .await
-            .iter()
-            .any(|event| matches!(event, SessionEvent::TextDelta { .. }))
-    );
     assert!(
         turn_events
             .snapshot()
@@ -1028,7 +996,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     session
         .control()
         .tools()
-        .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+        .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
     let tool_state = session
         .observe()
@@ -1038,7 +1006,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
         tool_state
             .get("app_lookup")
             .and_then(|spec| spec.definition().availability_override),
-        Some(ToolAvailability::Hidden)
+        Some(ToolAvailability::Off)
     );
     Ok(())
 }
@@ -1353,23 +1321,57 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let generation = session
         .control()
         .tools()
-        .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+        .set_availability_many(&[("app_lookup", ToolAvailability::Showcased)])
         .await?;
-    let hidden = session.control().tools().state().await?;
+    let showcased = session.control().tools().state().await?;
 
-    assert_eq!(hidden.generation(), generation);
+    assert_eq!(showcased.generation(), generation);
     assert_eq!(
-        hidden
+        showcased
             .get("app_lookup")
             .and_then(|spec| spec.definition().availability_override),
-        Some(ToolAvailability::Hidden)
+        Some(ToolAvailability::Showcased)
     );
 
-    let mut callable = hidden;
+    let generation = session
+        .control()
+        .tools()
+        .clear_availability_override("app_lookup")
+        .await?;
+    let cleared = session.control().tools().state().await?;
+
+    assert_eq!(cleared.generation(), generation);
+    assert_eq!(
+        cleared
+            .get("app_lookup")
+            .and_then(|spec| spec.definition().availability_override),
+        None
+    );
+
+    let generation = session
+        .control()
+        .tools()
+        .set_availability("app_lookup", ToolAvailability::Off)
+        .await?;
+    let off = session.control().tools().state().await?;
+
+    assert_eq!(off.generation(), generation);
+    assert_eq!(
+        off.get("app_lookup")
+            .and_then(|spec| spec.definition().availability_override),
+        Some(ToolAvailability::Off)
+    );
+
+    let mut callable = off;
     callable
         .set_availability("app_lookup", Some(ToolAvailability::Callable))
         .expect("app tool");
-    let generation = session.control().tools().apply_state(callable).await?;
+    let generation = session
+        .control()
+        .tools()
+        .advanced()
+        .apply_state(callable)
+        .await?;
     let callable = session.control().tools().state().await?;
 
     assert_eq!(callable.generation(), generation);
@@ -1394,7 +1396,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     session
         .control()
         .tools()
-        .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+        .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
     let persisted_tool_state = session.control().tools().state().await?;
     let state = PersistedSessionState {
@@ -1425,7 +1427,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         state
             .get("app_lookup")
             .and_then(|spec| spec.definition().availability_override),
-        Some(ToolAvailability::Hidden)
+        Some(ToolAvailability::Off)
     );
     Ok(())
 }
@@ -1571,11 +1573,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
                 call_id: Some("call-1".to_string()),
                 name: "app_lookup".to_string(),
                 args: serde_json::json!({}),
-                result: ToolResultView {
-                    raw: serde_json::json!({ "ok": true }),
-                    for_model: serde_json::json!({ "ok": true }),
-                    for_state: serde_json::json!({ "ok": true }),
-                },
+                result: serde_json::json!({ "ok": true }),
                 success: true,
                 duration_ms: 3,
             },
@@ -1604,7 +1602,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     assert!(matches!(
         &activities[1].event,
         TurnEvent::ToolCallCompleted { name, result, .. }
-            if name == "app_lookup" && result.raw == serde_json::json!({ "ok": true })
+            if name == "app_lookup" && *result == serde_json::json!({ "ok": true })
     ));
     assert_eq!(activities[0].correlation_id, activities[2].correlation_id);
     assert!(matches!(
@@ -1650,7 +1648,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     assert!(matches!(
         &tool_completed.event,
         TurnEvent::ToolCallCompleted { name, result, .. }
-            if name == "app_lookup" && result.raw == serde_json::json!({ "ok": true })
+            if name == "app_lookup" && *result == serde_json::json!({ "ok": true })
     ));
     Ok(())
 }
@@ -1720,9 +1718,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
     let TurnEvent::ToolCallCompleted { result, .. } = &events[completed].event else {
         unreachable!();
     };
-    assert_eq!(result.raw, serde_json::json!({ "ok": true }));
-    assert_eq!(result.for_model, serde_json::json!({ "ok": true }));
-    assert_eq!(result.for_state, serde_json::json!({ "ok": true }));
+    assert_eq!(*result, serde_json::json!({ "ok": true }));
     let prose = events
         .into_iter()
         .filter_map(|event| match event.event {
@@ -1790,9 +1786,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     let TurnEvent::ToolCallCompleted { result, .. } = &events[tool_completed].event else {
         unreachable!();
     };
-    assert_eq!(result.raw, serde_json::json!({ "ok": true }));
-    assert_eq!(result.for_model, serde_json::json!({ "ok": true }));
-    assert_eq!(result.for_state, serde_json::json!({ "ok": true }));
+    assert_eq!(*result, serde_json::json!({ "ok": true }));
     let TurnEvent::CodeBlockCompleted {
         language,
         success,
@@ -1883,7 +1877,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rlm_tool_completed_uses_standard_projection_view() -> Result<()> {
+async fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -> Result<()> {
     let projection = Arc::new(lash::BuiltinToolResultProjectionPluginFactory::new(
         lash::ToolResultProjectionPluginConfig {
             mode: lash::ToolResultProjectionMode::Bytes,
@@ -1891,8 +1885,49 @@ async fn rlm_tool_completed_uses_standard_projection_view() -> Result<()> {
             max_lines: 4,
         },
     ));
+    let observed_tool_results = Arc::new(TokioMutex::new(Vec::<String>::new()));
+    let observed_tool_results_provider = Arc::clone(&observed_tool_results);
+    let responses = Arc::new(TokioMutex::new(VecDeque::from([
+        LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "app_lookup".to_string(),
+                input_json: "{}".to_string(),
+                item_id: None,
+                signature: None,
+            }],
+            ..LlmResponse::default()
+        },
+        LlmResponse {
+            full_text: "done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        },
+    ])));
+    let standard_provider = lash::testing::TestProvider::builder()
+        .kind("embed-test")
+        .default_model("mock-model")
+        .complete(move |request| {
+            let observed_tool_results = Arc::clone(&observed_tool_results_provider);
+            let responses = Arc::clone(&responses);
+            async move {
+                for message in &request.messages {
+                    for block in message.blocks.iter() {
+                        if let LlmContentBlock::ToolResult { content, .. } = block {
+                            observed_tool_results.lock().await.push(content.clone());
+                        }
+                    }
+                }
+                Ok(responses.lock().await.pop_front().expect("queued response"))
+            }
+        })
+        .build()
+        .into_handle();
     let standard_core = LashCore::standard()
-        .provider(tool_roundtrip_provider())
+        .provider(standard_provider)
         .model("mock-model", None)
         .tools(Arc::new(LongTextTools))
         .plugin(projection.clone())
@@ -1913,6 +1948,16 @@ async fn rlm_tool_completed_uses_standard_projection_view() -> Result<()> {
             _ => None,
         })
         .expect("standard tool completion");
+    assert_eq!(
+        standard_view,
+        serde_json::json!("abcdefghijklmnopqrstuvwxyz0123456789")
+    );
+    let observed = observed_tool_results.lock().await;
+    let model_observation = observed
+        .iter()
+        .find(|content| content.contains("bytes truncated"))
+        .expect("projected model observation");
+    assert!(model_observation.contains("Full output saved to:"));
 
     let rlm_core = LashCore::rlm()
         .provider(queued_text_provider(vec![
@@ -1939,15 +1984,7 @@ async fn rlm_tool_completed_uses_standard_projection_view() -> Result<()> {
         })
         .expect("rlm tool completion");
 
-    assert_eq!(rlm_view.raw, standard_view.raw);
-    assert_ne!(rlm_view.raw, rlm_view.for_model);
-    assert_ne!(rlm_view.raw, rlm_view.for_state);
-    let standard_model = standard_view.for_model.as_str().expect("model projection");
-    let rlm_model = rlm_view.for_model.as_str().expect("rlm model projection");
-    assert!(standard_model.contains("bytes truncated"));
-    assert!(rlm_model.contains("bytes truncated"));
-    assert!(standard_model.contains("Full output saved to:"));
-    assert!(rlm_model.contains("Full output saved to:"));
+    assert_eq!(rlm_view, standard_view);
     Ok(())
 }
 
@@ -2102,7 +2139,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     opened
         .control()
         .tools()
-        .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+        .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
     let mut persisted = opened.control().state().persist_current().await?;
     persisted.tool_state_snapshot = Some(opened.control().tools().state().await?);
@@ -2118,7 +2155,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         state
             .get("app_lookup")
             .and_then(|spec| spec.definition().availability_override),
-        Some(ToolAvailability::Hidden)
+        Some(ToolAvailability::Off)
     );
     Ok(())
 }
@@ -2254,6 +2291,76 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
     assert_eq!(messages.len(), 1);
     assert_eq!(message_text(&messages[0]), "explicit store");
     Ok(())
+}
+
+#[test]
+fn turn_result_total_usage_sums_parent_and_children() {
+    use lash::{
+        ExecutionMode, ExecutionSummary, OutputState, SessionPolicy, SessionStateEnvelope,
+        TurnFinish, TurnOutcome,
+    };
+
+    let result = TurnResult {
+        state: SessionStateEnvelope {
+            session_id: "s".to_string(),
+            policy: SessionPolicy {
+                execution_mode: ExecutionMode::standard(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "ok".to_string(),
+        }),
+        assistant_output: AssistantOutput {
+            safe_text: "ok".to_string(),
+            raw_text: "ok".to_string(),
+            state: OutputState::Usable,
+        },
+        usage: TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cached_input_tokens: 2,
+            reasoning_tokens: 1,
+        },
+        children_usage: vec![
+            TokenLedgerEntry {
+                source: "subagent".to_string(),
+                model: "m".to_string(),
+                usage: TokenUsage {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    cached_input_tokens: 4,
+                    reasoning_tokens: 0,
+                },
+            },
+            TokenLedgerEntry {
+                source: "compaction".to_string(),
+                model: "m".to_string(),
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 0,
+                    cached_input_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+            },
+        ],
+        tool_calls: Vec::new(),
+        execution: ExecutionSummary {
+            mode: ExecutionMode::standard(),
+            had_tool_calls: false,
+            had_code_execution: false,
+        },
+        errors: Vec::new(),
+    };
+
+    let total = result.total_usage();
+    assert_eq!(total.input_tokens, 10 + 7 + 1);
+    assert_eq!(total.output_tokens, 5 + 3);
+    assert_eq!(total.cached_input_tokens, 2 + 4);
+    assert_eq!(total.reasoning_tokens, 1);
+    // Parent's own usage is unchanged.
+    assert_eq!(result.usage.input_tokens, 10);
 }
 
 fn text_message(role: lash::MessageRole, text: &str) -> lash::Message {

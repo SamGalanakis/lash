@@ -206,7 +206,7 @@ async fn standard_runtime_cancels_in_flight_tool_calls_when_token_fires() {
     // stronger signal that the token is now plumbed through to tool context.
     assert!(
         observed_cancel.load(Ordering::SeqCst),
-        "slow tool did not observe cancellation token through ToolExecutionContext"
+        "slow tool did not observe cancellation token through ToolContext"
     );
 }
 

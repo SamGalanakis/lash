@@ -1,7 +1,7 @@
 use lash::{ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode};
 
 pub fn batch_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "batch",
         "Execute up to 25 independent tool calls concurrently. Calls start in parallel; ordering is not guaranteed. Calls past index 25 are rejected.",
         object_schema(

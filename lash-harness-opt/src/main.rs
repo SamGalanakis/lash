@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use lash::TurnInput;
-use lash::provider::LashConfig;
+use lash_cli::config::LashConfig;
 use lash_embed::advanced::ModeTurnOptions;
 use lash_embed::{LashCore, TurnActivity, TurnEvent};
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};

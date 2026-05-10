@@ -74,7 +74,7 @@ mod catalogue_tests {
     use lash::{ExecutionMode, ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
 
     fn tool(name: &str) -> lash::ToolDefinition {
-        lash::ToolDefinition::new(
+        lash::ToolDefinition::raw(
             name,
             format!("Tool {name}"),
             serde_json::json!({
@@ -84,7 +84,7 @@ mod catalogue_tests {
             }),
             serde_json::json!({ "type": "string" }),
         )
-        .with_availability(ToolAvailabilityConfig::documented())
+        .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
         .with_execution_mode(ToolExecutionMode::Parallel)
     }
@@ -255,11 +255,11 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
 
 fn render_value_schema_contract(schema: &serde_json::Value) -> String {
     let input_contract =
-        lash::ToolDefinition::new("submit", "", schema.clone(), serde_json::json!({}))
+        lash::ToolDefinition::raw("submit", "", schema.clone(), serde_json::json!({}))
             .compact_contract();
 
     if input_contract.parameters.is_empty() {
-        return lash::ToolDefinition::new(
+        return lash::ToolDefinition::raw(
             "submit",
             "",
             lash::ToolDefinition::default_input_schema(),

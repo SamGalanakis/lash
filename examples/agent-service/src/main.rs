@@ -12,7 +12,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnInput};
+use lash::{ProviderHandle, ToolCall, ToolDefinition, ToolProvider, TurnInput};
 use lash_embed::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnBuilder, TurnEvent,
 };
@@ -654,38 +654,29 @@ impl ToolProvider for DemoTools {
         vec![read_board_tool(), play_move_tool()]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
-        lash::ToolResult::err_fmt("demo tools require turn context")
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> lash::ToolResult {
-        let Some(input) = context
-            .turn_context
+    async fn execute(&self, call: ToolCall<'_>) -> lash::ToolResult {
+        let Some(input) = call
+            .context
             .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
         else {
             return lash::ToolResult::err_fmt("missing board turn context");
         };
 
-        match name {
+        match call.name {
             "read_board" => lash::ToolResult::ok(board_snapshot(&input.board)),
             "play_move" => {
-                let Some(cell) = args.get("cell").and_then(|value| value.as_u64()) else {
+                let Some(cell) = call.args.get("cell").and_then(|value| value.as_u64()) else {
                     return lash::ToolResult::err_fmt("missing integer cell");
                 };
                 lash::ToolResult::ok(apply_agent_move(&input.board, cell as usize))
             }
-            _ => lash::ToolResult::err_fmt(format!("unknown demo tool `{name}`")),
+            other => lash::ToolResult::err_fmt(format!("unknown demo tool `{other}`")),
         }
     }
 }
 
 fn read_board_tool() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "read_board",
         "Read the app-owned Tic Tac Toe board. Returns the 0..8 index map, current marks by index, legal moves, winner, and whose turn it is.",
         json!({
@@ -698,7 +689,7 @@ fn read_board_tool() -> ToolDefinition {
 }
 
 fn play_move_tool() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "play_move",
         "Play one O move for the agent when it is O's turn. The move is a zero-based cell index: 0 top-left, 1 top-middle, 2 top-right, 3 middle-left, 4 center, 5 middle-right, 6 bottom-left, 7 bottom-middle, 8 bottom-right.",
         json!({
@@ -1530,7 +1521,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       sendText(`I played X in the ${cellName(index)}.`);
     }
     function applyToolBoard(event) {
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       const board = raw?.board?.cells ? raw.board : raw;
       if (board?.cells) setBoard(board);
     }
@@ -1548,7 +1539,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return out;
     }
     function compactToolPayload(event) {
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       if (event.name === 'play_move') {
         return {
           args: cleanArgs(event.args),
@@ -1649,7 +1640,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       el.querySelector('.badge').textContent = 'completed';
       el.querySelector('.tool-head span:last-child').textContent = `${event.success ? 'ok' : 'failed'} in ${event.duration_ms}ms`;
       const summary = el.querySelector('.tool-summary');
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       if (event.name === 'play_move') {
         const terminal = terminalToolSummary(raw?.board);
         summary.textContent = raw?.accepted

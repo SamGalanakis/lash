@@ -6,15 +6,14 @@ use std::sync::{Arc, Mutex};
 use serde_json::json;
 
 use lash::plugin::{
-    ExternalOpKind, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader,
-    SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride, TypedExternalOp,
-    TypedExternalOpError,
+    PluginAction, PluginActionFailure, PluginActionKind, PluginDirective, PluginError,
+    PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
+    SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash::{
     JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
-    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolCall, ToolContext,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
@@ -265,28 +264,28 @@ pub struct PlanModeEnableOp;
 pub struct PlanModeDisableOp;
 pub struct PlanModeToggleOp;
 
-impl TypedExternalOp for PlanModeEnableOp {
+impl PluginAction for PlanModeEnableOp {
     const NAME: &'static str = "plan_mode.enable";
     const DESCRIPTION: &'static str = "Enable plan mode for this session.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
 }
 
-impl TypedExternalOp for PlanModeDisableOp {
+impl PluginAction for PlanModeDisableOp {
     const NAME: &'static str = "plan_mode.disable";
     const DESCRIPTION: &'static str = "Disable plan mode for this session.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
 }
 
-impl TypedExternalOp for PlanModeToggleOp {
+impl PluginAction for PlanModeToggleOp {
     const NAME: &'static str = "plan_mode.toggle";
     const DESCRIPTION: &'static str = "Toggle plan mode for this session.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = PlanModeExternalArgs;
     type Output = PlanModeExternalStatus;
@@ -440,9 +439,9 @@ where
     H: lash::ToolStateHost + ?Sized,
 {
     let availability = if enabled {
-        Some(lash::ToolAvailability::Documented)
+        Some(lash::ToolAvailability::Showcased)
     } else {
-        Some(lash::ToolAvailability::Hidden)
+        Some(lash::ToolAvailability::Off)
     };
     match host
         .set_tool_availability(session_id, "plan_exit", availability)
@@ -544,7 +543,7 @@ struct PlanModeTools {
 }
 
 impl PlanModeTools {
-    async fn execute_plan_exit(&self, context: &ToolExecutionContext) -> ToolResult {
+    async fn execute_plan_exit(&self, context: &ToolContext) -> ToolResult {
         let enabled = match self.state.lock() {
             Ok(guard) => guard.enabled,
             Err(_) => return ToolResult::err(json!("plan mode state poisoned")),
@@ -554,7 +553,8 @@ impl PlanModeTools {
         }
 
         let report =
-            match ensure_plan_report(&self.state, &context.session_id, &context.host, true).await {
+            match ensure_plan_report(&self.state, context.session_id(), context.host(), true).await
+            {
                 Ok(report) => report,
                 Err(err) => return ToolResult::err(json!(err.to_string())),
             };
@@ -601,7 +601,7 @@ impl PlanModeTools {
         };
 
         if let Err(err) =
-            set_plan_mode_enabled_state(&self.state, &context.session_id, &context.host, false)
+            set_plan_mode_enabled_state(&self.state, context.session_id(), context.host(), false)
                 .await
         {
             return ToolResult::err(json!(err.to_string()));
@@ -630,44 +630,23 @@ impl PlanModeTools {
 impl ToolProvider for PlanModeTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "plan_exit",
                 "Ask whether to exit plan mode.",
                 ToolDefinition::default_input_schema(),
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec!["plan_exit()".into()])
-            .with_availability(lash::ToolAvailabilityConfig::hidden())
+            .with_availability(lash::ToolAvailabilityConfig::off())
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }
 
-    async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        _args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        match name {
-            "plan_exit" => self.execute_plan_exit(context).await,
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "plan_exit" => self.execute_plan_exit(call.context).await,
+            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
         }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&lash::ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 
@@ -945,17 +924,17 @@ impl SessionPlugin for PlanModePlugin {
                 .filter(|tool| !tool_surface_config.allowed_tools.contains(&tool.name))
                 .map(|tool| ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    availability: Some(lash::ToolAvailability::Hidden),
+                    availability: Some(lash::ToolAvailability::Off),
                 })
                 .collect::<Vec<_>>();
             overrides.push(ToolSurfaceOverride {
                 tool_name: "plan_exit".to_string(),
-                availability: Some(lash::ToolAvailability::Documented),
+                availability: Some(lash::ToolAvailability::Showcased),
             });
             if tool_surface_config.allowed_tools.contains("apply_patch") {
                 overrides.push(ToolSurfaceOverride {
                     tool_name: "apply_patch".to_string(),
-                    availability: Some(lash::ToolAvailability::Documented),
+                    availability: Some(lash::ToolAvailability::Showcased),
                 });
             }
 
@@ -1025,13 +1004,13 @@ fn register_plan_mode_op<Op>(
     state: Arc<Mutex<PlanModeState>>,
 ) -> Result<(), PluginError>
 where
-    Op: TypedExternalOp<Args = PlanModeExternalArgs, Output = PlanModeExternalStatus>,
+    Op: PluginAction<Args = PlanModeExternalArgs, Output = PlanModeExternalStatus>,
 {
-    reg.external().typed::<Op, _, _>(move |ctx, _args| {
+    reg.actions().typed::<Op, _, _>(move |ctx, _args| {
         let state = Arc::clone(&state);
         async move {
             let Some(session_id) = ctx.session_id else {
-                return Err(TypedExternalOpError::new(format!(
+                return Err(PluginActionFailure::new(format!(
                     "{} requires session_id",
                     Op::NAME
                 )));
@@ -1043,7 +1022,7 @@ where
                     "plan_mode.toggle" => !guard.enabled,
                     _ => unreachable!(),
                 },
-                Err(_) => return Err(TypedExternalOpError::new("plan mode state poisoned")),
+                Err(_) => return Err(PluginActionFailure::new("plan mode state poisoned")),
             };
             let enabled =
                 set_plan_mode_enabled_state(&state, &session_id, &ctx.host, target_enabled).await?;

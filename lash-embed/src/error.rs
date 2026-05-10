@@ -31,10 +31,8 @@ pub enum EmbedError {
     Plugin(#[from] lash::PluginError),
     #[error("failed to encode mode turn options: {0}")]
     ModeTurnOptions(#[from] serde_json::Error),
-    #[error("MCP server setup failed: {0}")]
-    Mcp(#[from] lash::McpError),
     #[error("runtime control unavailable: {0}")]
-    Control(#[from] lash::ExternalInvokeError),
+    Control(#[from] lash::PluginActionInvokeError),
     #[error("queued image `{id}` is missing its image blob")]
     MissingQueuedImageBlob { id: String },
 }

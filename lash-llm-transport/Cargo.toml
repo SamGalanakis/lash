@@ -7,6 +7,6 @@ license.workspace = true
 [dependencies]
 lash = { path = "../lash", default-features = false }
 lash-sansio = { path = "../lash-sansio" }
-tokio = { version = "1", features = ["time"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
-bytes = "1"
+tokio = { workspace = true, features = ["time"] }
+reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
+bytes = { workspace = true }

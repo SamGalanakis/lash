@@ -293,7 +293,28 @@ impl LashSession {
         SessionControl {
             runtime: self.runtime.clone(),
             turn_input_injection_bridge: self.turn_input_injection_bridge.clone(),
-            active_plugins: self.active_plugins.clone(),
+        }
+    }
+
+    pub async fn configure(&self, patch: SessionConfigPatch) -> Result<()> {
+        self.control().config().update(patch).await
+    }
+
+    pub fn tools(&self) -> ToolsControl {
+        ToolsControl::new(self.control())
+    }
+
+    pub fn background_tasks(&self) -> BackgroundTasks {
+        BackgroundTasks::new(self.control())
+    }
+
+    pub fn handoffs(&self) -> Handoffs {
+        Handoffs::new(self.control())
+    }
+
+    pub fn plugin_actions(&self) -> PluginActions {
+        PluginActions {
+            control: self.control(),
         }
     }
 

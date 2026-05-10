@@ -27,7 +27,9 @@ use lash::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     PluginSurfaceEvent, SessionPlugin,
 };
-use lash::{PromptContribution, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{
+    PromptContribution, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
 
 const PLUGIN_ID: &str = "update_plan";
 const PANEL_KEY: &str = "plan";
@@ -94,7 +96,7 @@ struct UpdatePlanTool {
 impl ToolProvider for UpdatePlanTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "update_plan",
                 "Publish or replace the current plan: a list of short ordered steps with statuses (pending, in_progress, completed), plus an optional explanation. At most one step can be in_progress at a time. Each call fully replaces the previous plan. Use this for substantial multi-step work to keep progress visible to the user. After updating, briefly summarize what changed and what comes next instead of repeating the full checklist.",
                 serde_json::json!({
@@ -130,10 +132,10 @@ impl ToolProvider for UpdatePlanTool {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        match name {
-            "update_plan" => execute_update_plan(&self.state, args),
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "update_plan" => execute_update_plan(&self.state, call.args),
+            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
         }
     }
 }
@@ -204,7 +206,7 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
 
 /// Format a [`PlanSnapshot`] as the checklist markdown the CLI's plan
 /// dock parser consumes (`- [x]` / `- [~]` / `- [ ]`). Matches the
-/// shape documented in `lash-cli/src/plugin_surface.rs::parse_plan_items`.
+/// shape showcased in `lash-cli/src/plugin_surface.rs::parse_plan_items`.
 fn format_plan_markdown(snapshot: &PlanSnapshot) -> String {
     let mut out = String::new();
     for item in &snapshot.plan {
@@ -332,12 +334,12 @@ mod tests {
         let tool = UpdatePlanTool {
             state: Arc::new(Mutex::new(PlanState::default())),
         };
-        let result = tool
-            .execute(
-                "update_plan",
-                &json!({"plan":[{"step":"","status":"pending"}]}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &tool,
+            "update_plan",
+            &json!({"plan":[{"step":"","status":"pending"}]}),
+        )
+        .await;
         assert!(!result.success);
     }
 
@@ -346,17 +348,17 @@ mod tests {
         let tool = UpdatePlanTool {
             state: Arc::new(Mutex::new(PlanState::default())),
         };
-        let result = tool
-            .execute(
-                "update_plan",
-                &json!({
-                    "plan":[
-                        {"step":"a","status":"in_progress"},
-                        {"step":"b","status":"in_progress"}
-                    ]
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &tool,
+            "update_plan",
+            &json!({
+                "plan":[
+                    {"step":"a","status":"in_progress"},
+                    {"step":"b","status":"in_progress"}
+                ]
+            }),
+        )
+        .await;
         assert!(!result.success);
     }
 
@@ -367,14 +369,14 @@ mod tests {
             state: Arc::clone(&state),
         };
         assert_eq!(state.lock().unwrap().generation, 0);
-        let result = tool
-            .execute(
-                "update_plan",
-                &json!({
-                    "plan":[{"step":"one","status":"pending"}]
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &tool,
+            "update_plan",
+            &json!({
+                "plan":[{"step":"one","status":"pending"}]
+            }),
+        )
+        .await;
         assert!(result.success);
         assert_eq!(state.lock().unwrap().generation, 1);
     }

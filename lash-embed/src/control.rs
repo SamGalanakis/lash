@@ -1,12 +1,11 @@
 pub use crate::session::SessionConfigPatch;
 use crate::support::*;
-pub use lash::{AcceptedInjectedTurnInput, TypedExternalOp};
+pub use lash::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
 pub struct SessionControl {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) turn_input_injection_bridge: lash::TurnInputInjectionBridge,
-    pub(crate) active_plugins: Vec<ActivePluginBinding>,
 }
 
 impl SessionControl {
@@ -28,12 +27,6 @@ impl SessionControl {
         }
     }
 
-    pub fn external(&self) -> ExternalControl {
-        ExternalControl {
-            control: self.clone(),
-        }
-    }
-
     pub fn children(&self) -> ChildrenControl {
         ChildrenControl {
             control: self.clone(),
@@ -49,24 +42,6 @@ impl SessionControl {
     pub fn mode(&self) -> ModeControl {
         ModeControl {
             control: self.clone(),
-        }
-    }
-
-    pub fn raw_turns(&self) -> RawTurnControl {
-        RawTurnControl {
-            control: self.clone(),
-        }
-    }
-
-    fn turn(&self, input: TurnInput) -> TurnBuilder {
-        TurnBuilder {
-            runtime: self.runtime.clone(),
-            active_plugins: self.active_plugins.clone(),
-            input,
-            cancel: CancellationToken::new(),
-            mode_turn_options: None,
-            provider: None,
-            model: None,
         }
     }
 
@@ -128,10 +103,6 @@ impl SessionControl {
         runtime.reset_session().await?;
         self.runtime.publish_from(&runtime);
         Ok(())
-    }
-
-    async fn refresh_session_tool_surface(&self) -> Result<()> {
-        self.refresh_tool_surface().await
     }
 
     async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
@@ -222,23 +193,27 @@ impl SessionControl {
         Ok(())
     }
 
-    async fn invoke_external(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
+    async fn invoke_plugin_action(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
         let session_id = self.runtime.observe().session_id().to_string();
         let writer = self.runtime.writer();
         writer
             .lock()
             .await
-            .invoke_external(name, args, Some(session_id))
+            .invoke_plugin_action(name, args, Some(session_id))
             .await
             .map_err(Into::into)
     }
 
-    async fn invoke_external_typed<Op: lash::TypedExternalOp>(
+    async fn call_plugin_action<Op: lash::PluginAction>(
         &self,
         args: Op::Args,
     ) -> Result<Op::Output> {
         let result = self
-            .invoke_external(
+            .invoke_plugin_action(
                 Op::NAME,
                 serde_json::to_value(args).map_err(|err| {
                     EmbedError::Plugin(lash::PluginError::Invoke(format!(
@@ -261,12 +236,6 @@ impl SessionControl {
                 Op::NAME
             )))
         })
-    }
-
-    async fn attach_mcp_servers(&self, servers: &BTreeMap<String, McpServerConfig>) -> Result<()> {
-        let tool_registry = self.tool_registry().await?;
-        lash::attach_mcp_servers(&tool_registry, servers).await?;
-        Ok(())
     }
 
     async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
@@ -350,15 +319,31 @@ impl SessionControl {
 
     async fn set_tool_availability(
         &self,
-        names: &[String],
-        availability: Option<ToolAvailability>,
+        name: &str,
+        availability: ToolAvailability,
+    ) -> Result<u64> {
+        self.set_tool_availability_many(&[(name, availability)])
+            .await
+    }
+
+    async fn set_tool_availability_many<N: AsRef<str>>(
+        &self,
+        updates: &[(N, ToolAvailability)],
     ) -> Result<u64> {
         let mut state = self.tool_state().await?;
-        for name in names {
+        for (name, availability) in updates {
             state
-                .set_availability(name, availability)
+                .set_availability(name.as_ref(), Some(*availability))
                 .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         }
+        self.apply_tool_state(state).await
+    }
+
+    async fn clear_tool_availability_override(&self, name: &str) -> Result<u64> {
+        let mut state = self.tool_state().await?;
+        state
+            .set_availability(name, None)
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
         self.apply_tool_state(state).await
     }
 
@@ -528,29 +513,51 @@ pub struct ToolsControl {
 }
 
 impl ToolsControl {
+    pub(crate) fn new(control: SessionControl) -> Self {
+        Self { control }
+    }
+}
+
+impl ToolsControl {
+    /// Re-register the current tool registry with the live runtime session.
+    ///
+    /// Use this after lower-level code mutates tool providers outside this
+    /// control surface. `add_provider` and `remove_source` refresh
+    /// automatically.
     pub async fn refresh_surface(&self) -> Result<()> {
         self.control.refresh_tool_surface().await
-    }
-
-    pub async fn refresh_session_tool_surface(&self) -> Result<()> {
-        self.control.refresh_session_tool_surface().await
     }
 
     pub async fn state(&self) -> Result<ToolState> {
         self.control.tool_state().await
     }
 
-    pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
-        self.control.apply_tool_state(state).await
+    pub fn advanced(&self) -> AdvancedToolsControl {
+        AdvancedToolsControl {
+            control: self.control.clone(),
+        }
     }
 
     pub async fn set_availability(
         &self,
-        names: &[String],
-        availability: Option<ToolAvailability>,
+        name: impl AsRef<str>,
+        availability: ToolAvailability,
     ) -> Result<u64> {
         self.control
-            .set_tool_availability(names, availability)
+            .set_tool_availability(name.as_ref(), availability)
+            .await
+    }
+
+    pub async fn set_availability_many<N: AsRef<str>>(
+        &self,
+        updates: &[(N, ToolAvailability)],
+    ) -> Result<u64> {
+        self.control.set_tool_availability_many(updates).await
+    }
+
+    pub async fn clear_availability_override(&self, name: impl AsRef<str>) -> Result<u64> {
+        self.control
+            .clear_tool_availability_override(name.as_ref())
             .await
     }
 
@@ -565,12 +572,59 @@ impl ToolsControl {
     pub async fn remove_source(&self, handle: &ToolSourceHandle) -> Result<u64> {
         self.control.remove_tool_source(handle).await
     }
+}
 
-    pub async fn attach_mcp_servers(
-        &self,
-        servers: &BTreeMap<String, McpServerConfig>,
-    ) -> Result<()> {
-        self.control.attach_mcp_servers(servers).await
+#[derive(Clone)]
+pub struct AdvancedToolsControl {
+    control: SessionControl,
+}
+
+impl AdvancedToolsControl {
+    /// Replace the entire tool-state snapshot.
+    ///
+    /// This is a generation-checked escape hatch for hosts that intentionally
+    /// edit the full snapshot. Prefer `ToolsControl` availability methods for
+    /// ordinary tool policy changes.
+    pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
+        self.control.apply_tool_state(state).await
+    }
+}
+
+#[derive(Clone)]
+pub struct BackgroundTasks {
+    control: SessionControl,
+}
+
+impl BackgroundTasks {
+    pub(crate) fn new(control: SessionControl) -> Self {
+        Self { control }
+    }
+
+    pub async fn list(&self) -> Result<Vec<ManagedTaskStatus>> {
+        self.control.list_background_tasks().await
+    }
+
+    pub async fn await_all(&self) -> Result<()> {
+        self.control.await_background_work().await
+    }
+
+    pub async fn cancel(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+        self.control.cancel_background_task(task_id).await
+    }
+}
+
+#[derive(Clone)]
+pub struct Handoffs {
+    control: SessionControl,
+}
+
+impl Handoffs {
+    pub(crate) fn new(control: SessionControl) -> Self {
+        Self { control }
+    }
+
+    pub async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
+        self.control.take_first_turn_input(session_id).await
     }
 }
 
@@ -633,63 +687,13 @@ impl StateControl {
 }
 
 #[derive(Clone)]
-pub struct ExternalControl {
-    control: SessionControl,
+pub struct PluginActions {
+    pub(crate) control: SessionControl,
 }
 
-impl ExternalControl {
-    pub async fn invoke(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
-        self.control.invoke_external(name, args).await
-    }
-
-    pub async fn invoke_typed<Op: lash::TypedExternalOp>(
-        &self,
-        args: Op::Args,
-    ) -> Result<Op::Output> {
-        self.control.invoke_external_typed::<Op>(args).await
-    }
-}
-
-#[derive(Clone)]
-pub struct RawTurnControl {
-    control: SessionControl,
-}
-
-impl RawTurnControl {
-    pub async fn stream(
-        &self,
-        input: TurnInput,
-        session_events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<TurnResult> {
-        let (runtime, input, cancel) = self.control.turn(input).cancel(cancel).prepare()?;
-        stream_prepared_turn(
-            &runtime,
-            input,
-            Some(session_events),
-            Some(turn_events),
-            cancel,
-        )
-        .await
-    }
-
-    pub async fn stream_assembled(
-        &self,
-        input: TurnInput,
-        session_events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn> {
-        let (runtime, input, cancel) = self.control.turn(input).cancel(cancel).prepare()?;
-        stream_prepared_assembled(
-            &runtime,
-            input,
-            Some(session_events),
-            Some(turn_events),
-            cancel,
-        )
-        .await
+impl PluginActions {
+    pub async fn call<Op: lash::PluginAction>(&self, args: Op::Args) -> Result<Op::Output> {
+        self.control.call_plugin_action::<Op>(args).await
     }
 }
 

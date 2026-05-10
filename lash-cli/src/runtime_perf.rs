@@ -623,7 +623,7 @@ struct BenchmarkEchoTool;
 impl ToolProvider for BenchmarkEchoTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "benchmark_echo",
                 "Return the input payload with a tiny async yield for runtime profiling.",
                 serde_json::json!({
@@ -640,14 +640,14 @@ impl ToolProvider for BenchmarkEchoTool {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        if name != "benchmark_echo" {
-            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {name}"));
+    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+        if call.name != "benchmark_echo" {
+            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name));
         }
         tokio::task::yield_now().await;
         ToolResult::ok(serde_json::json!({
-            "value": args.get("value").cloned().unwrap_or(serde_json::Value::Null),
-            "ordinal": args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
+            "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
+            "ordinal": call.args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
         }))
     }
 }

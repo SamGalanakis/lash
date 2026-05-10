@@ -263,18 +263,45 @@ pub(crate) async fn stream_prepared_assembled(
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
+    pub state: SessionStateEnvelope,
     pub outcome: TurnOutcome,
+    pub assistant_output: AssistantOutput,
+    /// Parent's own LLM tokens for this turn. Does **not** include child
+    /// sessions; see [`children_usage`](Self::children_usage) and
+    /// [`total_usage`](Self::total_usage).
     pub usage: TokenUsage,
+    /// Per-`(source, model)` ledger entries for child sessions whose LLM
+    /// calls completed during this turn (subagents, compaction, observers,
+    /// etc.). Empty unless the turn spawned children.
+    #[serde(default)]
+    pub children_usage: Vec<TokenLedgerEntry>,
+    pub tool_calls: Vec<ToolCallRecord>,
+    pub execution: ExecutionSummary,
     pub errors: Vec<TurnIssue>,
 }
 
 impl TurnResult {
     fn from_assembled(turn: lash::AssembledTurn) -> Self {
         Self {
+            state: turn.state,
             outcome: turn.outcome,
+            assistant_output: turn.assistant_output,
             usage: turn.token_usage,
+            children_usage: turn.children_usage,
+            tool_calls: turn.tool_calls,
+            execution: turn.execution,
             errors: turn.errors,
         }
+    }
+
+    /// Sum of parent's own LLM tokens and every child session's LLM tokens
+    /// for this turn.
+    pub fn total_usage(&self) -> TokenUsage {
+        let mut total = self.usage.clone();
+        for entry in &self.children_usage {
+            total.add(&entry.usage);
+        }
+        total
     }
 
     pub fn assistant_message(&self) -> Option<&str> {

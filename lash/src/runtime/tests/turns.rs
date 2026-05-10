@@ -10,7 +10,7 @@ async fn session_config_change_hook_receives_context_window_updates() {
             Ok(Arc::new(RuntimeTestPlugin {
                 before_turn: None,
                 checkpoint: None,
-                tool_result_projectors: Vec::new(),
+                tool_result_projector: None,
                 runtime_event: Some(Arc::new(move |event| {
                     let observed = Arc::clone(&observed);
                     Box::pin(async move {
@@ -74,7 +74,7 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                     })
                 })),
                 checkpoint: None,
-                tool_result_projectors: Vec::new(),
+                tool_result_projector: None,
                 runtime_event: None,
                 external_registrar: None,
             }))
@@ -433,7 +433,7 @@ async fn checkpoint_hook_can_inject_messages() {
                         }
                     })
                 })),
-                tool_result_projectors: Vec::new(),
+                tool_result_projector: None,
                 runtime_event: None,
                 external_registrar: None,
             }))
@@ -584,14 +584,14 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
             Ok(Arc::new(RuntimeTestPlugin {
                 before_turn: None,
                 checkpoint: None,
-                tool_result_projectors: Vec::new(),
+                tool_result_projector: None,
                 runtime_event: None,
                 external_registrar: Some(Arc::new(|reg| {
-                    reg.external().op(
-                        crate::ExternalOpDef {
+                    reg.actions().op(
+                        crate::PluginActionDef {
                             name: "test.spawn".to_string(),
                             description: "spawn".to_string(),
-                            kind: crate::ExternalOpKind::Command,
+                            kind: crate::PluginActionKind::Command,
                             session_param: crate::SessionParam::Optional,
                             input_schema: json!({}),
                             output_schema: json!({}),
@@ -674,7 +674,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
     );
 
     let result = runtime
-        .invoke_external("test.spawn", json!({}), None)
+        .invoke_plugin_action("test.spawn", json!({}), None)
         .await
         .expect("invoke");
     assert!(result.success);

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lash::provider::LashConfig;
+use crate::config::LashConfig;
 use lash::*;
 use lash_embed::control::SessionConfigPatch;
 use lash_embed::{LashSession, ModelSelection};

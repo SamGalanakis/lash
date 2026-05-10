@@ -2,8 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::{
-    LlmOutputPart, LlmResponse, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
-    TurnInput,
+    LlmOutputPart, LlmResponse, ToolCall, ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
 use lash_embed::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
@@ -101,7 +100,7 @@ struct TestTools {
 #[async_trait]
 impl ToolProvider for TestTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+        vec![ToolDefinition::raw(
             "typed_probe",
             "Probe typed turn context.",
             json!({
@@ -113,19 +112,10 @@ impl ToolProvider for TestTools {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
-        ToolResult::err_fmt("typed_probe requires context")
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        _args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        assert_eq!(name, "typed_probe");
-        let Some(input) = context
-            .turn_context
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        assert_eq!(call.name, "typed_probe");
+        let Some(input) = call
+            .context
             .plugin_context::<TestTurnContext>(TestPlugin::ID)
         else {
             return ToolResult::err_fmt("missing typed input");

@@ -183,25 +183,6 @@ fn provider_spec_roundtrips_as_flat_object() {
 }
 
 #[test]
-fn lash_config_roundtrips_existing_shape() {
-    let raw = serde_json::json!({
-        "active_provider": "openai-compatible",
-        "providers": {
-            "openai-compatible": {
-                "type": "openai-compatible",
-                "api_key": "k",
-                "base_url": "https://example.com/v1"
-            }
-        }
-    });
-    let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
-    assert_eq!(cfg.active_provider, "openai-compatible");
-    let spec = cfg.active_provider_spec();
-    assert_eq!(spec.kind, "openai-compatible");
-    assert_eq!(spec.config["api_key"], serde_json::json!("k"));
-}
-
-#[test]
 fn provider_options_serialize_only_reliability_shape() {
     let options = ProviderOptions {
         reliability: ProviderReliability::builder()
@@ -222,79 +203,6 @@ fn provider_options_serialize_only_reliability_shape() {
     assert_eq!(
         value["reliability"]["timeouts"]["chunk_timeout"],
         serde_json::json!(567)
-    );
-}
-
-#[test]
-fn rejects_unknown_top_level_config_fields() {
-    let raw = serde_json::json!({
-        "active_provider": "openai-compatible",
-        "providers": {
-            "openai-compatible": {
-                "type": "openai-compatible",
-                "api_key": "k",
-                "base_url": "https://example.com/v1"
-            }
-        },
-        "tavily_api_key": "legacy-key"
-    });
-    let err = serde_json::from_value::<LashConfig>(raw).expect_err("unknown field rejected");
-    assert!(err.to_string().contains("unknown field `tavily_api_key`"));
-}
-
-#[test]
-fn auxiliary_secrets_preserved() {
-    let raw = serde_json::json!({
-        "active_provider": "openai-compatible",
-        "providers": {
-            "openai-compatible": {
-                "type": "openai-compatible",
-                "api_key": "k",
-                "base_url": "https://example.com/v1"
-            }
-        },
-        "auxiliary_secrets": {
-            "tavily_api_key": "new-key"
-        }
-    });
-    let cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-    assert_eq!(cfg.tavily_api_key(), Some("new-key"));
-}
-
-#[test]
-fn model_defaults_are_provider_scoped() {
-    let raw = serde_json::json!({
-        "active_provider": "openai-compatible",
-        "providers": {
-            "openai-compatible": {
-                "type": "openai-compatible",
-                "api_key": "k",
-                "base_url": "https://example.com/v1"
-            }
-        },
-        "model_defaults": {
-            "openai-compatible": {
-                "model": "gpt-5.4",
-                "variant": "high"
-            }
-        }
-    });
-    let mut cfg: LashConfig = serde_json::from_value(raw).expect("valid config json");
-    assert_eq!(
-        cfg.model_default("openai-compatible"),
-        Some(&ModelDefault {
-            model: "gpt-5.4".to_string(),
-            variant: Some("high".to_string()),
-        })
-    );
-
-    cfg.set_model_default("anthropic", "claude-sonnet-4.6", None);
-    assert_eq!(
-        cfg.model_default("anthropic"),
-        Some(&ModelDefault {
-            model: "claude-sonnet-4.6".to_string(),
-            variant: None,
-        })
     );
 }
 

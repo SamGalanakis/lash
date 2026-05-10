@@ -15,21 +15,68 @@ pub struct SandboxMessage {
 /// Sender for streaming progress messages from tools (e.g. live bash output).
 pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 
+/// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
+/// the runtime can add capabilities without breaking tool authors.
 #[derive(Clone)]
-pub struct ToolExecutionContext {
-    pub session_id: String,
-    pub host: Arc<dyn ToolHookHost>,
-    pub cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    pub async_task_id: Option<String>,
-    pub turn_context: crate::TurnContext,
+pub struct ToolContext {
+    pub(crate) session_id: String,
+    pub(crate) host: Arc<dyn ToolHookHost>,
+    pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) async_task_id: Option<String>,
+    pub(crate) turn_context: crate::TurnContext,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
     /// `DirectRequest::originating_tool_call_id` they issue so the trace
     /// renderer can group fan-out LLM calls under the parent tool entry.
-    pub tool_call_id: Option<String>,
+    pub(crate) tool_call_id: Option<String>,
 }
 
-impl ToolExecutionContext {
+impl ToolContext {
+    pub(crate) fn new(
+        session_id: String,
+        host: Arc<dyn ToolHookHost>,
+        turn_context: crate::TurnContext,
+        tool_call_id: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            host,
+            cancellation_token: None,
+            async_task_id: None,
+            turn_context,
+            tool_call_id,
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn host(&self) -> &Arc<dyn ToolHookHost> {
+        &self.host
+    }
+
+    pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
+        self.cancellation_token.as_ref()
+    }
+
+    pub fn async_task_id(&self) -> Option<&str> {
+        self.async_task_id.as_deref()
+    }
+
+    pub fn turn_context(&self) -> &crate::TurnContext {
+        &self.turn_context
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    /// Shortcut for [`TurnContext::plugin_context`](crate::TurnContext::plugin_context).
+    pub fn plugin_context<T: 'static>(&self, plugin_id: &'static str) -> Option<&T> {
+        self.turn_context.plugin_context::<T>(plugin_id)
+    }
+
     pub fn with_async_task(
         mut self,
         task_id: impl Into<String>,
@@ -39,44 +86,44 @@ impl ToolExecutionContext {
         self.cancellation_token = Some(cancellation_token);
         self
     }
+
+    /// Constructor reserved for `lash::testing` helpers. Do not call directly;
+    /// use [`lash::testing::mock_tool_context`] instead.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn __for_testing(
+        session_id: String,
+        host: Arc<dyn ToolHookHost>,
+        turn_context: crate::TurnContext,
+        tool_call_id: Option<String>,
+    ) -> Self {
+        Self::new(session_id, host, turn_context, tool_call_id)
+    }
+}
+
+/// Per-call inputs handed to [`ToolProvider::execute`].
+///
+/// Fields are `pub` because `ToolCall` is a transient borrow; consumers
+/// typically destructure (`let ToolCall { name, args, .. } = call`). The
+/// stable surface lives on [`ToolContext`] (sealed) and the runtime's
+/// dispatcher, which constructs `ToolCall` values.
+pub struct ToolCall<'a> {
+    pub name: &'a str,
+    pub args: &'a serde_json::Value,
+    pub context: &'a ToolContext,
+    pub progress: Option<&'a ProgressSender>,
 }
 
 /// Trait for providing tools to the sandbox. Implement this per-project.
+///
+/// Implementations supply a list of [`ToolDefinition`]s and a single
+/// [`execute`](Self::execute) method that handles every call. Tools that
+/// need session state read it from `call.context`; tools that stream
+/// progress send through `call.progress`.
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition>;
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult;
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _context: &ToolExecutionContext,
-    ) -> ToolResult {
-        self.execute(name, args).await
-    }
-
-    /// Execute with progress streaming. Default: delegates to execute().
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute(name, args).await
-    }
-
-    /// Execute with progress streaming and session context. Default: delegates to
-    /// `execute_with_context()`.
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
-    }
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
 }
 
 pub(crate) struct CompositeToolProvider {
@@ -113,62 +160,10 @@ impl ToolProvider for CompositeToolProvider {
         self.tools.values().map(|(def, _)| def.clone()).collect()
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        match self.tools.get(name) {
-            Some((_, provider_idx)) => self.providers[*provider_idx].0.execute(name, args).await,
-            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        }
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        match self.tools.get(name) {
-            Some((_, provider_idx)) => {
-                self.providers[*provider_idx]
-                    .0
-                    .execute_with_context(name, args, context)
-                    .await
-            }
-            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        }
-    }
-
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        match self.tools.get(name) {
-            Some((_, provider_idx)) => {
-                self.providers[*provider_idx]
-                    .0
-                    .execute_streaming(name, args, progress)
-                    .await
-            }
-            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
-        }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        match self.tools.get(name) {
-            Some((_, provider_idx)) => {
-                self.providers[*provider_idx]
-                    .0
-                    .execute_streaming_with_context(name, args, context, progress)
-                    .await
-            }
-            None => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match self.tools.get(call.name) {
+            Some((_, provider_idx)) => self.providers[*provider_idx].0.execute(call).await,
+            None => ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         }
     }
 }

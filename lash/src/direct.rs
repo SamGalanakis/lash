@@ -51,9 +51,9 @@ pub struct DirectRequest {
     pub stream_events: Option<LlmEventSender>,
     pub session_id: Option<String>,
     /// Set this when issuing a direct completion from inside a tool's
-    /// `execute_with_context`. Carries the calling tool's call id all
-    /// the way to the trace event so the renderer can group fan-outs
-    /// (e.g. tournament_rerank's batch reranks) under their parent.
+    /// `execute`. Carries the calling tool's call id all the way to the
+    /// trace event so the renderer can group fan-outs (e.g.
+    /// tournament_rerank's batch reranks) under their parent.
     pub originating_tool_call_id: Option<String>,
 }
 

@@ -14,7 +14,6 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{SweBenchInstance, load_instances};
 use lash::plugin::PluginFactory;
-use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
@@ -23,6 +22,7 @@ use lash::{
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
+use lash_cli::config::LashConfig;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;

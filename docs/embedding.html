@@ -92,7 +92,9 @@ let visible_answer: String = collected.activities.iter().filter_map(|activity| m
     TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
     _ =&gt; None,
 }).collect();
-let usage = collected.result.usage;
+let parent_usage = collected.result.usage;          // parent's own LLM tokens
+let children = &amp;collected.result.children_usage;    // per-(source, model) child entries
+let total = collected.result.total_usage();         // parent + children
 let outcome = collected.result.outcome;</code></pre>
             </article>
             <article class="panel">
@@ -104,7 +106,7 @@ let turn = session
     .stream(ui_sink.as_ref())
     .await?;
 
-persist(app_turn_state.assistant_text(), turn.usage)?;</code></pre>
+persist(app_turn_state.assistant_text(), turn.total_usage())?;</code></pre>
             </article>
           </div>
           <p>Apps own their projection policy. Fold <code>TurnActivity</code> directly when persisting assistant prose, terminal values, tool summaries, or timelines.</p>
@@ -159,6 +161,9 @@ impl TurnActivitySink for AppEvents {
             TurnEvent::Usage { usage, cumulative, .. } =&gt; {
                 update_usage(usage, cumulative).await;
             }
+            TurnEvent::ChildUsage { source, usage, cumulative, .. } =&gt; {
+                update_child_usage(source, usage, cumulative).await;
+            }
             TurnEvent::ReasoningDelta { .. }
             | TurnEvent::CodeBlockCompleted { .. }
             | TurnEvent::Error { .. }
@@ -179,6 +184,24 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
             <strong>Do not synthesize a second final answer.</strong>
             <p><code>TurnEvent::SubmittedValue</code> and <code>TurnEvent::ToolValue</code> mean “a new terminal value was authored by a control path.” They are not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code>.</p>
           </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Token Usage</h2>
+            <p>Four channels surface token usage, finest granularity to coarsest. Pick the one that matches what you want to display or persist.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>TraceSink</code></dt>
+            <dd>Every provider call across every session in the runtime. Right for billing, audit, off-line analysis. Heavier than necessary for plain totals.</dd>
+            <dt><code>TurnEvent::Usage</code> / <code>TurnEvent::ChildUsage</code></dt>
+            <dd>Live during a turn, one event per LLM iteration. <code>Usage</code> is the parent's own model call; <code>ChildUsage</code> carries <code>session_id</code> and <code>source</code> so a UI can group child traffic (subagent, compaction, observer). Right for live counters.</dd>
+            <dt><code>TurnResult.usage</code> / <code>TurnResult.children_usage</code></dt>
+            <dd>Per-turn snapshot at completion. <code>usage</code> is parent-only; <code>children_usage</code> is a per-<code>(source, model)</code> breakdown for any child sessions that ran during the turn. <code>TurnResult::total_usage()</code> sums both.</dd>
+            <dt><code>session.usage_report()</code> → <code>SessionUsageReport</code></dt>
+            <dd>Aggregate across the whole session, broken down by <code>source × model</code>. Right for dashboards and "session so far."</dd>
+          </dl>
+          <p>The full re-export and well-known <code>source</code> label constants live in <code>lash_embed::usage</code>.</p>
         </div>
 
         <div class="section">
@@ -333,16 +356,11 @@ impl lash::ToolProvider for BoardTools {
         vec![/* read_board, play_move, app tools */]
     }
 
-    async fn execute_with_context(
-        &amp;self,
-        name: &amp;str,
-        args: &amp;serde_json::Value,
-        context: &amp;lash::ToolExecutionContext,
-    ) -&gt; lash::ToolResult {
-        let Some(input) = context.turn_context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
+    async fn execute(&amp;self, call: lash::ToolCall&lt;'_&gt;) -&gt; lash::ToolResult {
+        let Some(input) = call.context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
             return lash::ToolResult::err_fmt("missing board context");
         };
-        run_board_tool(name, args, &amp;input.board)
+        run_board_tool(call.name, call.args, &amp;input.board)
     }
 }</code></pre>
           </div>
@@ -403,7 +421,7 @@ let result = session
     .advanced()
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
-          <p>Raw turn streaming that needs both session events and turn activities is also an escape hatch: call <code>session.control().raw_turns().stream(...)</code> instead of adding raw sinks to <code>TurnBuilder</code>.</p>
+          <p>Turn streaming is semantic by default: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> items and resolves with a rich <code>TurnResult</code>. Raw runtime telemetry belongs in tracing and lower-level runtime debugging, not the normal embed surface.</p>
         </div>
 
         <div class="section">

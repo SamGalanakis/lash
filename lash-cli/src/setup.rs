@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::config::LashConfig;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use lash::provider::{LashConfig, ProviderHandle};
+use lash::provider::ProviderHandle;
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_auth as oauth;
 use lash_provider_codex::CodexProvider;

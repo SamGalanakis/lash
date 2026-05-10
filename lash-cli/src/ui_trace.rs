@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use lash::{PluginSurfaceEvent, PromptRequest, SessionEvent};
+use lash::{PluginSurfaceEvent, PromptRequest, TurnActivity, TurnEvent};
 use lash_tui::{PerfCounters, ScreenSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -200,7 +200,6 @@ pub(crate) enum TraceSessionEvent {
     Error {
         message: String,
     },
-    Done,
     PluginEvent {
         plugin_id: String,
         event: TracePluginSurfaceEvent,
@@ -208,12 +207,12 @@ pub(crate) enum TraceSessionEvent {
 }
 
 impl TraceSessionEvent {
-    pub(crate) fn from_session_event(event: &SessionEvent) -> Option<Self> {
-        match event {
-            SessionEvent::TextDelta { content } => Some(Self::TextDelta {
-                content: content.clone(),
+    pub(crate) fn from_turn_activity(activity: &TurnActivity) -> Option<Self> {
+        match &activity.event {
+            TurnEvent::AssistantProseDelta { text } => Some(Self::TextDelta {
+                content: text.clone(),
             }),
-            SessionEvent::ToolCall {
+            TurnEvent::ToolCallCompleted {
                 call_id,
                 name,
                 args,
@@ -228,38 +227,32 @@ impl TraceSessionEvent {
                 success: *success,
                 duration_ms: *duration_ms,
             }),
-            SessionEvent::Message { text, kind } => Some(Self::Message {
-                text: text.clone(),
-                kind: kind.clone(),
+            TurnEvent::CodeBlockStarted { code, .. } => Some(Self::Message {
+                text: code.clone(),
+                kind: "lashlang_code".to_string(),
             }),
-            SessionEvent::LlmRequest {
-                mode_iteration,
-                message_count,
-                tool_list,
-            } => Some(Self::LlmRequest {
+            TurnEvent::ModelRequestStarted { mode_iteration } => Some(Self::LlmRequest {
                 mode_iteration: *mode_iteration,
-                message_count: *message_count,
-                tool_list: tool_list.clone(),
+                message_count: 0,
+                tool_list: String::new(),
             }),
-            SessionEvent::Error { message, .. } => Some(Self::Error {
+            TurnEvent::Error { message } => Some(Self::Error {
                 message: message.clone(),
             }),
-            SessionEvent::Done => Some(Self::Done),
-            SessionEvent::PluginEvent { plugin_id, event } => Some(Self::PluginEvent {
+            TurnEvent::PluginSurface { plugin_id, event } => Some(Self::PluginEvent {
                 plugin_id: plugin_id.clone(),
                 event: TracePluginSurfaceEvent::from_event(event),
             }),
-            SessionEvent::ToolCallStart { .. }
-            | SessionEvent::LlmResponse { .. }
-            | SessionEvent::TokenUsage { .. }
-            | SessionEvent::ChildTokenUsage { .. }
-            | SessionEvent::RetryStatus { .. }
-            | SessionEvent::InjectedTurnInputAccepted { .. }
-            | SessionEvent::InjectedMessagesCommitted { .. }
-            | SessionEvent::TurnOutcome { .. }
-            // Reasoning deltas are session-local display signals; UI
-            // trace logs don't need to replay them.
-            | SessionEvent::ReasoningDelta { .. } => None,
+            TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::Usage { .. }
+            | TurnEvent::ChildUsage { .. }
+            | TurnEvent::RetryStatus { .. }
+            | TurnEvent::QueuedInputAccepted { .. }
+            | TurnEvent::QueuedMessagesCommitted { .. }
+            | TurnEvent::CodeBlockCompleted { .. }
+            | TurnEvent::SubmittedValue { .. }
+            | TurnEvent::ToolValue { .. }
+            | TurnEvent::ReasoningDelta { .. } => None,
         }
     }
 }
@@ -540,8 +533,8 @@ impl UiTraceRecorder {
         self.fixture.ops.push(UiTraceOp::ScrollDown { amount });
     }
 
-    pub(crate) fn record_session_event(&mut self, event: &SessionEvent) {
-        if let Some(event) = TraceSessionEvent::from_session_event(event) {
+    pub(crate) fn record_turn_activity(&mut self, activity: &TurnActivity) {
+        if let Some(event) = TraceSessionEvent::from_turn_activity(activity) {
             self.fixture.ops.push(UiTraceOp::Event { event });
         }
     }
@@ -654,9 +647,12 @@ mod tests {
         let mut recorder = UiTraceRecorder::new(&trace_path, 80, 24, None);
         recorder.record_user_turn(&PreparedTurn::new("hello".into(), Vec::new()));
         recorder.record_start_turn();
-        recorder.record_session_event(&SessionEvent::TextDelta {
-            content: "world".into(),
-        });
+        recorder.record_turn_activity(&TurnActivity::new(
+            lash::TurnActivityId::new("assistant"),
+            TurnEvent::AssistantProseDelta {
+                text: "world".into(),
+            },
+        ));
         recorder.finish("hello\nworld").expect("submit trace");
 
         let trace_json =
