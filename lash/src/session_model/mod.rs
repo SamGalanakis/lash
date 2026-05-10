@@ -45,14 +45,6 @@ impl ModeEvent {
         }
         serde_json::from_value(self.payload.clone()).map(Some)
     }
-
-    pub fn rlm(event: lash_rlm_types::RlmModeEvent) -> Self {
-        Self::typed(ExecutionMode::new("rlm"), event).expect("RLM mode events serialize")
-    }
-
-    pub fn rlm_event(&self) -> Option<lash_rlm_types::RlmModeEvent> {
-        self.decode(&ExecutionMode::new("rlm")).ok().flatten()
-    }
 }
 
 impl serde::Serialize for ModeEvent {
@@ -89,12 +81,9 @@ impl<'de> serde::Deserialize<'de> for ModeEvent {
                 payload: payload.clone(),
             });
         }
-        let _: lash_rlm_types::RlmModeEvent =
-            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            mode_id: ExecutionMode::new("rlm"),
-            payload: value,
-        })
+        Err(serde::de::Error::custom(
+            "mode events must be tagged with mode_id and payload",
+        ))
     }
 }
 
@@ -208,22 +197,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_event_reads_legacy_rlm_event_and_writes_tagged_payload() {
-        let legacy = serde_json::json!({
-            "RlmGlobalsPatch": {
-                "set": { "answer": 42 },
-                "unset": []
-            }
-        });
-        let event: ModeEvent = serde_json::from_value(legacy).expect("legacy event");
-        assert_eq!(event.mode_id, ExecutionMode::new("rlm"));
-        assert!(matches!(
-            event.rlm_event(),
-            Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_))
-        ));
-
+    fn mode_event_writes_tagged_payload() {
+        let event = ModeEvent::typed(
+            ExecutionMode::new("test"),
+            serde_json::json!({ "value": 42 }),
+        )
+        .expect("typed event");
         let serialized = serde_json::to_value(event).expect("serialize");
-        assert_eq!(serialized["mode_id"], "rlm");
+        assert_eq!(serialized["mode_id"], "test");
         assert!(serialized.get("payload").is_some());
     }
 }

@@ -6,7 +6,7 @@
 //! for manual compaction, overflow recovery, and window-shrink events.
 //!
 //! Registered as a default plugin by
-//! the first-party default tool bundles from `lash-default-tools`,
+//! the first-party default tool bundles from `lash-standard-plugins`,
 //! so standard lash sessions pick it up automatically.
 
 use std::collections::{HashMap, HashSet};

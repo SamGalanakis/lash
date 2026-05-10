@@ -652,11 +652,12 @@ mod test_mode_fakes {
             request: &crate::SessionCreateRequest,
         ) {
             if self.mode == ExecutionMode::new("rlm")
-                && let Ok(Some(extras)) = request
+                && let Ok(Some(termination)) = request
                     .mode_extras
-                    .decode::<lash_rlm_types::RlmCreateExtras>(&ExecutionMode::new("rlm"))
+                    .decode::<serde_json::Value>(&ExecutionMode::new("rlm"))
+                && let Some(termination) = termination.get("termination").cloned()
                 && let Ok(options) =
-                    crate::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
+                    crate::ModeTurnOptions::typed(ExecutionMode::new("rlm"), termination)
             {
                 ctx.set_mode_turn_options(options);
             }

@@ -23,11 +23,11 @@ use lash::{
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
     diff_usage_reports,
 };
-use lash_default_tools::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_sqlite_store::Store;
+use lash_standard_plugins::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash::{ExecutionMode, ProviderHandle, SessionPolicy, ToolDefinition};
+use lash::{ExecutionMode, ProviderHandle, SessionPolicy};
 
 /// State the registry exposes to a `Capability` while it resolves a spawn.
 pub struct CapabilityContext<'a> {
@@ -32,29 +32,12 @@ pub enum CapabilityOptionalField<T> {
     Clear,
 }
 
-/// Tool definitions a child session should receive.
-#[derive(Clone, Debug)]
-pub enum CapabilityToolSurface {
-    InheritParent,
-    BuiltinExplore,
-    Explicit(Vec<ToolDefinition>),
-}
-
-/// Whether a spawned session may expose recursive subagent tools.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapabilityRecursion {
-    Inherit,
-    Disabled,
-}
-
 /// Resolved spawn configuration.
 #[derive(Clone, Debug)]
 pub struct CapabilitySpec {
     pub model: CapabilityField<String>,
     pub model_variant: CapabilityOptionalField<String>,
     pub execution_mode: CapabilityField<ExecutionMode>,
-    pub tool_surface: CapabilityToolSurface,
-    pub recursion: CapabilityRecursion,
 }
 
 impl CapabilitySpec {
@@ -63,8 +46,6 @@ impl CapabilitySpec {
             model: CapabilityField::Inherit,
             model_variant: CapabilityOptionalField::Inherit,
             execution_mode: CapabilityField::Inherit,
-            tool_surface: CapabilityToolSurface::InheritParent,
-            recursion: CapabilityRecursion::Inherit,
         }
     }
 }
@@ -146,21 +127,10 @@ impl Capability for TierCapability {
             Some(variant) => CapabilityOptionalField::Set(variant),
             None => CapabilityOptionalField::Inherit,
         };
-        let is_explore = self.name == "explore";
         CapabilitySpec {
             model: CapabilityField::Set(model),
             model_variant,
             execution_mode,
-            tool_surface: if is_explore {
-                CapabilityToolSurface::BuiltinExplore
-            } else {
-                CapabilityToolSurface::InheritParent
-            },
-            recursion: if is_explore {
-                CapabilityRecursion::Disabled
-            } else {
-                CapabilityRecursion::Inherit
-            },
         }
     }
 }

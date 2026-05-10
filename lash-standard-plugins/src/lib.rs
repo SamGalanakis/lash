@@ -1,11 +1,5 @@
-pub mod tools;
-
 use std::sync::Arc;
 
-use crate::tools::{
-    ApplyPatchTool, FetchUrl, Glob, Grep, Ls, ReadFilePluginFactory, StandardShellPluginFactory,
-    WebSearch,
-};
 use lash::instructions::InstructionSource;
 use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
@@ -15,6 +9,11 @@ use lash::{
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
+use lash_tool_apply_patch::ApplyPatchTool;
+use lash_tool_files::{Glob, Ls, ReadFilePluginFactory};
+use lash_tool_search::Grep;
+use lash_tool_shell::StandardShellPluginFactory;
+use lash_tool_web::{FetchUrl, WebSearch};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefaultToolBundle {

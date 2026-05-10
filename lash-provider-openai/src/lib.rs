@@ -8,11 +8,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use lash::SchemaProjectionOverride;
-use lash::llm::streaming::{drive_sse_response, emit_progress};
-use lash::llm::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
-    send_request,
-};
 use lash::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
@@ -21,6 +16,11 @@ use lash::llm::types::{
 use lash::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
+};
+use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
+use lash_llm_transport::timeouts::{
+    build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
+    send_request,
 };
 use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, project_schema, project_structured_output,

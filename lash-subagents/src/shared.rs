@@ -7,21 +7,19 @@
 //! Per-mode prose, tool descriptions, and dispatch live in `standard.rs`
 //! and `rlm.rs`.
 
-use std::collections::HashSet;
-
 use lash::plugin::PluginError;
 use lash::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
     SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
-    ToolProvider, ToolResult, ToolSurfaceContribution, TurnInput,
+    ToolResult, ToolSurfaceContribution, TurnInput,
 };
 use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
 use serde_json::{Value, json};
 
 use crate::capability::{
-    CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRecursion,
-    CapabilityRegistry, CapabilitySpec, CapabilityToolSurface,
+    CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
 };
+use crate::{SubagentSessionConfigurator, SubagentSpawnContext};
 
 pub(crate) fn fresh_child_request(
     parent_session_id: String,
@@ -114,6 +112,7 @@ pub(crate) async fn build_spawn_create_request(
     capability_name: &str,
     output_schema: Option<Value>,
     seed: ClassifiedSeed,
+    configurator: &dyn SubagentSessionConfigurator,
 ) -> Result<SessionCreateRequest, String> {
     let current_snapshot = context
         .host
@@ -122,10 +121,11 @@ pub(crate) async fn build_spawn_create_request(
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
     let spec = resolve_capability_spec(registry, &current_snapshot.policy, capability_name)?;
     let mut policy = session_policy_from_spec(&spec, &current_snapshot.policy);
-    if !matches!(spec.tool_surface, CapabilityToolSurface::BuiltinExplore)
-        && output_schema.is_some()
-    {
-        policy.execution_mode = lash::ExecutionMode::new("rlm");
+    if output_schema.is_some() && policy.execution_mode != lash::ExecutionMode::new("rlm") {
+        return Err(format!(
+            "structured output is RLM-only; child capability `{capability_name}` runs in `{}` mode",
+            policy.execution_mode.plugin_id()
+        ));
     }
     if !seed.projected.is_empty() && policy.execution_mode != lash::ExecutionMode::new("rlm") {
         return Err(format!(
@@ -157,7 +157,6 @@ pub(crate) async fn build_spawn_create_request(
     }
     normalize_context_policy(&mut policy);
 
-    let hidden_tools = hidden_tools_for_spec(&spec, 0);
     let mut request = fresh_child_request(
         context.session_id.clone(),
         SessionStartPoint::Empty,
@@ -165,13 +164,20 @@ pub(crate) async fn build_spawn_create_request(
         mode_extras,
         "subagent",
     );
-    request.tool_access = SessionToolAccess {
-        tools: tools_for_surface(&spec.tool_surface, output_schema),
-        hidden_tools: hidden_tools.into_iter().collect(),
-    };
+    request.tool_access = SessionToolAccess::default();
     if !seed.globals.is_empty() {
         request.initial_nodes = lash_mode_rlm::rlm_seed_initial_nodes(seed.globals);
     }
+    let child_policy = request.policy.as_ref().expect("child policy set").clone();
+    configurator.configure(
+        &SubagentSpawnContext {
+            parent_session_id: &context.session_id,
+            capability: capability_name,
+            parent_policy: &current_snapshot.policy,
+            child_policy: &child_policy,
+        },
+        &mut request,
+    )?;
     Ok(request)
 }
 
@@ -299,48 +305,9 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
 /// the capability's explicit surface. `update_plan` is
 /// already gated to root-only by `UpdatePlanPluginFactory`, so it is
 /// not listed here.
-pub(crate) const SUBAGENT_INTERACTIVE_DENY: &[&str] =
-    &["ask", "show_snippet_to_user", "showcase", "plan_exit"];
-
 pub(crate) const SUBAGENT_SUITE_DENY: &[&str] = &["spawn_agent"];
 
 pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
-
-pub(crate) fn explore_tools(output_schema: Option<Value>) -> Vec<ToolDefinition> {
-    let mut tools = Vec::new();
-    tools.extend(lash_default_tools::tools::ReadFile::new().definitions());
-    tools.extend(lash_default_tools::tools::Grep::new().definitions());
-    tools.extend(lash_default_tools::tools::WebSearch::new("").definitions());
-    tools.extend(lash_default_tools::tools::FetchUrl::new("").definitions());
-    tools.extend(lash_default_tools::tools::StandardShell::new().definitions());
-    tools.retain(|tool| {
-        matches!(
-            tool.name.as_str(),
-            "read_file"
-                | "grep"
-                | "search_web"
-                | "fetch_url"
-                | "exec_command"
-                | "start_command"
-                | "write_stdin"
-        )
-    });
-    let _ = output_schema;
-    tools.push(lash_llm_tools::llm_query_tool_definition());
-    tools.push(lash_mode_rlm::continue_as_tool_definition());
-    tools
-}
-
-fn tools_for_surface(
-    surface: &CapabilityToolSurface,
-    output_schema: Option<Value>,
-) -> Vec<ToolDefinition> {
-    match surface {
-        CapabilityToolSurface::InheritParent => Vec::new(),
-        CapabilityToolSurface::BuiltinExplore => explore_tools(output_schema),
-        CapabilityToolSurface::Explicit(tools) => tools.clone(),
-    }
-}
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
@@ -366,19 +333,6 @@ pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
     ToolResult::ok(args.clone()).with_control(lash::ToolControl::Fail {
         value: args.clone(),
     })
-}
-
-pub(crate) fn hidden_tools_for_spec(spec: &CapabilitySpec, child_depth: u8) -> HashSet<String> {
-    let mut denied = HashSet::new();
-    denied.extend(
-        SUBAGENT_INTERACTIVE_DENY
-            .iter()
-            .map(|name| name.to_string()),
-    );
-    if spec.recursion == CapabilityRecursion::Disabled || child_depth >= MAX_SUBAGENT_DEPTH {
-        denied.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
-    }
-    denied
 }
 
 /// Apply the spawned subagent's tool authority as a tool surface override.

@@ -31,9 +31,8 @@ use lash_mode_rlm::{
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_sqlite_store::Store;
 use lash_subagents::{
-    CapabilityField, CapabilityOptionalField, CapabilityRecursion, CapabilityRegistry,
-    CapabilitySpec, CapabilityToolSurface, LocalSubagentHost, StaticCapability, SubagentHost,
-    SubagentsPluginFactory,
+    CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
+    LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -816,14 +815,14 @@ fn extract_text(content: Option<&Value>) -> String {
 ///   explicitly forbids external tool use.
 ///
 /// Children spawned via `spawn_agent` inherit the same explicit tool surface
-/// (via `CapabilityToolSurface::Explicit`), so recursive descents stay inside
+///, so recursive descents stay inside
 /// the locked-down set instead of accidentally picking up whatever happens to
 /// be registered at the root.
 fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<lash::PluginSession>> {
-    let longcot_tools = longcot_tool_definitions();
+    let _longcot_tools = longcot_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
         Arc::new(BuiltinRlmModePluginFactory::new(RlmModePluginConfig {
@@ -847,8 +846,6 @@ fn build_plugin_session(
                         model: CapabilityField::Inherit,
                         model_variant: CapabilityOptionalField::Inherit,
                         execution_mode: CapabilityField::Inherit,
-                        tool_surface: CapabilityToolSurface::Explicit(longcot_tools.clone()),
-                        recursion: CapabilityRecursion::Inherit,
                     },
                 ))),
             ),

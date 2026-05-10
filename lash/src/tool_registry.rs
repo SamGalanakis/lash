@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 

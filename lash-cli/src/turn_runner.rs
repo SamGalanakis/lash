@@ -45,13 +45,16 @@ where
         tracing::debug!(stream_id, "runtime turn task spawned");
         let result = match session
             .control()
-            .stream_raw_assembled(turn_input, &sink, &lash::NoopTurnActivitySink, task_cancel)
+            .external()
+            .stream_assembled(turn_input, &sink, &lash::NoopTurnActivitySink, task_cancel)
             .await
         {
             Ok(turn) => turn,
             Err(err) => {
                 let state = session
-                    .persist_current_state()
+                    .control()
+                    .state()
+                    .persist_current()
                     .await
                     .unwrap_or_else(|_| PersistedSessionState::default());
                 let state = SessionStateEnvelope {

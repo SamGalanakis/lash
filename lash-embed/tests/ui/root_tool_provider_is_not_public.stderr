@@ -1,0 +1,16 @@
+error[E0603]: trait `ToolProvider` is private
+ --> tests/ui/root_tool_provider_is_not_public.rs:2:36
+  |
+2 |     let _: Option<&dyn lash_embed::ToolProvider> = None;
+  |                                    ^^^^^^^^^^^^ private trait
+  |
+note: the trait `ToolProvider` is defined here
+ --> src/lib.rs
+  |
+  |     TerminationPolicy, TokioSessionTaskExecutor, ToolAvailability, ToolDefinition, ToolProvider,
+  |                                                                                    ^^^^^^^^^^^^
+help: import `ToolProvider` directly
+  |
+2 -     let _: Option<&dyn lash_embed::ToolProvider> = None;
+2 +     let _: Option<&dyn lash::tool_provider::ToolProvider> = None;
+  |

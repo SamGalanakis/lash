@@ -16,7 +16,7 @@ Patch-based editing, shell execution, file search, web search, planning, skills,
   - `lash-sansio`: pure turn machine, prompt model, messages, effects, and responses.
   - `lash`: async runtime, plugin host, providers, persistence, session graph, child-session orchestration, and built-in tools.
   - `lash-mode-standard` / `lash-mode-rlm`: execution-mode plugins.
-  - `lash-default-tools`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*`: first-party tool, plugin, and provider crates.
+  - `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*`: first-party tool, plugin, and provider crates.
   - `lash-cli`: end-user TUI, setup, provider auth, session bootstrap/resume/fork, and `--print` mode.
 
 ## Install

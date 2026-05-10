@@ -17,7 +17,6 @@ full = []
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
 lash-trace = { path = "../lash-trace" }
-lash-rlm-types = { path = "../lash-rlm-types" }
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -32,7 +31,6 @@ regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 base64 = "0.22"
-bytes = "1"
 sha2 = "0.10"
 chrono = "0.4"
 futures-util = "0.3"

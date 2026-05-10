@@ -54,16 +54,25 @@ async fn activate_opened_session(
         return Err("opened session was not installed".to_string());
     };
     session
+        .control()
+        .tools()
         .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| format!("failed to attach MCP servers: {err}"))?;
     session
-        .refresh_tool_surface()
+        .control()
+        .tools()
+        .refresh_surface()
         .await
         .map_err(|err| err.to_string())?;
-    *desired_tool_state = session.tool_state().await.map_err(|err| err.to_string())?;
+    *desired_tool_state = session
+        .control()
+        .tools()
+        .state()
+        .await
+        .map_err(|err| err.to_string())?;
     if let Some(rt) = runtime.as_ref() {
-        match rt.session_manager().await {
+        match rt.control().state().session_manager().await {
             Ok(manager) => *session_manager = manager,
             Err(err) => {
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
@@ -127,11 +136,15 @@ pub(super) async fn handle_clear(
         return Err(anyhow::anyhow!("opened session was not installed"));
     };
     session
+        .control()
+        .tools()
         .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
     if let Some(rt) = runtime.as_ref() {
-        rt.refresh_tool_surface()
+        rt.control()
+            .tools()
+            .refresh_surface()
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let session_id = rt.session_id().await;
@@ -139,7 +152,7 @@ pub(super) async fn handle_clear(
         app.session_id = session_id;
         *current_execution_mode = policy.execution_mode;
         *current_model_variant = policy.model_variant;
-        match rt.session_manager().await {
+        match rt.control().state().session_manager().await {
             Ok(manager) => *session_manager = manager,
             Err(err) => {
                 push_system_message(app, format!("Failed to refresh session manager: {}", err))
@@ -147,7 +160,7 @@ pub(super) async fn handle_clear(
         }
     }
     app.session_name = opened.bootstrap.session_name();
-    *desired_tool_state = session.tool_state().await?;
+    *desired_tool_state = session.control().tools().state().await?;
     history.clear();
     *turn_counter = 0;
     *last_turn = None;
@@ -188,7 +201,12 @@ pub(super) async fn handle_retry(
             return Ok(false);
         }
         let definitions = match runtime.as_ref() {
-            Some(session) => session.active_tool_definitions().await.unwrap_or_default(),
+            Some(session) => session
+                .control()
+                .tools()
+                .active_definitions()
+                .await
+                .unwrap_or_default(),
             None => Vec::new(),
         };
         *toolset_hash =

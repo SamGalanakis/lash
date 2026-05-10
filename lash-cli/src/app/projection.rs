@@ -154,7 +154,9 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
                 .call_id
                 .as_deref()
                 .map(|call_id| (call_id, record.clone())),
-            lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::RlmStep(_) => None,
+            lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::ModeEvent(_) => {
+                None
+            }
         })
         .collect::<HashMap<_, _>>();
 
@@ -172,8 +174,12 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
             lash::ChronologicalPayload::ToolCall(record) => {
                 append_tool_call_record_items(&mut timeline, record, &mut activity_state);
             }
-            lash::ChronologicalPayload::RlmStep(entry) => {
-                append_rlm_trajectory_items(&mut timeline, entry, &mut activity_state);
+            lash::ChronologicalPayload::ModeEvent(event) => {
+                if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
+                    lash_mode_rlm::decode_rlm_mode_event(event)
+                {
+                    append_rlm_trajectory_items(&mut timeline, &entry, &mut activity_state);
+                }
             }
         }
     }

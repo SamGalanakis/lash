@@ -4,10 +4,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_embed::{
-    LashSession, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStatus, MonitorUpdateBatch,
-    ToolResult, TurnEvent,
+use lash_embed::control::TypedExternalOp;
+#[cfg(test)]
+use lash_embed::tools::ToolResultView;
+use lash_embed::tools::{
+    AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec,
+    MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp,
+    MonitorUpdateBatch, StartMonitorArgs, StopMonitorArgs, ToolResult,
 };
+use lash_embed::{LashSession, TurnEvent};
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{
@@ -173,7 +178,7 @@ pub async fn invoke_typed_external<Op>(
     args: Op::Args,
 ) -> Result<Op::Output, String>
 where
-    Op: lash_embed::TypedExternalOp,
+    Op: TypedExternalOp,
 {
     let args =
         serde_json::to_value(args).map_err(|err| format!("invalid {} args: {err}", Op::NAME))?;
@@ -192,7 +197,9 @@ impl TuiExtensionSession for LashSession {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, String> {
-        LashSession::invoke_external(self, name, args)
+        self.control()
+            .external()
+            .invoke(name, args)
             .await
             .map_err(|err| err.to_string())
     }
@@ -1044,41 +1051,28 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
 }
 
 async fn monitor_status(session: &dyn TuiExtensionSession) -> Result<MonitorSnapshot, String> {
-    invoke_typed_external::<lash_embed::MonitorStatusOp>(session, lash_embed::MonitorEmptyArgs {})
-        .await
+    invoke_typed_external::<MonitorStatusOp>(session, MonitorEmptyArgs {}).await
 }
 
 async fn monitor_updates(session: &dyn TuiExtensionSession) -> Result<MonitorUpdateBatch, String> {
-    invoke_typed_external::<lash_embed::MonitorTakeUpdatesOp>(
-        session,
-        lash_embed::MonitorEmptyArgs {},
-    )
-    .await
+    invoke_typed_external::<MonitorTakeUpdatesOp>(session, MonitorEmptyArgs {}).await
 }
 
 async fn monitor_ack_wakes(
     session: &dyn TuiExtensionSession,
     ids: Vec<String>,
 ) -> Result<(), String> {
-    invoke_typed_external::<lash_embed::MonitorAckWakeOp>(session, lash_embed::AckWakeArgs { ids })
-        .await
+    invoke_typed_external::<MonitorAckWakeOp>(session, AckWakeArgs { ids }).await
 }
 
 async fn monitor_stop(session: &dyn TuiExtensionSession, id: &str) -> Result<(), String> {
-    let _ = invoke_typed_external::<lash_embed::MonitorStopOp>(
-        session,
-        lash_embed::StopMonitorArgs { id: id.to_string() },
-    )
-    .await?;
+    let _ = invoke_typed_external::<MonitorStopOp>(session, StopMonitorArgs { id: id.to_string() })
+        .await?;
     Ok(())
 }
 
 async fn monitor_start(session: &dyn TuiExtensionSession, spec: MonitorSpec) -> Result<(), String> {
-    let _ = invoke_typed_external::<lash_embed::MonitorStartOp>(
-        session,
-        lash_embed::StartMonitorArgs { spec },
-    )
-    .await?;
+    let _ = invoke_typed_external::<MonitorStartOp>(session, StartMonitorArgs { spec }).await?;
     Ok(())
 }
 
@@ -1223,7 +1217,7 @@ mod tests {
             call_id: None,
             name: name.to_string(),
             args: json!({}),
-            result: lash_embed::ToolResultView {
+            result: ToolResultView {
                 raw: result.clone(),
                 for_model: result.clone(),
                 for_state: result,

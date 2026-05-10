@@ -13,7 +13,7 @@ use lash::{
     ToolResult,
 };
 
-use super::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
+use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -131,7 +131,7 @@ impl ToolProvider for ReadFile {
                 r#"read_file(path="Cargo.toml")"#.into(),
                 r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
             ])
-            .with_discovery(super::discovery_metadata("filesystem", &["cat", "view_file"]))
+            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }

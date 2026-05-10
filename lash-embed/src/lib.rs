@@ -15,32 +15,96 @@ use async_trait::async_trait;
 use lash::plugin::StaticPluginFactory;
 use lash::{
     ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
-    RuntimeEnvironment, SessionPolicy, TurnContext,
+    RuntimeEnvironment, SessionPolicy,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use lash::{
-    AcceptedInjectedTurnInput, AckWakeArgs, AssembledTurn, AttachmentStore, EventSink,
-    ExternalInvokeError, InputItem, ManagedTaskStatus, McpServerConfig, Message, ModeTurnOptions,
-    MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState, MonitorSnapshot,
-    MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp,
-    MonitorTakeUpdatesOp, MonitorUpdateBatch, PluginError, PluginFactory, PluginMessage,
-    ProviderHandle, RegisterSpecsArgs, Residency, RewriteTrigger, RuntimeError, RuntimePersistence,
-    RuntimeSessionHost, SanitizerPolicy, SessionCreateRequest, SessionError, SessionEvent,
+use lash::{
+    AssembledTurn, AttachmentStore, EventSink, ManagedTaskStatus, McpServerConfig, Message,
+    ModeTurnOptions, PluginFactory, PluginMessage, ProviderHandle, Residency, RewriteTrigger,
+    RuntimePersistence, RuntimeSessionHost, SanitizerPolicy, SessionCreateRequest, SessionError,
     SessionHandle, SessionReadView, SessionStoreCreateRequest, SessionStoreFactory,
     SessionTaskExecutor, SessionTurnHandle, SessionUsageReport, StandardContextApproach,
-    StartMonitorArgs, StopMonitorArgs, TerminationPolicy, TokenUsage, TokioSessionTaskExecutor,
-    ToolAvailability, ToolDefinition, ToolProvider, ToolResult, ToolResultView, ToolSourceHandle,
-    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, TurnIssue, TurnOutcome,
-    TypedExternalOp, default_prompt_template,
+    TerminationPolicy, TokioSessionTaskExecutor, ToolAvailability, ToolDefinition, ToolProvider,
+    ToolResult, ToolSourceHandle, TurnActivitySink, TurnIssue, TurnOutcome,
 };
-pub use lash::{
-    PromptBuiltin, PromptContribution, PromptContributionGate, PromptLayer, PromptSlot,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-};
-pub use lash_mode_rlm::RlmProjectedBindings;
-pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+use lash::{InputItem, TokenUsage};
+use lash::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
+#[cfg(test)]
+use lash::{SessionEvent, ToolResultView};
+pub use lash::{TurnActivity, TurnActivityId, TurnEvent, TurnInput};
+
+pub mod prelude {
+    pub use crate::{
+        CollectedTurnOutput, EmbedError, EmbedPlugin, LashCore, LashCoreBuilder, LashSession,
+        ModeId, ModePreset, Result, SessionBuilder, TurnActivity, TurnBuilder, TurnEvent,
+        TurnInput, TurnResult, TurnStream,
+    };
+}
+
+pub mod turn {
+    pub use crate::{CollectedTurnOutput, TurnActivityFanout, TurnBuilder, TurnResult, TurnStream};
+    pub use lash::{
+        InputItem, ModeTurnOptions, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
+        TurnInput, TurnIssue, TurnOutcome,
+    };
+}
+
+pub mod control {
+    pub use crate::{
+        ChildrenControl, ConfigControl, ExternalControl, InjectionControl, ModeControl,
+        SessionConfigPatch, SessionControl, StateControl, ToolsControl,
+    };
+    pub use lash::{
+        AcceptedInjectedTurnInput, AssembledTurn, EventSink, ManagedTaskStatus, PluginMessage,
+        RewriteTrigger, RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionTurnHandle,
+        TypedExternalOp,
+    };
+}
+
+pub mod tools {
+    pub use crate::ToolState;
+    pub use lash::{
+        AckWakeArgs, McpServerConfig, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp,
+        MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
+        MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch,
+        RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolDefinition,
+        ToolProvider, ToolResult, ToolResultView, ToolSourceHandle,
+    };
+}
+
+pub mod persistence {
+    pub use lash::{
+        AttachmentStore, PersistedSessionState, RuntimePersistence, SessionReadView,
+        SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
+    };
+}
+
+pub mod plugins {
+    pub use crate::EmbedPlugin;
+    pub use lash::{PluginError, PluginFactory, PluginMessage, PluginSpec};
+}
+
+pub mod modes {
+    pub use crate::{ModeId, ModePreset};
+    pub use lash::{
+        ExecutionMode, ModeSessionExtensionHandle, ModeTurnOptions, Residency, SanitizerPolicy,
+        StandardContextApproach, TerminationPolicy,
+    };
+}
+
+pub mod prompt {
+    pub use lash::{
+        PromptBuiltin, PromptContribution, PromptContributionGate, PromptLayer, PromptSlot,
+        PromptTemplate, PromptTemplateEntry, PromptTemplateSection, default_prompt_template,
+    };
+}
+
+pub mod tracing {
+    pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+}
 
 pub type ToolState = lash::ToolState;
 
@@ -195,8 +259,6 @@ pub enum EmbedError {
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]
     StoreSessionMismatch { loaded: String, requested: String },
-    #[error("RLM projected binding error: {0}")]
-    RlmProjectedBinding(String),
     #[error("embed plugin `{plugin_id}` is not registered on this LashCore")]
     PluginNotRegistered { plugin_id: &'static str },
     #[error("missing required turn input for plugin `{plugin_id}`")]
@@ -855,128 +917,17 @@ impl LashSession {
         self.parent_session_id.as_deref()
     }
 
-    pub async fn run(&self, input: Input) -> Result<CollectedTurnResult> {
+    pub async fn run(&self, input: TurnInput) -> Result<CollectedTurnOutput> {
         self.turn(input).run().await
     }
 
-    pub async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
-        let (provider, model) = match (patch.provider, patch.model) {
-            (Some(provider), Some(model)) => (Some(provider), Some(model)),
-            (Some(provider), None) => {
-                let model = provider.default_model().to_string();
-                let variant = provider.default_model_variant(&model).map(str::to_string);
-                (Some(provider), Some(ModelSelection { model, variant }))
-            }
-            (None, model) => (None, model),
-        };
-        let (model, model_variant) = match model {
-            Some(model) => (Some(model.model), Some(model.variant)),
-            None => (None, None),
-        };
-        self.runtime
-            .lock()
-            .await
-            .update_session_config(
-                provider,
-                model,
-                model_variant,
-                patch.max_context_tokens,
-                patch.prompt,
-            )
-            .await;
-        Ok(())
-    }
-
-    pub async fn update_session_config(
-        &self,
-        provider: Option<ProviderHandle>,
-        model: Option<String>,
-        model_variant: Option<Option<String>>,
-        max_context_tokens: Option<usize>,
-        prompt: Option<PromptLayer>,
-    ) {
-        self.runtime
-            .lock()
-            .await
-            .update_session_config(provider, model, model_variant, max_context_tokens, prompt)
-            .await;
-    }
-
-    pub async fn export_state(&self) -> lash::SessionStateEnvelope {
-        self.runtime.lock().await.export_state()
-    }
-
-    pub async fn set_persisted_state(&self, state: PersistedSessionState) {
-        self.runtime.lock().await.set_persisted_state(state);
-    }
-
-    pub async fn reset_session(&self) -> Result<()> {
-        self.runtime.lock().await.reset_session().await?;
-        Ok(())
-    }
-
-    pub async fn refresh_session_tool_surface(&self) -> Result<()> {
-        self.refresh_tool_surface().await
-    }
-
-    pub async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .set_prompt_template(template)
-            .await;
-        Ok(())
-    }
-
-    pub async fn clear_prompt_template(&self) -> Result<()> {
-        self.runtime.lock().await.clear_prompt_template().await;
-        Ok(())
-    }
-
-    pub async fn add_prompt_contribution(&self, contribution: PromptContribution) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .add_prompt_contribution(contribution)
-            .await;
-        Ok(())
-    }
-
-    pub async fn replace_prompt_slot(
-        &self,
-        slot: PromptSlot,
-        contributions: impl IntoIterator<Item = PromptContribution>,
-    ) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .replace_prompt_slot(slot, contributions)
-            .await;
-        Ok(())
-    }
-
-    pub async fn clear_prompt_slot(&self, slot: PromptSlot) -> Result<()> {
-        self.runtime.lock().await.clear_prompt_slot(slot).await;
-        Ok(())
-    }
-
-    pub async fn rlm_project(&self, bindings: RlmProjectedBindings) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .apply_mode_session_extension(lash_mode_rlm::rlm_session_projection_extension(bindings))
-            .await
-            .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))
-    }
-
-    pub fn turn(&self, input: Input) -> TurnBuilder<'_> {
+    pub fn turn(&self, input: TurnInput) -> TurnBuilder {
         TurnBuilder {
-            session: self,
+            runtime: Arc::clone(&self.runtime),
+            active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
             mode_turn_options: None,
-            rlm_projected_bindings: None,
-            turn_context: TurnContext::default(),
             provider: None,
             model: None,
         }
@@ -990,7 +941,7 @@ impl LashSession {
         }
     }
 
-    pub fn queue(&self, input: Input) -> QueueInputBuilder<'_> {
+    pub fn queue(&self, input: TurnInput) -> QueueInputBuilder<'_> {
         QueueInputBuilder {
             session: self,
             input,
@@ -1002,337 +953,22 @@ impl LashSession {
         self.runtime.lock().await.read_view()
     }
 
-    pub async fn branch_to_node(
-        &self,
-        target_leaf: Option<String>,
-    ) -> Result<lash::SessionStateEnvelope> {
-        self.runtime
-            .lock()
-            .await
-            .branch_to_node(target_leaf)
-            .await
-            .map_err(Into::into)
-    }
-
     pub async fn usage_report(&self) -> SessionUsageReport {
         self.runtime.lock().await.usage_report()
     }
-
-    pub async fn await_background_work(&self) -> Result<()> {
-        self.runtime.lock().await.await_background_work().await?;
-        Ok(())
-    }
-
-    pub async fn refresh_tool_surface(&self) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .refresh_session_tool_surface()
-            .await?;
-        Ok(())
-    }
-
-    pub async fn invoke_external(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
-        let session_id = self.runtime.lock().await.session_id().to_string();
-        self.runtime
-            .lock()
-            .await
-            .invoke_external(name, args, Some(session_id))
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn invoke_external_typed<Op: lash::TypedExternalOp>(
-        &self,
-        args: Op::Args,
-    ) -> Result<Op::Output> {
-        let result = self
-            .invoke_external(
-                Op::NAME,
-                serde_json::to_value(args).map_err(|err| {
-                    EmbedError::Plugin(lash::PluginError::Invoke(format!(
-                        "invalid {} args: {err}",
-                        Op::NAME
-                    )))
-                })?,
-            )
-            .await?;
-        if !result.success {
-            return Err(EmbedError::Plugin(lash::PluginError::Invoke(format!(
-                "{} failed: {}",
-                Op::NAME,
-                result.result
-            ))));
-        }
-        serde_json::from_value(result.result).map_err(|err| {
-            EmbedError::Plugin(lash::PluginError::Invoke(format!(
-                "invalid {} output: {err}",
-                Op::NAME
-            )))
-        })
-    }
-
-    pub async fn attach_mcp_servers(
-        &self,
-        servers: &BTreeMap<String, McpServerConfig>,
-    ) -> Result<()> {
-        let tool_registry = self.tool_registry().await?;
-        lash::attach_mcp_servers(&tool_registry, servers).await?;
-        Ok(())
-    }
-
-    pub async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
-        self.runtime
-            .lock()
-            .await
-            .rewrite_history(trigger)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn persist_current_state(&self) -> Result<PersistedSessionState> {
-        let mut runtime = self.runtime.lock().await;
-        runtime.await_background_work().await?;
-        Ok(runtime.export_persisted_state())
-    }
-
-    pub async fn list_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
-        let runtime = self.runtime.lock().await;
-        let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .list_background_tasks(&session_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
-        self.runtime
-            .lock()
-            .await
-            .session_manager()
-            .map_err(Into::into)
-    }
-
-    pub async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
-        let runtime = self.runtime.lock().await;
-        let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .cancel_background_task(&session_id, task_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn snapshot_execution_state(&self) -> Result<Option<Vec<u8>>> {
-        self.runtime
-            .lock()
-            .await
-            .snapshot_execution_state()
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn restore_execution_state(&self, bytes: &[u8]) -> Result<()> {
-        self.runtime
-            .lock()
-            .await
-            .restore_execution_state(bytes)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn tool_state(&self) -> Result<ToolState> {
-        self.runtime.lock().await.tool_state().map_err(Into::into)
-    }
-
-    pub async fn apply_tool_state(&self, state: ToolState) -> Result<u64> {
-        self.runtime
-            .lock()
-            .await
-            .apply_tool_state(state)
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn set_tool_availability(
-        &self,
-        names: &[String],
-        availability: Option<ToolAvailability>,
-    ) -> Result<u64> {
-        let mut state = self.tool_state().await?;
-        for name in names {
-            state
-                .set_availability(name, availability)
-                .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-        }
-        self.apply_tool_state(state).await
-    }
-
-    pub async fn active_tool_definitions(&self) -> Result<Vec<ToolDefinition>> {
-        Ok(self.tool_state().await?.definitions())
-    }
-
-    pub async fn add_tool_provider(
-        &self,
-        provider: Arc<dyn ToolProvider>,
-    ) -> Result<ToolSourceHandle> {
-        let tool_registry = self.tool_registry().await?;
-        let handle = tool_registry
-            .add_tool_provider(provider)
-            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-        self.refresh_tool_surface().await?;
-        Ok(handle)
-    }
-
-    pub async fn remove_tool_source(&self, handle: &ToolSourceHandle) -> Result<u64> {
-        let tool_registry = self.tool_registry().await?;
-        let generation = tool_registry
-            .remove_source(handle)
-            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
-        self.refresh_tool_surface().await?;
-        Ok(generation)
-    }
-
-    async fn tool_registry(&self) -> Result<Arc<lash::ToolRegistry>> {
-        self.runtime
-            .lock()
-            .await
-            .plugin_session()
-            .map(|session| session.tool_registry())
-            .ok_or_else(|| {
-                EmbedError::Session(SessionError::Protocol(
-                    "tool registry is unavailable in this runtime session".to_string(),
-                ))
-            })
-    }
 }
 
-pub struct TurnBuilder<'a> {
-    session: &'a LashSession,
-    input: Input,
-    cancel: CancellationToken,
-    mode_turn_options: Option<ModeTurnOptions>,
-    rlm_projected_bindings: Option<RlmProjectedBindings>,
-    turn_context: TurnContext,
-    provider: Option<ProviderHandle>,
-    model: Option<ModelSelection>,
-}
-
-impl<'a> TurnBuilder<'a> {
-    pub fn cancel(mut self, cancel: CancellationToken) -> Self {
-        self.cancel = cancel;
-        self
-    }
-
-    pub fn mode_turn_options(mut self, options: ModeTurnOptions) -> Self {
-        self.mode_turn_options = Some(options);
-        self
-    }
-
-    pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.provider = Some(provider);
-        self
-    }
-
-    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.model = Some(ModelSelection::new(model, variant));
-        self
-    }
-
-    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        self.turn_context.set_prompt_template(template);
-        self
-    }
-
-    pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        self.turn_context.add_prompt_contribution(contribution);
-        self
-    }
-
-    pub fn replace_prompt_slot(
-        mut self,
-        slot: PromptSlot,
-        contributions: impl IntoIterator<Item = PromptContribution>,
-    ) -> Self {
-        self.turn_context.replace_prompt_slot(slot, contributions);
-        self
-    }
-
-    pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        self.turn_context.clear_prompt_slot(slot);
-        self
-    }
-
-    pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.turn_context.set_prompt_layer(layer);
-        self
-    }
-
-    pub fn rlm_project(mut self, bindings: RlmProjectedBindings) -> Result<Self> {
-        self.rlm_projected_bindings = Some(match self.rlm_projected_bindings.take() {
-            Some(existing) => existing
-                .merge(bindings)
-                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
-            None => bindings,
-        });
-        Ok(self)
-    }
-
-    pub fn with_plugin_input<P: EmbedPlugin>(mut self, input: P::TurnInput) -> Self {
-        self.turn_context.insert_plugin_input(P::ID, input);
-        self
-    }
-
-    pub async fn run(self) -> Result<CollectedTurnResult> {
-        let collector = RunActivityCollector::default();
-        let result = self.stream(&collector).await?;
-        Ok(CollectedTurnResult {
-            activities: collector.into_activities(),
-            outcome: result.outcome,
-            usage: result.usage,
-            errors: result.errors,
-        })
-    }
-
-    pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
-        let mut input = self.input.into_turn_input();
-        input.mode_turn_options = self.mode_turn_options;
-        input.turn_context = self.turn_context;
-        if let Some(provider) = self.provider {
-            input.turn_context.set_provider(provider);
-        }
-        if let Some(model) = self.model {
-            input.turn_context.set_model(model.model, model.variant);
-        }
-        if let Some(turn_bindings) = self.rlm_projected_bindings {
-            input = lash_mode_rlm::RlmTurnInputExt::rlm_project(input, turn_bindings)
-                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
-        }
-        validate_required_plugin_inputs(&self.session.active_plugins, &input)?;
-        stream_prepared_turn(
-            &self.session.runtime,
-            input,
-            None,
-            Some(events),
-            self.cancel,
-        )
-        .await
-    }
-}
-
-pub struct RawTurnBuilder {
+pub struct TurnBuilder {
     runtime: Arc<Mutex<LashRuntime>>,
     active_plugins: Vec<ActiveEmbedPlugin>,
     input: TurnInput,
     cancel: CancellationToken,
     mode_turn_options: Option<ModeTurnOptions>,
-    rlm_projected_bindings: Option<RlmProjectedBindings>,
     provider: Option<ProviderHandle>,
     model: Option<ModelSelection>,
 }
 
-impl RawTurnBuilder {
+impl TurnBuilder {
     pub fn cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
         self
@@ -1386,33 +1022,21 @@ impl RawTurnBuilder {
         self
     }
 
-    pub fn rlm_project(mut self, bindings: RlmProjectedBindings) -> Result<Self> {
-        self.rlm_projected_bindings = Some(match self.rlm_projected_bindings.take() {
-            Some(existing) => existing
-                .merge(bindings)
-                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?,
-            None => bindings,
-        });
-        Ok(self)
-    }
-
     pub fn with_plugin_input<P: EmbedPlugin>(mut self, input: P::TurnInput) -> Self {
         self.input.turn_context.insert_plugin_input(P::ID, input);
         self
     }
 
-    pub async fn run(self) -> Result<CollectedTurnResult> {
+    pub async fn run(self) -> Result<CollectedTurnOutput> {
         let collector = RunActivityCollector::default();
         let result = self.stream(&collector).await?;
-        Ok(CollectedTurnResult {
+        Ok(CollectedTurnOutput {
+            result,
             activities: collector.into_activities(),
-            outcome: result.outcome,
-            usage: result.usage,
-            errors: result.errors,
         })
     }
 
-    pub async fn stream(mut self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
+    fn prepare(mut self) -> Result<(Arc<Mutex<LashRuntime>>, TurnInput, CancellationToken)> {
         if let Some(options) = self.mode_turn_options {
             self.input.mode_turn_options = Some(options);
         }
@@ -1424,18 +1048,95 @@ impl RawTurnBuilder {
                 .turn_context
                 .set_model(model.model, model.variant);
         }
-        if let Some(turn_bindings) = self.rlm_projected_bindings {
-            self.input = lash_mode_rlm::RlmTurnInputExt::rlm_project(self.input, turn_bindings)
-                .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
-        }
         validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
-        stream_prepared_turn(&self.runtime, self.input, None, Some(events), self.cancel).await
+        Ok((self.runtime, self.input, self.cancel))
+    }
+
+    pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
+        let (runtime, input, cancel) = self.prepare()?;
+        stream_prepared_turn(&runtime, input, None, Some(events), cancel).await
+    }
+
+    pub fn into_stream(self) -> Result<TurnStream> {
+        let (runtime, input, cancel) = self.prepare()?;
+        let (tx, rx) = mpsc::channel(64);
+        let sink = ChannelTurnActivitySink { tx };
+        let completion = tokio::spawn(async move {
+            stream_prepared_turn(&runtime, input, None, Some(&sink), cancel).await
+        });
+        Ok(TurnStream {
+            activities: rx,
+            completion,
+        })
+    }
+
+    pub async fn stream_with_events(
+        self,
+        session_events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+    ) -> Result<TurnResult> {
+        let (runtime, input, cancel) = self.prepare()?;
+        stream_prepared_turn(
+            &runtime,
+            input,
+            Some(session_events),
+            Some(turn_events),
+            cancel,
+        )
+        .await
+    }
+
+    pub async fn stream_assembled(
+        self,
+        session_events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+    ) -> Result<AssembledTurn> {
+        let (runtime, input, cancel) = self.prepare()?;
+        stream_prepared_assembled(
+            &runtime,
+            input,
+            Some(session_events),
+            Some(turn_events),
+            cancel,
+        )
+        .await
+    }
+}
+
+pub struct TurnStream {
+    activities: mpsc::Receiver<Result<TurnActivity>>,
+    completion: JoinHandle<Result<TurnResult>>,
+}
+
+impl TurnStream {
+    pub async fn next_activity(&mut self) -> Option<Result<TurnActivity>> {
+        self.activities.recv().await
+    }
+
+    pub async fn finish(self) -> Result<TurnResult> {
+        self.completion.await.map_err(|err| {
+            EmbedError::Runtime(lash::RuntimeError {
+                code: "turn_stream_join".to_string(),
+                message: format!("turn stream task failed: {err}"),
+            })
+        })?
+    }
+}
+
+struct ChannelTurnActivitySink {
+    tx: mpsc::Sender<Result<TurnActivity>>,
+}
+
+#[async_trait]
+impl TurnActivitySink for ChannelTurnActivitySink {
+    async fn emit(&self, activity: TurnActivity) {
+        let _ = self.tx.send(Ok(activity)).await;
     }
 }
 
 pub struct QueueInputBuilder<'a> {
     session: &'a LashSession,
-    input: Input,
+    input: TurnInput,
     id: Option<String>,
 }
 
@@ -1474,59 +1175,385 @@ pub struct SessionControl {
 }
 
 impl SessionControl {
-    pub fn raw_turn(&self, input: TurnInput) -> RawTurnBuilder {
-        RawTurnBuilder {
+    pub fn config(&self) -> ConfigControl {
+        ConfigControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn tools(&self) -> ToolsControl {
+        ToolsControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn state(&self) -> StateControl {
+        StateControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn external(&self) -> ExternalControl {
+        ExternalControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn children(&self) -> ChildrenControl {
+        ChildrenControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn injection(&self) -> InjectionControl {
+        InjectionControl {
+            control: self.clone(),
+        }
+    }
+
+    pub fn mode(&self) -> ModeControl {
+        ModeControl {
+            control: self.clone(),
+        }
+    }
+
+    fn turn(&self, input: TurnInput) -> TurnBuilder {
+        TurnBuilder {
             runtime: Arc::clone(&self.runtime),
             active_plugins: self.active_plugins.clone(),
             input,
             cancel: CancellationToken::new(),
             mode_turn_options: None,
-            rlm_projected_bindings: None,
             provider: None,
             model: None,
         }
     }
 
-    pub async fn stream_raw(
+    async fn stream(
         &self,
         input: TurnInput,
         session_events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<TurnResult> {
-        let turn = self
-            .stream_raw_assembled(input, session_events, turn_events, cancel)
-            .await?;
-        Ok(TurnResult::from_assembled(turn))
+        self.turn(input)
+            .cancel(cancel)
+            .stream_with_events(session_events, turn_events)
+            .await
     }
 
-    pub async fn stream_raw_assembled(
+    async fn stream_assembled(
         &self,
         input: TurnInput,
         session_events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn> {
-        stream_prepared_assembled(
-            &self.runtime,
-            input,
-            Some(session_events),
-            Some(turn_events),
-            cancel,
-        )
-        .await
+        self.turn(input)
+            .cancel(cancel)
+            .stream_assembled(session_events, turn_events)
+            .await
     }
 
-    pub async fn create_child_session(
+    async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
+        let (provider, model) = match (patch.provider, patch.model) {
+            (Some(provider), Some(model)) => (Some(provider), Some(model)),
+            (Some(provider), None) => {
+                let model = provider.default_model().to_string();
+                let variant = provider.default_model_variant(&model).map(str::to_string);
+                (Some(provider), Some(ModelSelection { model, variant }))
+            }
+            (None, model) => (None, model),
+        };
+        let (model, model_variant) = match model {
+            Some(model) => (Some(model.model), Some(model.variant)),
+            None => (None, None),
+        };
+        self.update_session_config(
+            provider,
+            model,
+            model_variant,
+            patch.max_context_tokens,
+            patch.prompt,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn update_session_config(
         &self,
-        request: SessionCreateRequest,
-    ) -> Result<SessionHandle> {
+        provider: Option<ProviderHandle>,
+        model: Option<String>,
+        model_variant: Option<Option<String>>,
+        max_context_tokens: Option<usize>,
+        prompt: Option<PromptLayer>,
+    ) {
+        self.runtime
+            .lock()
+            .await
+            .update_session_config(provider, model, model_variant, max_context_tokens, prompt)
+            .await;
+    }
+
+    async fn export_state(&self) -> lash::SessionStateEnvelope {
+        self.runtime.lock().await.export_state()
+    }
+
+    async fn set_persisted_state(&self, state: PersistedSessionState) {
+        self.runtime.lock().await.set_persisted_state(state);
+    }
+
+    async fn reset_session(&self) -> Result<()> {
+        self.runtime.lock().await.reset_session().await?;
+        Ok(())
+    }
+
+    async fn refresh_session_tool_surface(&self) -> Result<()> {
+        self.refresh_tool_surface().await
+    }
+
+    async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .set_prompt_template(template)
+            .await;
+        Ok(())
+    }
+
+    async fn clear_prompt_template(&self) -> Result<()> {
+        self.runtime.lock().await.clear_prompt_template().await;
+        Ok(())
+    }
+
+    async fn add_prompt_contribution(&self, contribution: PromptContribution) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .add_prompt_contribution(contribution)
+            .await;
+        Ok(())
+    }
+
+    async fn replace_prompt_slot(
+        &self,
+        slot: PromptSlot,
+        contributions: impl IntoIterator<Item = PromptContribution>,
+    ) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .replace_prompt_slot(slot, contributions)
+            .await;
+        Ok(())
+    }
+
+    async fn clear_prompt_slot(&self, slot: PromptSlot) -> Result<()> {
+        self.runtime.lock().await.clear_prompt_slot(slot).await;
+        Ok(())
+    }
+
+    async fn apply_mode_session_extension(
+        &self,
+        extension: lash::ModeSessionExtensionHandle,
+    ) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .apply_mode_session_extension(extension)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn branch_to_node(
+        &self,
+        target_leaf: Option<String>,
+    ) -> Result<lash::SessionStateEnvelope> {
+        self.runtime
+            .lock()
+            .await
+            .branch_to_node(target_leaf)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn await_background_work(&self) -> Result<()> {
+        self.runtime.lock().await.await_background_work().await?;
+        Ok(())
+    }
+
+    async fn refresh_tool_surface(&self) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .refresh_session_tool_surface()
+            .await?;
+        Ok(())
+    }
+
+    async fn invoke_external(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
+        let session_id = self.runtime.lock().await.session_id().to_string();
+        self.runtime
+            .lock()
+            .await
+            .invoke_external(name, args, Some(session_id))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn invoke_external_typed<Op: lash::TypedExternalOp>(
+        &self,
+        args: Op::Args,
+    ) -> Result<Op::Output> {
+        let result = self
+            .invoke_external(
+                Op::NAME,
+                serde_json::to_value(args).map_err(|err| {
+                    EmbedError::Plugin(lash::PluginError::Invoke(format!(
+                        "invalid {} args: {err}",
+                        Op::NAME
+                    )))
+                })?,
+            )
+            .await?;
+        if !result.success {
+            return Err(EmbedError::Plugin(lash::PluginError::Invoke(format!(
+                "{} failed: {}",
+                Op::NAME,
+                result.result
+            ))));
+        }
+        serde_json::from_value(result.result).map_err(|err| {
+            EmbedError::Plugin(lash::PluginError::Invoke(format!(
+                "invalid {} output: {err}",
+                Op::NAME
+            )))
+        })
+    }
+
+    async fn attach_mcp_servers(&self, servers: &BTreeMap<String, McpServerConfig>) -> Result<()> {
+        let tool_registry = self.tool_registry().await?;
+        lash::attach_mcp_servers(&tool_registry, servers).await?;
+        Ok(())
+    }
+
+    async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
+        self.runtime
+            .lock()
+            .await
+            .rewrite_history(trigger)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn persist_current_state(&self) -> Result<PersistedSessionState> {
+        let mut runtime = self.runtime.lock().await;
+        runtime.await_background_work().await?;
+        Ok(runtime.export_persisted_state())
+    }
+
+    async fn list_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+        let runtime = self.runtime.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let manager = runtime.session_manager()?;
+        manager
+            .list_background_tasks(&session_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
+        self.runtime
+            .lock()
+            .await
+            .session_manager()
+            .map_err(Into::into)
+    }
+
+    async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+        let runtime = self.runtime.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let manager = runtime.session_manager()?;
+        manager
+            .cancel_background_task(&session_id, task_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn snapshot_execution_state(&self) -> Result<Option<Vec<u8>>> {
+        self.runtime
+            .lock()
+            .await
+            .snapshot_execution_state()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn restore_execution_state(&self, bytes: &[u8]) -> Result<()> {
+        self.runtime
+            .lock()
+            .await
+            .restore_execution_state(bytes)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn tool_state(&self) -> Result<ToolState> {
+        self.runtime.lock().await.tool_state().map_err(Into::into)
+    }
+
+    async fn apply_tool_state(&self, state: ToolState) -> Result<u64> {
+        self.runtime
+            .lock()
+            .await
+            .apply_tool_state(state)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn set_tool_availability(
+        &self,
+        names: &[String],
+        availability: Option<ToolAvailability>,
+    ) -> Result<u64> {
+        let mut state = self.tool_state().await?;
+        for name in names {
+            state
+                .set_availability(name, availability)
+                .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
+        }
+        self.apply_tool_state(state).await
+    }
+
+    async fn active_tool_definitions(&self) -> Result<Vec<ToolDefinition>> {
+        Ok(self.tool_state().await?.definitions())
+    }
+
+    async fn add_tool_provider(&self, provider: Arc<dyn ToolProvider>) -> Result<ToolSourceHandle> {
+        let tool_registry = self.tool_registry().await?;
+        let handle = tool_registry
+            .add_tool_provider(provider)
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
+        self.refresh_tool_surface().await?;
+        Ok(handle)
+    }
+
+    async fn remove_tool_source(&self, handle: &ToolSourceHandle) -> Result<u64> {
+        let tool_registry = self.tool_registry().await?;
+        let generation = tool_registry
+            .remove_source(handle)
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
+        self.refresh_tool_surface().await?;
+        Ok(generation)
+    }
+
+    async fn create_child_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
         let runtime = self.runtime.lock().await;
         let manager = runtime.session_manager()?;
         manager.create_session(request).await.map_err(Into::into)
     }
 
-    pub async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
+    async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
         let runtime = self.runtime.lock().await;
         let manager = runtime.session_manager()?;
         manager
@@ -1535,7 +1562,7 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    pub async fn start_child_turn(
+    async fn start_child_turn(
         &self,
         session_id: &str,
         input: TurnInput,
@@ -1548,25 +1575,25 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    pub async fn await_child_turn(&self, turn_id: &str) -> Result<AssembledTurn> {
+    async fn await_child_turn(&self, turn_id: &str) -> Result<AssembledTurn> {
         let runtime = self.runtime.lock().await;
         let manager = runtime.session_manager()?;
         manager.await_turn(turn_id).await.map_err(Into::into)
     }
 
-    pub async fn cancel_child_turn(&self, turn_id: &str) -> Result<()> {
+    async fn cancel_child_turn(&self, turn_id: &str) -> Result<()> {
         let runtime = self.runtime.lock().await;
         let manager = runtime.session_manager()?;
         manager.cancel_turn(turn_id).await.map_err(Into::into)
     }
 
-    pub async fn close_child_session(&self, session_id: &str) -> Result<()> {
+    async fn close_child_session(&self, session_id: &str) -> Result<()> {
         let runtime = self.runtime.lock().await;
         let manager = runtime.session_manager()?;
         manager.close_session(session_id).await.map_err(Into::into)
     }
 
-    pub async fn activate_managed_session(&self, session_id: &str) -> Result<()> {
+    async fn activate_managed_session(&self, session_id: &str) -> Result<()> {
         self.runtime
             .lock()
             .await
@@ -1575,24 +1602,305 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    pub async fn inject_turn_input(
-        &self,
-        id: Option<String>,
-        message: PluginMessage,
-    ) -> Result<()> {
+    async fn inject_turn_input(&self, id: Option<String>, message: PluginMessage) -> Result<()> {
         self.turn_input_injection_bridge
             .enqueue(vec![lash::InjectedTurnInput { id, message }])
             .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
     }
 
-    pub async fn inject_turn_inputs(&self, messages: Vec<lash::InjectedTurnInput>) -> Result<()> {
+    async fn inject_turn_inputs(&self, messages: Vec<lash::InjectedTurnInput>) -> Result<()> {
         self.turn_input_injection_bridge
             .enqueue(messages)
             .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
     }
+
+    async fn tool_registry(&self) -> Result<Arc<lash::ToolRegistry>> {
+        self.runtime
+            .lock()
+            .await
+            .plugin_session()
+            .map(|session| session.tool_registry())
+            .ok_or_else(|| {
+                EmbedError::Session(SessionError::Protocol(
+                    "tool registry is unavailable in this runtime session".to_string(),
+                ))
+            })
+    }
 }
 
-fn queued_input_message(input: Input) -> Result<PluginMessage> {
+#[derive(Clone)]
+pub struct ConfigControl {
+    control: SessionControl,
+}
+
+impl ConfigControl {
+    pub async fn update(&self, patch: SessionConfigPatch) -> Result<()> {
+        self.control.update_config(patch).await
+    }
+
+    pub async fn update_session_config(
+        &self,
+        provider: Option<ProviderHandle>,
+        model: Option<String>,
+        model_variant: Option<Option<String>>,
+        max_context_tokens: Option<usize>,
+        prompt: Option<PromptLayer>,
+    ) {
+        self.control
+            .update_session_config(provider, model, model_variant, max_context_tokens, prompt)
+            .await;
+    }
+
+    pub async fn set_prompt_template(&self, template: PromptTemplate) -> Result<()> {
+        self.control.set_prompt_template(template).await
+    }
+
+    pub async fn clear_prompt_template(&self) -> Result<()> {
+        self.control.clear_prompt_template().await
+    }
+
+    pub async fn add_prompt_contribution(&self, contribution: PromptContribution) -> Result<()> {
+        self.control.add_prompt_contribution(contribution).await
+    }
+
+    pub async fn replace_prompt_slot(
+        &self,
+        slot: PromptSlot,
+        contributions: impl IntoIterator<Item = PromptContribution>,
+    ) -> Result<()> {
+        self.control.replace_prompt_slot(slot, contributions).await
+    }
+
+    pub async fn clear_prompt_slot(&self, slot: PromptSlot) -> Result<()> {
+        self.control.clear_prompt_slot(slot).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolsControl {
+    control: SessionControl,
+}
+
+impl ToolsControl {
+    pub async fn refresh_surface(&self) -> Result<()> {
+        self.control.refresh_tool_surface().await
+    }
+
+    pub async fn refresh_session_tool_surface(&self) -> Result<()> {
+        self.control.refresh_session_tool_surface().await
+    }
+
+    pub async fn state(&self) -> Result<ToolState> {
+        self.control.tool_state().await
+    }
+
+    pub async fn apply_state(&self, state: ToolState) -> Result<u64> {
+        self.control.apply_tool_state(state).await
+    }
+
+    pub async fn set_availability(
+        &self,
+        names: &[String],
+        availability: Option<ToolAvailability>,
+    ) -> Result<u64> {
+        self.control
+            .set_tool_availability(names, availability)
+            .await
+    }
+
+    pub async fn active_definitions(&self) -> Result<Vec<ToolDefinition>> {
+        self.control.active_tool_definitions().await
+    }
+
+    pub async fn add_provider(&self, provider: Arc<dyn ToolProvider>) -> Result<ToolSourceHandle> {
+        self.control.add_tool_provider(provider).await
+    }
+
+    pub async fn remove_source(&self, handle: &ToolSourceHandle) -> Result<u64> {
+        self.control.remove_tool_source(handle).await
+    }
+
+    pub async fn attach_mcp_servers(
+        &self,
+        servers: &BTreeMap<String, McpServerConfig>,
+    ) -> Result<()> {
+        self.control.attach_mcp_servers(servers).await
+    }
+}
+
+#[derive(Clone)]
+pub struct StateControl {
+    control: SessionControl,
+}
+
+impl StateControl {
+    pub async fn export(&self) -> lash::SessionStateEnvelope {
+        self.control.export_state().await
+    }
+
+    pub async fn set_persisted(&self, state: PersistedSessionState) {
+        self.control.set_persisted_state(state).await
+    }
+
+    pub async fn reset(&self) -> Result<()> {
+        self.control.reset_session().await
+    }
+
+    pub async fn branch_to_node(
+        &self,
+        target_leaf: Option<String>,
+    ) -> Result<lash::SessionStateEnvelope> {
+        self.control.branch_to_node(target_leaf).await
+    }
+
+    pub async fn await_background_work(&self) -> Result<()> {
+        self.control.await_background_work().await
+    }
+
+    pub async fn persist_current(&self) -> Result<PersistedSessionState> {
+        self.control.persist_current_state().await
+    }
+
+    pub async fn list_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+        self.control.list_background_tasks().await
+    }
+
+    pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
+        self.control.session_manager().await
+    }
+
+    pub async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+        self.control.cancel_background_task(task_id).await
+    }
+
+    pub async fn snapshot_execution(&self) -> Result<Option<Vec<u8>>> {
+        self.control.snapshot_execution_state().await
+    }
+
+    pub async fn restore_execution(&self, bytes: &[u8]) -> Result<()> {
+        self.control.restore_execution_state(bytes).await
+    }
+
+    pub async fn rewrite_history(&self, trigger: RewriteTrigger) -> Result<bool> {
+        self.control.rewrite_history(trigger).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ExternalControl {
+    control: SessionControl,
+}
+
+impl ExternalControl {
+    pub async fn invoke(&self, name: &str, args: serde_json::Value) -> Result<ToolResult> {
+        self.control.invoke_external(name, args).await
+    }
+
+    pub async fn invoke_typed<Op: lash::TypedExternalOp>(
+        &self,
+        args: Op::Args,
+    ) -> Result<Op::Output> {
+        self.control.invoke_external_typed::<Op>(args).await
+    }
+
+    pub async fn stream(
+        &self,
+        input: TurnInput,
+        session_events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        cancel: CancellationToken,
+    ) -> Result<TurnResult> {
+        self.control
+            .stream(input, session_events, turn_events, cancel)
+            .await
+    }
+
+    pub async fn stream_assembled(
+        &self,
+        input: TurnInput,
+        session_events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn> {
+        self.control
+            .stream_assembled(input, session_events, turn_events, cancel)
+            .await
+    }
+}
+
+#[derive(Clone)]
+pub struct ChildrenControl {
+    control: SessionControl,
+}
+
+impl ChildrenControl {
+    pub async fn create_session(&self, request: SessionCreateRequest) -> Result<SessionHandle> {
+        self.control.create_child_session(request).await
+    }
+
+    pub async fn take_first_turn_input(&self, session_id: &str) -> Result<Option<PluginMessage>> {
+        self.control.take_first_turn_input(session_id).await
+    }
+
+    pub async fn start_turn(
+        &self,
+        session_id: &str,
+        input: TurnInput,
+    ) -> Result<SessionTurnHandle> {
+        self.control.start_child_turn(session_id, input).await
+    }
+
+    pub async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn> {
+        self.control.await_child_turn(turn_id).await
+    }
+
+    pub async fn cancel_turn(&self, turn_id: &str) -> Result<()> {
+        self.control.cancel_child_turn(turn_id).await
+    }
+
+    pub async fn close_session(&self, session_id: &str) -> Result<()> {
+        self.control.close_child_session(session_id).await
+    }
+
+    pub async fn activate_managed_session(&self, session_id: &str) -> Result<()> {
+        self.control.activate_managed_session(session_id).await
+    }
+}
+
+#[derive(Clone)]
+pub struct InjectionControl {
+    control: SessionControl,
+}
+
+impl InjectionControl {
+    pub async fn inject_turn_input(
+        &self,
+        id: Option<String>,
+        message: PluginMessage,
+    ) -> Result<()> {
+        self.control.inject_turn_input(id, message).await
+    }
+
+    pub async fn inject_turn_inputs(&self, messages: Vec<lash::InjectedTurnInput>) -> Result<()> {
+        self.control.inject_turn_inputs(messages).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ModeControl {
+    control: SessionControl,
+}
+
+impl ModeControl {
+    pub async fn apply_session_extension(
+        &self,
+        extension: lash::ModeSessionExtensionHandle,
+    ) -> Result<()> {
+        self.control.apply_mode_session_extension(extension).await
+    }
+}
+
+fn queued_input_message(input: TurnInput) -> Result<PluginMessage> {
     let mut text = Vec::new();
     let mut images = Vec::new();
     for item in input.items {
@@ -1663,7 +1971,7 @@ async fn stream_prepared_assembled(
         runtime
             .validate_mode_turn_extension(extension)
             .await
-            .map_err(|err| EmbedError::RlmProjectedBinding(err.to_string()))?;
+            .map_err(EmbedError::Session)?;
     }
     let turn = match (session_events, turn_events) {
         (Some(session_events), Some(turn_events)) => {
@@ -1700,45 +2008,6 @@ async fn stream_prepared_assembled(
     })
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Input {
-    items: Vec<InputItem>,
-    image_blobs: HashMap<String, Vec<u8>>,
-}
-
-impl Input {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            items: vec![InputItem::Text { text: text.into() }],
-            image_blobs: HashMap::new(),
-        }
-    }
-
-    pub fn items(items: Vec<InputItem>) -> Self {
-        Self {
-            items,
-            image_blobs: HashMap::new(),
-        }
-    }
-
-    pub fn with_image_blob(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
-        self.image_blobs.insert(id.into(), bytes);
-        self
-    }
-
-    fn into_turn_input(self) -> TurnInput {
-        TurnInput {
-            items: self.items,
-            image_blobs: self.image_blobs,
-            mode: None,
-            mode_turn_options: None,
-            trace_turn_id: None,
-            mode_extension: None,
-            turn_context: lash::TurnContext::default(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnResult {
     pub outcome: TurnOutcome,
@@ -1749,19 +2018,72 @@ pub struct TurnResult {
 impl TurnResult {
     fn from_assembled(turn: lash::AssembledTurn) -> Self {
         Self {
-            outcome: turn.outcome.clone(),
-            usage: turn.token_usage.clone(),
-            errors: turn.errors.clone(),
+            outcome: turn.outcome,
+            usage: turn.token_usage,
+            errors: turn.errors,
         }
+    }
+
+    pub fn assistant_message(&self) -> Option<&str> {
+        match &self.outcome {
+            TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { text }) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn submitted_value(&self) -> Option<&serde_json::Value> {
+        match &self.outcome {
+            TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { value }) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn tool_value(&self) -> Option<(&str, &serde_json::Value)> {
+        match &self.outcome {
+            TurnOutcome::Finished(lash::TurnFinish::ToolValue { tool_name, value }) => {
+                Some((tool_name.as_str(), value))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self.outcome,
+            TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
+        )
     }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectedTurnResult {
+pub struct CollectedTurnOutput {
+    pub result: TurnResult,
     pub activities: Vec<TurnActivity>,
-    pub outcome: TurnOutcome,
-    pub usage: TokenUsage,
-    pub errors: Vec<TurnIssue>,
+}
+
+impl CollectedTurnOutput {
+    pub fn assistant_messages(&self) -> Vec<String> {
+        let mut messages: Vec<String> = Vec::new();
+        let mut current_id: Option<TurnActivityId> = None;
+        for activity in &self.activities {
+            let TurnEvent::AssistantProseDelta { text } = &activity.event else {
+                continue;
+            };
+            if current_id.as_ref() == Some(&activity.correlation_id) {
+                if let Some(current) = messages.last_mut() {
+                    current.push_str(text);
+                }
+                continue;
+            }
+            current_id = Some(activity.correlation_id.clone());
+            messages.push(text.clone());
+        }
+        messages
+    }
+
+    pub fn assistant_transcript_text(&self) -> String {
+        self.assistant_messages().concat()
+    }
 }
 
 #[derive(Default)]
@@ -1841,7 +2163,9 @@ mod tests {
 
     use lash::LlmOutputPart;
     use lash::llm::transport::LlmTransportError;
-    use lash::llm::types::{LlmContentBlock, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent};
+    use lash::llm::types::{
+        LlmContentBlock, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, ResponseTextMeta,
+    };
     use tokio::sync::{Mutex as TokioMutex, oneshot};
 
     #[derive(Default)]
@@ -2246,6 +2570,38 @@ mod tests {
             .into_handle()
     }
 
+    fn semantic_group_provider() -> ProviderHandle {
+        lash::testing::TestProvider::builder()
+            .kind("embed-test")
+            .default_model("mock-model")
+            .complete(|_request| async move {
+                Ok(LlmResponse {
+                    full_text: "firstsecond".to_string(),
+                    parts: vec![
+                        LlmOutputPart::Text {
+                            text: "first".to_string(),
+                            response_meta: Some(ResponseTextMeta {
+                                id: Some("assistant:first".to_string()),
+                                status: None,
+                                phase: None,
+                            }),
+                        },
+                        LlmOutputPart::Text {
+                            text: "second".to_string(),
+                            response_meta: Some(ResponseTextMeta {
+                                id: Some("assistant:second".to_string()),
+                                status: None,
+                                phase: None,
+                            }),
+                        },
+                    ],
+                    ..LlmResponse::default()
+                })
+            })
+            .build()
+            .into_handle()
+    }
+
     fn text_provider(
         kind: &'static str,
         model: &'static str,
@@ -2268,12 +2624,14 @@ mod tests {
             .into_handle()
     }
 
+    type SeenModels = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
     fn recording_text_provider(
         kind: &'static str,
         model: &'static str,
         variant: Option<&'static str>,
         text: &'static str,
-        seen: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+        seen: SeenModels,
     ) -> ProviderHandle {
         lash::testing::TestProvider::builder()
             .kind(kind)
@@ -2460,7 +2818,10 @@ mod tests {
         let session = core.session("main").open().await?;
         let events = RecordingEvents::default();
 
-        let result = session.turn(Input::text("hello")).stream(&events).await?;
+        let result = session
+            .turn(TurnInput::text("hello"))
+            .stream(&events)
+            .await?;
 
         assert!(matches!(
             result.outcome,
@@ -2481,6 +2842,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> {
+        let core = standard_core();
+        let session = core.session("turn-stream").open().await?;
+        let mut stream = session.turn(TurnInput::text("stream me")).into_stream()?;
+
+        let mut activities = Vec::new();
+        while let Some(activity) = stream.next_activity().await {
+            activities.push(activity?);
+        }
+        let result = stream.finish().await?;
+
+        assert!(matches!(
+            result.outcome,
+            TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
+        ));
+        assert_eq!(assistant_prose(&activities), "echo: stream me");
+        assert!(
+            activities
+                .iter()
+                .any(|activity| matches!(&activity.event, TurnEvent::AssistantProseDelta { .. }))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
+        let core = LashCore::standard()
+            .provider(semantic_group_provider())
+            .model("mock-model", None)
+            .max_context_tokens(200_000)
+            .build()?;
+        let session = core.session("turn-stream-last-group").open().await?;
+        let mut stream = session
+            .turn(TurnInput::text("stream groups"))
+            .into_stream()?;
+
+        let mut activities = Vec::new();
+        while let Some(activity) = stream.next_activity().await {
+            activities.push(activity?);
+        }
+        let result = stream.finish().await?;
+
+        assert_eq!(assistant_prose(&activities), "firstsecond");
+        assert_eq!(result.assistant_message(), Some("second"));
+        assert!(result.is_success());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
+        let core = LashCore::standard()
+            .provider(semantic_group_provider())
+            .model("mock-model", None)
+            .max_context_tokens(200_000)
+            .build()?;
+        let session = core.session("turn-run-last-group").open().await?;
+
+        let collected = session.turn(TurnInput::text("run groups")).run().await?;
+
+        assert_eq!(collected.assistant_messages(), vec!["first", "second"]);
+        assert_eq!(collected.assistant_transcript_text(), "firstsecond");
+        assert_eq!(collected.result.assistant_message(), Some("second"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
         let core = LashCore::standard()
             .provider(retry_once_provider())
@@ -2490,7 +2917,10 @@ mod tests {
         let session = core.session("retry-status").open().await?;
         let events = RecordingEvents::default();
 
-        let result = session.turn(Input::text("hello")).stream(&events).await?;
+        let result = session
+            .turn(TurnInput::text("hello"))
+            .stream(&events)
+            .await?;
 
         assert!(matches!(
             result.outcome,
@@ -2529,7 +2959,10 @@ mod tests {
         let session = core.session("plugin-surface").open().await?;
         let events = RecordingEvents::default();
 
-        session.turn(Input::text("hello")).stream(&events).await?;
+        session
+            .turn(TurnInput::text("hello"))
+            .stream(&events)
+            .await?;
 
         let surface = events
             .snapshot()
@@ -2550,13 +2983,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_turn_accepts_prebuilt_turn_input() -> Result<()> {
+    async fn control_turn_accepts_prebuilt_turn_input() -> Result<()> {
         let core = standard_core();
         let session = core.session("raw-turn").open().await?;
-        let mut input = Input::text("raw input").into_turn_input();
+        let mut input = TurnInput::text("raw input");
         input.trace_turn_id = Some("host-trace-id".to_string());
 
-        let result = session.control().raw_turn(input).run().await?;
+        let result = session.turn(input).run().await?;
 
         assert_eq!(assistant_prose(&result.activities), "echo: raw input");
         Ok(())
@@ -2577,14 +3010,14 @@ mod tests {
         let turn_events = Arc::clone(&events);
         let turn = tokio::spawn(async move {
             turn_session
-                .turn(Input::text("hello"))
+                .turn(TurnInput::text("hello"))
                 .stream(turn_events.as_ref())
                 .await
         });
 
         entered_rx.await.expect("provider entered first call");
         session
-            .queue(Input::text("queued follow-up"))
+            .queue(TurnInput::text("queued follow-up"))
             .id("queue-1")
             .await?;
         release_tx.send(()).expect("release provider");
@@ -2615,7 +3048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_control_stream_raw_receives_raw_and_semantic_events() -> Result<()> {
+    async fn session_control_stream_receives_runtime_and_semantic_events() -> Result<()> {
         let core = standard_core();
         let session = core.session("raw-control").open().await?;
         let raw_events = RecordingSessionEvents::default();
@@ -2623,8 +3056,9 @@ mod tests {
 
         let result = session
             .control()
-            .stream_raw(
-                Input::text("raw stream").into_turn_input(),
+            .external()
+            .stream(
+                TurnInput::text("raw stream"),
                 &raw_events,
                 &turn_events,
                 CancellationToken::new(),
@@ -2657,14 +3091,32 @@ mod tests {
         let core = standard_core();
         let session = core.session("session-ops").open().await?;
 
-        session.run(Input::text("usage")).await?;
+        session.run(TurnInput::text("usage")).await?;
         let usage = session.usage_report().await;
         assert_eq!(usage.usage.output_tokens, 2);
-        session.refresh_tool_surface().await?;
-        session.await_background_work().await?;
-        assert!(session.list_background_tasks().await?.is_empty());
-        assert!(session.snapshot_execution_state().await?.is_none());
-        session.restore_execution_state(&[1, 2, 3]).await?;
+        session.control().tools().refresh_surface().await?;
+        session.control().state().await_background_work().await?;
+        assert!(
+            session
+                .control()
+                .state()
+                .list_background_tasks()
+                .await?
+                .is_empty()
+        );
+        assert!(
+            session
+                .control()
+                .state()
+                .snapshot_execution()
+                .await?
+                .is_none()
+        );
+        session
+            .control()
+            .state()
+            .restore_execution(&[1, 2, 3])
+            .await?;
         Ok(())
     }
 
@@ -2672,9 +3124,9 @@ mod tests {
     async fn session_control_manages_child_session_turns() -> Result<()> {
         let core = standard_core();
         let session = core.session("parent-control").open().await?;
-        let control = session.control();
-        let child = control
-            .create_child_session(SessionCreateRequest {
+        let children = session.control().children();
+        let child = children
+            .create_session(SessionCreateRequest {
                 session_id: Some("child-control".to_string()),
                 relation: lash::SessionRelation::Child {
                     parent_session_id: "parent-control".to_string(),
@@ -2692,12 +3144,12 @@ mod tests {
             })
             .await?;
 
-        let handle = control
-            .start_child_turn(&child.session_id, Input::text("child").into_turn_input())
+        let handle = children
+            .start_turn(&child.session_id, TurnInput::text("child"))
             .await?;
-        let assembled = control.await_child_turn(&handle.turn_id).await?;
+        let assembled = children.await_turn(&handle.turn_id).await?;
         assert_eq!(assembled.state.session_id, "child-control");
-        control.close_child_session(&child.session_id).await?;
+        children.close_session(&child.session_id).await?;
         Ok(())
     }
 
@@ -2717,11 +3169,13 @@ mod tests {
             .await?;
 
         session
-            .turn(Input::text("first"))
+            .turn(TurnInput::text("first"))
             .prompt_contribution(PromptContribution::guidance("Turn", "turn guidance"))
             .run()
             .await?;
         session
+            .control()
+            .config()
             .replace_prompt_slot(
                 PromptSlot::Guidance,
                 [PromptContribution::guidance(
@@ -2730,9 +3184,13 @@ mod tests {
                 )],
             )
             .await?;
-        session.run(Input::text("second")).await?;
-        session.clear_prompt_slot(PromptSlot::Guidance).await?;
-        session.run(Input::text("third")).await?;
+        session.run(TurnInput::text("second")).await?;
+        session
+            .control()
+            .config()
+            .clear_prompt_slot(PromptSlot::Guidance)
+            .await?;
+        session.run(TurnInput::text("third")).await?;
 
         let prompts = seen.lock().expect("seen prompts");
         assert!(prompts[0].contains("core guidance"));
@@ -2764,21 +3222,23 @@ mod tests {
             .open()
             .await?;
 
-        let session_result = session.run(Input::text("hello")).await?;
+        let session_result = session.run(TurnInput::text("hello")).await?;
         assert_eq!(assistant_prose(&session_result.activities), "session");
 
         let turn_result = session
-            .turn(Input::text("hello"))
+            .turn(TurnInput::text("hello"))
             .provider(text_provider("turn-provider", "turn-model", "turn"))
             .run()
             .await?;
         assert_eq!(assistant_prose(&turn_result.activities), "turn");
 
-        let after_turn = session.run(Input::text("hello")).await?;
+        let after_turn = session.run(TurnInput::text("hello")).await?;
         assert_eq!(assistant_prose(&after_turn.activities), "session");
 
         session
-            .update_config(SessionConfigPatch {
+            .control()
+            .config()
+            .update(SessionConfigPatch {
                 provider: Some(text_provider(
                     "updated-provider",
                     "updated-model",
@@ -2789,7 +3249,7 @@ mod tests {
             })
             .await?;
 
-        let updated = session.run(Input::text("hello")).await?;
+        let updated = session.run(TurnInput::text("hello")).await?;
         assert_eq!(assistant_prose(&updated.activities), "updated");
         Ok(())
     }
@@ -2820,9 +3280,9 @@ mod tests {
             .open()
             .await?;
 
-        session.run(Input::text("hello")).await?;
+        session.run(TurnInput::text("hello")).await?;
         session
-            .turn(Input::text("hello"))
+            .turn(TurnInput::text("hello"))
             .provider(recording_text_provider(
                 "turn-provider",
                 "turn-model",
@@ -2833,7 +3293,7 @@ mod tests {
             .run()
             .await?;
         session
-            .turn(Input::text("hello"))
+            .turn(TurnInput::text("hello"))
             .provider(recording_text_provider(
                 "manual-provider",
                 "manual-default-model",
@@ -2845,7 +3305,9 @@ mod tests {
             .run()
             .await?;
         session
-            .update_config(SessionConfigPatch {
+            .control()
+            .config()
+            .update(SessionConfigPatch {
                 provider: Some(recording_text_provider(
                     "updated-provider",
                     "updated-model",
@@ -2856,7 +3318,7 @@ mod tests {
                 ..SessionConfigPatch::default()
             })
             .await?;
-        session.run(Input::text("hello")).await?;
+        session.run(TurnInput::text("hello")).await?;
 
         assert_eq!(
             *seen.lock().expect("seen requests"),
@@ -2884,7 +3346,7 @@ mod tests {
         let core = standard_core();
         let session = core.session("dynamic-default").open().await?;
 
-        let state = session.tool_state().await?;
+        let state = session.control().tools().state().await?;
 
         assert!(state.generation() > 0);
         Ok(())
@@ -2900,7 +3362,7 @@ mod tests {
             .build()?;
         let session = core.session("static-tools").open().await?;
 
-        let state = session.tool_state().await?;
+        let state = session.control().tools().state().await?;
 
         assert!(state.contains("app_lookup"));
         Ok(())
@@ -2917,9 +3379,11 @@ mod tests {
         let session = core.session("tool-state").open().await?;
 
         let generation = session
-            .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+            .control()
+            .tools()
+            .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
             .await?;
-        let hidden = session.tool_state().await?;
+        let hidden = session.control().tools().state().await?;
 
         assert_eq!(hidden.generation(), generation);
         assert_eq!(
@@ -2933,8 +3397,8 @@ mod tests {
         callable
             .set_availability("app_lookup", Some(ToolAvailability::Callable))
             .expect("app tool");
-        let generation = session.apply_tool_state(callable).await?;
-        let callable = session.tool_state().await?;
+        let generation = session.control().tools().apply_state(callable).await?;
+        let callable = session.control().tools().state().await?;
 
         assert_eq!(callable.generation(), generation);
         assert_eq!(
@@ -2956,9 +3420,11 @@ mod tests {
             .build()?;
         let session = core.session("persisted-tools").open().await?;
         session
-            .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+            .control()
+            .tools()
+            .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
             .await?;
-        let persisted_tool_state = session.tool_state().await?;
+        let persisted_tool_state = session.control().tools().state().await?;
         let state = PersistedSessionState {
             session_id: "persisted-tools".to_string(),
             policy: lash::SessionPolicy {
@@ -2981,7 +3447,7 @@ mod tests {
             .build()?;
 
         let reopened = reopened_core.session("persisted-tools").open().await?;
-        let state = reopened.tool_state().await?;
+        let state = reopened.control().tools().state().await?;
 
         assert_eq!(
             state
@@ -3012,7 +3478,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rlm_session_and_turn_projection_duplicates_fail_before_run() -> Result<()> {
+    async fn rlm_projection_errors_surface_from_mode_extensions() -> Result<()> {
+        use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt};
+
         let core = LashCore::rlm()
             .provider(mock_provider())
             .model("mock-model", None)
@@ -3020,28 +3488,28 @@ mod tests {
             .build()?;
         let session = core.session("rlm").open().await?;
         session
-            .rlm_project(
+            .control()
+            .mode()
+            .apply_session_extension(lash_mode_rlm::rlm_session_projection_extension(
                 RlmProjectedBindings::new()
                     .bind_json("current_query", serde_json::json!("session"))
                     .expect("session bind"),
-            )
+            ))
             .await?;
 
-        let err = match session
-            .turn(Input::text("hello"))
+        let input = TurnInput::text("hello")
             .rlm_project(
                 RlmProjectedBindings::new()
                     .bind_json("current_query", serde_json::json!("turn"))
                     .expect("turn bind"),
-            )?
-            .run()
-            .await
-        {
+            )
+            .map_err(|err| EmbedError::Session(SessionError::Protocol(err.to_string())))?;
+        let err = match session.turn(input).run().await {
             Ok(_) => panic!("duplicate session and turn projection should fail"),
             Err(err) => err,
         };
         assert!(
-            matches!(err, EmbedError::RlmProjectedBinding(message) if message.contains("current_query"))
+            matches!(err, EmbedError::Session(message) if message.to_string().contains("current_query"))
         );
         Ok(())
     }
@@ -3082,7 +3550,7 @@ mod tests {
         let core = standard_core();
         let session = core.session("main").open().await?;
 
-        let result = session.run(Input::text("visible")).await?;
+        let result = session.run(TurnInput::text("visible")).await?;
 
         assert_eq!(assistant_prose(&result.activities), "echo: visible");
         assert!(
@@ -3104,10 +3572,10 @@ mod tests {
                 .any(|activity| matches!(&activity.event, TurnEvent::CodeBlockCompleted { .. }))
         );
         assert!(matches!(
-            result.outcome,
+            result.result.outcome,
             TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. })
         ));
-        assert_eq!(result.usage.output_tokens, 2);
+        assert_eq!(result.result.usage.output_tokens, 2);
         Ok(())
     }
 
@@ -3192,7 +3660,7 @@ mod tests {
         let session = core.session("fanout-tool-events").open().await?;
 
         let result = session
-            .turn(Input::text("use tool"))
+            .turn(TurnInput::text("use tool"))
             .stream(&fanout)
             .await?;
 
@@ -3224,7 +3692,10 @@ mod tests {
         let session = core.session("semantic-events").open().await?;
         let events = RecordingEvents::default();
 
-        let result = session.turn(Input::text("stream")).stream(&events).await?;
+        let result = session
+            .turn(TurnInput::text("stream"))
+            .stream(&events)
+            .await?;
 
         assert!(matches!(
             result.outcome,
@@ -3259,7 +3730,7 @@ mod tests {
         let events = RecordingEvents::default();
 
         let collected = session
-            .turn(Input::text("use tool"))
+            .turn(TurnInput::text("use tool"))
             .stream(&events)
             .await?;
 
@@ -3309,7 +3780,7 @@ mod tests {
         let events = Arc::new(RecordingEvents::default());
 
         let result = session
-            .turn(Input::text("use tool"))
+            .turn(TurnInput::text("use tool"))
             .stream(events.as_ref())
             .await?;
 
@@ -3383,7 +3854,7 @@ mod tests {
         let events = Arc::new(RecordingEvents::default());
 
         let result = session
-            .turn(Input::text("answer directly"))
+            .turn(TurnInput::text("answer directly"))
             .mode_turn_options(
                 ModeTurnOptions::typed(
                     lash::ExecutionMode::new("rlm"),
@@ -3423,7 +3894,7 @@ mod tests {
         let events = Arc::new(RecordingEvents::default());
 
         let result = session
-            .turn(Input::text("submit"))
+            .turn(TurnInput::text("submit"))
             .mode_turn_options(
                 ModeTurnOptions::typed(
                     lash::ExecutionMode::new("rlm"),
@@ -3469,7 +3940,7 @@ mod tests {
         let standard_session = standard_core.session("standard-projection").open().await?;
         let standard_events = RecordingEvents::default();
         let _ = standard_session
-            .turn(Input::text("use tool"))
+            .turn(TurnInput::text("use tool"))
             .stream(&standard_events)
             .await?;
         let standard_view = standard_events
@@ -3494,7 +3965,7 @@ mod tests {
         let rlm_session = rlm_core.session("rlm-projection").open().await?;
         let rlm_events = RecordingEvents::default();
         let _ = rlm_session
-            .turn(Input::text("use tool"))
+            .turn(TurnInput::text("use tool"))
             .stream(&rlm_events)
             .await?;
         let rlm_view = rlm_events
@@ -3534,7 +4005,7 @@ mod tests {
         let events = RecordingEvents::default();
 
         let _result = session
-            .turn(Input::text("bad code"))
+            .turn(TurnInput::text("bad code"))
             .stream(&events)
             .await?;
 
@@ -3668,10 +4139,12 @@ mod tests {
             "manual input"
         );
         opened
-            .set_tool_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
+            .control()
+            .tools()
+            .set_availability(&["app_lookup".to_string()], Some(ToolAvailability::Hidden))
             .await?;
-        let mut persisted = opened.persist_current_state().await?;
-        persisted.tool_state_snapshot = Some(opened.tool_state().await?);
+        let mut persisted = opened.control().state().persist_current().await?;
+        persisted.tool_state_snapshot = Some(opened.control().tools().state().await?);
         drop(opened);
 
         let reopened = core
@@ -3679,7 +4152,7 @@ mod tests {
             .store(Arc::clone(&store))
             .open_with_state(persisted)
             .await?;
-        let state = reopened.tool_state().await?;
+        let state = reopened.control().tools().state().await?;
         assert_eq!(
             state
                 .get("app_lookup")
@@ -3702,7 +4175,8 @@ mod tests {
 
         session
             .control()
-            .create_child_session(SessionCreateRequest {
+            .children()
+            .create_session(SessionCreateRequest {
                 session_id: Some("managed-child-store".to_string()),
                 relation: lash::SessionRelation::Child {
                     parent_session_id: "root-with-child-store".to_string(),
@@ -3748,7 +4222,8 @@ mod tests {
 
         session
             .control()
-            .create_child_session(SessionCreateRequest {
+            .children()
+            .create_session(SessionCreateRequest {
                 session_id: Some("explicit-root-child".to_string()),
                 relation: lash::SessionRelation::Child {
                     parent_session_id: "explicit-root-store".to_string(),

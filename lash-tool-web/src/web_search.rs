@@ -2,7 +2,7 @@ use serde_json::json;
 
 use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::object_schema;
+use lash_tool_support::object_schema;
 
 /// Web search via Tavily API.
 pub struct WebSearch {
@@ -69,7 +69,7 @@ impl ToolProvider for WebSearch {
             .with_examples(vec![
                 "search_web(query=\"latest Rust release notes\", limit=5)".into(),
             ])
-            .with_discovery(super::discovery_metadata("web", &["web_search"]))
+            .with_discovery(lash_tool_support::discovery_metadata("web", &["web_search"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }

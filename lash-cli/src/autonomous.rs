@@ -279,6 +279,7 @@ async fn autonomous_handoff_first_turn(
 ) -> anyhow::Result<TurnInput> {
     let seed = session
         .control()
+        .children()
         .take_first_turn_input(session_id)
         .await
         .map_err(|err| {
@@ -331,8 +332,8 @@ pub(crate) async fn run_autonomous(
         break (turn_done, outcome.cancel);
     };
     if persistence.await_background_work {
-        session.await_background_work().await?;
-        let state = session.persist_current_state().await?;
+        session.control().state().await_background_work().await?;
+        let state = session.control().state().persist_current().await?;
         done.result.state = lash::SessionStateEnvelope {
             session_id: state.session_id,
             policy: state.policy,

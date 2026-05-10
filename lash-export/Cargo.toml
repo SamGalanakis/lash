@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 lash = { path = "../lash" }
+lash-mode-rlm = { path = "../lash-mode-rlm" }
 lash-sqlite-store = { path = "../lash-sqlite-store" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 anyhow = "1"

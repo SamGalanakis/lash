@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::{
+use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
 };
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 /// List filesystem entries in a directory tree.
 #[derive(Default)]
@@ -74,7 +74,7 @@ impl ToolProvider for Ls {
                 r#"ls(path=".", depth=1, limit=100)"#.into(),
                 r#"ls(path="lash/src/tools", with_lines=true)"#.into(),
             ])
-            .with_discovery(super::discovery_metadata(
+            .with_discovery(lash_tool_support::discovery_metadata(
                 "filesystem",
                 &["list_files", "list_directory"],
             ))

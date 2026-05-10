@@ -2,7 +2,7 @@ use serde_json::json;
 
 use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::{object_schema, require_str};
+use lash_tool_support::{object_schema, require_str};
 
 /// Fetch a URL and return its content as text.
 pub struct FetchUrl {
@@ -58,7 +58,7 @@ impl ToolProvider for FetchUrl {
                 }),
             )
             .with_examples(vec!["fetch_url(url=\"https://www.rust-lang.org/\")".into()])
-            .with_discovery(super::discovery_metadata(
+            .with_discovery(lash_tool_support::discovery_metadata(
                 "web",
                 &["fetch", "open_url"],
             ))

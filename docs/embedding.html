@@ -42,7 +42,7 @@
             <pre><code>use std::sync::Arc;
 
 use lash::ToolProvider;
-use lash_embed::{Input, LashCore, ModeId, ModePreset};
+use lash_embed::{LashCore, ModeId, ModePreset, TurnInput};
 
 let core = LashCore::builder()
     .install_mode(ModePreset::standard())
@@ -56,7 +56,7 @@ let core = LashCore::builder()
     .build()?;
 
 let session = core.session("chat-123").rlm().open().await?;
-let result = session.turn(Input::text("Use the app tools.")).run().await?;
+let result = session.turn(TurnInput::text("Use the app tools.")).run().await?;
 let assistant_text: String = result.activities.iter().filter_map(|activity| match &amp;activity.event {
     TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
     _ =&gt; None,
@@ -69,7 +69,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>ModePreset</code></dt>
             <dd>Installs execution modes. Use <code>ModePreset::standard()</code> for native provider tool calls, <code>ModePreset::rlm()</code> for Lashlang-driven RLM turns, or install both and choose the default with <code>default_mode</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(Input)</code>, <code>run(Input)</code>, <code>read_view()</code>, and <code>rlm_project(...)</code>.</dd>
+            <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and <code>rlm_project(...)</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
           </dl>
@@ -78,13 +78,13 @@ println!("{assistant_text}");</code></pre>
         <div class="section">
           <div class="section-header">
             <h2>Run A Turn</h2>
-            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>CollectedTurnResult</code> with the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
+            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>CollectedTurnOutput</code> with the terminal <code>TurnResult</code> and the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
           </div>
           <div class="two-col">
             <article class="panel">
               <h3>Collected result</h3>
               <pre><code>let collected = session
-    .turn(Input::text("Summarize this task."))
+    .turn(TurnInput::text("Summarize this task."))
     .run()
     .await?;
 
@@ -92,15 +92,15 @@ let visible_answer: String = collected.activities.iter().filter_map(|activity| m
     TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
     _ =&gt; None,
 }).collect();
-let usage = collected.usage;
-let outcome = collected.outcome;</code></pre>
+let usage = collected.result.usage;
+let outcome = collected.result.outcome;</code></pre>
             </article>
             <article class="panel">
               <h3>Live stream</h3>
               <pre><code>let ui_sink = Arc::new(AppEvents::new(tx));
 
 let turn = session
-    .turn(Input::text(user_text))
+    .turn(TurnInput::text(user_text))
     .stream(ui_sink.as_ref())
     .await?;
 
@@ -191,7 +191,7 @@ let prose_options = ModeTurnOptions::typed(
 )?;
 
 let result = session
-    .turn(Input::text("Move on the board."))
+    .turn(TurnInput::text("Move on the board."))
     .mode_turn_options(options)
     .stream(&amp;sink)
     .await?;</code></pre>
@@ -264,7 +264,7 @@ let session = core
     .await?;
 
 let result = session
-    .turn(Input::text("Draft the response."))
+    .turn(TurnInput::text("Draft the response."))
     .prompt_contribution(PromptContribution::guidance(
         "Turn",
         "Keep this reply under 120 words.",
@@ -360,7 +360,7 @@ let session = core
     .await?;
 
 let result = session
-    .turn(Input::text("Play one move."))
+    .turn(TurnInput::text("Play one move."))
     .with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
     .stream(&amp;sink)
     .await?;</code></pre>

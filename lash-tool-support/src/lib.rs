@@ -1,23 +1,3 @@
-mod apply_patch;
-mod fetch_url;
-mod glob;
-mod grep;
-mod ls;
-mod read_file;
-mod shell;
-mod web_search;
-
-pub use apply_patch::ApplyPatchTool;
-pub use apply_patch::{PatchAction, PatchFileOp, inspect_patch_ops};
-pub use fetch_url::FetchUrl;
-pub use glob::Glob;
-pub use grep::Grep;
-pub use ls::Ls;
-pub use read_file::{ReadFile, ReadFilePluginFactory};
-pub use shell::{StandardShell, StandardShellPluginFactory};
-pub use shell::{shell_prompt_contributions, shell_prompt_contributions_for_access};
-pub use web_search::WebSearch;
-
 use lash::ToolResult;
 use lash_rlm_types::unwrap_projected_arg;
 use std::io::{BufRead, BufReader};
@@ -27,11 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Shared preamble describing default filesystem-listing behavior.
 /// Used by `ls` and `glob` so both tools document hidden-file and
 /// `.gitignore` handling in identical wording.
-pub(crate) const FS_DEFAULTS_PREAMBLE: &str =
+pub const FS_DEFAULTS_PREAMBLE: &str =
     "By default this includes hidden files and respects `.gitignore` only inside Git repos.";
 
 #[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct PathEntry {
+pub struct PathEntry {
     pub path: String,
     pub kind: String,
     pub size_bytes: u64,
@@ -40,17 +20,14 @@ pub(crate) struct PathEntry {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct TruncationMeta {
+pub struct TruncationMeta {
     pub shown: usize,
     pub total: usize,
     pub omitted: usize,
 }
 
 /// Extract a required non-empty string arg, or return ToolResult::err.
-pub(crate) fn require_str<'a>(
-    args: &'a serde_json::Value,
-    key: &str,
-) -> Result<&'a str, ToolResult> {
+pub fn require_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, ToolResult> {
     args.get(key)
         .map(unwrap_projected_arg)
         .and_then(|v| v.as_str())
@@ -59,7 +36,7 @@ pub(crate) fn require_str<'a>(
 }
 
 /// Parse optional bool arg with a default.
-pub(crate) fn parse_optional_bool(
+pub fn parse_optional_bool(
     args: &serde_json::Value,
     key: &str,
     default: bool,
@@ -78,7 +55,7 @@ pub(crate) fn parse_optional_bool(
 
 /// Parse an optional positive integer arg.
 /// Accepts `null` or `"none"` when `allow_none` is true.
-pub(crate) fn parse_optional_usize_arg(
+pub fn parse_optional_usize_arg(
     args: &serde_json::Value,
     key: &str,
     default: Option<usize>,
@@ -135,7 +112,7 @@ pub(crate) fn parse_optional_usize_arg(
     }
 }
 
-pub(crate) fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": properties,
@@ -144,7 +121,7 @@ pub(crate) fn object_schema(properties: serde_json::Value, required: &[&str]) ->
     })
 }
 
-pub(crate) fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash::ToolDiscoveryMetadata {
+pub fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash::ToolDiscoveryMetadata {
     lash::ToolDiscoveryMetadata {
         namespace: if namespace.is_empty() {
             None
@@ -168,7 +145,7 @@ where
 
 /// Build a normalized filesystem entry for tool output.
 /// Returns the entry plus raw mtime for optional sorting.
-pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {
+pub fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {
     let fallback_mtime = UNIX_EPOCH;
     let path_str = path.to_string_lossy().to_string();
 
@@ -214,7 +191,7 @@ pub(crate) fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, Sys
     (entry, mtime)
 }
 
-pub(crate) fn rg_file_list(
+pub fn rg_file_list(
     base: &Path,
     include_hidden: bool,
     respect_gitignore: bool,
@@ -267,10 +244,7 @@ pub(crate) fn rg_file_list(
 }
 
 /// Build the standard result envelope returned by filesystem listing tools.
-pub(crate) fn filesystem_entries_result(
-    items: Vec<PathEntry>,
-    total_count: usize,
-) -> serde_json::Value {
+pub fn filesystem_entries_result(items: Vec<PathEntry>, total_count: usize) -> serde_json::Value {
     let shown = items.len();
     let truncated = if total_count > shown {
         Some(TruncationMeta {
@@ -306,7 +280,7 @@ fn format_time_rfc3339(ts: SystemTime) -> String {
 
 /// Generate a compact unified diff between old and new content.
 /// Truncates to `max_lines` lines if the diff is too long.
-pub(crate) fn compact_diff(old: &str, new: &str, path: &str, max_lines: usize) -> String {
+pub fn compact_diff(old: &str, new: &str, path: &str, max_lines: usize) -> String {
     let diff = similar::TextDiff::from_lines(old, new);
     let unified = diff
         .unified_diff()

@@ -5,7 +5,8 @@ use lash::{
     CachedModelCatalog, ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage,
     ProviderHandle, TokenUsage, ToolState,
 };
-use lash_embed::{LashSession, ModelSelection, SessionConfigPatch};
+use lash_embed::control::SessionConfigPatch;
+use lash_embed::{LashSession, ModelSelection};
 use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
@@ -47,7 +48,7 @@ async fn restore_execution_state_if_present<'a>(
         return;
     };
     match snapshot {
-        Some(snapshot) => match rt.restore_execution_state(snapshot).await {
+        Some(snapshot) => match rt.control().state().restore_execution(snapshot).await {
             Ok(()) => {
                 app.timeline.push(UiTimelineItem::SystemMessage(
                     "Execution state restored from snapshot.".to_string(),
@@ -123,7 +124,9 @@ async fn restore_model_from_graph_config(
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
-            .update_config(SessionConfigPatch {
+            .control()
+            .config()
+            .update(SessionConfigPatch {
                 model: Some(ModelSelection::new(app.model.clone(), None)),
                 max_context_tokens: Some(restored_context_window as usize),
                 ..SessionConfigPatch::default()
@@ -171,8 +174,8 @@ async fn apply_graph_resume_state(
         .and_then(|checkpoint| checkpoint.tool_state.clone())
         && let Some(session) = runtime.as_ref()
     {
-        let _ = session.apply_tool_state(tool_state).await;
-        if let Ok(state) = session.tool_state().await {
+        let _ = session.control().tools().apply_state(tool_state).await;
+        if let Ok(state) = session.control().tools().state().await {
             *desired_tool_state = state;
         }
     }
@@ -224,18 +227,20 @@ async fn apply_graph_resume_state(
         .await;
 
     if let Some(rt) = runtime.as_mut() {
-        rt.update_config(SessionConfigPatch {
-            provider: Some(provider.clone()),
-            model: Some(ModelSelection::new(
-                app.model.clone(),
-                current_model_variant.clone(),
-            )),
-            max_context_tokens: app.context_window.map(|window| window as usize),
-            ..SessionConfigPatch::default()
-        })
-        .await
-        .map_err(|err| err.to_string())?;
-        let _ = rt.refresh_tool_surface().await;
+        rt.control()
+            .config()
+            .update(SessionConfigPatch {
+                provider: Some(provider.clone()),
+                model: Some(ModelSelection::new(
+                    app.model.clone(),
+                    current_model_variant.clone(),
+                )),
+                max_context_tokens: app.context_window.map(|window| window as usize),
+                ..SessionConfigPatch::default()
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        let _ = rt.control().tools().refresh_surface().await;
     }
 
     Ok(())

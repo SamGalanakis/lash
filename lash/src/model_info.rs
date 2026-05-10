@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use reqwest as model_catalog_http;
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 pub const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -217,7 +218,7 @@ impl ModelsDevHttpSource {
 #[async_trait]
 impl ModelCatalogSource for ModelsDevHttpSource {
     async fn fetch(&self) -> Result<String, String> {
-        let client = reqwest::Client::builder()
+        let client = model_catalog_http::ClientBuilder::new()
             .timeout(self.timeout)
             .user_agent(self.user_agent.clone())
             .build()

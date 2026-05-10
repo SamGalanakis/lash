@@ -4,8 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
+use lash::TurnInput;
 use lash::provider::LashConfig;
-use lash_embed::{Input, LashCore, ModeTurnOptions, TurnActivity, TurnEvent};
+use lash_embed::modes::ModeTurnOptions;
+use lash_embed::{LashCore, TurnActivity, TurnEvent};
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{
     ReflectiveGepaStrategy, ReflectiveProposalRequest, ReflectiveProposer,
@@ -425,7 +427,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .await
             .map_err(lash_harness_opt::HarnessOptError::Io)?;
         let turn = session
-            .turn(Input::text(prompt))
+            .turn(TurnInput::text(prompt))
             .cancel(cancellation)
             .mode_turn_options(
                 ModeTurnOptions::typed(
@@ -441,7 +443,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
 
         let assistant_prose = assistant_prose(&turn.activities);
-        match turn.outcome {
+        match turn.result.outcome {
             lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { value })
             | lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { value, .. }) => {
                 let output_path = request.artifact_dir.join("output.json");
@@ -449,7 +451,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                     &output_path,
                     serde_json::to_vec_pretty(&json!({
                         "value": value,
-                        "errors": turn.errors,
+                        "errors": turn.result.errors,
                         "assistant_prose": assistant_prose,
                     }))
                     .map_err(lash_harness_opt::HarnessOptError::Json)?,
@@ -464,7 +466,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             }
             other => Err(lash_harness_opt::HarnessOptError::Strategy(format!(
                 "GEPA RLM proposer did not submit a proposal: outcome={other:?} errors={:?} output={}",
-                turn.errors, assistant_prose
+                turn.result.errors, assistant_prose
             ))),
         }
     }

@@ -18,7 +18,7 @@
 //! * **Webserver multi-tenant:** one `RuntimeEnvironment` per process,
 //!   `residency: ActivePathOnly`, and `park()` / `resume()` per
 //!   request. HTTP connection pooling is a provider concern —
-//!   provider crates accept an optional `Arc<reqwest::Client>` in
+//!   provider crates accept an optional shared HTTP client in
 //!   their constructors, so the host can share one pool across every
 //!   materialized provider.
 

@@ -62,7 +62,7 @@ flowchart TD
   Runtime --> Trace["lash-trace schema v2<br/>standard + extended JSONL"]
   Runtime --> Export["lash-export<br/>DB + provider trace"]
   MCP --> Dynamic["DynamicToolProvider"]
-  DefaultTools["lash-default-tools"] --> Tavily
+  DefaultTools["lash-standard-plugins"] --> Tavily
   Dynamic --> Runtime
   DefaultTools --> Runtime
             </div>

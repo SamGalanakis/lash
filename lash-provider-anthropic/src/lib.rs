@@ -5,11 +5,6 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use lash::llm::streaming::drive_sse_response;
-use lash::llm::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
-    send_request,
-};
 use lash::llm::transport::LlmTransportError;
 use lash::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
@@ -18,6 +13,11 @@ use lash::llm::types::{
 use lash::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
+};
+use lash_llm_transport::streaming::drive_sse_response;
+use lash_llm_transport::timeouts::{
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";

@@ -117,10 +117,12 @@ fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash::SessionEventRecord::Mode(event) => match event.rlm_event() {
-                Some(RlmModeEvent::RlmTrajectoryEntry(entry)) => Some(entry),
-                _ => None,
-            },
+            lash::SessionEventRecord::Mode(event) => {
+                match lash_mode_rlm::decode_rlm_mode_event(event) {
+                    Some(RlmModeEvent::RlmTrajectoryEntry(entry)) => Some(entry),
+                    _ => None,
+                }
+            }
             _ => None,
         })
         .collect()

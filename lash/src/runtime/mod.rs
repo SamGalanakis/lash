@@ -138,6 +138,29 @@ pub struct TurnInput {
     pub turn_context: TurnContext,
 }
 
+impl TurnInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::items(vec![InputItem::Text { text: text.into() }])
+    }
+
+    pub fn items(items: Vec<InputItem>) -> Self {
+        Self {
+            items,
+            image_blobs: HashMap::new(),
+            mode: None,
+            mode_turn_options: None,
+            trace_turn_id: None,
+            mode_extension: None,
+            turn_context: TurnContext::default(),
+        }
+    }
+
+    pub fn with_image_blob(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.image_blobs.insert(id.into(), bytes);
+        self
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TurnContext {
     plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,

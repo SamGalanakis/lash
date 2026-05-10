@@ -323,7 +323,7 @@ fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
             lash::MessageRole::System => LlmRole::System,
         },
         ChronologicalPayload::ToolCall(_) => LlmRole::User,
-        ChronologicalPayload::RlmStep(_) => LlmRole::Assistant,
+        ChronologicalPayload::ModeEvent(_) => LlmRole::Assistant,
     }
 }
 
@@ -361,7 +361,8 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 impl RlmContextProjector {
     #[cfg(test)]
     fn format_history(&self, projection: &lash::ChronologicalProjection) -> String {
-        render_history_prompt(&projection.rlm_history(), self.max_output_chars)
+        let history = crate::rlm_history_projection(projection);
+        render_history_prompt(history.history(), self.max_output_chars)
     }
 }
 
@@ -504,7 +505,12 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
                 max_output_chars,
             },
         ),
-        ChronologicalPayload::RlmStep(step) => {
+        ChronologicalPayload::ModeEvent(event) => {
+            let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step)) =
+                crate::decode_rlm_mode_event(event)
+            else {
+                return rendered;
+            };
             let images = step
                 .images
                 .iter()
@@ -593,11 +599,15 @@ fn append_entry_image_blocks(
                 blocks.push(LlmContentBlock::Image { attachment_idx });
             }
         }
-        lash::ChronologicalPayload::RlmStep(entry) => {
-            for image in &entry.images {
-                let attachment_idx = attachments.len();
-                attachments.push(LlmAttachment::reference(image.clone()));
-                blocks.push(LlmContentBlock::Image { attachment_idx });
+        lash::ChronologicalPayload::ModeEvent(event) => {
+            if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
+                crate::decode_rlm_mode_event(event)
+            {
+                for image in &entry.images {
+                    let attachment_idx = attachments.len();
+                    attachments.push(LlmAttachment::reference(image.clone()));
+                    blocks.push(LlmContentBlock::Image { attachment_idx });
+                }
             }
         }
         lash::ChronologicalPayload::ToolCall(_) => {}
@@ -840,7 +850,7 @@ mod tests {
     }
 
     fn step_event(mode_iteration: usize, code: &str, output: &str) -> SessionEventRecord {
-        SessionEventRecord::Mode(lash::ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(
+        SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
             RlmTrajectoryEntry {
                 id: format!("rlm_step_{mode_iteration}"),
                 mode_iteration,
@@ -973,7 +983,7 @@ mod tests {
 
     #[test]
     fn printed_images_render_as_llm_image_blocks() {
-        let event = SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        let event = SessionEventRecord::Mode(crate::rlm_mode_event(
             RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
                 id: "rlm_step_1".to_string(),
                 mode_iteration: 1,

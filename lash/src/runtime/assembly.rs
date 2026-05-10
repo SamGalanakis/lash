@@ -16,7 +16,7 @@ use crate::{TurnFinish, TurnOutcome, TurnStop};
 use super::state::SessionStateEnvelope;
 use super::{
     AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, SanitizerPolicy,
-    TerminationPolicy, TurnIssue,
+    TerminationPolicy, TurnActivity, TurnActivityId, TurnEvent, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -474,6 +474,8 @@ fn append_stream_piece(full: &mut String, piece: &str) {
 
 pub(super) struct TurnAssembler {
     pub(super) final_message: Option<String>,
+    pub(super) current_assistant_prose_id: Option<TurnActivityId>,
+    pub(super) current_assistant_prose: Option<String>,
     pub(super) text_deltas: String,
     pub(super) capture_text_deltas: bool,
     pub(super) tool_calls: Vec<ToolCallRecord>,
@@ -495,6 +497,8 @@ impl TurnAssembler {
     pub(super) fn new(capture_text_deltas: bool) -> Self {
         Self {
             final_message: None,
+            current_assistant_prose_id: None,
+            current_assistant_prose: None,
             text_deltas: String::new(),
             capture_text_deltas,
             tool_calls: Vec::new(),
@@ -505,6 +509,20 @@ impl TurnAssembler {
             saw_tool_failure: false,
             outcome: None,
         }
+    }
+
+    pub(super) fn push_turn_activity(&mut self, activity: &TurnActivity) {
+        let TurnEvent::AssistantProseDelta { text } = &activity.event else {
+            return;
+        };
+        if self.current_assistant_prose_id.as_ref() == Some(&activity.correlation_id) {
+            if let Some(current) = self.current_assistant_prose.as_mut() {
+                current.push_str(text);
+            }
+            return;
+        }
+        self.current_assistant_prose_id = Some(activity.correlation_id.clone());
+        self.current_assistant_prose = Some(text.clone());
     }
 
     pub(super) fn push(&mut self, event: &SessionEvent) {
@@ -592,6 +610,8 @@ impl TurnAssembler {
 
         let raw_output = if let Some(final_message) = self.final_message {
             final_message
+        } else if let Some(assistant_prose) = self.current_assistant_prose {
+            assistant_prose
         } else {
             let streamed = self.text_deltas.trim().to_string();
             let state_output = fallback_assistant_output_from_state(&state);
@@ -611,7 +631,14 @@ impl TurnAssembler {
         let outcome = if interrupted {
             TurnOutcome::Stopped(TurnStop::Cancelled)
         } else if let Some(outcome) = self.outcome.take() {
-            outcome
+            match outcome {
+                TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => {
+                    TurnOutcome::Finished(TurnFinish::AssistantMessage {
+                        text: safe_output.clone(),
+                    })
+                }
+                outcome => outcome,
+            }
         } else if !self.saw_done && termination.treat_missing_done_as_failure {
             TurnOutcome::Stopped(TurnStop::RuntimeError)
         } else if !issues.is_empty() {

@@ -14,7 +14,9 @@ async fn persist_parent_root_snapshot(
     store: &Store,
 ) -> Result<()> {
     let mut state = session
-        .persist_current_state()
+        .control()
+        .state()
+        .persist_current()
         .await
         .context("Failed to snapshot session state for fork")?;
     persist_committed_runtime_state(store, &mut state).await;

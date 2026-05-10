@@ -1,0 +1,13 @@
+[package]
+name = "lash-provider-auth"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }

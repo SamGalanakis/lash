@@ -489,7 +489,7 @@ async fn handle_slash_command(
             let trigger = lash::RewriteTrigger::Manual {
                 instructions: argument,
             };
-            match rt.rewrite_history(trigger).await {
+            match rt.control().state().rewrite_history(trigger).await {
                 Ok(true) => {
                     let read_view = rt.read_view().await;
                     history.clear();

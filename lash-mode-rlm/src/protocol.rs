@@ -13,7 +13,7 @@ use lash::sansio::{
     WaitingLlmState, driver_state,
 };
 use lash::session_model::{
-    ConversationRecord, Message, MessageRole, ModeEvent, Part, PartKind, PruneState, SessionEvent,
+    ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
 };
 use lash::{
@@ -626,11 +626,13 @@ fn conversation_event(message: Message) -> SessionEventRecord {
 }
 
 fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionEventRecord {
-    SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmTrajectoryEntry(entry)))
+    SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
+        entry,
+    )))
 }
 
 fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
-    SessionEventRecord::Mode(ModeEvent::rlm(RlmModeEvent::RlmDiagnostic(
+    SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmDiagnostic(
         RlmDiagnosticEvent {
             phase: phase.to_string(),
             payload,

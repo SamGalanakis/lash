@@ -143,13 +143,20 @@ pub(super) async fn apply_pending_reconfigure(
         return Err("runtime session is unavailable while a turn is running".to_string());
     };
     let generation = session
-        .apply_tool_state(desired_tool_state.clone())
+        .control()
+        .tools()
+        .apply_state(desired_tool_state.clone())
         .await
         .map_err(|err| err.to_string())?;
 
     sync_runtime_tool_surface(runtime).await?;
 
-    *desired_tool_state = session.tool_state().await.map_err(|err| err.to_string())?;
+    *desired_tool_state = session
+        .control()
+        .tools()
+        .state()
+        .await
+        .map_err(|err| err.to_string())?;
     *pending_reconfigure = false;
     Ok(generation)
 }
@@ -158,7 +165,9 @@ pub(super) async fn sync_runtime_tool_surface(
     runtime: &mut Option<LashSession>,
 ) -> Result<(), String> {
     if let Some(rt) = runtime.as_mut() {
-        rt.refresh_tool_surface()
+        rt.control()
+            .tools()
+            .refresh_surface()
             .await
             .map_err(|err| err.to_string())?;
     }

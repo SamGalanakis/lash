@@ -310,17 +310,17 @@ impl ModeSessionPlugin for RlmModeSession {
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
         let read_view = state.read_view();
-        let projected_globals = read_view.shared_rlm_globals();
+        let projected_globals = crate::project_rlm_globals_from_events(read_view.active_events());
         if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
             execution.restore_execution_state(&snapshot)?;
-            execution.prune_projected_globals(projected_globals.as_ref());
+            execution.prune_projected_globals(&projected_globals);
         }
         for event in state.read_view().active_events() {
             if let lash::SessionEventRecord::Mode(event) = event
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    event.rlm_event()
+                    crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, projected_globals.as_ref())?;
+                execution.patch_globals(&patch, &projected_globals)?;
             }
         }
         Ok(())
@@ -328,22 +328,23 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn append_session_nodes(
         &self,
-        ctx: ModeSessionContext<'_>,
+        _ctx: ModeSessionContext<'_>,
         nodes: &[lash::SessionAppendNode],
     ) -> Result<(), SessionError> {
         let mut execution = self.execution.lock().await;
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
-        execution.prune_projected_globals(ctx.projected_rlm_globals());
+        let projected_globals = serde_json::Map::new();
+        execution.prune_projected_globals(&projected_globals);
         for node in nodes {
             if let lash::SessionAppendNode::Event {
                 event: lash::SessionEventRecord::Mode(event),
             } = node
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    event.rlm_event()
+                    crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, ctx.projected_rlm_globals())?;
+                execution.patch_globals(&patch, &projected_globals)?;
             }
         }
         Ok(())
