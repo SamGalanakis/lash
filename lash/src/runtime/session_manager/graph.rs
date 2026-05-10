@@ -14,11 +14,13 @@ impl CurrentSessionCapability {
             let registry = managed.registry.lock().await;
             registry.get(session_id).cloned()
         } {
-            let mut runtime = runtime.lock().await;
-            return runtime
+            let mut writer = runtime.runtime.lock().await;
+            let result = writer
                 .append_session_nodes(request)
                 .await
-                .map_err(|err| crate::PluginError::Session(err.to_string()));
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+            runtime.publish_from(&writer);
+            return Ok(result);
         }
 
         if session_id != self.session_id {

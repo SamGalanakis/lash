@@ -1080,7 +1080,7 @@ async fn run_once_embed(
 
     let export_before_alloc = allocator_stats();
     let export_started = Instant::now();
-    let read_view = session.read_view().await;
+    let read_view = session.read_view();
     let export_state_ms = elapsed_ms(export_started);
     let export_state_alloc = alloc_delta(export_before_alloc, allocator_stats());
     let after_export_memory = process_memory_sample();

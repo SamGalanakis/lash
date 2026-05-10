@@ -45,7 +45,7 @@ where
         tracing::debug!(stream_id, "runtime turn task spawned");
         let result = match session
             .control()
-            .external()
+            .raw_turns()
             .stream_assembled(turn_input, &sink, &lash::NoopTurnActivitySink, task_cancel)
             .await
         {

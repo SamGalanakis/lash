@@ -36,36 +36,6 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     response_meta: None,
                 });
             }
-            InputItem::FileRef { path } => {
-                parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[file: {path}]"),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
-            InputItem::DirRef { path } => {
-                parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[directory: {}]", path.trim_end_matches('/')),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
             InputItem::ImageRef { id } => {
                 let Some(bytes) = image_blobs.get(&id) else {
                     continue;

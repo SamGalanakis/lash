@@ -24,14 +24,14 @@ impl ManagedSessionCapability {
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let policy = {
-            let runtime = runtime.lock().await;
+            let runtime = runtime.runtime.lock().await;
             runtime.session_policy()
         };
         let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(100);
         let usage_source = self.child_usage_source(usage, session_id);
-        let runtime_clone = Arc::clone(&runtime);
+        let runtime_clone = runtime.clone();
         let cancel_clone = cancel.clone();
         let sink = ChannelEventSink {
             tx: event_tx,
@@ -46,15 +46,17 @@ impl ManagedSessionCapability {
             }),
         };
         let task = tokio::spawn(async move {
-            let mut runtime = runtime_clone.lock().await;
+            let mut runtime = runtime_clone.runtime.lock().await;
             runtime
                 .refresh_session_tool_surface()
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-            runtime
+            let turn = runtime
                 .stream_turn(input, &sink, cancel_clone)
                 .await
-                .map_err(|err| crate::PluginError::Session(err.to_string()))
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+            runtime_clone.publish_from(&runtime);
+            Ok(turn)
         });
         self.turns.lock().await.insert(
             turn_id.clone(),

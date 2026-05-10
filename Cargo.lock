@@ -27,6 +27,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-service"
+version = "0.2.110"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "lash",
+ "lash-embed",
+ "lash-provider-openai",
+ "lash-sqlite-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -139,6 +159,15 @@ dependencies = [
  "windows-sys 0.60.2",
  "wl-clipboard-rs",
  "x11rb",
+]
+
+[[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -2207,6 +2236,7 @@ dependencies = [
 name = "lash"
 version = "0.2.110"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -3425,27 +3455,6 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
-
-[[package]]
-name = "openrouter-chat-ui"
-version = "0.2.110"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "lash",
- "lash-embed",
- "lash-provider-openai",
- "lash-rlm-types",
- "lash-sqlite-store",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "uuid",
-]
 
 [[package]]
 name = "openssl-probe"

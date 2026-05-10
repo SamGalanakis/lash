@@ -343,7 +343,7 @@ async fn handle_slash_command(
             let session_name = app.session_name.clone();
             let standard_context_approach = runtime
                 .as_ref()
-                .map(|rt| async { rt.policy_snapshot().await.standard_context_approach });
+                .map(|rt| async { rt.policy_snapshot().standard_context_approach });
             let standard_context_approach = match standard_context_approach {
                 Some(future) => future.await,
                 None => None,
@@ -491,7 +491,7 @@ async fn handle_slash_command(
             };
             match rt.control().state().rewrite_history(trigger).await {
                 Ok(true) => {
-                    let read_view = rt.read_view().await;
+                    let read_view = rt.read_view();
                     history.clear();
                     history.extend(read_view.messages().iter().cloned());
                     app.timeline =

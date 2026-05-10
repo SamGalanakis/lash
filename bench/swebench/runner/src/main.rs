@@ -637,9 +637,7 @@ async fn run_instance(
     );
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
-                .with_base_dir(&repo_dir)
-                .with_trace_jsonl_path(Some(trace_path.clone())),
+            RuntimeCoreConfig::default().with_trace_jsonl_path(Some(trace_path.clone())),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
     );
@@ -662,10 +660,9 @@ async fn run_instance(
     let before_usage = runtime.usage_report();
     let turn_started = Instant::now();
     // Each instance runs in its own subprocess (see `spawn_child`), so we
-    // own the process CWD for the duration of this turn. Lash's file tools
-    // resolve paths against the process CWD rather than
-    // `RuntimeCoreConfig::base_dir`, so this is the only way to pin them
-    // to the instance's worktree.
+    // own the process CWD for the duration of this turn. Lash core does not
+    // own filesystem-root policy; file tools resolve paths against process
+    // CWD, so this pins them to the instance's worktree.
     std::env::set_current_dir(&repo_dir)
         .with_context(|| format!("cd into {}", repo_dir.display()))?;
     let turn = runtime

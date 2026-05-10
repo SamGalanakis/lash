@@ -147,8 +147,8 @@ pub(super) async fn handle_clear(
             .refresh_surface()
             .await
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let session_id = rt.session_id().await;
-        let policy = rt.policy_snapshot().await;
+        let session_id = rt.session_id();
+        let policy = rt.policy_snapshot();
         app.session_id = session_id;
         *current_execution_mode = policy.execution_mode;
         *current_model_variant = policy.model_variant;

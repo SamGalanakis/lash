@@ -15,8 +15,8 @@ use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::state::SessionStateEnvelope;
 use super::{
-    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, SanitizerPolicy,
-    TerminationPolicy, TurnActivity, TurnActivityId, TurnEvent, TurnIssue,
+    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, TerminationPolicy, TurnActivity,
+    TurnActivityId, TurnEvent, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -592,7 +592,6 @@ impl TurnAssembler {
         state: SessionStateEnvelope,
         interrupted: bool,
         force_runtime_error: Option<TurnIssue>,
-        sanitizer: &SanitizerPolicy,
         termination: &TerminationPolicy,
     ) -> AssembledTurn {
         let mut issues = self.issues;
@@ -625,7 +624,7 @@ impl TurnAssembler {
                 streamed
             }
         };
-        let safe_output = sanitize_assistant_output(raw_output.clone(), sanitizer);
+        let safe_output = sanitize_assistant_output(raw_output.clone());
         let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
         let outcome = if interrupted {
@@ -708,7 +707,7 @@ pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope)
         .unwrap_or_default()
 }
 
-pub(super) fn sanitize_assistant_output(text: String, _policy: &SanitizerPolicy) -> String {
+pub(super) fn sanitize_assistant_output(text: String) -> String {
     text.lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()

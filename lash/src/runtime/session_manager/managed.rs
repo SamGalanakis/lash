@@ -189,7 +189,7 @@ impl ManagedSessionCapability {
         self.registry
             .lock()
             .await
-            .insert(session_id.clone(), Arc::new(Mutex::new(runtime)));
+            .insert(session_id.clone(), RuntimeHandle::new(runtime));
         if let crate::SessionRelation::Handoff {
             parent_session_id, ..
         } = &request.relation
@@ -271,16 +271,16 @@ impl ManagedSessionCapability {
         session_id: &str,
         input: crate::InjectedTurnInput,
     ) -> Result<(), crate::PluginError> {
-        let runtime_arc = {
+        let runtime_handle = {
             let registry = self.registry.lock().await;
             registry.get(session_id).cloned()
         };
-        let Some(runtime_arc) = runtime_arc else {
+        let Some(runtime_handle) = runtime_handle else {
             return Err(crate::PluginError::Session(format!(
                 "unknown or inactive session `{session_id}` for turn input injection"
             )));
         };
-        let runtime = runtime_arc.lock().await;
+        let runtime = runtime_handle.runtime.lock().await;
         let Some(session) = runtime.session.as_ref() else {
             return Err(crate::PluginError::Session(format!(
                 "session `{session_id}` has no live turn-input bridge"

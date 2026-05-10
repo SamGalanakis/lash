@@ -7,7 +7,7 @@ use crate::editor::PendingImage;
 use lash::InputItem;
 
 /// Build structured turn items from editor input:
-/// - `@path` becomes `FileRef` or `DirRef` when resolvable
+/// - `@path` becomes a host-prepared text marker when resolvable
 /// - `[Image #n]` binds to pasted image `n` from this turn's image list
 /// - plain text remains `Text`
 pub fn build_items_from_editor_input(
@@ -62,17 +62,14 @@ pub fn build_items_from_editor_input(
                         cwd.join(token)
                     };
                     if path.is_file() {
-                        push_text_item(&mut items, &mut text_buf);
-                        items.push(InputItem::FileRef {
-                            path: path.display().to_string(),
-                        });
+                        text_buf.push_str(&format!("[file: {}]", path.display()));
                         i = token_end;
                         continue;
                     } else if path.is_dir() {
-                        push_text_item(&mut items, &mut text_buf);
-                        items.push(InputItem::DirRef {
-                            path: path.display().to_string(),
-                        });
+                        text_buf.push_str(&format!(
+                            "[directory: {}]",
+                            path.display().to_string().trim_end_matches('/')
+                        ));
                         i = token_end;
                         continue;
                     }

@@ -306,7 +306,7 @@ pub(crate) async fn run_autonomous(
     persistence: AutonomousPersistenceContext,
     rlm_projected_bindings: Option<lash_mode_rlm::RlmProjectedBindings>,
 ) -> anyhow::Result<()> {
-    let before_usage = session.usage_report().await;
+    let before_usage = session.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let mut turn_input = make_turn_input(&prepared);
     if let Some(bindings) = rlm_projected_bindings {
@@ -344,7 +344,7 @@ pub(crate) async fn run_autonomous(
             mode_turn_options: state.mode_turn_options,
         };
     }
-    let cumulative_usage = session.usage_report().await;
+    let cumulative_usage = session.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
         let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(
             &before_usage,

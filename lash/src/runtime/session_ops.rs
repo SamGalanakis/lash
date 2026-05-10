@@ -157,10 +157,10 @@ impl LashRuntime {
                 SessionError::Protocol(format!("unknown managed session `{session_id}`"))
             })?
         };
-        let child = Arc::try_unwrap(child).map_err(|_| {
+        let child = child.try_into_runtime().map_err(|_| {
             SessionError::Protocol(format!("managed session `{session_id}` is still in use"))
         })?;
-        *self = child.into_inner();
+        *self = child;
         Ok(())
     }
 

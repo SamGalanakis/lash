@@ -40,7 +40,7 @@ members = [
     "lash-export",
     "lash-file-index",
     "lashlang",
-    "examples/openrouter-chat-ui",
+    "examples/agent-service",
     "bench/longcot/runner",
     "bench/longmemeval-rlm/runner",
     "bench/swebench/runner",

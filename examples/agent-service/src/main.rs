@@ -12,12 +12,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{
-    ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnInput,
+use lash::{ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnInput};
+use lash_embed::{
+    LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnBuilder, TurnEvent,
 };
-use lash_embed::{EmbedPlugin, LashCore, LashSession, ModeId, ModePreset, TurnActivity, TurnEvent};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
-use lash_rlm_types::RlmTermination;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -179,18 +178,18 @@ async fn main() -> anyhow_like::Result<()> {
     let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
     let model_variant =
         std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "medium".to_string());
-    let addr: SocketAddr = std::env::var("OPENROUTER_CHAT_ADDR")
+    let addr: SocketAddr = std::env::var("AGENT_SERVICE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()
-        .map_err(|err| format!("invalid OPENROUTER_CHAT_ADDR: {err}"))?;
-    let data_dir = std::env::var("OPENROUTER_CHAT_DATA_DIR")
+        .map_err(|err| format!("invalid AGENT_SERVICE_ADDR: {err}"))?;
+    let data_dir = std::env::var("AGENT_SERVICE_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".openrouter-chat-ui"));
+        .unwrap_or_else(|_| PathBuf::from(".agent-service"));
     std::fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
-    let trace_path = std::env::var("OPENROUTER_CHAT_TRACE")
+    let trace_path = std::env::var("AGENT_SERVICE_TRACE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("trace.jsonl"));
-    eprintln!("rlm-plugin-chat trace: {}", trace_path.display());
+    eprintln!("agent-service trace: {}", trace_path.display());
 
     let provider = ProviderHandle::new(
         OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
@@ -239,7 +238,7 @@ async fn main() -> anyhow_like::Result<()> {
         )
         .with_state(state);
 
-    println!("rlm-plugin-chat listening on http://{addr}");
+    println!("agent-service listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| err.to_string())?;
@@ -324,33 +323,10 @@ async fn send_message(
         };
         let turn = session
             .turn(TurnInput::text(text))
-            .with_plugin_input::<DemoPlugin>(DemoTurnInput {
-                board: request.board,
-            })
-            .mode_turn_options(
-                lash::ModeTurnOptions::typed(
-                    ExecutionMode::new("rlm"),
-                    RlmTermination::SubmitRequired { schema: None },
-                )
-                .expect("RLM termination options serialize"),
-            )
-            .into_stream();
+            .with_board(request.board)
+            .require_submit();
         let turn = match turn {
-            Ok(mut stream) => {
-                while let Some(activity) = stream.next_activity().await {
-                    match activity {
-                        Ok(activity) => ui_events.handle(activity).await,
-                        Err(err) => {
-                            let _ = tx
-                                .send(StreamItem::Error {
-                                    message: err.to_string(),
-                                })
-                                .await;
-                        }
-                    }
-                }
-                stream.finish().await
-            }
+            Ok(turn) => turn.collect_with(&ui_events).await.map(|_| ()),
             Err(err) => Err(err),
         };
         match turn {
@@ -579,6 +555,13 @@ impl ChannelTurnEvents {
     }
 }
 
+#[async_trait]
+impl lash::TurnActivitySink for ChannelTurnEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        self.handle(activity).await;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DemoPlugin;
 
@@ -592,20 +575,30 @@ struct BoardState {
 }
 
 #[derive(Clone, Debug)]
-struct DemoTurnInput {
+struct DemoTurnContext {
     board: BoardState,
 }
 
-impl EmbedPlugin for DemoPlugin {
+trait BoardTurnExt {
+    fn with_board(self, board: BoardState) -> Self;
+}
+
+impl BoardTurnExt for TurnBuilder {
+    fn with_board(self, board: BoardState) -> Self {
+        self.with_plugin_context::<DemoPlugin>(DemoTurnContext { board })
+    }
+}
+
+impl PluginBinding for DemoPlugin {
     const ID: &'static str = "demo_tic_tac_toe";
     type SessionConfig = DemoPluginConfig;
-    type TurnInput = DemoTurnInput;
+    type TurnContext = DemoTurnContext;
 
     fn factory(_config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
         Arc::new(DemoPluginFactory)
     }
 
-    fn requires_turn_input(_config: &Self::SessionConfig) -> bool {
+    fn requires_turn_context(_config: &Self::SessionConfig) -> bool {
         true
     }
 }
@@ -637,7 +630,7 @@ impl lash::SessionPlugin for DemoSessionPlugin {
             Box::pin(async move {
                 let Some(input) = ctx
                     .turn_context
-                    .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
+                    .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
                 else {
                     return Ok(Vec::new());
                 };
@@ -673,9 +666,9 @@ impl ToolProvider for DemoTools {
     ) -> lash::ToolResult {
         let Some(input) = context
             .turn_context
-            .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
+            .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
         else {
-            return lash::ToolResult::err_fmt("missing board turn input");
+            return lash::ToolResult::err_fmt("missing board turn context");
         };
 
         match name {
@@ -1578,7 +1571,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       return { args: cleanArgs(event.args), result: raw };
     }
-    function renderTerminalOutput(value) {
+    function renderTerminalValue(value) {
       if (value === null || value === undefined) return '';
       if (typeof value === 'string') return value;
       return JSON.stringify(value, null, 2);
@@ -1776,7 +1769,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
           if (item.type === 'event' && item.event.type === 'code_block_started') pendingCodeBlock = item.event;
           if (item.type === 'event' && item.event.type === 'code_block_completed') completeCodeBlock(item.event);
           if (item.type === 'event' && item.event.type === 'tool_call_completed') appendCompletedTool({ ...item.event, phase:'completed' });
-          if (item.type === 'event' && item.event.type === 'terminal_output') appendStreamText(renderTerminalOutput(item.event.value));
+          if (item.type === 'event' && item.event.type === 'submitted_value') appendStreamText(renderTerminalValue(item.event.value));
+          if (item.type === 'event' && item.event.type === 'tool_value') appendStreamText(renderTerminalValue(item.event.value));
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }

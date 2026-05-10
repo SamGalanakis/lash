@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use lash::TurnInput;
 use lash::provider::LashConfig;
-use lash_embed::modes::ModeTurnOptions;
+use lash_embed::advanced::ModeTurnOptions;
 use lash_embed::{LashCore, TurnActivity, TurnEvent};
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{

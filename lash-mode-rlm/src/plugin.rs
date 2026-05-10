@@ -152,7 +152,7 @@ impl SessionPlugin for RlmModePlugin {
                 let mut contributions = session.projected_binding_prompt_contributions().await;
                 if let Some(extension) = ctx
                     .turn_context
-                    .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                    .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
                 {
                     contributions.extend(RlmProjectionExtension::prompt_contributions_for(
                         &extension.bindings,

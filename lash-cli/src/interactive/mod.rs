@@ -89,7 +89,7 @@ pub(crate) async fn run_app(
     startup_system_message: Option<String>,
     subagent_host: Arc<dyn SubagentHost>,
 ) -> anyhow::Result<()> {
-    let initial_session_id = session.session_id().await;
+    let initial_session_id = session.session_id();
     let mut app = App::new(model, session_name, initial_session_id);
     app.activity_state.set_subagent_host(subagent_host);
     let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
@@ -498,7 +498,7 @@ pub(crate) async fn run_app(
                         pending_handoff_session_id = None;
                         app.recycle_unaccepted_monitor_wakes();
                         if let Some(rt) = runtime.as_mut() {
-                            let preserved_policy = rt.policy_snapshot().await;
+                            let preserved_policy = rt.policy_snapshot();
                             let _ = rt.control().state().reset().await;
                             rt.control()
                                 .state()

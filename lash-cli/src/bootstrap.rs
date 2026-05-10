@@ -623,7 +623,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let active_tool_definitions = session.control().tools().active_definitions().await?;
     let toolset_hash =
         hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
-    let initial_policy = session.policy_snapshot().await;
+    let initial_policy = session.policy_snapshot();
     let initial_model_variant = initial_policy.model_variant.clone();
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();

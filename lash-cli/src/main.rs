@@ -553,11 +553,15 @@ mod tests {
             .map(|item| match item {
                 InputItem::Text { .. } => "text",
                 InputItem::ImageRef { .. } => "image",
-                InputItem::FileRef { .. } => "file",
-                InputItem::DirRef { .. } => "dir",
             })
             .collect();
-        assert_eq!(kinds, vec!["text", "image", "text", "file", "text"]);
+        assert_eq!(kinds, vec!["text", "image", "text"]);
+        let tail_text = match items.last().expect("tail item") {
+            InputItem::Text { text } => text,
+            _ => panic!("expected text tail"),
+        };
+        assert!(tail_text.contains("[file:"));
+        assert!(tail_text.ends_with(" after"));
         assert_eq!(image_blobs.len(), 1);
     }
 

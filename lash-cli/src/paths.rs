@@ -3,8 +3,8 @@
 //! These functions live in lash-cli rather than lash core: where a
 //! user's config/cache lives is a CLI-application decision, not part
 //! of the library surface. lash-core accepts paths explicitly from the
-//! caller (via `RuntimeEnvironment.base_dir`, `InstructionLoaderConfig`,
-//! `FileModelCatalogStore::new`, etc.); lash-cli is the concrete host
+//! caller (via `InstructionLoaderConfig`, `FileModelCatalogStore::new`,
+//! host-prepared `InputItem` references, etc.); lash-cli is the concrete host
 //! that wires these values from the `~/.lash/` conventions below.
 
 use std::path::PathBuf;

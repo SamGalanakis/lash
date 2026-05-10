@@ -61,7 +61,7 @@ struct CurrentSessionCapability {
 
 #[derive(Clone)]
 struct ManagedSessionCapability {
-    registry: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    registry: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     /// Maps child session_id → seed PluginMessage queued via

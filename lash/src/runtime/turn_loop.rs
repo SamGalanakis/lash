@@ -165,7 +165,7 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let runtime = {
+        let runtime_handle = {
             let registry = self.managed_sessions.lock().await;
             registry.get(&execution_session_id).cloned()
         }
@@ -173,11 +173,12 @@ impl LashRuntime {
             code: "handoff_successor_missing".to_string(),
             message: format!("active handoff session `{execution_session_id}` is unavailable"),
         })?;
-        let mut runtime = runtime.lock().await;
+        let mut runtime = runtime_handle.runtime.lock().await;
         runtime.state.turn_index = self.state.turn_index;
         let turn = runtime
             .stream_turn_inner(input, events, turn_events, cancel)
             .await?;
+        runtime_handle.publish_from(&runtime);
         self.state.turn_index = turn.state.turn_index;
         Ok(turn)
     }
@@ -275,12 +276,15 @@ impl LashRuntime {
             input.mode_turn_options = follow_mode_turn_options.clone();
             input.trace_turn_id = Some(follow_trace_turn_id.clone());
             input.turn_context = follow_turn_context.clone();
-            if let Some(successor) = {
+            if let Some(successor_handle) = {
                 let registry = self.managed_sessions.lock().await;
                 registry.get(&successor_session_id).cloned()
             } {
-                let mut successor = successor.lock().await;
+                let mut successor = successor_handle.runtime.lock().await;
                 successor.state.turn_index = self.state.turn_index.saturating_sub(1);
+                // Keep observers aligned if a handoff successor has not
+                // started its own streamed turn yet.
+                successor_handle.publish_from(&successor);
             }
         }
     }
@@ -338,7 +342,6 @@ impl LashRuntime {
                     self.state.export_state(),
                     false,
                     None,
-                    &self.host.core.sanitizer,
                     &self.host.core.termination,
                 ));
             }
@@ -678,7 +681,6 @@ impl LashRuntime {
                 state.export_state(),
                 cancel.is_cancelled(),
                 Some(issue),
-                &self.host.core.sanitizer,
                 &self.host.core.termination,
             ));
         }
@@ -759,7 +761,6 @@ impl LashRuntime {
                                 self.state.export_state(),
                                 cancel_state.is_cancelled(),
                                 Some(issue),
-                                &self.host.core.sanitizer,
                                 &self.host.core.termination,
                             ));
                         }
@@ -844,7 +845,6 @@ impl LashRuntime {
             assembled_state,
             cancel_state.is_cancelled(),
             None,
-            &self.host.core.sanitizer,
             &self.host.core.termination,
         );
         tracing::debug!(
@@ -953,13 +953,7 @@ impl LashRuntime {
         items: &[InputItem],
         image_blobs: &HashMap<String, Vec<u8>>,
     ) -> Result<Vec<NormalizedItem>, String> {
-        normalize_input_items(
-            items,
-            image_blobs,
-            self.host.core.base_dir.as_path(),
-            self.host.core.path_resolver.as_ref(),
-            self.host.core.attachment_store.as_ref(),
-        )
+        normalize_input_items(items, image_blobs, self.host.core.attachment_store.as_ref())
     }
 }
 

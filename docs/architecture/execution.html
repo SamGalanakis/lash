@@ -87,23 +87,28 @@ flowchart TD
 flowchart LR
   App["host app<br/>HTTP / DB / auth / UI"] --> Core["LashCore<br/>shared runtime environment"]
   Core --> Builder["LashCoreBuilder<br/>provider, model, modes, tools, plugins"]
-  Builder --> Env["RuntimeEnvironment<br/>PluginHost + stores + tracing"]
+  Builder --> Advanced["builder.advanced()<br/>runtime host knobs"]
+  Advanced --> Env["RuntimeEnvironment<br/>PluginHost + stores + tracing"]
   App --> Session["core.session(id)<br/>SessionBuilder"]
   Session --> Runtime["LashRuntime<br/>per chat/session"]
   Runtime --> Turn["turn(TurnInput).stream(&sink) / .run()"]
-  Turn --> Result["TurnResult / CollectedTurnOutput<br/>result (+ activities)"]
+  Turn --> Result["TurnResult / TurnOutput<br/>result (+ activities)"]
   Turn --> Events["TurnActivitySink<br/>text, reasoning, tools, usage, done"]
             </div>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared core that owns the runtime environment, default session policy, installed mode presets, optional store factory, tool providers, plugin factories, attachment store, trace sink, residency, sanitizer, and termination policy.</dd>
+            <dd>Cloneable shared core that owns the runtime environment, default session policy, installed mode presets, optional store factory, tool providers, plugin factories, attachment store, and trace sink. Residency and termination policy are advanced runtime-host settings.</dd>
             <dt><code>ModePreset</code></dt>
             <dd>Installs semantic modes such as <code>ModePreset::standard()</code> and <code>ModePreset::rlm()</code>. Hosts can install both and choose a default with <code>default_mode</code>, then override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>Represents one app conversation. It wraps an <code>Arc&lt;Mutex&lt;LashRuntime&gt;&gt;</code>, exposes <code>run(TurnInput)</code>, <code>turn(TurnInput)</code>, <code>read_view()</code>, and <code>rlm_project(bindings)</code> for projecting host values into the session's lashlang scope, and can carry a parent session id for app-level parent/child relationships.</dd>
+            <dd>Represents one app conversation. It wraps an <code>Arc&lt;Mutex&lt;LashRuntime&gt;&gt;</code>, exposes <code>run(TurnInput)</code>, <code>turn(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>, and can carry a parent session id for app-level parent/child relationships.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnActivitySink</code> and returns a <code>TurnResult</code> (outcome, usage, errors); <code>.run()</code> returns a <code>CollectedTurnOutput</code> with the terminal result and ordered turn activities.</dd>
+            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn context, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnActivitySink</code> and returns a <code>TurnResult</code> (outcome, usage, errors); <code>.run()</code> returns a <code>TurnOutput</code> with the terminal result and ordered turn activities.</dd>
+            <dt><code>TurnInput</code></dt>
+            <dd>Core input is text plus image references. Hosts resolve UI syntax such as <code>@path</code> before constructing the turn, either as text markers or as future host-owned attachments.</dd>
+            <dt><code>SessionControl::raw_turns()</code></dt>
+            <dd>Raw streaming that needs both session events and turn activities lives behind the control escape hatch rather than the normal turn builder.</dd>
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
@@ -118,7 +123,7 @@ let result = session
     .stream(&events)
     .await?;</code></pre>
           <div class="two-col">
-            <article class="panel"><h3>Example shape</h3><p><code>examples/openrouter-chat-ui</code> keeps a map of <code>LashSession</code>s keyed by conversation id, records projected <code>TurnEvent</code>s through a <code>TurnActivitySink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and browser streaming. The app-facing walkthrough lives in <a href="../embedding.html">Embedding API</a>.</p></article>
+            <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code> keeps a map of <code>LashSession</code>s keyed by conversation id, records projected <code>TurnEvent</code>s through a <code>TurnActivitySink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and browser streaming. The app-facing walkthrough lives in <a href="../embedding.html">Embedding API</a>.</p></article>
             <article class="panel"><h3>Boundary rule</h3><p>The embed API is intentionally above <code>LashRuntime</code> but below an app framework. It should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
           </div>
         </div>

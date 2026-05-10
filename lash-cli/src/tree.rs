@@ -7,7 +7,7 @@ use crate::persistence::persist_committed_runtime_state;
 use crate::session_log::SessionLogger;
 
 pub async fn current_message_tree(session: &LashSession) -> Vec<SessionMessageTreeNode> {
-    session.read_view().await.message_tree()
+    session.read_view().message_tree()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -37,7 +37,6 @@ pub async fn switch_to_tree_selection(
     // transcript, which is expensive to pay for a visible no-op.
     let current_leaf = session
         .read_view()
-        .await
         .materialized_session_graph()
         .leaf_node_id
         .clone();

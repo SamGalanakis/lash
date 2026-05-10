@@ -273,7 +273,7 @@ fn projected_bindings(
     insert_projected_bindings(&mut bindings, session_bindings)?;
     if let Some(extension) = ctx
         .turn_context()
-        .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+        .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
     {
         insert_projected_bindings(&mut bindings, extension.bindings.clone())?;
     }
