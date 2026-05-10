@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lash::provider::LashConfig;
 use lash::*;
-use lash_embed::{LashSession, ModelSelection, SessionConfigPatch};
+use lash_embed::control::SessionConfigPatch;
+use lash_embed::{LashSession, ModelSelection};
 use lash_tui::Terminal;
 
 use crate::app::App;
@@ -91,7 +92,9 @@ pub(super) async fn handle_model(
         .map(str::to_string);
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
-            .update_config(SessionConfigPatch {
+            .control()
+            .config()
+            .update(SessionConfigPatch {
                 model: Some(ModelSelection::new(
                     selection.model.clone(),
                     model_variant.clone(),
@@ -155,7 +158,9 @@ pub(super) async fn handle_variant(
     };
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
-            .update_config(SessionConfigPatch {
+            .control()
+            .config()
+            .update(SessionConfigPatch {
                 model: Some(ModelSelection::new(app.model.clone(), variant.clone())),
                 ..SessionConfigPatch::default()
             })
@@ -366,7 +371,9 @@ pub(super) async fn handle_change_provider(
             };
             if let Some(rt) = runtime.as_mut() {
                 let _ = rt
-                    .update_config(SessionConfigPatch {
+                    .control()
+                    .config()
+                    .update(SessionConfigPatch {
                         provider: Some(provider.clone()),
                         model: Some(ModelSelection::new(
                             selection.model.clone(),

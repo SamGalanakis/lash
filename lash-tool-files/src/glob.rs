@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::{
+use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, require_str, rg_file_list, run_blocking,
 };
@@ -64,7 +64,7 @@ impl ToolProvider for Glob {
                 r#"glob(pattern="**/*.rs", path="lash/src", limit=50)"#.into(),
                 r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
             ])
-            .with_discovery(super::discovery_metadata("filesystem", &["find_files"]))
+            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }

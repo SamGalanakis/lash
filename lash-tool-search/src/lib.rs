@@ -16,7 +16,7 @@ use serde_json::json;
 
 use lash::{ToolDefinition, ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::{object_schema, require_str};
+use lash_tool_support::{object_schema, require_str};
 
 const DEFAULT_MAX_RESULTS: usize = 20;
 const MAX_CURSORS: usize = 20;
@@ -308,7 +308,7 @@ impl ToolProvider for Grep {
                 r#"grep(query="*.rs apply_patch", path=".")"#.into(),
                 r#"grep(query="current_query")"#.into(),
             ])
-            .with_discovery(super::discovery_metadata(
+            .with_discovery(lash_tool_support::discovery_metadata(
                 "filesystem",
                 &["search_files", "ripgrep"],
             ))

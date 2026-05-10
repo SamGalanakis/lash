@@ -27,6 +27,13 @@ use crate::LoadedSession;
 use crate::trace::{LlmCallUsage, LlmPromptSnapshot};
 use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation, SubagentEdge};
 
+fn chronological_rlm_step(event: &lash::ModeEvent) -> Option<RlmTrajectoryEntry> {
+    match lash_mode_rlm::decode_rlm_mode_event(event)? {
+        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step) => Some(step),
+        _ => None,
+    }
+}
+
 pub fn render(session: &LoadedSession) -> String {
     let stats = compute_stats(session);
     let mut ctx = RenderCtx::new(&stats);
@@ -164,7 +171,10 @@ fn compute_stats(session: &LoadedSession) -> SessionStats {
             ChronologicalPayload::ToolCall(record) => {
                 record_tool_call(&mut s, &mut tool_counts, record);
             }
-            ChronologicalPayload::RlmStep(step) => {
+            ChronologicalPayload::ModeEvent(event) => {
+                let Some(step) = chronological_rlm_step(event) else {
+                    continue;
+                };
                 s.rlm_iterations += 1;
                 if step.error.is_some() {
                     s.rlm_errors += 1;
@@ -616,8 +626,9 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
     let mut last_final_output: Option<String> = None;
     for entry in session.chronological.iter() {
         match &entry.payload {
-            ChronologicalPayload::RlmStep(step) => {
-                last_final_output = step.final_output.as_ref().map(submit_value_text);
+            ChronologicalPayload::ModeEvent(event) => {
+                last_final_output = chronological_rlm_step(event)
+                    .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
             }
             ChronologicalPayload::Message(message) => {
                 if matches!(message.role, MessageRole::Assistant)
@@ -740,12 +751,15 @@ fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -> EntriesHt
                     );
                 }
             }
-            ChronologicalPayload::RlmStep(step) => {
+            ChronologicalPayload::ModeEvent(event) => {
+                let Some(step) = chronological_rlm_step(event) else {
+                    continue;
+                };
                 render_rlm_step_with_fanout(
                     &mut entries,
                     &mut spine,
                     ctx,
-                    step,
+                    &step,
                     &fanout_index,
                     &session.llm_prompts,
                     session.context_window_tokens,
@@ -1056,9 +1070,12 @@ fn compute_prompt_insertions(
     let mut before_index = vec![Vec::new(); chronological.len()];
     let mut consumed = vec![false; prompts.len()];
 
-    let has_rlm_steps = chronological
-        .iter()
-        .any(|e| matches!(e.payload, ChronologicalPayload::RlmStep(_)));
+    let has_rlm_steps = chronological.iter().any(|e| {
+        matches!(
+            &e.payload,
+            ChronologicalPayload::ModeEvent(event) if chronological_rlm_step(event).is_some()
+        )
+    });
 
     if has_rlm_steps {
         let mut by_mode_iteration: HashMap<u64, VecDeque<usize>> = HashMap::new();
@@ -1098,7 +1115,10 @@ fn compute_prompt_insertions(
                         run_start = Some(i);
                     }
                 }
-                ChronologicalPayload::RlmStep(step) => {
+                ChronologicalPayload::ModeEvent(event) => {
+                    let Some(step) = chronological_rlm_step(event) else {
+                        continue;
+                    };
                     let begin = run_start.unwrap_or(i);
                     let mode_iteration = step.mode_iteration as u64;
                     if initial_user_anchor_mode_iteration == Some(mode_iteration) {
@@ -3046,8 +3066,9 @@ fn render_node_entries(
     let mut last_final_output: Option<String> = None;
     for entry in session.chronological.iter() {
         match &entry.payload {
-            ChronologicalPayload::RlmStep(step) => {
-                last_final_output = step.final_output.as_ref().map(submit_value_text);
+            ChronologicalPayload::ModeEvent(event) => {
+                last_final_output = chronological_rlm_step(event)
+                    .and_then(|step| step.final_output.map(|value| submit_value_text(&value)));
             }
             ChronologicalPayload::Message(message) => {
                 if matches!(message.role, MessageRole::Assistant)
@@ -3103,8 +3124,11 @@ fn render_node_entries(
                     render_tool_call_entry(out, spine, ctx, record, None);
                 }
             },
-            ChronologicalPayload::RlmStep(step) => {
-                render_rlm_step(out, spine, ctx, step);
+            ChronologicalPayload::ModeEvent(event) => {
+                let Some(step) = chronological_rlm_step(event) else {
+                    continue;
+                };
+                render_rlm_step(out, spine, ctx, &step);
             }
         }
     }
@@ -3362,7 +3386,12 @@ fn render_handoff_divider(
         + parent
             .chronological
             .iter()
-            .filter(|e| matches!(&e.payload, ChronologicalPayload::RlmStep(_)))
+            .filter(|e| {
+                matches!(
+                    &e.payload,
+                    ChronologicalPayload::ModeEvent(event) if chronological_rlm_step(event).is_some()
+                )
+            })
             .count();
     let max_ctx_pct = parent
         .llm_prompts
@@ -3527,6 +3556,12 @@ mod tests {
         }
     }
 
+    fn rlm_payload(step: RlmTrajectoryEntry) -> ChronologicalPayload {
+        ChronologicalPayload::ModeEvent(lash_mode_rlm::rlm_mode_event(
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step),
+        ))
+    }
+
     #[test]
     fn html_export_renders_chronological_tool_and_rlm_step() {
         let session = LoadedSession {
@@ -3534,7 +3569,7 @@ mod tests {
             chronological: vec![
                 ChronologicalEntry {
                     index: 0,
-                    payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_0")),
+                    payload: rlm_payload(rlm_step(0, "rlm_step_0")),
                 },
                 ChronologicalEntry {
                     index: 1,
@@ -3570,7 +3605,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 1,
-                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_0")),
+                payload: rlm_payload(rlm_step(0, "rlm_step_0")),
             },
             ChronologicalEntry {
                 index: 2,
@@ -3578,7 +3613,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 3,
-                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_1")),
+                payload: rlm_payload(rlm_step(0, "rlm_step_1")),
             },
             ChronologicalEntry {
                 index: 4,
@@ -3586,7 +3621,7 @@ mod tests {
             },
             ChronologicalEntry {
                 index: 5,
-                payload: ChronologicalPayload::RlmStep(rlm_step(0, "rlm_step_2")),
+                payload: rlm_payload(rlm_step(0, "rlm_step_2")),
             },
         ];
         let prompts = vec![
@@ -3673,7 +3708,7 @@ mod tests {
             meta: None,
             chronological: vec![ChronologicalEntry {
                 index: 0,
-                payload: ChronologicalPayload::RlmStep(RlmTrajectoryEntry {
+                payload: rlm_payload(RlmTrajectoryEntry {
                     code: "data = (call lookup { q: \"x\" })?".to_string(),
                     output: Vec::new(),
                     tool_calls: vec![ToolCallRecord {

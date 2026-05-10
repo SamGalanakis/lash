@@ -16,7 +16,7 @@ use lash::{
     SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolDefinition,
     ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
 };
-use lash_default_tools::tools::{PatchAction, inspect_patch_ops};
+use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
 const PLAN_MODE_BADGE_KEY: &str = "mode";
 const PLAN_MODE_BADGE_LABEL: &str = "plan";

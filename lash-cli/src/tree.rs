@@ -46,6 +46,8 @@ pub async fn switch_to_tree_selection(
     }
 
     let state = session
+        .control()
+        .state()
         .branch_to_node(target_leaf)
         .await
         .map_err(|err| err.to_string())?;

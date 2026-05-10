@@ -6,7 +6,6 @@ pub mod llm;
 pub mod mcp;
 pub mod model_info;
 pub mod monitor;
-pub mod oauth;
 pub mod plugin;
 pub mod provider;
 pub mod runtime;
@@ -136,6 +135,7 @@ pub use lash_trace::{
     TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSink, TraceSinkError,
     TraceTokenUsage, TraceToolSpec,
 };
+pub use llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 pub use mcp::{McpError, McpServerConfig, attach_mcp_servers};
 pub use model_info::{
     CachedModelCatalog, FileModelCatalogStore, MemoryModelCatalogStore, ModelCatalog,
@@ -174,9 +174,9 @@ pub use plugin::{
     TypedExternalOp, TypedExternalOpError, typed_external_op_def,
 };
 pub use provider::{
-    AgentModelSelection, LashConfig, ProviderComponents, ProviderFactory, ProviderHandle,
-    ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
-    ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
+    AgentModelSelection, LashConfig, LlmTimeouts, ProviderComponents, ProviderFactory,
+    ProviderHandle, ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec,
+    ProviderState, ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
     VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
 pub use runtime::{

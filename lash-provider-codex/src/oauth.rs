@@ -3,7 +3,7 @@
 
 use base64::Engine;
 
-use lash::oauth::{OAuthError, now_secs, url_form_encode};
+use lash_provider_auth::{OAuthError, now_secs, url_form_encode};
 
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";

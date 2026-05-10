@@ -1,7 +1,7 @@
 //! Google OAuth authorize-URL / code-exchange / refresh-token flow.
 //! Public so `lash-cli`'s setup UI can drive the interactive login.
 
-use lash::oauth::{OAuthError, OAuthTokens, now_secs, url_form_encode, urlencoded};
+use lash_provider_auth::{OAuthError, OAuthTokens, now_secs, url_form_encode, urlencoded};
 
 const GOOGLE_CLIENT_ID_ENV: &str = "LASH_GOOGLE_CLIENT_ID";
 const GOOGLE_CLIENT_SECRET_ENV: &str = "LASH_GOOGLE_CLIENT_SECRET";
@@ -144,7 +144,7 @@ fn parse_token_response(body: &serde_json::Value) -> Result<OAuthTokens, OAuthEr
 
 fn extract_auth_code(input: &str) -> String {
     let trimmed = input.trim();
-    if let Some(code) = lash::oauth::extract_query_param(trimmed, "code") {
+    if let Some(code) = lash_provider_auth::extract_query_param(trimmed, "code") {
         return code;
     }
     if let Some(pos) = trimmed.find("code=") {
@@ -153,7 +153,7 @@ fn extract_auth_code(input: &str) -> String {
             .char_indices()
             .find_map(|(i, ch)| (ch == '&' || ch == '#').then_some(i))
             .unwrap_or(rest.len());
-        return lash::oauth::extract_query_param(&format!("?code={}", &rest[..end]), "code")
+        return lash_provider_auth::extract_query_param(&format!("?code={}", &rest[..end]), "code")
             .unwrap_or_else(|| rest[..end].to_string());
     }
     trimmed.to_string()

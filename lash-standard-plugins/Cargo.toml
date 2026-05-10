@@ -1,0 +1,21 @@
+[package]
+name = "lash-standard-plugins"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[features]
+default = []
+fff-zlob = ["lash-tool-search/fff-zlob"]
+semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
+
+[dependencies]
+lash = { path = "../lash", default-features = false }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory" }
+lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history" }
+lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery" }
+lash-tool-apply-patch = { path = "../lash-tool-apply-patch" }
+lash-tool-files = { path = "../lash-tool-files" }
+lash-tool-search = { path = "../lash-tool-search" }
+lash-tool-shell = { path = "../lash-tool-shell" }
+lash-tool-web = { path = "../lash-tool-web" }

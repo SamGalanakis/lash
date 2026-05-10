@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash_embed::TurnEvent;
+use lash_embed::control::TypedExternalOp;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,
@@ -376,7 +377,7 @@ async fn invoke_external_op<Op>(
     args: Op::Args,
 ) -> Result<Value, String>
 where
-    Op: lash_embed::TypedExternalOp,
+    Op: TypedExternalOp,
     Op::Output: serde::Serialize,
 {
     let result = invoke_typed_external::<Op>(ctx.session, args).await?;

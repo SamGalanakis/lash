@@ -1,0 +1,12 @@
+[package]
+name = "lash-llm-transport"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", default-features = false }
+lash-sansio = { path = "../lash-sansio" }
+tokio = { version = "1", features = ["time"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+bytes = "1"

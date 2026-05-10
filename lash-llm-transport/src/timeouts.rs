@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::llm::transport::{LlmTransportError, ProviderFailureKind};
+use lash::{LlmTransportError, ProviderFailureKind};
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;

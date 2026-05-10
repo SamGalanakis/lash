@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use lash::provider::{LashConfig, ProviderHandle};
 use lash::*;
-use lash_default_tools::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
-};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::OpenAiGenericProvider;
+use lash_standard_plugins::{
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+};
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
@@ -135,9 +135,9 @@ fn autonomous_tool_allowed(name: &str) -> bool {
 }
 
 async fn apply_autonomous_tool_policy(session: &lash_embed::LashSession) -> anyhow::Result<()> {
-    let mut snapshot = session.tool_state().await?;
+    let mut snapshot = session.control().tools().state().await?;
     retain_autonomous_tools(&mut snapshot);
-    session.apply_tool_state(snapshot).await?;
+    session.control().tools().apply_state(snapshot).await?;
     Ok(())
 }
 
@@ -610,6 +610,8 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         .await?;
     let session = opened_session.session;
     session
+        .control()
+        .tools()
         .attach_mcp_servers(lash_config.mcp_servers())
         .await
         .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
@@ -618,7 +620,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .await
             .map_err(|err| anyhow::anyhow!("failed to apply autonomous tool policy: {err}"))?;
     }
-    let active_tool_definitions = session.active_tool_definitions().await?;
+    let active_tool_definitions = session.control().tools().active_definitions().await?;
     let toolset_hash =
         hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
     let initial_policy = session.policy_snapshot().await;
@@ -626,7 +628,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();
     let mut logger = opened_session.logger;
-    session.refresh_tool_surface().await?;
+    session.control().tools().refresh_surface().await?;
     if rlm_projected_bindings.is_some() && args.print_prompt.is_none() {
         return Err(anyhow::anyhow!(
             "`--rlm-var` and `--rlm-vars-file` are currently supported for autonomous `--print-prompt` turns; interactive hosts should use the RLM projection API."

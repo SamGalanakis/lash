@@ -52,7 +52,6 @@ impl RuntimeTurnDriver {
                 &self.session_id,
                 manager,
                 tool_event_tx,
-                Arc::new(serde_json::Map::new()),
                 Arc::new(crate::ChronologicalProjection::default()),
                 self.mode_extension.clone(),
                 self.turn_context.clone(),

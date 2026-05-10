@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 lash = { path = "../lash", default-features = false }
-lash-default-tools = { path = "../lash-default-tools" }
 lash-llm-tools = { path = "../lash-llm-tools" }
 lash-mode-rlm = { path = "../lash-mode-rlm" }
 lash-rlm-types = { path = "../lash-rlm-types" }

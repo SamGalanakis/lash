@@ -10,9 +10,8 @@ mod types;
 use std::sync::Arc;
 
 pub use capability::{
-    Capability, CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRecursion,
-    CapabilityRegistry, CapabilitySpec, CapabilityToolSurface, StaticCapability, TierCapability,
-    TierExecutionMode, default_registry,
+    Capability, CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRegistry,
+    CapabilitySpec, StaticCapability, TierCapability, TierExecutionMode, default_registry,
 };
 
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
@@ -25,10 +24,39 @@ pub use host::{
 };
 pub use rlm::spawn_agent_tool_definition;
 
+pub struct SubagentSpawnContext<'a> {
+    pub parent_session_id: &'a str,
+    pub capability: &'a str,
+    pub parent_policy: &'a SessionPolicy,
+    pub child_policy: &'a SessionPolicy,
+}
+
+pub trait SubagentSessionConfigurator: Send + Sync {
+    fn configure(
+        &self,
+        ctx: &SubagentSpawnContext<'_>,
+        request: &mut lash::SessionCreateRequest,
+    ) -> Result<(), String>;
+}
+
+#[derive(Default)]
+pub struct NoopSubagentSessionConfigurator;
+
+impl SubagentSessionConfigurator for NoopSubagentSessionConfigurator {
+    fn configure(
+        &self,
+        _ctx: &SubagentSpawnContext<'_>,
+        _request: &mut lash::SessionCreateRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 pub struct SubagentsPluginFactory {
     policy: SessionPolicy,
     registry: Arc<CapabilityRegistry>,
     host: Arc<dyn SubagentHost>,
+    configurator: Arc<dyn SubagentSessionConfigurator>,
 }
 
 impl SubagentsPluginFactory {
@@ -41,7 +69,16 @@ impl SubagentsPluginFactory {
             policy,
             registry,
             host,
+            configurator: Arc::new(NoopSubagentSessionConfigurator),
         }
+    }
+
+    pub fn with_session_configurator(
+        mut self,
+        configurator: Arc<dyn SubagentSessionConfigurator>,
+    ) -> Self {
+        self.configurator = configurator;
+        self
     }
 }
 
@@ -59,6 +96,7 @@ impl PluginFactory for SubagentsPluginFactory {
 
         let registry = Arc::clone(&self.registry);
         let host = Arc::clone(&self.host);
+        let configurator = Arc::clone(&self.configurator);
         let execution_mode = ctx.execution_mode.clone();
 
         let is_rlm = execution_mode == lash::ExecutionMode::new("rlm");
@@ -72,6 +110,7 @@ impl PluginFactory for SubagentsPluginFactory {
             Some(Arc::new(rlm::RlmSubagentToolsProvider {
                 registry: Arc::clone(&registry),
                 host: Arc::clone(&host),
+                configurator: Arc::clone(&configurator),
                 include_submit_error: ctx.subagent.is_some(),
             }))
         } else {
@@ -292,10 +331,17 @@ mod tests {
             tool_call_id: None,
         };
 
-        let request =
-            build_spawn_create_request(&registry, &context, "explore", None, Default::default())
-                .await
-                .expect("spawn request");
+        let noop = NoopSubagentSessionConfigurator;
+        let request = build_spawn_create_request(
+            &registry,
+            &context,
+            "explore",
+            None,
+            Default::default(),
+            &noop,
+        )
+        .await
+        .expect("spawn request");
         let child_policy = request.policy.expect("child policy");
 
         // The capability looked up the live policy's provider, not
@@ -312,25 +358,7 @@ mod tests {
         );
         assert_ne!(child_policy.model, stale_choice);
         assert_eq!(child_policy.model, "live-explore");
-        assert_eq!(
-            request
-                .tool_access
-                .tools
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "read_file",
-                "grep",
-                "search_web",
-                "fetch_url",
-                "exec_command",
-                "start_command",
-                "write_stdin",
-                "llm_query",
-                "continue_as"
-            ]
-        );
+        assert!(request.tool_access.tools.is_empty());
 
         let structured_request = build_spawn_create_request(
             &registry,
@@ -342,6 +370,7 @@ mod tests {
                 "required": ["ok"]
             })),
             Default::default(),
+            &noop,
         )
         .await
         .expect("structured spawn request");
@@ -351,14 +380,7 @@ mod tests {
             lash::ExecutionMode::new("rlm"),
             "explore runs in RLM so typed output uses native submit"
         );
-        assert_eq!(
-            structured_request
-                .tool_access
-                .tools
-                .last()
-                .map(|tool| tool.name.as_str()),
-            Some("continue_as")
-        );
+        assert!(structured_request.tool_access.tools.is_empty());
     }
 
     #[tokio::test]

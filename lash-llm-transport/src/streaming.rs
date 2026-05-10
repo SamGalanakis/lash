@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err)]
 
-use crate::llm::transport::LlmTransportError;
-use crate::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
+use lash::LlmTransportError;
+use lash_sansio::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 
 use std::time::Duration;
 

@@ -1,0 +1,12 @@
+[package]
+name = "lash-tool-web"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", default-features = false }
+lash-tool-support = { path = "../lash-tool-support" }
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+serde_json = "1"

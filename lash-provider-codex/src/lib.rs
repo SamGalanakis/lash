@@ -7,11 +7,6 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use lash::SchemaProjectionOverride;
-use lash::llm::streaming::{drive_sse_response, emit_progress};
-use lash::llm::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
-    send_request,
-};
 use lash::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
@@ -21,6 +16,11 @@ use lash::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
     ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
     VariantRequestConfig,
+};
+use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
+use lash_llm_transport::timeouts::{
+    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
+    send_request,
 };
 use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,

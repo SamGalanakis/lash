@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
-use super::{compact_diff, object_schema, require_str, run_blocking};
+use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
 
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
 const END_PATCH_MARKER: &str = "*** End Patch";
@@ -134,7 +134,7 @@ impl ToolProvider for ApplyPatchTool {
                 "apply_patch(input=\"*** Begin Patch\\n*** Update File: src/main.rs\\n@@ fn main() {\\n-    old();\\n+    new();\\n*** End Patch\")"
                     .into(),
             ])
-            .with_discovery(super::discovery_metadata("filesystem", &["patch", "edit_file"]))
+            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["patch", "edit_file"]))
             .with_execution_mode(ToolExecutionMode::Serial),
         ]
     }

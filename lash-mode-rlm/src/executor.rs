@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::projected_bindings::{
     RLM_TURN_CONTEXT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
 };
+use crate::projection::{RlmHistoryProjection, rlm_history_projection};
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
@@ -262,7 +263,9 @@ fn projected_bindings(
             ProjectedValue::custom(
                 "history",
                 Arc::new(HistoryProjectedValue {
-                    projection: ctx.rlm_chronological_projection(),
+                    projection: Arc::new(rlm_history_projection(
+                        ctx.chronological_projection().as_ref(),
+                    )),
                 }),
             ),
         )
@@ -297,7 +300,7 @@ fn insert_projected_bindings(
 }
 
 struct HistoryProjectedValue {
-    projection: Arc<lash::ChronologicalProjection>,
+    projection: Arc<RlmHistoryProjection>,
 }
 
 impl ProjectedHostValue for HistoryProjectedValue {
@@ -306,16 +309,16 @@ impl ProjectedHostValue for HistoryProjectedValue {
     }
 
     fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async { Some(self.projection.rlm_history_len()) })
+        Box::pin(async { Some(self.projection.len()) })
     }
 
     fn get_index(&self, index: FlowValue) -> ProjectedFuture<'_, ProjectedRead> {
         Box::pin(async move {
-            let Ok(Some(index)) = projected_index(&index, self.projection.rlm_history_len()) else {
+            let Ok(Some(index)) = projected_index(&index, self.projection.len()) else {
                 return ProjectedRead::Missing;
             };
             self.projection
-                .rlm_history_item(index)
+                .item(index)
                 .and_then(|item| serde_json::to_value(item).ok())
                 .map(json_to_flow_value)
                 .map(ProjectedRead::Value)
@@ -325,13 +328,12 @@ impl ProjectedHostValue for HistoryProjectedValue {
 
     fn render(&self) -> ProjectedFuture<'_, String> {
         Box::pin(async move {
-            serde_json::to_string(&self.projection.rlm_history())
-                .unwrap_or_else(|_| "[]".to_string())
+            serde_json::to_string(self.projection.history()).unwrap_or_else(|_| "[]".to_string())
         })
     }
 
     fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
-        Box::pin(async move { json_to_flow_value(self.projection.rlm_history_value()) })
+        Box::pin(async move { json_to_flow_value(self.projection.value()) })
     }
 }
 

@@ -12,6 +12,7 @@ use lash::{
 };
 use serde_json::Value;
 
+use crate::SubagentSessionConfigurator;
 use crate::capability::CapabilityRegistry;
 use crate::host::SubagentHost;
 use crate::shared::{
@@ -24,6 +25,7 @@ use crate::types::{CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitU
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) host: Arc<dyn SubagentHost>,
+    pub(crate) configurator: Arc<dyn SubagentSessionConfigurator>,
     pub(crate) include_submit_error: bool,
 }
 
@@ -47,6 +49,7 @@ impl RlmSubagentToolsProvider {
             &capability_name,
             output_schema.clone(),
             seed,
+            self.configurator.as_ref(),
         )
         .await?;
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));

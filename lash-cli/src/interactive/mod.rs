@@ -116,6 +116,8 @@ pub(crate) async fn run_app(
     let mut history: Vec<Message> = Vec::new();
     let mut turn_counter: usize = 0;
     let mut session_manager = session
+        .control()
+        .state()
         .session_manager()
         .await
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -123,7 +125,9 @@ pub(crate) async fn run_app(
     let mut desired_tool_state = runtime
         .as_ref()
         .expect("session initialized")
-        .tool_state()
+        .control()
+        .tools()
+        .state()
         .await?;
     let mut pending_reconfigure = false;
     let mut ui_trace = args.debug_ui_trace.as_ref().map(|path| {
@@ -266,7 +270,7 @@ pub(crate) async fn run_app(
             push_system_message(&mut app, err);
         } else {
             if let Some(rt) = runtime.as_ref() {
-                match rt.session_manager().await {
+                match rt.control().state().session_manager().await {
                     Ok(manager) => session_manager = manager,
                     Err(err) => push_system_message(
                         &mut app,
@@ -495,11 +499,13 @@ pub(crate) async fn run_app(
                         app.recycle_unaccepted_monitor_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.policy_snapshot().await;
-                            let _ = rt.reset_session().await;
-                            rt.set_persisted_state(lash::PersistedSessionState::from_state(
-                                cleared_session_state(preserved_policy),
-                            ))
-                            .await;
+                            let _ = rt.control().state().reset().await;
+                            rt.control()
+                                .state()
+                                .set_persisted(lash::PersistedSessionState::from_state(
+                                    cleared_session_state(preserved_policy),
+                                ))
+                                .await;
                         }
                         history.clear();
                         turn_counter = 0;

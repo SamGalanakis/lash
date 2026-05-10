@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use lash::session_model::{ModeEvent, SessionEventRecord};
+use lash::session_model::SessionEventRecord;
 use lash::{
     MessageRole, ModeExtras, PluginMessage, ProgressSender, SessionAppendNode,
     SessionCreateRequest, SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation,
@@ -215,7 +215,7 @@ pub fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<Sessi
         return Vec::new();
     }
     vec![SessionAppendNode::event(SessionEventRecord::Mode(
-        ModeEvent::rlm(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
+        crate::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody { set_default: seed },
         )),
     ))]
@@ -351,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
         let mut session_graph = lash::SessionGraph::default();
-        session_graph.append_event(SessionEventRecord::Mode(ModeEvent::rlm(
+        session_graph.append_event(SessionEventRecord::Mode(crate::rlm_mode_event(
             RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
                 set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
             }),
@@ -439,7 +439,8 @@ mod tests {
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
+        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = crate::decode_rlm_mode_event(mode_event)
+        else {
             panic!("expected RlmGlobalsPatch");
         };
         assert_eq!(seed.set_default["x"], json!(1));
@@ -514,7 +515,8 @@ mod tests {
         else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = mode_event.rlm_event() else {
+        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = crate::decode_rlm_mode_event(mode_event)
+        else {
             panic!("expected RlmGlobalsPatch");
         };
         assert_eq!(

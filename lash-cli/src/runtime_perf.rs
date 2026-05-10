@@ -12,11 +12,11 @@ use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::testing::TestProvider;
 use lash::*;
-use lash_default_tools::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
-};
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiGenericProvider;
+use lash_standard_plugins::{
+    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+};
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1029,7 +1029,7 @@ async fn run_once_embed(
         let turn_before_memory = process_memory_sample();
         let turn_started = Instant::now();
         let turn = session
-            .run(lash_embed::Input::text(benchmark_prompt(
+            .run(lash::TurnInput::text(benchmark_prompt(
                 scenario, turn_index,
             )))
             .await
@@ -1072,7 +1072,7 @@ async fn run_once_embed(
                 total: turn_total_alloc,
             },
             phase_profile: BTreeMap::new(),
-            turn_usage: turn.usage,
+            turn_usage: turn.result.usage,
             usage_delta: before_turn_usage,
             cumulative_usage: SessionUsageReport::default(),
         });

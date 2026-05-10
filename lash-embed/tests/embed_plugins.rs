@@ -3,19 +3,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use lash::{
     LlmOutputPart, LlmResponse, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
+    TurnInput,
 };
-use lash_embed::{EmbedError, EmbedPlugin, Input, LashCore, ModePreset};
+use lash_embed::{EmbedError, EmbedPlugin, LashCore, ModePreset};
 use serde_json::json;
 
-fn assistant_prose(result: &lash_embed::CollectedTurnResult) -> String {
-    result
-        .activities
-        .iter()
-        .filter_map(|activity| match &activity.event {
-            lash_embed::TurnEvent::AssistantProseDelta { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
+fn assistant_prose(result: &lash_embed::turn::CollectedTurnOutput) -> String {
+    result.assistant_transcript_text()
 }
 
 #[derive(Clone, Debug)]
@@ -209,7 +203,7 @@ async fn required_turn_input_missing_is_validated_before_execution() {
         .expect("session");
 
     let err = session
-        .run(Input::text("hello"))
+        .run(TurnInput::text("hello"))
         .await
         .expect_err("missing required input");
     assert!(matches!(
@@ -239,7 +233,7 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
         .expect("session");
 
     let result = session
-        .turn(Input::text("probe"))
+        .turn(TurnInput::text("probe"))
         .with_plugin_input::<TestPlugin>(TestTurnInput {
             label: "page-a".to_string(),
         })
@@ -274,6 +268,6 @@ async fn optional_turn_input_can_be_absent() {
         .await
         .expect("session");
 
-    let result = session.run(Input::text("hello")).await.expect("turn");
+    let result = session.run(TurnInput::text("hello")).await.expect("turn");
     assert_eq!(assistant_prose(&result), "ok");
 }

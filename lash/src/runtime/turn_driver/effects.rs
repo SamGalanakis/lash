@@ -152,16 +152,14 @@ impl RuntimeTurnDriver {
         let manager = self.session_manager.clone();
         let mode_session = Arc::clone(self.session.plugins().mode_session());
         let read_view = self.checkpoint_state_view(messages, mode_iteration);
-        let rlm_globals = read_view.shared_rlm_globals();
-        let rlm_chronological_projection = read_view.shared_chronological_projection();
+        let chronological_projection = read_view.shared_chronological_projection();
         let context = self
             .session
             .mode_execution_context(
                 &self.session_id,
                 manager,
                 session_event_tx.clone(),
-                rlm_globals,
-                rlm_chronological_projection,
+                chronological_projection,
                 self.mode_extension.clone(),
                 self.turn_context.clone(),
             )

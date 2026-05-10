@@ -7,6 +7,7 @@ description = "Anthropic API (Claude) provider for lash."
 
 [dependencies]
 lash = { path = "../lash" }
+lash-llm-transport = { path = "../lash-llm-transport" }
 async-trait = "0.1"
 base64 = "0.22"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }

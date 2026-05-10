@@ -19,13 +19,29 @@ use async_trait::async_trait;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::llm::timeouts::{DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts};
-
 use crate::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use crate::llm::types::{LlmContentBlock, LlmRequest, LlmResponse};
 use crate::mcp::McpServerConfig;
 use crate::model_info::{ModelCatalog, ResolvedModelSpec};
 use tokio::time::Instant;
+
+pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_CHUNK_TIMEOUT_MS: u64 = 120_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LlmTimeouts {
+    pub request_timeout: Option<Duration>,
+    pub chunk_timeout: Duration,
+}
+
+impl Default for LlmTimeouts {
+    fn default() -> Self {
+        Self {
+            request_timeout: Some(Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS)),
+            chunk_timeout: Duration::from_millis(DEFAULT_CHUNK_TIMEOUT_MS),
+        }
+    }
+}
 
 /// Per-request tuning a provider produces for a model + variant. Each
 /// concrete provider crate interprets its own variant strings and emits

@@ -243,8 +243,7 @@ pub struct ModeExecutionContext {
     async_tool_handles: Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
-    rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
+    chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
     turn_context: crate::TurnContext,
     turn_event_tx: Option<Sender<TurnActivity>>,
@@ -264,12 +263,8 @@ impl ModeExecutionContext {
         Arc::clone(&self.attachment_store)
     }
 
-    pub fn rlm_globals(&self) -> Arc<serde_json::Map<String, serde_json::Value>> {
-        Arc::clone(&self.rlm_globals)
-    }
-
-    pub fn rlm_chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
-        Arc::clone(&self.rlm_chronological_projection)
+    pub fn chronological_projection(&self) -> Arc<crate::ChronologicalProjection> {
+        Arc::clone(&self.chronological_projection)
     }
 
     pub fn mode_extension<T: 'static>(&self) -> Option<&T> {
@@ -1300,8 +1295,7 @@ impl Session {
         session_id: &str,
         host: Arc<dyn RuntimeSessionHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
-        rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-        rlm_chronological_projection: Arc<crate::ChronologicalProjection>,
+        chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
         turn_context: crate::TurnContext,
     ) -> ModeExecutionContext {
@@ -1323,8 +1317,7 @@ impl Session {
             async_tool_handles: Arc::clone(&self.async_tool_handles),
             message_tx: self.message_tx.clone(),
             attachment_store: Arc::clone(&self.services.attachment_store),
-            rlm_globals,
-            rlm_chronological_projection,
+            chronological_projection,
             mode_extension,
             turn_context,
             turn_event_tx: None,

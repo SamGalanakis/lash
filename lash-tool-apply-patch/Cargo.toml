@@ -1,0 +1,15 @@
+[package]
+name = "lash-tool-apply-patch"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+lash = { path = "../lash", default-features = false }
+lash-tool-support = { path = "../lash-tool-support" }
+async-trait = "0.1"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

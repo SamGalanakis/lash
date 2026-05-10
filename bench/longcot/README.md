@@ -23,7 +23,7 @@ All runtime artifacts live under ignored `.benchmarks/longcot/`.
 The Rust runner registers an explicit RLM tool surface for benchmark hygiene, mirroring the continual-learning-bench setup:
 
 - **registered (model-visible):** `llm_query`, `spawn_agent` with `capability: "default"`, `continue_as`, `list_async_handles`
-- **inherited by `spawn_agent` children:** the same four tools (locked via `CapabilityToolSurface::Explicit`), so recursive descents stay inside the same surface
+- **inherited by `spawn_agent` children:** the same four tools, so recursive descents stay inside the same surface
 - **not registered:** local shell, filesystem, search, web, editing, MCP, monitor, task-controls, AppWorld, and standard-mode context plugins (rolling-history / observational-memory)
 
 LongCoT prompts explicitly forbid external tool use; this stack honors that while keeping recursive decomposition (via `spawn_agent`) available.

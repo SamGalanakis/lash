@@ -2410,6 +2410,12 @@ fn assembler_prefers_final_message() {
     assembler.push(&SessionEvent::TextDelta {
         content: "stream".to_string(),
     });
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:stream"),
+        TurnEvent::AssistantProseDelta {
+            text: "semantic".to_string(),
+        },
+    ));
     assembler.push(&SessionEvent::Message {
         text: "final".to_string(),
         kind: "final".to_string(),
@@ -2433,6 +2439,202 @@ fn assembler_prefers_final_message() {
     assert_eq!(out.assistant_output.safe_text, "final");
     assert_eq!(out.assistant_output.raw_text, "final");
     assert_eq!(out.assistant_output.state, OutputState::Usable);
+}
+
+#[test]
+fn assembler_uses_last_semantic_assistant_prose_group() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:first"),
+        TurnEvent::AssistantProseDelta {
+            text: "first".to_string(),
+        },
+    ));
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:second"),
+        TurnEvent::AssistantProseDelta {
+            text: "second".to_string(),
+        },
+    ));
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "second".to_string()
+        })
+    );
+    assert_eq!(out.assistant_output.safe_text, "second");
+}
+
+#[test]
+fn assembler_coalesces_semantic_assistant_prose_with_same_correlation_id() {
+    let mut assembler = TurnAssembler::default();
+    let correlation_id = TurnActivityId::new("assistant:one");
+    assembler.push_turn_activity(&TurnActivity::new(
+        correlation_id.clone(),
+        TurnEvent::AssistantProseDelta {
+            text: "hel".to_string(),
+        },
+    ));
+    assembler.push_turn_activity(&TurnActivity::new(
+        correlation_id,
+        TurnEvent::AssistantProseDelta {
+            text: "lo".to_string(),
+        },
+    ));
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "hello".to_string()
+        })
+    );
+    assert_eq!(out.assistant_output.safe_text, "hello");
+}
+
+#[test]
+fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:first"),
+        TurnEvent::AssistantProseDelta {
+            text: "first".to_string(),
+        },
+    ));
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:second"),
+        TurnEvent::AssistantProseDelta {
+            text: "second".to_string(),
+        },
+    ));
+    assembler.push(&SessionEvent::TurnOutcome {
+        outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "first\n\nsecond".to_string(),
+        }),
+    });
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "second".to_string()
+        })
+    );
+}
+
+#[test]
+fn assembler_keeps_explicit_terminal_value_when_semantic_prose_streamed() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:before-submit"),
+        TurnEvent::AssistantProseDelta {
+            text: "thinking before submit".to_string(),
+        },
+    ));
+    assembler.push(&SessionEvent::TurnOutcome {
+        outcome: TurnOutcome::Finished(TurnFinish::SubmittedValue {
+            value: serde_json::json!({ "ok": true }),
+        }),
+    });
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::SubmittedValue {
+            value: serde_json::json!({ "ok": true })
+        })
+    );
+    assert_eq!(out.assistant_output.safe_text, "thinking before submit");
+}
+
+#[test]
+fn assembler_keeps_tool_value_when_semantic_prose_streamed() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:before-tool"),
+        TurnEvent::AssistantProseDelta {
+            text: "thinking before tool".to_string(),
+        },
+    ));
+    assembler.push(&SessionEvent::TurnOutcome {
+        outcome: TurnOutcome::Finished(TurnFinish::ToolValue {
+            tool_name: "finish".to_string(),
+            value: serde_json::json!("done"),
+        }),
+    });
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::ToolValue {
+            tool_name: "finish".to_string(),
+            value: serde_json::json!("done")
+        })
+    );
+}
+
+#[test]
+fn interrupted_assembler_does_not_finish_with_semantic_assistant_prose() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push_turn_activity(&TurnActivity::new(
+        TurnActivityId::new("assistant:partial"),
+        TurnEvent::AssistantProseDelta {
+            text: "partial answer".to_string(),
+        },
+    ));
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        true,
+        None,
+        &SanitizerPolicy::default(),
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(out.outcome, TurnOutcome::Stopped(TurnStop::Cancelled));
+    assert_eq!(out.assistant_output.safe_text, "partial answer");
 }
 
 #[test]

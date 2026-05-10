@@ -59,11 +59,14 @@ impl BoundVariablesCache {
     }
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
-        let globals = ctx.state.shared_rlm_globals();
-        let history_len = ctx.state.rlm_history_len();
+        let globals = Arc::new(crate::project_rlm_globals_from_events(
+            ctx.state.active_events(),
+        ));
+        let history_len =
+            crate::rlm_history_projection(&ctx.state.chronological_projection()).len();
         if let Ok(guard) = self.inner.lock()
             && let Some(cached) = guard.as_ref()
-            && Arc::ptr_eq(&cached.globals, &globals)
+            && cached.globals.as_ref() == globals.as_ref()
             && cached.history_len == history_len
         {
             return vec![cached.rendered.clone()];

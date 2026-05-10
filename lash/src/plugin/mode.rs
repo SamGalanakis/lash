@@ -121,36 +121,17 @@ pub trait ModeSessionPlugin: Send + Sync {
 /// internals.
 pub struct ModeSessionContext<'a> {
     session_id: &'a str,
-    projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl<'a> ModeSessionContext<'a> {
     pub(crate) fn new(_session: &'a mut crate::Session, session_id: &'a str) -> Self {
-        Self {
-            session_id,
-            projected_rlm_globals: Arc::new(serde_json::Map::new()),
-        }
-    }
-
-    pub(crate) fn with_projected_rlm_globals(
-        _session: &'a mut crate::Session,
-        session_id: &'a str,
-        projected_rlm_globals: Arc<serde_json::Map<String, serde_json::Value>>,
-    ) -> Self {
-        Self {
-            session_id,
-            projected_rlm_globals,
-        }
+        Self { session_id }
     }
 
     /// ID of the session being initialized/restored. Equivalent to the
     /// `session_id` previously passed as a separate argument.
     pub fn session_id(&self) -> &str {
         self.session_id
-    }
-
-    pub fn projected_rlm_globals(&self) -> &serde_json::Map<String, serde_json::Value> {
-        &self.projected_rlm_globals
     }
 }
 
@@ -295,28 +276,3 @@ impl<'de> Deserialize<'de> for ModeExtras {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StandardCreateExtras {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mode_extras_round_trips_open_payload() {
-        let standard = ModeExtras::default();
-        assert_eq!(standard.mode_id, ExecutionMode::standard());
-        assert_eq!(standard.payload, serde_json::json!({}));
-
-        let extras = ModeExtras::typed(
-            ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras {
-                termination: lash_rlm_types::RlmTermination::default(),
-                ..Default::default()
-            },
-        )
-        .expect("encode");
-        let json = serde_json::to_value(&extras).expect("serialize");
-        assert_eq!(json["mode_id"], "rlm");
-        let decoded: ModeExtras = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(decoded.mode_id, ExecutionMode::new("rlm"));
-    }
-}

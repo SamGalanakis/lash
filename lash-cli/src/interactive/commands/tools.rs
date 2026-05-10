@@ -211,7 +211,7 @@ pub(super) async fn handle_reconfigure(
         }
         "clear" => {
             if let Some(session) = runtime.as_ref() {
-                *desired_tool_state = session.tool_state().await?;
+                *desired_tool_state = session.control().tools().state().await?;
             }
             *pending_reconfigure = false;
             push_system_message(app, "Cleared pending tool registry changes.");
@@ -221,9 +221,12 @@ pub(super) async fn handle_reconfigure(
             {
                 Ok(generation) => {
                     let definitions = match runtime.as_ref() {
-                        Some(session) => {
-                            session.active_tool_definitions().await.unwrap_or_default()
-                        }
+                        Some(session) => session
+                            .control()
+                            .tools()
+                            .active_definitions()
+                            .await
+                            .unwrap_or_default(),
                         None => desired_tool_state.definitions(),
                     };
                     *toolset_hash = hash12(

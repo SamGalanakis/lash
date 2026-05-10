@@ -751,9 +751,9 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
-        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
-    ))];
+    let events = vec![lash::SessionEventRecord::Mode(
+        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    )];
 
     let blocks =
         timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
@@ -780,9 +780,9 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
     };
-    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
-        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
-    ))];
+    let events = vec![lash::SessionEventRecord::Mode(
+        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    )];
 
     let blocks =
         timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
@@ -807,7 +807,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     };
     let events = vec![
         conversation_event(user.clone()),
-        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
         )),
         conversation_event(assistant.clone()),
@@ -856,9 +856,9 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
-        lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
-    ))];
+    let events = vec![lash::SessionEventRecord::Mode(
+        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    )];
 
     let blocks =
         timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
@@ -915,10 +915,10 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let assistant = text_message("a1", MessageRole::Assistant, "Done.");
     let events = vec![
-        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(first),
         )),
-        lash::SessionEventRecord::Mode(lash::ModeEvent::rlm(
+        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(second),
         )),
         conversation_event(assistant.clone()),

@@ -269,6 +269,7 @@ pub(super) async fn enqueue_pending_monitor_wakes(
         .collect::<Vec<_>>();
     session
         .control()
+        .injection()
         .inject_turn_inputs(messages)
         .await
         .map_err(|err| err.to_string())?;
@@ -884,7 +885,7 @@ pub(super) async fn handle_key_event(
                     .await
                     {
                         Ok(()) => {
-                            match rt.session_manager().await {
+                            match rt.control().state().session_manager().await {
                                 Ok(manager) => *session_manager = manager,
                                 Err(err) => push_system_message(
                                     app,
@@ -1310,7 +1311,12 @@ pub(super) async fn handle_key_event(
                     app.restore_prepared_turn(queued);
                     return Ok(false);
                 };
-                match session.control().inject_turn_inputs(vec![injection]).await {
+                match session
+                    .control()
+                    .injection()
+                    .inject_turn_inputs(vec![injection])
+                    .await
+                {
                     Ok(()) => {
                         record_queue_pending_steer(ui_trace, &queued);
                         app.queue_pending_steer(queued.clone());

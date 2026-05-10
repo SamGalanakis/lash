@@ -7,6 +7,7 @@ description = "OpenAI-compatible (API key) provider for lash. Works with OpenRou
 
 [dependencies]
 lash = { path = "../lash" }
+lash-llm-transport = { path = "../lash-llm-transport" }
 lash-openai-schema = { path = "../lash-openai-schema" }
 async-trait = "0.1"
 base64 = "0.22"

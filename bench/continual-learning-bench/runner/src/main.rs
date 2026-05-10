@@ -22,9 +22,8 @@ use lash_mode_rlm::RlmTurnInputExt;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
 use lash_subagents::{
-    CapabilityField, CapabilityOptionalField, CapabilityRecursion, CapabilityRegistry,
-    CapabilitySpec, CapabilityToolSurface, LocalSubagentHost, StaticCapability, SubagentHost,
-    SubagentsPluginFactory,
+    CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
+    LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -148,7 +147,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         runtime
             .append_session_nodes(AppendSessionNodesRequest {
                 nodes: vec![SessionAppendNode::event(SessionEventRecord::Mode(
-                    lash::ModeEvent::rlm(RlmModeEvent::RlmGlobalsPatch(defaults)),
+                    lash_mode_rlm::rlm_mode_event(RlmModeEvent::RlmGlobalsPatch(defaults)),
                 ))],
                 requires_ancestor_node_id: None,
             })
@@ -244,7 +243,7 @@ fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
 ) -> Result<Arc<lash::PluginSession>> {
-    let clbench_tools = clbench_tool_definitions();
+    let _clbench_tools = clbench_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
         Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::new(
@@ -270,8 +269,6 @@ fn build_plugin_session(
                         model: CapabilityField::Inherit,
                         model_variant: CapabilityOptionalField::Inherit,
                         execution_mode: CapabilityField::Inherit,
-                        tool_surface: CapabilityToolSurface::Explicit(clbench_tools.clone()),
-                        recursion: CapabilityRecursion::Inherit,
                     },
                 ))),
             ),

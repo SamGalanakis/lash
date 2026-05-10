@@ -12,11 +12,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider};
-use lash_embed::{
-    EmbedPlugin, Input, LashCore, LashSession, ModeId, ModePreset, TurnActivity, TurnActivitySink,
-    TurnEvent,
+use lash::{
+    ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnInput,
 };
+use lash_embed::{EmbedPlugin, LashCore, LashSession, ModeId, ModePreset, TurnActivity, TurnEvent};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
 use lash_rlm_types::RlmTermination;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -317,14 +316,14 @@ async fn send_message(
             })
             .await;
         let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
-        let ui_sink: Arc<dyn TurnActivitySink> = Arc::new(ChannelTurnEvents {
+        let ui_events = ChannelTurnEvents {
             tx: tx.clone(),
             state: run_state.clone(),
             chat_id: chat_id.clone(),
             turn_state: Arc::clone(&turn_state),
-        });
+        };
         let turn = session
-            .turn(Input::text(text))
+            .turn(TurnInput::text(text))
             .with_plugin_input::<DemoPlugin>(DemoTurnInput {
                 board: request.board,
             })
@@ -335,8 +334,25 @@ async fn send_message(
                 )
                 .expect("RLM termination options serialize"),
             )
-            .stream(ui_sink.as_ref())
-            .await;
+            .into_stream();
+        let turn = match turn {
+            Ok(mut stream) => {
+                while let Some(activity) = stream.next_activity().await {
+                    match activity {
+                        Ok(activity) => ui_events.handle(activity).await,
+                        Err(err) => {
+                            let _ = tx
+                                .send(StreamItem::Error {
+                                    message: err.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+                stream.finish().await
+            }
+            Err(err) => Err(err),
+        };
         match turn {
             Ok(_) => {
                 let assistant_text = turn_state
@@ -406,9 +422,8 @@ struct TurnPersistenceState {
     tools: HashMap<String, i64>,
 }
 
-#[async_trait]
-impl TurnActivitySink for ChannelTurnEvents {
-    async fn emit(&self, activity: TurnActivity) {
+impl ChannelTurnEvents {
+    async fn handle(&self, activity: TurnActivity) {
         let event = &activity.event;
         if let TurnEvent::AssistantProseDelta { text } = &event {
             self.turn_state

@@ -7,6 +7,8 @@ description = "OpenAI Codex OAuth provider for lash (ChatGPT Plus/Pro/Team)."
 
 [dependencies]
 lash = { path = "../lash" }
+lash-llm-transport = { path = "../lash-llm-transport" }
+lash-provider-auth = { path = "../lash-provider-auth" }
 lash-openai-schema = { path = "../lash-openai-schema" }
 async-trait = "0.1"
 base64 = "0.22"

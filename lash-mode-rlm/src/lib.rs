@@ -8,6 +8,7 @@ mod driver;
 mod executor;
 mod plugin;
 mod projected_bindings;
+mod projection;
 mod protocol;
 mod rlm_support;
 mod stream_mask;
@@ -17,6 +18,10 @@ pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use projected_bindings::{
     RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
+};
+pub use projection::{
+    RlmHistoryProjection, decode_rlm_mode_event, project_rlm_globals_from_events,
+    rlm_history_projection, rlm_mode_event,
 };
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
