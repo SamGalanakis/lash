@@ -79,14 +79,14 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Host Capabilities</h2>
-            <p><code>RuntimeSessionManager</code> implements focused plugin host traits rather than one broad mutable runtime handle.</p>
+            <p><code>RuntimeSessionManager</code> implements focused plugin host traits rather than one broad mutable runtime handle. Tool authors do not receive those bridge traits directly; <code>ToolContext</code> projects them into explicit methods such as <code>session_model()</code>, <code>tool_catalog()</code>, <code>sessions()</code>, <code>tasks()</code>, and <code>direct_completion(...)</code>.</p>
           </div>
           <div class="table">
             <table>
               <thead><tr><th>Trait</th><th>Runtime responsibility</th></tr></thead>
               <tbody>
                 <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code></td><td>Read current state and tool catalogs through stable projections.</td></tr>
-                <tr><td><code>DynamicToolHost</code></td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
+                <tr><td><code>ToolStateHost</code></td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
                 <tr><td><code>SessionLifecycleHost</code>, <code>TurnHost</code></td><td>Create, fork, continue, and stream managed sessions.</td></tr>
                 <tr><td><code>SessionGraphHost</code></td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
                 <tr><td><code>TaskHost</code>, <code>MonitorHost</code></td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>

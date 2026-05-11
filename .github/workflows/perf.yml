@@ -1,0 +1,80 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LASH_CI_ZIG_VERSION: 0.15.1
+
+jobs:
+  runtime-perf:
+    name: Runtime Perf Full
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.LASH_CI_ZIG_VERSION }}
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run full synthetic runtime performance benchmark
+        run: |
+          python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
+
+      - name: Publish runtime performance summary
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(".benchmarks/runtime-perf/full.json").read_text())
+          lines = [
+              "## Runtime Perf Full",
+              "",
+              f"- runs: `{report['runs']}`",
+              f"- warmups: `{report['warmups']}`",
+              f"- turns: `{report['chat_turns']}`",
+              f"- scenarios: `{', '.join(report['scenarios'])}`",
+          ]
+          for item in report["summary"]:
+              lines.extend([
+                  "",
+                  f"### {item['scenario']}",
+                  f"- `total_ms` mean: `{item['total_ms']['mean']}ms`",
+                  f"- `run_turn_ms` mean: `{item['run_turn_ms']['mean']}ms`",
+                  f"- `total_alloc_bytes` mean: `{item['total_alloc_bytes']['mean']}`",
+                  f"- `total_live_bytes` mean: `{item['total_live_bytes']['mean']}`",
+              ])
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload runtime performance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-perf-full
+          path: .benchmarks/runtime-perf/full.json
