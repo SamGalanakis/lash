@@ -339,11 +339,11 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use lash_core::plugin::{
-        DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
-        SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
-        ToolStateHost, TraceHost, TurnHost,
+    use lash_core::plugin::runtime_host::{
+        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
+        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
+    use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
     use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
 
     #[derive(Default)]

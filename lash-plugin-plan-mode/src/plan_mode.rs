@@ -11,9 +11,9 @@ use lash_core::plugin::{
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash_core::{
-    JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
-    SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolCall, ToolContext,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionCreateRequest,
+    SessionPluginMode, SessionStartPoint, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
+    ToolProvider, ToolResult,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
@@ -392,7 +392,7 @@ async fn ensure_plan_path<H>(
     host: &Arc<H>,
 ) -> Result<PathBuf, PluginError>
 where
-    H: lash_core::SessionSnapshotHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionSnapshotHost + ?Sized,
 {
     if let Some(path) = state
         .lock()
@@ -454,7 +454,7 @@ async fn ensure_plan_report<H>(
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError>
 where
-    H: lash_core::SessionSnapshotHost + ?Sized,
+    H: lash_core::plugin::runtime_host::SessionSnapshotHost + ?Sized,
 {
     let path = ensure_plan_path(state, session_id, host).await?;
     if seed_if_missing {
@@ -473,7 +473,7 @@ async fn sync_plan_exit_tool_state<H>(
     enabled: bool,
 ) -> Result<(), PluginError>
 where
-    H: lash_core::ToolStateHost + ?Sized,
+    H: lash_core::plugin::runtime_host::ToolStateHost + ?Sized,
 {
     let availability = if enabled {
         Some(lash_core::ToolAvailability::Showcased)
@@ -497,7 +497,7 @@ async fn set_plan_mode_enabled_state<H>(
     enabled: bool,
 ) -> Result<bool, PluginError>
 where
-    H: lash_core::ToolStateHost + ?Sized,
+    H: lash_core::plugin::runtime_host::ToolStateHost + ?Sized,
 {
     let previous = {
         let mut guard = state
@@ -933,22 +933,17 @@ impl SessionPlugin for PlanModePlugin {
                         );
                         let session_id = fresh_context_session_id();
                         directives.push(PluginDirective::CreateSession {
-                            request: Box::new(SessionCreateRequest {
-                                session_id: Some(session_id.clone()),
-                                relation: lash_core::SessionRelation::Child {
-                                    parent_session_id: ctx.session_id.clone(),
-                                },
-                                start: SessionStartPoint::Empty,
-                                policy: None,
-                                plugin_mode: SessionPluginMode::Fresh,
-                                initial_nodes: Vec::new(),
-                                first_turn_input: Some(seed),
-                                tool_access: lash_core::SessionToolAccess::default(),
-                                subagent: None,
-                                context_surface: SessionContextSurface::default(),
-                                mode_extras: lash_core::ModeExtras::default(),
-                                usage_source: Some("plan_execution".to_string()),
-                            }),
+                            request: Box::new(
+                                SessionCreateRequest::child_inheriting_policy(
+                                    ctx.session_id.clone(),
+                                    SessionStartPoint::Empty,
+                                    lash_core::ModeExtras::default(),
+                                    "plan_execution",
+                                )
+                                .with_session_id(session_id.clone())
+                                .with_plugin_mode(SessionPluginMode::Fresh)
+                                .with_first_turn_input(seed),
+                            ),
                         });
                         directives.push(PluginDirective::HandoffSession {
                             session_id: session_id.clone(),

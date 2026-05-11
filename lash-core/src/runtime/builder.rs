@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
     BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, RuntimeCoreConfig, RuntimePersistence, RuntimeServices,
+    PersistentRuntimeServices, PluginStack, RuntimeCoreConfig, RuntimePersistence, RuntimeServices,
     SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor, TerminationPolicy,
     TurnInjectionBridge, TurnInputInjectionBridge,
 };
@@ -94,6 +94,10 @@ impl EmbeddedRuntimeBuilder {
             host
         });
         self
+    }
+
+    pub fn with_plugin_stack(self, stack: PluginStack) -> Self {
+        self.with_plugin_factories(stack.into_factories())
     }
 
     pub fn with_turn_injection_bridge(mut self, bridge: TurnInjectionBridge) -> Self {

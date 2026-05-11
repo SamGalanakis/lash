@@ -143,11 +143,11 @@ mod tests {
     use crate::shared::{build_session_policy, build_spawn_create_request};
     use async_trait::async_trait;
     use lash_core::PersistedSessionState;
-    use lash_core::plugin::{
-        DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
-        SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
-        ToolStateHost, TraceHost, TurnHost,
+    use lash_core::plugin::runtime_host::{
+        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
+        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
+    use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
     use lash_core::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
     use serde_json::json;
 

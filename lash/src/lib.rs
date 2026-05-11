@@ -10,7 +10,6 @@ mod core;
 mod error;
 mod mode;
 mod plugin_binding;
-mod plugin_stack;
 mod session;
 mod support;
 #[cfg(test)]
@@ -25,7 +24,6 @@ pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset, ModelSelection};
 pub use crate::plugin_binding::PluginBinding;
-pub use crate::plugin_stack::PluginStack;
 pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
@@ -33,7 +31,8 @@ pub use crate::turn::{
     TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    InputItem, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    InputItem, PluginStack, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
+    TurnInput,
 };
 
 pub mod prelude {
@@ -96,9 +95,9 @@ pub mod advanced {
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
         AssembledTurn, EventSink, ExecutionMode, ManagedTaskStatus, ModeSessionExtensionHandle,
-        ModeTurnOptions, PluginMessage, Residency, RewriteTrigger, RuntimeSessionHost,
-        SessionCreateRequest, SessionHandle, SessionTurnHandle, StandardContextApproach,
-        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        ModeTurnOptions, PluginMessage, Residency, RewriteTrigger, SessionHandle,
+        SessionTurnHandle, StandardContextApproach, TerminationPolicy, TurnContext, TurnFinish,
+        TurnOutcome, TurnStop,
     };
 }
 

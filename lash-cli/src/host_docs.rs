@@ -34,8 +34,7 @@ Skills are directories containing a `SKILL.md` file plus any referenced assets o
 Default search order, lowest to highest priority:
 
 1. `$LASH_HOME/skills`
-2. repo-local `.lash/skills`
-3. repo-local `.agents/lash/skills`
+2. repo-local `.agents/lash/skills`
 
 To install a user-global skill:
 

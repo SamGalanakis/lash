@@ -33,6 +33,7 @@ use crate::llm::types::{
     LlmOutputPart, LlmProviderTraceEvent, LlmProviderTraceSender, LlmRequest, LlmResponse,
     LlmStreamEvent, LlmUsage,
 };
+use crate::plugin::runtime_host::RuntimeSessionHost;
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
 };
@@ -43,9 +44,9 @@ use crate::session_model::{
 };
 use crate::{
     CheckpointKind, ExecutionMode, PersistentRuntimeServices, PluginActionInvokeError,
-    PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
-    SessionCreateRequest, SessionError, SessionHandle, SessionSnapshot, SessionStartPoint,
-    ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
+    PromptHookContext, RuntimeServices, SandboxMessage, Session, SessionCreateRequest,
+    SessionError, SessionHandle, SessionSnapshot, SessionStartPoint, ToolCallRecord, TurnFinish,
+    TurnOutcome, TurnStop,
 };
 use crate::{Effect, TurnMachine};
 

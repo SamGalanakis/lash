@@ -9,38 +9,14 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionSpec,
-    SessionStartPoint, SessionToolAccess, ToolContext, ToolDefinition, ToolExecutionMode,
-    ToolResult, ToolSurfaceContribution, TurnInput,
+    InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSpec, SessionStartPoint,
+    ToolContext, ToolDefinition, ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnInput,
 };
 use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityContext, CapabilityRegistry};
 use crate::{SubagentSessionConfigurator, SubagentSpawnContext};
-
-pub(crate) fn fresh_child_request(
-    parent_session_id: String,
-    start: SessionStartPoint,
-    policy: SessionPolicy,
-    mode_extras: ModeExtras,
-    usage_source: impl Into<String>,
-) -> SessionCreateRequest {
-    SessionCreateRequest {
-        session_id: Some(uuid::Uuid::new_v4().to_string()),
-        relation: lash_core::SessionRelation::Child { parent_session_id },
-        start,
-        policy: Some(policy),
-        plugin_mode: SessionPluginMode::Fresh,
-        initial_nodes: Vec::new(),
-        first_turn_input: None,
-        tool_access: SessionToolAccess::default(),
-        subagent: None,
-        context_surface: lash_core::SessionContextSurface::default(),
-        mode_extras,
-        usage_source: Some(usage_source.into()),
-    }
-}
 
 #[cfg(test)]
 pub(crate) fn build_session_policy(
@@ -65,12 +41,6 @@ pub(crate) fn resolve_capability_spec(
     }))
 }
 
-pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
-    if policy.execution_mode != lash_core::ExecutionMode::standard() {
-        policy.standard_context_approach = None;
-    }
-}
-
 pub(crate) async fn build_spawn_create_request(
     registry: &CapabilityRegistry,
     context: &ToolContext,
@@ -87,20 +57,21 @@ pub(crate) async fn build_spawn_create_request(
     let mut policy = session_spec.resolve_against(&current_snapshot.policy);
     let spec = resolve_capability_spec(registry, &policy, capability_name)?;
     policy = spec.resolve_against(&policy);
-    if output_schema.is_some() && policy.execution_mode != lash_core::ExecutionMode::new("rlm") {
+    let child_mode = policy.execution_mode.clone();
+    if output_schema.is_some() && child_mode != lash_core::ExecutionMode::new("rlm") {
         return Err(format!(
             "structured output is RLM-only; child capability `{capability_name}` runs in `{}` mode",
-            policy.execution_mode.plugin_id()
+            child_mode.plugin_id()
         ));
     }
-    if !seed.projected.is_empty() && policy.execution_mode != lash_core::ExecutionMode::new("rlm") {
+    if !seed.projected.is_empty() && child_mode != lash_core::ExecutionMode::new("rlm") {
         return Err(format!(
             "projected seed is RLM-only; child capability `{capability_name}` runs in `{}` mode",
-            policy.execution_mode.plugin_id()
+            child_mode.plugin_id()
         ));
     }
     let mut mode_extras = ModeExtras::default();
-    if policy.execution_mode == lash_core::ExecutionMode::new("rlm") {
+    if child_mode == lash_core::ExecutionMode::new("rlm") {
         let termination = match output_schema.clone() {
             Some(schema) => RlmTermination::SubmitRequired {
                 schema: Some(schema),
@@ -121,19 +92,20 @@ pub(crate) async fn build_spawn_create_request(
         )
         .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
     }
-    normalize_context_policy(&mut policy);
 
-    let mut request = fresh_child_request(
-        context.session_id().to_string(),
+    let initial_nodes = if child_mode == lash_core::ExecutionMode::new("rlm") {
+        lash_mode_rlm::rlm_seed_initial_nodes(seed.globals)
+    } else {
+        Vec::new()
+    };
+    let mut request = SessionCreateRequest::child(
+        context.session_id(),
         SessionStartPoint::Empty,
         policy,
         mode_extras,
         "subagent",
-    );
-    request.tool_access = SessionToolAccess::default();
-    if !seed.globals.is_empty() {
-        request.initial_nodes = lash_mode_rlm::rlm_seed_initial_nodes(seed.globals);
-    }
+    )
+    .with_initial_nodes(initial_nodes);
     let child_policy = request.policy.as_ref().expect("child policy set").clone();
     configurator.configure(
         &SubagentSpawnContext {

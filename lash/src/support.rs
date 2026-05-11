@@ -6,21 +6,22 @@ pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::{
     ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
-    RuntimeEnvironment, RuntimeHandle, RuntimeObservation, SessionPolicy, SessionSpec,
+    PluginStack, RuntimeEnvironment, RuntimeHandle, RuntimeObservation, SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio_util::sync::CancellationToken;
 
+pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
     AssembledTurn, AssistantOutput, AttachmentStore, EventSink, ExecutionSummary,
     ManagedTaskStatus, Message, ModeTurnOptions, PluginFactory, PluginMessage, ProviderHandle,
-    Residency, RewriteTrigger, RuntimePersistence, RuntimeSessionHost, SessionCreateRequest,
-    SessionError, SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
+    Residency, RewriteTrigger, RuntimePersistence, SessionCreateRequest, SessionError,
+    SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
     SessionStoreFactory, SessionTaskExecutor, SessionTurnHandle, SessionUsageReport,
     StandardContextApproach, TerminationPolicy, TokioSessionTaskExecutor, ToolAvailability,
-    ToolCallRecord, ToolDefinition, ToolOutputBudgetPluginFactory, ToolProvider, ToolResult,
-    ToolSourceHandle, TurnActivitySink, TurnIssue, TurnOutcome,
+    ToolCallRecord, ToolDefinition, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink,
+    TurnIssue, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
@@ -34,6 +35,5 @@ pub(crate) use crate::core::*;
 pub(crate) use crate::error::*;
 pub(crate) use crate::mode::*;
 pub(crate) use crate::plugin_binding::*;
-pub(crate) use crate::plugin_stack::*;
 pub(crate) use crate::session::SessionBuilder;
 pub(crate) use crate::turn::*;

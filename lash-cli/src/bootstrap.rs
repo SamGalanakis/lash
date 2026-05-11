@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::config::LashConfig;
-use lash::SessionSpec;
 use lash::advanced::ExecutionMode;
 use lash::plugins::{
     BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
@@ -16,9 +15,10 @@ use lash::tools::{
     ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use lash::tracing::TraceLevel;
+use lash::{PluginStack, SessionSpec};
 use lash_core::{
     FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
-    PluginHost, PromptLayer, RuntimeCoreConfig, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+    PromptLayer, SessionPolicy, TokioSessionTaskExecutor, ToolState,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
@@ -27,7 +27,7 @@ use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginF
 use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_standard_plugins::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+    DefaultPluginStackOptions, DefaultToolSurfaceProfile, default_plugin_stack,
 };
 use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
@@ -69,7 +69,7 @@ struct PluginFactorySurfaceInput<'a> {
 }
 
 struct PluginFactoriesForSurface {
-    factories: Vec<Arc<dyn PluginFactory>>,
+    stack: PluginStack,
     subagent_host: Arc<dyn SubagentHost>,
 }
 
@@ -93,7 +93,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         !autonomous,
         !tavily_key.is_empty(),
     );
-    let mut plugin_factories = tool_plugin_factories(DefaultToolPluginOptions {
+    let mut plugin_stack = default_plugin_stack(DefaultPluginStackOptions {
         execution_mode,
         standard_context_approach: session_policy.standard_context_approach.clone(),
         bundles: profile.bundles.clone(),
@@ -104,44 +104,45 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         },
         instruction_source: Some(Arc::clone(&instruction_source)),
     });
-    plugin_factories.push(Arc::new(PromptContextPluginFactory::new(
+    plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
     if profile.interactive_extras {
         if let Some(host_docs_dir) = host_docs_dir {
-            plugin_factories.push(Arc::new(crate::host_docs::HostDocsPluginFactory::new(
-                host_docs_dir,
-            )) as Arc<dyn PluginFactory>);
+            plugin_stack.push(
+                Arc::new(crate::host_docs::HostDocsPluginFactory::new(host_docs_dir))
+                    as Arc<dyn PluginFactory>,
+            );
         }
-        plugin_factories.push(Arc::new(
+        plugin_stack.push(Arc::new(
             PlanModePluginFactory::new(Default::default())
                 .with_prompt(Arc::new(prompt_bridge.clone())),
         ));
-        plugin_factories.push(cli_ask_plugin_factory(prompt_bridge));
-        plugin_factories.push(Arc::new(UiActivityPluginFactory));
+        plugin_stack.push(cli_ask_plugin_factory(prompt_bridge));
+        plugin_stack.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
         // the TUI. Interactive-only here; root-only inside the plugin
         // itself (the factory returns an inert plugin for subagent
         // / compaction / other non-root sessions).
-        plugin_factories.push(Arc::new(UpdatePlanPluginFactory));
+        plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
-    plugin_factories.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
-    plugin_factories.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
-    plugin_factories.push(Arc::new(
+    plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
+    plugin_stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
+    plugin_stack.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));
-    plugin_factories.push(Arc::new(
+    plugin_stack.push(Arc::new(
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
-    plugin_factories.push(Arc::new(LlmToolsPluginFactory));
-    plugin_factories.push(Arc::new(
+    plugin_stack.push(Arc::new(LlmToolsPluginFactory));
+    plugin_stack.push(Arc::new(
         SubagentsPluginFactory::new(capability_registry, Arc::clone(&subagent_host))
             .with_session_spec(SessionSpec::inherit()),
     ));
     PluginFactoriesForSurface {
-        factories: plugin_factories,
+        stack: plugin_stack,
         subagent_host,
     }
 }
@@ -580,19 +581,11 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         standard_context_approach: configured_standard_context_approach.clone(),
         ..Default::default()
     };
-    let host_core = RuntimeCoreConfig::default()
-        .with_prompt_layer(prompt_layer)
-        .with_attachment_store(Arc::new(FileAttachmentStore::new(
-            crate::paths::attachments_dir(),
-        )))
-        .with_trace_jsonl_path(trace_path)
-        .with_trace_level(trace_level);
-
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let prompt_bridge = CliPromptBridge::default();
 
     let PluginFactoriesForSurface {
-        factories: mut plugin_factories,
+        stack: mut plugin_stack,
         subagent_host,
     } = plugin_factories_for_surface(PluginFactorySurfaceInput {
         autonomous,
@@ -609,8 +602,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             .await
             .map_err(|err| anyhow::anyhow!("failed to connect MCP servers: {err}"))?,
     );
-    plugin_factories.push(mcp_factory);
-    let plugin_host = PluginHost::new(plugin_factories);
+    plugin_stack.push(mcp_factory);
     if args.info {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -634,8 +626,11 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         return Ok(());
     }
     let runtime_factory = CliSessionOpener::new(
-        plugin_host.clone(),
-        host_core,
+        plugin_stack.clone(),
+        prompt_layer,
+        Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
+        trace_path,
+        trace_level,
         Arc::new(TokioSessionTaskExecutor::default()),
     );
     let opened_session = runtime_factory
@@ -765,7 +760,8 @@ mod tests {
                 .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
             prompt_bridge: CliPromptBridge::default(),
         })
-        .factories
+        .stack
+        .into_factories()
         .into_iter()
         .map(|factory| factory.id())
         .collect()

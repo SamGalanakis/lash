@@ -681,7 +681,7 @@ mod tests {
     struct NoopPromptManager;
 
     #[async_trait::async_trait]
-    impl lash_core::SessionSnapshotHost for NoopPromptManager {
+    impl lash_core::plugin::runtime_host::SessionSnapshotHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
         ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl lash_core::ToolCatalogHost for NoopPromptManager {
+    impl lash_core::plugin::runtime_host::ToolCatalogHost for NoopPromptManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
@@ -710,9 +710,9 @@ mod tests {
         }
     }
 
-    impl lash_core::TaskHost for NoopPromptManager {}
-    impl lash_core::DirectCompletionHost for NoopPromptManager {}
-    impl lash_core::TraceHost for NoopPromptManager {}
+    impl lash_core::plugin::runtime_host::TaskHost for NoopPromptManager {}
+    impl lash_core::plugin::runtime_host::DirectCompletionHost for NoopPromptManager {}
+    impl lash_core::plugin::runtime_host::TraceHost for NoopPromptManager {}
 
     fn prompt_usage(context_budget_tokens: usize) -> lash_core::PromptUsage {
         lash_core::PromptUsage {
@@ -795,7 +795,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl lash_core::SessionLifecycleHost for NoopPromptManager {
+    impl lash_core::plugin::runtime_host::SessionLifecycleHost for NoopPromptManager {
         async fn create_session(
             &self,
             _request: lash_core::SessionCreateRequest,

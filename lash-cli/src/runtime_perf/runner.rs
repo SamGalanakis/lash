@@ -15,24 +15,25 @@ use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash_core::store;
 use lash_core::testing::TestProvider;
 use lash_core::{
-    AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
-    LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
-    PluginMessage, PluginSpec, ProviderHandle, ProviderOptions, RollingHistoryConfig,
-    RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint,
-    SessionGraph, SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, TokenUsage,
+    AppendSessionNodesRequest, BlobRef, GcReport, GraphCommitDelta, InputItem, LashRuntime,
+    MessageRole, PersistedSessionRead, PluginHost, PluginMessage, PluginSpec, ProviderHandle,
+    ProviderOptions, RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionAppendNode,
+    SessionCheckpoint, SessionGraph, SessionHeadMeta, SessionNodeRecord, SessionPolicy,
+    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, TokenUsage,
     TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
     TurnInput, TurnOutcome, VacuumReport,
 };
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_standard_plugins::{
-    DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
+    DefaultPluginStackOptions, DefaultToolSurfaceProfile, default_plugin_stack,
 };
 use serde::Serialize;
 use stats_alloc::Stats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+
+use super::RuntimePerfScenario;
 
 const OM_ACTIVE_STATE_PLUGIN_TYPE: &str = "lash.context.observational_memory.state";
 const DEFAULT_PROMPT: &str =
@@ -40,92 +41,6 @@ const DEFAULT_PROMPT: &str =
 const HISTORY_EXCHANGES: usize = 18;
 const OPENAI_COMPAT_STREAM_CHUNK_COUNT: usize = 256;
 const OPENAI_COMPAT_STREAM_CHUNK_BYTES: usize = 96;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum RuntimePerfScenario {
-    Standard,
-    Rlm,
-    RlmToolCalls,
-    RlmGlobals,
-    ObservationalMemory,
-    OpenAiCompatStream,
-    EmbedStandard,
-    EmbedRlm,
-}
-
-impl RuntimePerfScenario {
-    const DEFAULTS: [Self; 8] = [
-        Self::Standard,
-        Self::Rlm,
-        Self::RlmToolCalls,
-        Self::RlmGlobals,
-        Self::ObservationalMemory,
-        Self::OpenAiCompatStream,
-        Self::EmbedStandard,
-        Self::EmbedRlm,
-    ];
-    const KNOWN: [Self; 8] = [
-        Self::Standard,
-        Self::Rlm,
-        Self::RlmToolCalls,
-        Self::RlmGlobals,
-        Self::ObservationalMemory,
-        Self::OpenAiCompatStream,
-        Self::EmbedStandard,
-        Self::EmbedRlm,
-    ];
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "standard" => Some(Self::Standard),
-            "rlm" => Some(Self::Rlm),
-            "rlm_tool_calls" => Some(Self::RlmToolCalls),
-            "rlm_globals" => Some(Self::RlmGlobals),
-            "observational_memory" => Some(Self::ObservationalMemory),
-            "openai_compat_stream" => Some(Self::OpenAiCompatStream),
-            "embed_standard" => Some(Self::EmbedStandard),
-            "embed_rlm" => Some(Self::EmbedRlm),
-            _ => None,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Rlm => "rlm",
-            Self::RlmToolCalls => "rlm_tool_calls",
-            Self::RlmGlobals => "rlm_globals",
-            Self::ObservationalMemory => "observational_memory",
-            Self::OpenAiCompatStream => "openai_compat_stream",
-            Self::EmbedStandard => "embed_standard",
-            Self::EmbedRlm => "embed_rlm",
-        }
-    }
-
-    fn execution_mode(self) -> ExecutionMode {
-        match self {
-            Self::Standard
-            | Self::ObservationalMemory
-            | Self::OpenAiCompatStream
-            | Self::EmbedStandard => ExecutionMode::standard(),
-            Self::Rlm | Self::RlmToolCalls | Self::RlmGlobals | Self::EmbedRlm => {
-                ExecutionMode::new("rlm")
-            }
-        }
-    }
-
-    fn standard_context_approach(self) -> Option<StandardContextApproach> {
-        match self.execution_mode() {
-            mode if mode != ExecutionMode::standard() => None,
-            _ => Some(match self {
-                Self::ObservationalMemory => StandardContextApproach::ObservationalMemory(
-                    ObservationalMemoryConfig::default(),
-                ),
-                _ => StandardContextApproach::RollingHistory(RollingHistoryConfig),
-            }),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfRunResult {
@@ -1275,13 +1190,14 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
     let profile =
         DefaultToolSurfaceProfile::for_runtime(standard_context_approach.as_ref(), false, false);
     let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimePersistence>;
-    let mut factories = tool_plugin_factories(DefaultToolPluginOptions {
+    let factories = default_plugin_stack(DefaultPluginStackOptions {
         execution_mode,
         standard_context_approach: standard_context_approach.clone(),
         bundles: profile.bundles,
         tavily_api_key: None,
         instruction_source: None,
     });
+    let mut factories = factories.into_factories();
     factories.push(Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()));
     factories.push(Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(

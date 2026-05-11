@@ -6,6 +6,7 @@ pub mod llm;
 pub mod model_info;
 pub mod monitor;
 pub mod plugin;
+mod plugin_stack;
 pub mod provider;
 pub mod runtime;
 pub mod runtime_controls;
@@ -146,31 +147,28 @@ pub use monitor::{
 pub use plugin::{
     AckWakeArgs, AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    CheckpointHookContext, CheckpointHookHost, DirectCompletion, DirectCompletionHost,
-    DirectLlmCompletion, HistoryError, HistoryHost, HistoryRegistrations, HistoryRewriteMetadata,
-    HistoryRewriter, HistoryState, ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction,
-    MonitorAckWakeOp, MonitorEmptyArgs, MonitorHost, MonitorRegisterSpecsOp, MonitorRegistrations,
-    MonitorStartOp, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec,
-    PersistentRuntimeServices, PluginAction, PluginActionContext, PluginActionDef,
-    PluginActionFailure, PluginActionHost, PluginActionInvokeError, PluginActionKind,
-    PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
-    PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
-    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
-    PluginSpec, PluginSpecFactory, PromptHookContext, PromptHookHost, RegisterSpecsArgs,
-    RewriteContext, RewriteTrigger, RuntimeServices, RuntimeSessionHost, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphHost,
-    SessionHandle, SessionLifecycleHost, SessionParam, SessionPlugin, SessionPluginMode,
-    SessionReadView, SessionRelation, SessionSnapshot, SessionSnapshotHost, SessionStartPoint,
-    SessionStateChangedContext, SessionToolAccess, SessionTurnHandle, SnapshotReader,
-    SnapshotWriter, StandardCreateExtras, StartMonitorArgs, StopMonitorArgs,
-    SubagentSessionAuthority, TaskHost, ToolCatalogHost, ToolDiscoveryContext,
-    ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
-    ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
-    ToolResultProjectionContext, ToolResultProjector, ToolStateHost, ToolSurfaceContribution,
-    TraceHost, TurnContextTransform, TurnHookContext, TurnHookHost, TurnHost,
-    TurnResultHookContext, TurnResultHookHost, TurnResultSummary, TurnTransformContext,
-    plugin_action_def,
+    CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
+    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
+    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorAckWakeOp, MonitorEmptyArgs,
+    MonitorRegisterSpecsOp, MonitorRegistrations, MonitorStartOp, MonitorStatusOp, MonitorStopOp,
+    MonitorTakeUpdatesOp, OwnedMonitorSpec, PersistentRuntimeServices, PluginAction,
+    PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionInvokeError,
+    PluginActionKind, PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned,
+    PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession,
+    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
+    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, RegisterSpecsArgs,
+    RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
+    SessionParam, SessionPlugin, SessionPluginMode, SessionReadView, SessionRelation,
+    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
+    SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras, StartMonitorArgs,
+    StopMonitorArgs, SubagentSessionAuthority, ToolDiscoveryContext, ToolDiscoveryContribution,
+    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolOutputBudgetConfig,
+    ToolOutputBudgetMode, ToolOutputBudgetPluginFactory, ToolResultProjectionContext,
+    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
+    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
+pub use plugin_stack::PluginStack;
 pub use provider::{
     AgentModelSelection, CacheRetention, LlmTimeouts, ProviderComponents, ProviderFactory,
     ProviderHandle, ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec,
