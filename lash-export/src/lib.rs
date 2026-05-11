@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use lash::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope};
+use lash_core::{ChronologicalEntry, SessionGraph, SessionMeta, SessionStateEnvelope};
 use lash_sqlite_store::Store;
 
 pub mod html;

@@ -5,6 +5,8 @@ use lash_llm_transport::timeouts::build_http_client;
 use lash_openai_schema::emit_provider_trace;
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
 pub(crate) const OPENROUTER_REASONING_VARIANTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh"];
@@ -20,7 +22,7 @@ pub(crate) fn sanitize_surrogates(s: &str) -> &str {
 }
 
 pub(crate) fn emit_provider_request_trace(
-    provider_trace: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider_trace: Option<&lash_core::llm::types::LlmProviderTraceSender>,
     endpoint: &str,
     body: &Value,
 ) {

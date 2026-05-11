@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::llm::types::{
     LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec,
+    ProviderReplayMeta,
 };
 use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
@@ -49,10 +50,8 @@ pub struct PendingToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
-    /// Provider-specific item-id (e.g. Codex `fc_...`). Carried through so
-    /// it can be re-emitted on the next request body. `None` for providers
-    /// that don't surface a distinct item-id.
-    pub item_id: Option<String>,
+    /// Opaque provider replay state carried through for the next request.
+    pub replay: Option<ProviderReplayMeta>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,8 +62,8 @@ pub struct CompletedToolCall {
     pub result: ToolResult,
     pub model_result: ToolResult,
     pub duration_ms: u64,
-    /// See [`PendingToolCall::item_id`].
-    pub item_id: Option<String>,
+    /// See [`PendingToolCall::replay`].
+    pub replay: Option<ProviderReplayMeta>,
 }
 
 #[derive(Clone, Debug)]
@@ -824,8 +823,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                         attachment: None,
                         tool_call_id: None,
                         tool_name: None,
-                        tool_item_id: None,
-                        tool_signature: None,
+                        tool_replay: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
                         response_meta: None,
@@ -965,32 +963,27 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 LlmOutputPart::Text { .. } => None,
                 LlmOutputPart::Reasoning {
                     text,
-                    item_id,
-                    summary,
-                    encrypted_content,
-                    signature,
-                    redacted,
+                    replay,
                 } => Some(serde_json::json!({
                     "type": "reasoning",
-                    "id": item_id,
-                    "summary": summary,
+                    "id": replay.as_ref().and_then(|meta| meta.item_id.as_ref()),
+                    "summary": replay.as_ref().map(|meta| &meta.summary),
                     "text": text,
-                    "has_encrypted": encrypted_content.is_some() || signature.is_some(),
-                    "redacted": redacted,
+                    "has_encrypted": replay.as_ref().is_some_and(|meta| meta.encrypted_content.is_some() || meta.signature.is_some()),
+                    "redacted": replay.as_ref().is_some_and(|meta| meta.redacted),
                 })),
                 LlmOutputPart::ToolCall {
                     call_id,
                     tool_name,
                     input_json,
-                    item_id,
-                    signature,
+                    replay,
                 } => Some(serde_json::json!({
                     "type": "tool_call",
                     "call_id": call_id,
                     "tool_name": tool_name,
                     "input_json": input_json,
-                    "id": item_id,
-                    "has_signature": signature.is_some(),
+                    "id": replay.as_ref().and_then(|meta| meta.item_id.as_ref()),
+                    "has_opaque": replay.as_ref().is_some_and(|meta| meta.opaque.is_some()),
                 })),
             })
             .collect::<Vec<_>>();

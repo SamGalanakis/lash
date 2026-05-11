@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Service Example - lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main class="page">
+    <div class="frame">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="sidebar__exit" href="./index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Guide</span>
+            <span class="sidebar__current">Agent Service</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./embedding.html">Lash API</a></li>
+            <li><a class="active" href="./example-agent-service.html">Agent Service</a></li>
+            <li><a href="./cli.html">CLI</a></li>
+            <li><a href="./plugins.html">Plugins</a></li>
+            <li><a href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
+            <li><a href="./architecture/">Architecture</a></li>
+            <li><a href="./design-language.html">Design Language</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#run-it">Run It</a></li>
+            <li><a href="#demonstrates">What It Demonstrates</a></li>
+            <li><a href="#core-wiring">Core Wiring</a></li>
+            <li><a href="#turn-path">Turn Path</a></li>
+            <li><a href="#browser-controls">Browser Controls</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <header class="hero">
+        <div class="eyebrow">lash guide</div>
+        <h1>agent<span class="slash">/</span>service</h1>
+        <p>The runnable browser example in <code>examples/agent-service</code> shows the app-facing <code>lash</code> API in a realistic host: Axum routes, OpenRouter, RLM mode, typed plugin input, app tools, semantic streaming, per-chat model selection, SQLite runtime stores, and separate product persistence.</p>
+      </header>
+
+      <section class="content" id="content">
+        <div class="section" id="run-it">
+          <div class="section-header">
+            <h2>Run It</h2>
+            <p>The example uses OpenRouter through the OpenAI-compatible provider. Environment variables define defaults; the browser UI can override model and variant per chat.</p>
+          </div>
+          <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
+# then open http://127.0.0.1:3000</code></pre>
+          <dl class="def-list">
+            <dt><code>OPENROUTER_MODEL</code></dt>
+            <dd>Default model id for new chats. Defaults to <code>openai/gpt-5.5</code>.</dd>
+            <dt><code>OPENROUTER_MODEL_VARIANT</code></dt>
+            <dd>Default reasoning variant for new chats. Defaults to <code>medium</code>; the UI offers <code>low</code>, <code>medium</code>, and <code>high</code>.</dd>
+            <dt><code>AGENT_SERVICE_DATA_DIR</code></dt>
+            <dd>App database, runtime session stores, and traces. Defaults to <code>.agent-service</code>.</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="demonstrates">
+          <div class="section-header">
+            <h2>What It Demonstrates</h2>
+            <p>This is the best end-to-end reference when checking whether an app is using the <code>lash</code> facade correctly.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Shared core</h3><p>One <code>LashCore</code> holds provider, model defaults, RLM mode, store factory, and trace sink for the whole app.</p></article>
+            <article class="panel"><h3>Session per chat</h3><p>Each request opens a <code>LashSession</code> from the chat id and store. The app does not keep live runtime sessions in a process map.</p></article>
+            <article class="panel"><h3>Per-chat model</h3><p>The product DB stores <code>model</code> and <code>model_variant</code>; turns apply the current selection through <code>TurnBuilder::model(...)</code>.</p></article>
+            <article class="panel"><h3>Typed plugin input</h3><p>The board state is validated as typed per-turn input, then read by prompt hooks and app tools without string parsing.</p></article>
+            <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s for assistant prose, reasoning deltas, code blocks, tool cards, usage, and submitted terminal values.</p></article>
+            <article class="panel"><h3>Split persistence</h3><p><code>lash-sqlite-store</code> persists runtime state; the app database owns chat rows, board snapshots, model choice, titles, and rendered activity rows.</p></article>
+          </div>
+        </div>
+
+        <div class="section" id="core-wiring">
+          <div class="section-header">
+            <h2>Core Wiring</h2>
+            <p>Build one core for the process. The example installs RLM explicitly and uses a SQLite session-store factory so every chat id maps back to durable runtime state.</p>
+          </div>
+          <pre><code>let provider = ProviderHandle::new(
+    OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            thinking: ProviderThinkingPolicy { expose: true },
+            ..ProviderOptions::default()
+        })
+        .into_components(),
+);
+
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .provider(provider)
+    .model(model.clone(), Some(model_variant.clone()))
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .trace_sink(Some(trace_sink))
+    .trace_level(TraceLevel::Extended)
+    .build()?;</code></pre>
+        </div>
+
+        <div class="section" id="turn-path">
+          <div class="section-header">
+            <h2>Turn Path</h2>
+            <p>The route stores the user message and board snapshot first, opens the Lash session, then runs a turn with the chat's model selection and plugin input.</p>
+          </div>
+          <pre><code>let session = state.open_session(&amp;chat_id).await?;
+
+let turn = session
+    .turn(TurnInput::text(text))
+    .model(model_selection.model, model_selection.model_variant)
+    .with_board(request.board)
+    .require_submit()?;
+
+let output = turn.collect_with(&amp;ui_events).await?;
+let assistant_text = assistant_text_for_persistence(
+    &amp;output,
+    &amp;turn_state.lock().expect("turn state lock").assistant_prose,
+);</code></pre>
+          <p><code>.with_board(...)</code> is a small app-owned extension trait over <code>TurnBuilder::with_plugin_input</code>. It keeps route code focused on product terms while still using the typed plugin input API.</p>
+        </div>
+
+        <div class="section" id="browser-controls">
+          <div class="section-header">
+            <h2>Browser Controls</h2>
+            <p>The UI treats model choice as product state. New chats inherit defaults from <code>/api/settings</code>, the sidebar displays each chat's selected model, and edits are saved to <code>/api/chats/{chat_id}/model</code>.</p>
+          </div>
+          <pre><code>function selectedModel() {
+  return {
+    model: modelInput.value.trim() || settings.default_model,
+    model_variant: variantInput.value || null
+  };
+}
+
+await api(`/api/chats/${activeChat}/messages`, {
+  method: 'POST',
+  body: JSON.stringify({
+    text,
+    board: currentBoard(),
+    ...selectedModel()
+  })
+});</code></pre>
+        </div>
+
+        <div class="section-nav">
+          <a href="./embedding.html"><span>Previous</span><strong>Lash API</strong></a>
+          <a href="./cli.html"><span>Next</span><strong>CLI</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>examples/agent-service/src/main.rs</code>, <code>examples/agent-service/README.md</code>, <code>lash/src/turn.rs</code>, <code>lash/src/session.rs</code>.</footer>
+    </div>
+  </main>
+</body>
+</html>

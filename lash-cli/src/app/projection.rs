@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
@@ -117,7 +117,7 @@ pub(crate) enum UiTimelineItem {
 }
 
 pub(crate) fn timeline_from_read_view(
-    read_view: &lash::SessionReadView,
+    read_view: &lash_core::SessionReadView,
     ui_state: &UiProjectionState,
 ) -> UiTimeline {
     let projection = read_view.chronological_projection();
@@ -134,7 +134,7 @@ pub(crate) fn timeline_from_read_view(
 }
 
 pub(crate) fn interrupted_blocks_from_read_view(
-    read_view: &lash::SessionReadView,
+    read_view: &lash_core::SessionReadView,
     ui_state: &UiProjectionState,
     status_message: impl Into<String>,
 ) -> UiTimeline {
@@ -143,26 +143,27 @@ pub(crate) fn interrupted_blocks_from_read_view(
     timeline
 }
 
-fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> UiTimeline {
+fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) -> UiTimeline {
     let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
+    let rlm_owned_tool_call_ids = rlm_owned_tool_call_ids(projection);
     let tool_call_map = projection
         .entries()
         .iter()
         .filter_map(|entry| match &entry.payload {
-            lash::ChronologicalPayload::ToolCall(record) => record
-                .call_id
-                .as_deref()
-                .map(|call_id| (call_id, record.clone())),
-            lash::ChronologicalPayload::Message(_) | lash::ChronologicalPayload::ModeEvent(_) => {
-                None
+            lash_core::ChronologicalPayload::ToolCall(record) => {
+                record.call_id.as_deref().and_then(|call_id| {
+                    (!rlm_owned_tool_call_ids.contains(call_id)).then(|| (call_id, record.clone()))
+                })
             }
+            lash_core::ChronologicalPayload::Message(_)
+            | lash_core::ChronologicalPayload::ModeEvent(_) => None,
         })
         .collect::<HashMap<_, _>>();
 
     for entry in projection.entries() {
         match &entry.payload {
-            lash::ChronologicalPayload::Message(message) => {
+            lash_core::ChronologicalPayload::Message(message) => {
                 append_transcript_items(
                     &mut timeline,
                     message,
@@ -171,10 +172,16 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
                     false,
                 );
             }
-            lash::ChronologicalPayload::ToolCall(record) => {
-                append_tool_call_record_items(&mut timeline, record, &mut activity_state);
+            lash_core::ChronologicalPayload::ToolCall(record) => {
+                if !record
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
+                {
+                    append_tool_call_record_items(&mut timeline, record, &mut activity_state);
+                }
             }
-            lash::ChronologicalPayload::ModeEvent(event) => {
+            lash_core::ChronologicalPayload::ModeEvent(event) => {
                 if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
                     lash_mode_rlm::decode_rlm_mode_event(event)
                 {
@@ -185,6 +192,29 @@ fn timeline_from_chronological(projection: &lash::ChronologicalProjection) -> Ui
     }
 
     timeline
+}
+
+fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> HashSet<String> {
+    projection
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            lash_core::ChronologicalPayload::ModeEvent(event) => {
+                lash_mode_rlm::decode_rlm_mode_event(event)
+            }
+            lash_core::ChronologicalPayload::Message(_)
+            | lash_core::ChronologicalPayload::ToolCall(_) => None,
+        })
+        .flat_map(|event| match event {
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry
+                .tool_calls
+                .into_iter()
+                .filter_map(|record| record.call_id)
+                .collect::<Vec<_>>(),
+            lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_)
+            | lash_rlm_types::RlmModeEvent::RlmDiagnostic(_) => Vec::new(),
+        })
+        .collect()
 }
 
 fn append_rlm_trajectory_items(
@@ -198,6 +228,9 @@ fn append_rlm_trajectory_items(
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
     for record in &entry.tool_calls {
         append_tool_call_record_items(timeline, record, activity_state);
+    }
+    if let Some(final_output) = &entry.final_output {
+        let _ = push_assistant_text_item(timeline, &render_submitted_value(final_output));
     }
 }
 
@@ -499,7 +532,7 @@ fn append_transcript_items(
 }
 
 fn is_internal_rlm_retry_message(message: &Message) -> bool {
-    let Some(lash::MessageOrigin::Plugin { plugin_id, .. }) = &message.origin else {
+    let Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) = &message.origin else {
         return false;
     };
     if plugin_id != "mode_rlm" {
@@ -535,7 +568,7 @@ fn append_tool_call_record_items(
 /// True when a legacy user-message part carries an RLM exec result.
 /// Current RLM history uses trajectory events instead; these old
 /// messages should stay off rather than render as fake tool calls.
-fn part_is_rlm_exec_result(part: &lash::Part) -> bool {
+fn part_is_rlm_exec_result(part: &lash_core::Part) -> bool {
     matches!(part.kind, PartKind::Text)
         && part.tool_call_id.is_some()
         && part.tool_name.as_deref() == Some("execute_lashlang")
@@ -543,7 +576,7 @@ fn part_is_rlm_exec_result(part: &lash::Part) -> bool {
 
 fn append_tool_result_items(
     timeline: &mut UiTimeline,
-    part: &lash::Part,
+    part: &lash_core::Part,
     tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
 ) {
@@ -587,6 +620,14 @@ fn push_assistant_text_item(timeline: &mut UiTimeline, text: &str) -> bool {
     }
     timeline.push(UiTimelineItem::AssistantText(cleaned));
     true
+}
+
+pub(crate) fn render_submitted_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
 }
 
 fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool {

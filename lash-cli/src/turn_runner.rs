@@ -1,9 +1,9 @@
-use lash::{
-    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, RunMode,
-    SessionStateEnvelope, TokenUsage, TurnContext, TurnIssue, TurnOutcome, TurnStop,
+use lash::LashSession;
+use lash::{TurnActivitySink, TurnInput};
+use lash_core::{
+    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, SessionStateEnvelope,
+    TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
-use lash_embed::LashSession;
-use lash_embed::{TurnActivitySink, TurnInput};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
@@ -15,21 +15,13 @@ use crate::input_items::build_items_from_editor_input;
 /// Returned by the spawned session task after the app-owned session has been updated in place.
 pub(crate) struct RuntimeRunResult {
     pub(crate) stream_id: u64,
-    pub(crate) result: lash_embed::TurnResult,
+    pub(crate) result: lash::TurnResult,
 }
 
 pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-    TurnInput {
-        items,
-        image_blobs,
-        mode: Some(RunMode::Normal),
-        mode_turn_options: None,
-        trace_turn_id: None,
-        mode_extension: None,
-        turn_context: TurnContext::default(),
-    }
+    TurnInput::items(items).with_image_blobs(image_blobs)
 }
 
 pub(crate) fn spawn_session_turn<S>(
@@ -70,7 +62,7 @@ where
                     last_prompt_usage: state.last_prompt_usage,
                     mode_turn_options: state.mode_turn_options,
                 };
-                lash_embed::TurnResult {
+                lash::TurnResult {
                     execution: ExecutionSummary {
                         mode: state.policy.execution_mode.clone(),
                         had_tool_calls: false,
@@ -105,13 +97,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::session_model::fresh_message_id;
-    use lash::{
+    use lash::{advanced::ExecutionMode, usage::TokenLedgerEntry};
+    use lash_core::session_model::fresh_message_id;
+    use lash_core::{
         HydratedSessionCheckpoint, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
         PersistedTurnState, PruneState, RollingHistoryConfig, SessionGraph, SessionHead,
         StandardContextApproach, refresh_persisted_session_state,
     };
-    use lash_embed::{advanced::ExecutionMode, usage::TokenLedgerEntry};
 
     #[tokio::test]
     async fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
@@ -127,8 +119,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,

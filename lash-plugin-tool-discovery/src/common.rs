@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
-use lash::ToolOutputContract;
+use lash_core::ToolOutputContract;
 use serde_json::{Value, json};
 
 pub(crate) const DEFAULT_LIMIT: usize = 10;

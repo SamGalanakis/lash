@@ -34,7 +34,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
- "lash-embed",
+ "lash",
  "lash-provider-openai",
  "lash-sqlite-store",
  "rusqlite",
@@ -315,7 +315,7 @@ dependencies = [
  "dirs 6.0.0",
  "lash",
  "lash-cli",
- "lash-embed",
+ "lash-core",
  "lash-harness-opt",
  "lash-llm-tools",
  "lash-mode-rlm",
@@ -341,7 +341,7 @@ dependencies = [
  "dotenvy",
  "lash",
  "lash-cli",
- "lash-embed",
+ "lash-core",
  "lash-export",
  "lash-llm-tools",
  "lash-mode-rlm",
@@ -366,7 +366,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "lash",
- "lash-embed",
+ "lash-core",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-plugin-observational-memory",
@@ -394,7 +394,7 @@ dependencies = [
  "dotenvy",
  "lash",
  "lash-cli",
- "lash-embed",
+ "lash-core",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-mode-standard",
@@ -2242,26 +2242,18 @@ dependencies = [
 name = "lash"
 version = "0.2.110"
 dependencies = [
- "arc-swap",
  "async-trait",
- "chrono",
- "futures-util",
- "jsonschema",
- "lash-sansio",
+ "lash-core",
+ "lash-mode-rlm",
+ "lash-mode-standard",
+ "lash-rlm-types",
  "lash-trace",
- "libc",
- "regex",
- "reqwest 0.13.2",
- "schemars",
  "serde",
  "serde_json",
- "sha2",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tracing",
- "uuid",
+ "trybuild",
 ]
 
 [[package]]
@@ -2270,7 +2262,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "lash",
- "lash-embed",
+ "lash-core",
  "lash-tui",
  "lash-tui-extensions",
  "schemars",
@@ -2297,7 +2289,7 @@ dependencies = [
  "image",
  "lash",
  "lash-autoresearch",
- "lash-embed",
+ "lash-core",
  "lash-export",
  "lash-file-index",
  "lash-llm-tools",
@@ -2337,21 +2329,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "lash-embed"
+name = "lash-core"
 version = "0.2.110"
 dependencies = [
+ "arc-swap",
  "async-trait",
- "lash",
- "lash-mode-rlm",
- "lash-mode-standard",
- "lash-rlm-types",
+ "chrono",
+ "futures-util",
+ "jsonschema",
+ "lash-sansio",
  "lash-trace",
+ "libc",
+ "regex",
+ "reqwest 0.13.2",
+ "schemars",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "trybuild",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2360,7 +2360,7 @@ version = "0.2.110"
 dependencies = [
  "anyhow",
  "clap",
- "lash",
+ "lash-core",
  "lash-mode-rlm",
  "lash-rlm-types",
  "lash-sqlite-store",
@@ -2390,7 +2390,7 @@ dependencies = [
  "dirs 6.0.0",
  "lash",
  "lash-cli",
- "lash-embed",
+ "lash-core",
  "lash-providers-builtin",
  "lash-rlm-types",
  "lash-sansio",
@@ -2410,7 +2410,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "jsonschema",
- "lash",
+ "lash-core",
  "lashlang",
  "serde_json",
  "tokio",
@@ -2421,7 +2421,7 @@ name = "lash-llm-transport"
 version = "0.2.110"
 dependencies = [
  "bytes",
- "lash",
+ "lash-core",
  "lash-sansio",
  "reqwest 0.13.2",
  "tokio",
@@ -2433,7 +2433,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "jsonschema",
- "lash",
+ "lash-core",
  "lash-mode-standard",
  "lash-rlm-types",
  "lash-sansio",
@@ -2451,7 +2451,7 @@ name = "lash-mode-standard"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-sqlite-store",
  "serde_json",
  "tokio",
@@ -2472,7 +2472,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "lash",
+ "lash-core",
  "rmcp",
  "serde",
  "serde_json",
@@ -2486,7 +2486,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "chrono",
- "lash",
+ "lash-core",
  "regex",
  "serde",
  "serde_json",
@@ -2498,7 +2498,7 @@ name = "lash-plugin-plan-mode"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-tool-apply-patch",
  "schemars",
  "serde",
@@ -2515,7 +2515,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "chrono",
- "lash",
+ "lash-core",
  "serde",
  "tokio",
 ]
@@ -2525,7 +2525,7 @@ name = "lash-plugin-rolling-history"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "serde_json",
  "sha2",
  "tempfile",
@@ -2537,7 +2537,7 @@ name = "lash-plugin-tool-discovery"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "model2vec-rs",
  "schemars",
  "serde_json",
@@ -2549,7 +2549,7 @@ dependencies = [
 name = "lash-plugin-ui-activity"
 version = "0.2.110"
 dependencies = [
- "lash",
+ "lash-core",
  "serde_json",
  "tokio",
 ]
@@ -2560,7 +2560,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "lash",
+ "lash-core",
  "lash-llm-transport",
  "reqwest 0.13.2",
  "serde",
@@ -2586,7 +2586,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "lash",
+ "lash-core",
  "lash-llm-transport",
  "lash-openai-schema",
  "lash-provider-auth",
@@ -2603,7 +2603,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "lash",
+ "lash-core",
  "lash-llm-transport",
  "lash-provider-auth",
  "reqwest 0.13.2",
@@ -2620,7 +2620,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "lash",
+ "lash-core",
  "lash-llm-transport",
  "lash-openai-schema",
  "reqwest 0.13.2",
@@ -2664,7 +2664,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "flate2",
- "lash",
+ "lash-core",
  "rmp-serde",
  "rusqlite",
  "serde",
@@ -2678,7 +2678,7 @@ dependencies = [
 name = "lash-standard-plugins"
 version = "0.2.110"
 dependencies = [
- "lash",
+ "lash-core",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-plugin-tool-discovery",
@@ -2694,7 +2694,7 @@ name = "lash-subagents"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-rlm-types",
@@ -2710,7 +2710,7 @@ name = "lash-tool-apply-patch"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-tool-support",
  "serde_json",
  "tempfile",
@@ -2723,7 +2723,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "globset",
- "lash",
+ "lash-core",
  "lash-tool-support",
  "pdf-extract",
  "serde_json",
@@ -2737,7 +2737,7 @@ version = "0.2.110"
 dependencies = [
  "async-trait",
  "fff-search",
- "lash",
+ "lash-core",
  "lash-tool-support",
  "regex",
  "serde_json",
@@ -2751,7 +2751,7 @@ name = "lash-tool-shell"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-tool-support",
  "libc",
  "portable-pty",
@@ -2766,7 +2766,7 @@ version = "0.2.110"
 dependencies = [
  "chrono",
  "ignore",
- "lash",
+ "lash-core",
  "lash-rlm-types",
  "serde",
  "serde_json",
@@ -2779,7 +2779,7 @@ name = "lash-tool-web"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash",
+ "lash-core",
  "lash-tool-support",
  "reqwest 0.13.2",
  "serde_json",
@@ -2822,7 +2822,7 @@ name = "lash-tui-extensions"
 version = "0.2.110"
 dependencies = [
  "async-trait",
- "lash-embed",
+ "lash",
  "lash-plugin-plan-mode",
  "lash-tui",
  "serde_json",

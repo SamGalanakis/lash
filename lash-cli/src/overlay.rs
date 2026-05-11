@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use lash::{
+use lash_core::{
     Message, MessageRole, PartKind, PromptRequest, PromptResponse, PromptSelectionMode,
     SessionMessageTreeNode,
 };

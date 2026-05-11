@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use lash::session_model::{Part, PartKind, PruneState};
-use lash::{
-    AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, InputItem,
-    MediaType, Message, MessageRole, PluginMessage, ToolState, TurnInput,
+use lash::{InputItem, LashSession, TurnInput};
+use lash_core::session_model::{Part, PartKind, PruneState};
+use lash_core::{
+    AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, MediaType,
+    Message, MessageRole, PluginMessage, ToolState,
 };
-use lash_embed::LashSession;
 
 use super::helpers::TurnActivityBridge;
 use super::*;
@@ -32,8 +32,7 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -62,11 +61,12 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Image,
                     content: String::new(),
-                    attachment: Some(lash::session_model::message::PartAttachment { reference }),
+                    attachment: Some(lash_core::session_model::message::PartAttachment {
+                        reference,
+                    }),
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -194,7 +194,6 @@ pub(super) async fn send_user_message(
         .cloned()
         .expect("runtime should be available when not running");
     tracing::info!(
-        mode = ?turn_input.mode,
         items = turn_input.items.len(),
         images = turn_input.image_blobs.len(),
         "dispatching runtime turn"

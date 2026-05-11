@@ -1,4 +1,4 @@
-use lash::ReconfigureError;
+use lash_core::ReconfigureError;
 
 /// Errors surfaced by `lash-plugin-mcp` when a server fails to connect,
 /// when a tool call errors out, or when the registry rejects the new

@@ -4,15 +4,16 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 pub(crate) use std::collections::HashMap;
 
-pub(crate) use lash::SchemaProjectionOverride;
-pub(crate) use lash::llm::transport::{LlmTransportError, ProviderFailureKind};
-pub(crate) use lash::llm::types::{
+pub(crate) use lash_core::SchemaProjectionOverride;
+pub(crate) use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
+pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
+    LlmStreamEvent, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+    ResponseTextMeta, ResponseTextPhase,
 };
-pub(crate) use lash::provider::{
-    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
-    ProviderState, ProviderTransport, VariantRequestConfig,
+pub(crate) use lash_core::provider::{
+    AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
+    ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
 pub(crate) use lash_llm_transport::timeouts::{

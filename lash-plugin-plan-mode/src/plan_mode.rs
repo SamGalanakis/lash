@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use lash::plugin::{
+use lash_core::plugin::{
     PluginAction, PluginActionFailure, PluginActionKind, PluginDirective, PluginError,
     PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
-use lash::{
+use lash_core::{
     JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionContextSurface,
     SessionCreateRequest, SessionPluginMode, SessionStartPoint, ToolCall, ToolContext,
     ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
@@ -107,7 +107,10 @@ fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
         .join(format!("{run_session_id}.md")))
 }
 
-fn effective_run_session_id<'a>(session_id: &'a str, policy: &'a lash::SessionPolicy) -> &'a str {
+fn effective_run_session_id<'a>(
+    session_id: &'a str,
+    policy: &'a lash_core::SessionPolicy,
+) -> &'a str {
     policy.session_id.as_deref().unwrap_or(session_id)
 }
 
@@ -174,16 +177,16 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     })
 }
 
-fn plan_panel_event(report: &PlanReport) -> lash::plugin::PluginSurfaceEvent {
-    lash::plugin::PluginSurfaceEvent::PanelUpsert {
+fn plan_panel_event(report: &PlanReport) -> lash_core::plugin::PluginSurfaceEvent {
+    lash_core::plugin::PluginSurfaceEvent::PanelUpsert {
         key: PLAN_MODE_PANEL_KEY.to_string(),
         title: PLAN_MODE_PANEL_TITLE.to_string(),
         content: report.preview_content(),
     }
 }
 
-fn clear_plan_panel_event() -> lash::plugin::PluginSurfaceEvent {
-    lash::plugin::PluginSurfaceEvent::PanelClear {
+fn clear_plan_panel_event() -> lash_core::plugin::PluginSurfaceEvent {
+    lash_core::plugin::PluginSurfaceEvent::PanelClear {
         key: PLAN_MODE_PANEL_KEY.to_string(),
     }
 }
@@ -191,7 +194,7 @@ fn clear_plan_panel_event() -> lash::plugin::PluginSurfaceEvent {
 fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     let display = plan_display_path(plan_path);
     PluginMessage::text(
-        lash::MessageRole::System,
+        lash_core::MessageRole::System,
         format!(
             "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the panel only shows the file path while planning. When the plan is ready for review, call `plan_exit()`."
         ),
@@ -341,15 +344,15 @@ impl PlanModeState {
 
     fn finish_turn(&mut self) {}
 
-    fn badge_event(&self) -> lash::plugin::PluginSurfaceEvent {
-        lash::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
+    fn badge_event(&self) -> lash_core::plugin::PluginSurfaceEvent {
+        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
             key: PLAN_MODE_BADGE_KEY.to_string(),
             label: PLAN_MODE_BADGE_LABEL.to_string(),
         }
     }
 
-    fn clear_badge_event(&self) -> lash::plugin::PluginSurfaceEvent {
-        lash::plugin::PluginSurfaceEvent::ModeIndicatorClear {
+    fn clear_badge_event(&self) -> lash_core::plugin::PluginSurfaceEvent {
+        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorClear {
             key: PLAN_MODE_BADGE_KEY.to_string(),
         }
     }
@@ -360,7 +363,7 @@ impl PlanModeState {
 
     fn ensure_plan_path_from_state(
         &mut self,
-        state: &lash::SessionStateEnvelope,
+        state: &lash_core::SessionStateEnvelope,
     ) -> Result<PathBuf, PluginError> {
         if let Some(path) = self.plan_path() {
             return Ok(path);
@@ -389,7 +392,7 @@ async fn ensure_plan_path<H>(
     host: &Arc<H>,
 ) -> Result<PathBuf, PluginError>
 where
-    H: lash::SessionSnapshotHost + ?Sized,
+    H: lash_core::SessionSnapshotHost + ?Sized,
 {
     if let Some(path) = state
         .lock()
@@ -417,7 +420,7 @@ async fn ensure_plan_report<H>(
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError>
 where
-    H: lash::SessionSnapshotHost + ?Sized,
+    H: lash_core::SessionSnapshotHost + ?Sized,
 {
     let path = ensure_plan_path(state, session_id, host).await?;
     if seed_if_missing {
@@ -436,12 +439,12 @@ async fn sync_plan_exit_tool_state<H>(
     enabled: bool,
 ) -> Result<(), PluginError>
 where
-    H: lash::ToolStateHost + ?Sized,
+    H: lash_core::ToolStateHost + ?Sized,
 {
     let availability = if enabled {
-        Some(lash::ToolAvailability::Showcased)
+        Some(lash_core::ToolAvailability::Showcased)
     } else {
-        Some(lash::ToolAvailability::Off)
+        Some(lash_core::ToolAvailability::Off)
     };
     match host
         .set_tool_availability(session_id, "plan_exit", availability)
@@ -460,7 +463,7 @@ async fn set_plan_mode_enabled_state<H>(
     enabled: bool,
 ) -> Result<bool, PluginError>
 where
-    H: lash::ToolStateHost + ?Sized,
+    H: lash_core::ToolStateHost + ?Sized,
 {
     let previous = {
         let mut guard = state
@@ -637,7 +640,7 @@ impl ToolProvider for PlanModeTools {
                 serde_json::json!({ "type": "object", "additionalProperties": true }),
             )
             .with_examples(vec!["plan_exit()".into()])
-            .with_availability(lash::ToolAvailabilityConfig::off())
+            .with_availability(lash_core::ToolAvailabilityConfig::off())
             .with_execution_mode(ToolExecutionMode::Parallel),
         ]
     }
@@ -858,14 +861,14 @@ impl SessionPlugin for PlanModePlugin {
                             .unwrap_or_default()
                             .to_string();
                         let seed = PluginMessage::text(
-                            lash::MessageRole::User,
+                            lash_core::MessageRole::User,
                             plan_exit_fresh_context_input(&plan_path),
                         );
                         let session_id = fresh_context_session_id();
                         directives.push(PluginDirective::CreateSession {
                             request: Box::new(SessionCreateRequest {
                                 session_id: Some(session_id.clone()),
-                                relation: lash::SessionRelation::Child {
+                                relation: lash_core::SessionRelation::Child {
                                     parent_session_id: ctx.session_id.clone(),
                                 },
                                 start: SessionStartPoint::Empty,
@@ -873,10 +876,10 @@ impl SessionPlugin for PlanModePlugin {
                                 plugin_mode: SessionPluginMode::Fresh,
                                 initial_nodes: Vec::new(),
                                 first_turn_input: Some(seed),
-                                tool_access: lash::SessionToolAccess::default(),
+                                tool_access: lash_core::SessionToolAccess::default(),
                                 subagent: None,
                                 context_surface: SessionContextSurface::default(),
-                                mode_extras: lash::ModeExtras::default(),
+                                mode_extras: lash_core::ModeExtras::default(),
                                 usage_source: Some("plan_execution".to_string()),
                             }),
                         });
@@ -924,17 +927,17 @@ impl SessionPlugin for PlanModePlugin {
                 .filter(|tool| !tool_surface_config.allowed_tools.contains(&tool.name))
                 .map(|tool| ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    availability: Some(lash::ToolAvailability::Off),
+                    availability: Some(lash_core::ToolAvailability::Off),
                 })
                 .collect::<Vec<_>>();
             overrides.push(ToolSurfaceOverride {
                 tool_name: "plan_exit".to_string(),
-                availability: Some(lash::ToolAvailability::Showcased),
+                availability: Some(lash_core::ToolAvailability::Showcased),
             });
             if tool_surface_config.allowed_tools.contains("apply_patch") {
                 overrides.push(ToolSurfaceOverride {
                     tool_name: "apply_patch".to_string(),
-                    availability: Some(lash::ToolAvailability::Showcased),
+                    availability: Some(lash_core::ToolAvailability::Showcased),
                 });
             }
 

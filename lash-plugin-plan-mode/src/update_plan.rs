@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use lash::plugin::{
+use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     PluginSurfaceEvent, SessionPlugin,
 };
-use lash::{
+use lash_core::{
     PromptContribution, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 
@@ -296,7 +296,7 @@ impl SessionPlugin for UpdatePlanPlugin {
                 }
                 if !ctx.result.success {
                     tracing::debug!(
-                        target: "lash::update_plan",
+                        target: "lash_core::update_plan",
                         "after_tool_call observed failed update_plan; skipping emit",
                     );
                     return Ok(Vec::new());
@@ -306,7 +306,7 @@ impl SessionPlugin for UpdatePlanPlugin {
                     .map_err(|_| PluginError::Session("update_plan state poisoned".to_string()))?
                     .snapshot();
                 tracing::info!(
-                    target: "lash::update_plan",
+                    target: "lash_core::update_plan",
                     items = snapshot.plan.len(),
                     generation = snapshot.generation,
                     "emitting plan panel upsert",
@@ -323,8 +323,8 @@ impl SessionPlugin for UpdatePlanPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::testing::{MockSessionManager, test_mode_factories};
-    use lash::{
+    use lash_core::testing::{MockSessionManager, test_mode_factories};
+    use lash_core::{
         ExecutionMode, PluginHost, PromptHookContext, PromptSlot, SessionReadView,
         SessionStateEnvelope,
     };
@@ -334,7 +334,7 @@ mod tests {
         let tool = UpdatePlanTool {
             state: Arc::new(Mutex::new(PlanState::default())),
         };
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "update_plan",
             &json!({"plan":[{"step":"","status":"pending"}]}),
@@ -348,7 +348,7 @@ mod tests {
         let tool = UpdatePlanTool {
             state: Arc::new(Mutex::new(PlanState::default())),
         };
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "update_plan",
             &json!({
@@ -369,7 +369,7 @@ mod tests {
             state: Arc::clone(&state),
         };
         assert_eq!(state.lock().unwrap().generation, 0);
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "update_plan",
             &json!({
@@ -413,18 +413,18 @@ mod tests {
         let factory = UpdatePlanPluginFactory::new();
         let root_ctx = PluginSessionContext {
             session_id: "root".into(),
-            execution_mode: lash::ExecutionMode::standard(),
-            standard_context_approach: Some(lash::StandardContextApproach::default()),
-            tool_access: lash::SessionToolAccess::default(),
+            execution_mode: lash_core::ExecutionMode::standard(),
+            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             background_tasks_available: false,
             parent_session_id: None,
         };
         let child_ctx = PluginSessionContext {
             session_id: "child".into(),
-            execution_mode: lash::ExecutionMode::standard(),
-            standard_context_approach: Some(lash::StandardContextApproach::default()),
-            tool_access: lash::SessionToolAccess::default(),
+            execution_mode: lash_core::ExecutionMode::standard(),
+            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             background_tasks_available: false,
             parent_session_id: Some("root".into()),
@@ -449,8 +449,8 @@ mod tests {
                 session_id: "root".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: lash::ModeTurnOptions::default(),
-                turn_context: lash::TurnContext::default(),
+                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                turn_context: lash_core::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");
@@ -473,9 +473,9 @@ mod tests {
                 "child",
                 Some("root".to_string()),
                 ExecutionMode::standard(),
-                Some(lash::StandardContextApproach::default()),
+                Some(lash_core::StandardContextApproach::default()),
                 None,
-                lash::plugin::SessionAuthorityContext::default(),
+                lash_core::plugin::SessionAuthorityContext::default(),
             )
             .expect("session");
 
@@ -484,8 +484,8 @@ mod tests {
                 session_id: "child".to_string(),
                 host: Arc::new(MockSessionManager::default()),
                 state: SessionReadView::from_exported_state(&SessionStateEnvelope::default()),
-                mode_turn_options: lash::ModeTurnOptions::default(),
-                turn_context: lash::TurnContext::default(),
+                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                turn_context: lash_core::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plugins - lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main class="page">
+    <div class="frame">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="sidebar__exit" href="./index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Guide</span>
+            <span class="sidebar__current">Plugins</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./embedding.html">Lash API</a></li>
+            <li><a href="./example-agent-service.html">Agent Service</a></li>
+            <li><a href="./cli.html">CLI</a></li>
+            <li><a class="active" href="./plugins.html">Plugins</a></li>
+            <li><a href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
+            <li><a href="./architecture/">Architecture</a></li>
+            <li><a href="./design-language.html">Design Language</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#three-traits">Three Traits, Two Lifetimes</a></li>
+            <li><a href="#worked-example">A Worked Example</a></li>
+            <li><a href="#what-you-can-register">What You Can Register</a></li>
+            <li><a href="#cheap-build">The Cheap-Build Contract</a></li>
+            <li><a href="#toolcall-shape">The ToolCall Shape</a></li>
+            <li><a href="#wiring">Wiring It In</a></li>
+            <li><a href="#reference-examples">Reference Examples</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <header class="hero">
+        <div class="eyebrow">lash guide</div>
+        <h1>writing<span class="slash">/</span>plugins</h1>
+        <p>A plugin is the unit of extension in lash. It can register tools, contribute to prompts, observe turn lifecycle hooks, project tool results, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
+      </header>
+
+      <section class="content" id="content">
+        <div class="section" id="three-traits">
+          <div class="section-header">
+            <h2>Three Traits, Two Lifetimes</h2>
+            <p>A plugin lives at two timescales: the <strong>factory</strong> exists for the lifetime of the <code>LashCore</code> and is shared across every session built from it; the <strong>session plugin</strong> exists for one <code>LashSession</code>. The factory is asked to build a fresh session plugin every time a session opens. Both must be cheap to construct.</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel">
+              <h3><code>PluginFactory</code></h3>
+              <p>Per-core. Owns expensive, shared state. Builds a <code>SessionPlugin</code> on demand. Don't do I/O in <code>build()</code> — it runs on the hot path for every new session, every subagent, every fork, every compaction child.</p>
+              <pre><code>pub trait PluginFactory: Send + Sync {
+    fn id(&amp;self) -&gt; &amp;'static str;
+    fn build(
+        &amp;self,
+        ctx: &amp;PluginSessionContext,
+    ) -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt;;
+}</code></pre>
+            </article>
+            <article class="panel">
+              <h3><code>SessionPlugin</code></h3>
+              <p>Per-session. Wires hooks into a <code>PluginRegistrar</code> during <code>register()</code>, then participates in the session for its lifetime. Optionally implements <code>snapshot</code> / <code>restore</code> for durability across resume.</p>
+              <pre><code>pub trait SessionPlugin: Send + Sync {
+    fn id(&amp;self) -&gt; &amp;'static str;
+    fn register(
+        &amp;self,
+        reg: &amp;mut PluginRegistrar,
+    ) -&gt; Result&lt;(), PluginError&gt;;
+    // …snapshot / restore / session_ready hooks
+}</code></pre>
+            </article>
+            <article class="panel">
+              <h3><code>ToolProvider</code></h3>
+              <p>If your plugin exposes tools, implement this on a struct and hand it to <code>reg.tools().provider(...)</code>. <code>definitions()</code> is sync and called often; cache the result. <code>execute()</code> is async and runs the actual tool work.</p>
+              <pre><code>pub trait ToolProvider: Send + Sync + 'static {
+    fn definitions(&amp;self) -&gt; Vec&lt;ToolDefinition&gt;;
+    async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult;
+}</code></pre>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="worked-example">
+          <div class="section-header">
+            <h2>A Worked Example</h2>
+            <p>The plan-mode plugin (<code>lash-plugin-plan-mode/src/update_plan.rs</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
+          </div>
+          <pre><code>use std::sync::{Arc, Mutex};
+use lash::plugins::{
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
+};
+use lash::tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+
+const PLUGIN_ID: &amp;str = "update_plan";
+
+// 1. Factory — per-core, cheap to build.
+pub struct UpdatePlanPluginFactory;
+
+impl PluginFactory for UpdatePlanPluginFactory {
+    fn id(&amp;self) -&gt; &amp;'static str { PLUGIN_ID }
+
+    fn build(
+        &amp;self,
+        ctx: &amp;PluginSessionContext,
+    ) -&gt; Result&lt;Arc&lt;dyn SessionPlugin&gt;, PluginError&gt; {
+        Ok(Arc::new(UpdatePlanPlugin {
+            // Gate by context: only enable in root sessions.
+            active: ctx.is_root_session(),
+            state: Arc::new(Mutex::new(PlanState::default())),
+        }))
+    }
+}
+
+// 2. SessionPlugin — per-session, wires hooks during register().
+struct UpdatePlanPlugin {
+    active: bool,
+    state: Arc&lt;Mutex&lt;PlanState&gt;&gt;,
+}
+
+impl SessionPlugin for UpdatePlanPlugin {
+    fn id(&amp;self) -&gt; &amp;'static str { PLUGIN_ID }
+
+    fn register(&amp;self, reg: &amp;mut PluginRegistrar) -&gt; Result&lt;(), PluginError&gt; {
+        if !self.active { return Ok(()); }
+        reg.tools().provider(Arc::new(UpdatePlanTool {
+            state: Arc::clone(&amp;self.state),
+        }))?;
+        Ok(())
+    }
+}
+
+// 3. ToolProvider — definitions() advertises, execute() runs.
+struct UpdatePlanTool { state: Arc&lt;Mutex&lt;PlanState&gt;&gt; }
+
+#[async_trait::async_trait]
+impl ToolProvider for UpdatePlanTool {
+    fn definitions(&amp;self) -&gt; Vec&lt;ToolDefinition&gt; {
+        vec![ToolDefinition::raw(
+            "update_plan",
+            "Publish or replace the current plan.",
+            serde_json::json!({ "type": "object", "properties": { /* … */ } }),
+            serde_json::json!({}),
+        )]
+    }
+
+    async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
+        // Read call.args, validate, mutate self.state, emit ToolResult::ok(...).
+        ToolResult::ok(serde_json::json!({ "generation": 1 }))
+    }
+}</code></pre>
+          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>lash-plugin-plan-mode/src/update_plan.rs:280-330</code> for the full version.</p>
+        </div>
+
+        <div class="section" id="what-you-can-register">
+          <div class="section-header">
+            <h2>What You Can Register</h2>
+            <p>The <code>PluginRegistrar</code> exposes hook namespaces. Each returns a small builder you push closures into. The most common groups:</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Method</th><th>What you register</th></tr></thead>
+              <tbody>
+                <tr><td><code>reg.tools()</code></td><td>One or more <code>ToolProvider</code> implementations.</td></tr>
+                <tr><td><code>reg.prompt()</code></td><td>Async <code>PromptContribution</code> producers — system/environment/tool-doc blocks composed into the model prompt.</td></tr>
+                <tr><td><code>reg.surface()</code></td><td>Tool-surface overrides — change which tools are visible / callable / showcased per session or per turn.</td></tr>
+                <tr><td><code>reg.discovery()</code></td><td>Hints for the tool-discovery ranker (lexical, embedding, schema indexing).</td></tr>
+                <tr><td><code>reg.turn()</code></td><td>Before-turn / after-turn / checkpoint hooks.</td></tr>
+                <tr><td><code>reg.tool_calls()</code></td><td>Before-tool / after-tool hooks. Useful for emitting UI events or mutating session state in response to specific tools.</td></tr>
+                <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output and final responses.</td></tr>
+                <tr><td><code>reg.tool_results()</code></td><td>Tool-result projection (truncation, redaction). <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
+                <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
+                <tr><td><code>reg.actions()</code></td><td>Plugin actions — typed or raw RPC-shaped APIs the host can invoke without going through tool calls.</td></tr>
+                <tr><td><code>reg.monitors()</code></td><td>Monitor specs (long-running watches that the plugin maintains across turns).</td></tr>
+                <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
+                <tr><td><code>reg.mode()</code></td><td>Mode-plugin capabilities. Most users don't touch this; modes are built into <code>lash-mode-standard</code> and <code>lash-mode-rlm</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="cheap-build">
+          <div class="section-header">
+            <h2>The Cheap-Build Contract</h2>
+            <p><code>PluginFactory::build()</code> is on the hot path. It runs for every fresh session, every subagent spawn, every fork, every compaction child. Specifically, <strong>do not</strong>:</p>
+          </div>
+          <ul class="bullets">
+            <li>Perform I/O — disk reads, HTTP requests, DB queries.</li>
+            <li>Compile regexes, JSON schemas, templates, or anything else that can be done once on the factory.</li>
+            <li>Open network or process pools.</li>
+            <li>Load large models or parse large config files.</li>
+            <li>Block on long mutexes or run anything resembling work.</li>
+          </ul>
+          <p>Put expensive state on the <em>factory</em> struct (wrap it in <code>Arc</code>), clone the <code>Arc</code> into the <code>SessionPlugin</code> at build time, and clone again into hook closures. The factory lives once per core; sessions are cheap shells.</p>
+        </div>
+
+        <div class="section" id="toolcall-shape">
+          <div class="section-header">
+            <h2>The <code>ToolCall&lt;'_&gt;</code> Shape</h2>
+            <p>Every <code>execute()</code> call receives a borrowed view of the invocation. Don't store the reference — copy what you need into owned types.</p>
+          </div>
+          <pre><code>pub struct ToolCall&lt;'a&gt; {
+    pub name: &amp;'a str,                           // Advertised tool name the model called
+    pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
+    pub context: &amp;'a ToolContext,                // Session state, turn context, host
+    pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
+}</code></pre>
+          <p><code>context.plugin_input::&lt;MyPlugin&gt;("plugin_id")</code> reads typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> (see the <a href="./embedding.html">Lash API guide</a>'s "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern).</p>
+        </div>
+
+        <div class="section" id="wiring">
+          <div class="section-header">
+            <h2>Wiring It In</h2>
+            <p>Pass your factory to <code>LashCoreBuilder::plugin(...)</code>. It's an <code>Arc&lt;dyn PluginFactory&gt;</code> so the same factory instance can be shared across cores if needed.</p>
+          </div>
+          <pre><code>let core = LashCore::builder()
+    .provider(provider)
+    .model("anthropic/claude-sonnet-4.6", None)
+    .max_context_tokens(200_000)
+    .plugin(Arc::new(UpdatePlanPluginFactory) as Arc&lt;dyn PluginFactory&gt;)
+    .build()?;</code></pre>
+          <p>For tools that aren't part of a plugin (no state, no lifecycle hooks), you can skip the factory and pass a <code>ToolProvider</code> directly to <code>.tools(Arc::new(MyTools))</code>. Both forms compose: provider-style tools live alongside plugin-registered tools on the same surface.</p>
+        </div>
+
+        <div class="section" id="reference-examples">
+          <div class="section-header">
+            <h2>Reference Examples In The Workspace</h2>
+            <p>If you want a plugin to model your work on, these are good starting points:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel"><h3>Minimal hook only</h3><p><code>lash-plugin-ui-activity/src/lib.rs</code> — ~50 lines, one after-turn hook, emits a desktop-notification surface event. No tools, no state. Good template for "I just want to react to turn lifecycle."</p></article>
+            <article class="panel"><h3>Tool + state + UI event</h3><p><code>lash-plugin-plan-mode/src/update_plan.rs</code> — single tool with session-local state, surface-event emission on tool success, root-session-only gating. Good template for "I want to expose one tool that the user can see in the TUI."</p></article>
+            <article class="panel"><h3>Prompt contribution + factory state</h3><p><code>lash-plugin-prompt-context/src/lib.rs</code> — captures an instruction source on the factory, projects it into prompts via <code>reg.prompt().contribute(...)</code>. Good template for "I want to inject something into the system prompt."</p></article>
+            <article class="panel"><h3>Per-core connection pool</h3><p><code>lash-plugin-mcp/src/plugin.rs</code> — factory owns an <code>Arc&lt;McpConnectionPool&gt;</code> shared across every session, plus runtime <code>attach_server</code> / <code>detach_server</code> methods. Good template for "I'm wrapping an external service with one persistent connection."</p></article>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./cli.html"><span>Previous</span><strong>CLI</strong></a>
+          <a href="./persistence.html"><span>Next</span><strong>Persistence</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>lash-core/src/plugin/registry.rs</code>, <code>lash-core/src/plugin/registrar.rs</code>, <code>lash-core/src/tool_provider.rs</code>, <code>lash-plugin-plan-mode/src/update_plan.rs</code>, <code>lash-plugin-ui-activity/src/lib.rs</code>, <code>lash/src/lib.rs</code>.</footer>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use lash::plugin::RuntimeSessionHost;
-use lash::testing::{MockSessionManager, mock_assembled_turn};
-use lash::{
+use lash_core::plugin::RuntimeSessionHost;
+use lash_core::testing::{MockSessionManager, mock_assembled_turn};
+use lash_core::{
     ExecutionMode, PersistedSessionState, PluginDirective, PluginHost, PluginSurfaceEvent,
     SessionPolicy, SessionSnapshot, SessionStateEnvelope, TurnResultHookContext,
 };
@@ -29,7 +29,7 @@ fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
 #[tokio::test]
 async fn ui_activity_plugin_emits_done_notification_surface_event() {
     let host = {
-        let mut f = lash::testing::test_mode_factories();
+        let mut f = lash_core::testing::test_mode_factories();
         f.push(Arc::new(UiActivityPluginFactory));
         PluginHost::new(f)
     };
@@ -39,7 +39,7 @@ async fn ui_activity_plugin_emits_done_notification_surface_event() {
     let events = session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash::TurnResultSummary::from_assembled(
+            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(
                 &mock_assembled_turn("root", ""),
             )),
             host: manager,

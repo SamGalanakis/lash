@@ -1,5 +1,7 @@
 use crate::support::*;
-use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
+use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use lash_core::provider::CacheRetention;
 use std::sync::Arc;
 
 fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -19,7 +21,7 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
 
 #[test]
 fn builds_responses_body_with_instructions_and_input() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = OpenAiProvider::new("key");
     let req = request(vec![
         LlmMessage::text(LlmRole::System, "system prompt"),
         LlmMessage::text(LlmRole::User, "hello"),
@@ -37,7 +39,7 @@ fn builds_responses_body_with_instructions_and_input() {
 
 #[test]
 fn responses_body_does_not_request_reasoning_summaries_by_default() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "openai/gpt-5.5".to_string();
     req.model_variant = Some("medium".to_string());
@@ -49,11 +51,10 @@ fn responses_body_does_not_request_reasoning_summaries_by_default() {
 
 #[test]
 fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() {
-    let provider =
-        OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL).with_options(ProviderOptions {
-            thinking: lash::provider::ProviderThinkingPolicy { expose: true },
-            ..ProviderOptions::default()
-        });
+    let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
+        thinking: lash_core::provider::ProviderThinkingPolicy { expose: true },
+        ..ProviderOptions::default()
+    });
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
     req.model = "openai/gpt-5.5".to_string();
     req.model_variant = Some("medium".to_string());
@@ -64,27 +65,56 @@ fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() 
 }
 
 #[test]
-fn wire_api_auto_routes_only_openrouter_claude_to_chat_completions() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
-    let mut claude = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    claude.model = "anthropic/claude-sonnet-4.6".to_string();
-    assert_eq!(
-        provider.resolved_wire_api(&claude),
-        OpenAiWireApi::ChatCompletions
-    );
+fn providers_serialize_distinct_config_shapes() {
+    let direct = OpenAiProvider::new("key");
+    let direct_config = direct.serialize_config();
+    assert_eq!(direct.kind(), "openai");
+    assert_eq!(direct_config["api_key"], "key");
+    assert!(direct_config.get("base_url").is_none());
+    assert!(direct_config.get("wire_api").is_none());
 
-    let mut gpt = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    gpt.model = "openai/gpt-5.4".to_string();
-    assert_eq!(provider.resolved_wire_api(&gpt), OpenAiWireApi::Responses);
+    let compatible = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let compatible_config = compatible.serialize_config();
+    assert_eq!(compatible.kind(), "openai-compatible");
+    assert_eq!(compatible_config["api_key"], "key");
+    assert_eq!(compatible_config["base_url"], OPENROUTER_BASE_URL);
+    assert!(compatible_config.get("wire_api").is_none());
+}
 
-    let local = OpenAiGenericProvider::new("key", "http://localhost:11434/v1");
-    assert_eq!(local.resolved_wire_api(&claude), OpenAiWireApi::Responses);
+#[test]
+fn provider_factories_reject_stale_wire_api_configs() {
+    let direct_err = OpenAiProviderFactory
+        .deserialize(json!({
+            "api_key": "key",
+            "wire_api": "responses"
+        }))
+        .expect_err("direct OpenAI rejects wire_api");
+    assert!(direct_err.contains("wire_api"));
 
-    let forced = local.with_wire_api(OpenAiWireApi::ChatCompletions);
-    assert_eq!(
-        forced.resolved_wire_api(&gpt),
-        OpenAiWireApi::ChatCompletions
-    );
+    let compatible_err = OpenAiCompatibleProviderFactory
+        .deserialize(json!({
+            "api_key": "key",
+            "base_url": OPENROUTER_BASE_URL,
+            "wire_api": "chat-completions"
+        }))
+        .expect_err("compatible OpenAI rejects wire_api");
+    assert!(compatible_err.contains("wire_api"));
+}
+
+#[test]
+fn provider_factories_materialize_distinct_kinds() {
+    let direct = OpenAiProviderFactory
+        .deserialize(json!({ "api_key": "key" }))
+        .expect("direct config");
+    assert_eq!(direct.state.kind(), "openai");
+
+    let compatible = OpenAiCompatibleProviderFactory
+        .deserialize(json!({
+            "api_key": "key",
+            "base_url": OPENROUTER_BASE_URL
+        }))
+        .expect("compatible config");
+    assert_eq!(compatible.state.kind(), "openai-compatible");
 }
 
 #[test]
@@ -97,7 +127,7 @@ fn chat_body_uses_messages_and_not_responses_input() {
     req.model_variant = Some("high".to_string());
     req.output_spec = Some(LlmOutputSpec::JsonObject);
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -126,7 +156,7 @@ fn openrouter_claude_chat_body_marks_anthropic_cache_breakpoints() {
         output_schema_projections: Vec::new(),
     }]);
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -162,7 +192,7 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
             description: "Override".to_string(),
             input_schema: json!({"type": "object", "properties": {"raw": {"const": "x"}}}),
             output_schema: json!({}),
-            input_schema_projections: vec![lash::SchemaProjectionOverride {
+            input_schema_projections: vec![lash_core::SchemaProjectionOverride {
                 profile: OpenAiSchemaProfile::ToolParameters
                     .projection_id()
                     .to_string(),
@@ -175,7 +205,7 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
         },
     ]);
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -201,7 +231,7 @@ fn structured_output_schema_is_projected_or_rejected_locally() {
         strict: true,
     }));
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiProvider::new("key")
         .build_responses_request_body(&req, false)
         .unwrap();
     assert_eq!(
@@ -218,7 +248,7 @@ fn structured_output_schema_is_projected_or_rejected_locally() {
         schema: json!({"type": "object", "allOf": []}),
         strict: true,
     }));
-    let err = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let err = OpenAiProvider::new("key")
         .build_responses_request_body(&req, false)
         .unwrap_err();
     assert_eq!(err.kind, ProviderFailureKind::Validation);
@@ -247,7 +277,7 @@ fn openrouter_claude_chat_body_prefers_explicit_text_cache_breakpoint() {
     ]);
     req.model = "anthropic/claude-sonnet-4.6".to_string();
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -275,8 +305,11 @@ fn cache_retention_none_removes_chat_cache_markers() {
     ]);
     req.model = "anthropic/claude-sonnet-4.6".to_string();
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-        .with_cache_retention(OpenAiCacheRetention::None)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::None,
+            ..ProviderOptions::default()
+        })
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -293,8 +326,11 @@ fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
     ]);
     req.model = "anthropic/claude-sonnet-4.6".to_string();
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-        .with_cache_retention(OpenAiCacheRetention::Long)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        })
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -306,8 +342,10 @@ fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
 
 #[test]
 fn responses_long_cache_retention_emits_openai_retention() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
-        .with_cache_retention(OpenAiCacheRetention::Long);
+    let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
+        cache_retention: CacheRetention::Long,
+        ..ProviderOptions::default()
+    });
     let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
@@ -318,8 +356,45 @@ fn responses_long_cache_retention_emits_openai_retention() {
 }
 
 #[test]
+fn responses_none_cache_retention_omits_prompt_cache_fields() {
+    let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
+        cache_retention: CacheRetention::None,
+        ..ProviderOptions::default()
+    });
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let body = provider.build_responses_request_body(&req, true).unwrap();
+
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(body.get("prompt_cache_retention").is_none());
+}
+
+#[test]
+fn max_output_tokens_uses_shared_options() {
+    let options = ProviderOptions {
+        max_output_tokens: Some(2048),
+        ..ProviderOptions::default()
+    };
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let responses_body = OpenAiProvider::new("key")
+        .with_options(options.clone())
+        .build_responses_request_body(&req, true)
+        .unwrap();
+    assert_eq!(responses_body["max_output_tokens"], 2048);
+
+    let mut chat_req = req;
+    chat_req.model = "anthropic/claude-sonnet-4.6".to_string();
+    let chat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(options)
+        .build_chat_request_body(&chat_req, true)
+        .unwrap();
+    assert_eq!(chat_body["max_tokens"], 2048);
+}
+
+#[test]
 fn assistant_text_preserves_response_meta() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = OpenAiProvider::new("key");
     let req = request(vec![LlmMessage::new(
         LlmRole::Assistant,
         vec![LlmContentBlock::Text {
@@ -340,7 +415,7 @@ fn assistant_text_preserves_response_meta() {
 
 #[test]
 fn legacy_assistant_text_gets_deterministic_id() {
-    let provider = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL);
+    let provider = OpenAiProvider::new("key");
     let req = request(vec![LlmMessage::text(LlmRole::Assistant, "legacy")]);
     let body = provider.build_responses_request_body(&req, false).unwrap();
     assert_eq!(body["input"][0]["id"], "msg_lash_0_0");
@@ -349,19 +424,8 @@ fn legacy_assistant_text_gets_deterministic_id() {
 }
 
 #[test]
-fn local_base_url_omits_openai_only_fields() {
-    let provider = OpenAiGenericProvider::new("key", "http://localhost:11434/v1");
-    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
-    let body = provider.build_responses_request_body(&req, true).unwrap();
-    assert!(body.get("include").is_none());
-    assert!(body.get("store").is_none());
-    assert!(body.get("parallel_tool_calls").is_none());
-    assert!(body.get("text").is_none());
-}
-
-#[test]
 fn usage_parser_accepts_responses_and_chat_completion_shapes() {
-    let responses_usage = OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
+    let responses_usage = OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
         "usage": {
             "input_tokens": 11,
             "output_tokens": 7,
@@ -374,7 +438,7 @@ fn usage_parser_accepts_responses_and_chat_completion_shapes() {
     assert_eq!(responses_usage.cached_input_tokens, 3);
     assert_eq!(responses_usage.reasoning_tokens, 5);
 
-    let chat_usage = OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
+    let chat_usage = OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
         "usage": {
             "prompt_tokens": 13,
             "completion_tokens": 17,
@@ -387,13 +451,14 @@ fn usage_parser_accepts_responses_and_chat_completion_shapes() {
     assert_eq!(chat_usage.cached_input_tokens, 2);
     assert_eq!(chat_usage.reasoning_tokens, 4);
 
-    let write_only_usage = OpenAiGenericProvider::usage_from_response_value(&serde_json::json!({
-        "usage": {
-            "prompt_tokens": 5353,
-            "completion_tokens": 433,
-            "prompt_tokens_details": { "cached_tokens": 3, "cache_write_tokens": 5353 }
-        }
-    }));
+    let write_only_usage =
+        OpenAiCompatibleProvider::usage_from_response_value(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 5353,
+                "completion_tokens": 433,
+                "prompt_tokens_details": { "cached_tokens": 3, "cache_write_tokens": 5353 }
+            }
+        }));
     assert_eq!(write_only_usage.cached_input_tokens, 0);
 }
 
@@ -405,19 +470,21 @@ fn chat_body_replays_openrouter_reasoning_details_on_tool_calls() {
             call_id: "call_1".to_string(),
             tool_name: "lookup".to_string(),
             input_json: "{\"q\":\"x\"}".to_string(),
-            item_id: None,
-            signature: Some(
-                json!({
-                    "type": "reasoning.encrypted",
-                    "id": "call_1",
-                    "data": "encrypted"
-                })
-                .to_string(),
-            ),
+            replay: Some(ProviderReplayMeta {
+                item_id: None,
+                opaque: Some(
+                    json!({
+                        "type": "reasoning.encrypted",
+                        "id": "call_1",
+                        "data": "encrypted"
+                    })
+                    .to_string(),
+                ),
+            }),
         }],
     )]);
 
-    let body = OpenAiGenericProvider::new("key", OPENROUTER_BASE_URL)
+    let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
         .build_chat_request_body(&req, false)
         .unwrap();
 
@@ -461,8 +528,8 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
         }
     });
 
-    let parts = OpenAiGenericProvider::chat_response_parts_from_value(&value);
-    let usage = OpenAiGenericProvider::usage_from_response_value(&value);
+    let parts = OpenAiCompatibleProvider::chat_response_parts_from_value(&value);
+    let usage = OpenAiCompatibleProvider::usage_from_response_value(&value);
 
     assert!(matches!(&parts[0], LlmOutputPart::Reasoning { text, .. } if text == "think"));
     assert!(matches!(&parts[1], LlmOutputPart::Text { text, .. } if text == "hello"));
@@ -472,12 +539,15 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
             call_id,
             tool_name,
             input_json,
-            signature,
+            replay,
             ..
         } if call_id == "call_1"
             && tool_name == "lookup"
             && input_json == "{\"q\":\"x\"}"
-            && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+            && replay
+                .as_ref()
+                .and_then(|meta| meta.opaque.as_deref())
+                .is_some_and(|value| value.contains("encrypted"))
     ));
     assert_eq!(usage.input_tokens, 13);
     assert_eq!(usage.output_tokens, 17);
@@ -487,37 +557,37 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
 #[test]
 fn chat_stream_parser_captures_text_tool_done_and_usage() {
     let mut state = ChatStreamState::default();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"delta":{"content":"Hi"}}]}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"delta":{"reasoning_content":"Think"}}]}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"call_1","data":"encrypted"}]}}],"usage":{"prompt_tokens":9,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event(
+    OpenAiCompatibleProvider::process_chat_sse_event(
         r#"{"choices":[{"usage":{"prompt_tokens":11,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":2}}}]}"#,
         &mut state,
     )
     .unwrap();
-    OpenAiGenericProvider::process_chat_sse_event("[DONE]", &mut state).unwrap();
+    OpenAiCompatibleProvider::process_chat_sse_event("[DONE]", &mut state).unwrap();
 
     assert_eq!(state.full_text, "Hi");
     assert_eq!(state.reasoning_text, "Think");
@@ -530,12 +600,15 @@ fn chat_stream_parser_captures_text_tool_done_and_usage() {
             call_id,
             tool_name,
             input_json,
-            signature,
+            replay,
             ..
         } if call_id == "call_1"
             && tool_name == "lookup"
             && input_json == "{\"q\":\"x\"}"
-            && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+            && replay
+                .as_ref()
+                .and_then(|meta| meta.opaque.as_deref())
+                .is_some_and(|value| value.contains("encrypted"))
     ));
     assert_eq!(state.usage.input_tokens, 11);
     assert_eq!(state.usage.output_tokens, 5);
@@ -545,61 +618,61 @@ fn chat_stream_parser_captures_text_tool_done_and_usage() {
 #[test]
 fn stream_parser_captures_text_reasoning_tool_and_phase() {
     let mut state = ResponsesStreamState::default();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.added","item":{"type":"reasoning","id":"rs_1"}}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.reasoning_summary_text.delta","delta":"Think"}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Think"}],"encrypted_content":"enc"}}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_text.delta","delta":"Hi"}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.done","item":{"type":"message","id":"msg_1","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Hi"}]}}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"tool","arguments":""}}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"x\":"}"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"x\":1}" }"#,
         &mut state,
         None,
     )
     .unwrap();
-    OpenAiGenericProvider::process_sse_event(
+    OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"tool","arguments":"{\"x\":1}","status":"completed"}}"#,
         &mut state,
         None,
@@ -610,11 +683,9 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
     let parts = state.response_parts();
     assert!(matches!(
         &parts[0],
-        LlmOutputPart::Reasoning {
-            item_id: Some(id),
-            encrypted_content: Some(blob),
-            ..
-        } if id == "rs_1" && blob == "enc"
+        LlmOutputPart::Reasoning { replay: Some(replay), .. }
+            if replay.item_id.as_deref() == Some("rs_1")
+                && replay.encrypted_content.as_deref() == Some("enc")
     ));
     assert!(matches!(
         &parts[1],
@@ -629,17 +700,17 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
     assert!(matches!(
         &parts[2],
         LlmOutputPart::ToolCall {
-            item_id: Some(id),
+            replay: Some(replay),
             input_json,
             ..
-        } if id == "fc_1" && input_json == "{\"x\":1}"
+        } if replay.item_id.as_deref() == Some("fc_1") && input_json == "{\"x\":1}"
     ));
 }
 
 #[test]
 fn response_failed_server_error_is_retryable() {
     let mut state = ResponsesStreamState::default();
-    let err = OpenAiGenericProvider::process_sse_event(
+    let err = OpenAiCompatibleProvider::process_sse_event(
         r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"internal stream ended unexpectedly"}}}"#,
         &mut state,
         None,

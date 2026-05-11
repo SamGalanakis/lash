@@ -262,7 +262,7 @@ Wrap in `.table` for horizontal-scroll on narrow viewports.
   <table>
     <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
     <tbody>
-      <tr><td><code>lash/src/runtime/mod.rs</code></td><td>…</td></tr>
+      <tr><td><code>lash-core/src/runtime/mod.rs</code></td><td>…</td></tr>
     </tbody>
   </table>
 </div>

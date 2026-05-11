@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use lash::ToolDiscoveryMetadata;
+use lash_core::ToolDiscoveryMetadata;
 
 /// Normalise a server name or raw MCP tool name to lowercase ASCII
 /// alphanumeric and underscore. Collapses runs of non-alphanumeric characters

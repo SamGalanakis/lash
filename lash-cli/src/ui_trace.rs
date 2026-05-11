@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use lash::{PluginSurfaceEvent, PromptRequest, TurnActivity, TurnEvent};
+use lash_core::{PluginSurfaceEvent, PromptRequest, TurnActivity, TurnEvent};
 use lash_tui::{PerfCounters, ScreenSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -150,7 +150,7 @@ impl TracePromptRequest {
             }
         } else {
             match request.selection_mode {
-                lash::PromptSelectionMode::Single => Self::Single {
+                lash_core::PromptSelectionMode::Single => Self::Single {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
@@ -159,7 +159,7 @@ impl TracePromptRequest {
                         markdown: panel.markdown.clone(),
                     }),
                 },
-                lash::PromptSelectionMode::Multi => Self::Multi {
+                lash_core::PromptSelectionMode::Multi => Self::Multi {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
@@ -648,7 +648,7 @@ mod tests {
         recorder.record_user_turn(&PreparedTurn::new("hello".into(), Vec::new()));
         recorder.record_start_turn();
         recorder.record_turn_activity(&TurnActivity::new(
-            lash::TurnActivityId::new("assistant"),
+            lash_core::TurnActivityId::new("assistant"),
             TurnEvent::AssistantProseDelta {
                 text: "world".into(),
             },

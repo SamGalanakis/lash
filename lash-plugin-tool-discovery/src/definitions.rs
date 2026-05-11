@@ -1,4 +1,4 @@
-use lash::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolExecutionMode};
+use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolExecutionMode};
 use serde_json::json;
 
 pub(crate) fn search_tools_definition() -> ToolDefinition {
@@ -67,7 +67,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         ])
         .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
-        .with_discovery(lash::ToolDiscoveryMetadata {
+        .with_discovery(lash_core::ToolDiscoveryMetadata {
             namespace: Some("runtime".to_string()),
             aliases: vec!["tool_search".to_string()],
         })
@@ -88,7 +88,7 @@ pub(crate) fn load_tools_definition() -> ToolDefinition {
         .with_examples(vec!["load_tools(names=[\"tool_name\"])".into()])
         .with_availability(ToolAvailabilityConfig::showcased())
         .with_activation(ToolActivation::Always)
-        .with_discovery(lash::ToolDiscoveryMetadata {
+        .with_discovery(lash_core::ToolDiscoveryMetadata {
             namespace: Some("runtime".to_string()),
             aliases: vec!["activate_tools".to_string()],
         })

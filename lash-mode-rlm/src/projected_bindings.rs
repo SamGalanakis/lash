@@ -1,11 +1,11 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use lash::{
+use lash_core::{
     ModeSessionExtension, ModeTurnExtension, ModeTurnExtensionHandle, PromptContribution, TurnInput,
 };
 
-pub(crate) const RLM_TURN_CONTEXT_PLUGIN_ID: &str = "rlm";
+pub(crate) const RLM_TURN_INPUT_PLUGIN_ID: &str = "rlm";
 use lashlang::{
     ProjectedBindingError, ProjectedBindings, ProjectedHostValue, ProjectedValue,
     Value as FlowValue,
@@ -140,8 +140,8 @@ impl ModeSessionExtension for RlmProjectionExtension {
 
 pub fn rlm_session_projection_extension(
     bindings: RlmProjectedBindings,
-) -> lash::ModeSessionExtensionHandle {
-    lash::ModeSessionExtensionHandle::new(RlmProjectionExtension::new(bindings))
+) -> lash_core::ModeSessionExtensionHandle {
+    lash_core::ModeSessionExtensionHandle::new(RlmProjectionExtension::new(bindings))
 }
 
 pub trait RlmTurnInputExt {
@@ -157,20 +157,20 @@ impl RlmTurnInputExt for TurnInput {
     ) -> Result<Self, ProjectedBindingError> {
         let bindings = if let Some(existing) = self
             .turn_context
-            .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+            .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
             .cloned()
         {
             existing.bindings.clone().merge(bindings)?
         } else {
             bindings
         };
-        self.turn_context.insert_plugin_context(
-            RLM_TURN_CONTEXT_PLUGIN_ID,
+        self.turn_context.insert_plugin_input(
+            RLM_TURN_INPUT_PLUGIN_ID,
             RlmProjectionExtension::new(bindings),
         );
         self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
             self.turn_context
-                .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
                 .expect("RLM projection was just inserted")
                 .bindings
                 .clone(),
@@ -215,11 +215,10 @@ mod tests {
         let input = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -242,11 +241,10 @@ mod tests {
         let input = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("stable".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -268,11 +266,10 @@ mod tests {
         let first = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -283,11 +280,10 @@ mod tests {
         let second = TurnInput {
             items: Vec::new(),
             image_blobs: Default::default(),
-            mode: None,
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()

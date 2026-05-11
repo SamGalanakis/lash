@@ -13,22 +13,22 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
-};
-use lash_cli::config::LashConfig;
-use lash_embed::{
     TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
     prompt::{
         PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     },
-    provider::ProviderHandle,
+    provider::{ProviderHandle, ProviderOptions},
     tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
+};
+use lash_cli::config::LashConfig;
+use lash_core::{
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -156,9 +156,8 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_MAX_CONTEXT_TOKENS)]
     max_context_tokens: usize,
 
-    /// Per-response max output tokens. Sets `LASH_MAX_OUTPUT_TOKENS` for
-    /// this process (overrides the lash default of 32768). Matches
-    /// upstream's `oai_gpt52.yaml` cap of 125_000.
+    /// Per-response max output tokens. Merged into shared provider options;
+    /// `0` means provider default.
     #[arg(long, default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
     max_output_tokens: u64,
 
@@ -290,17 +289,6 @@ async fn main() -> anyhow::Result<()> {
     lash_providers_builtin::register_all();
 
     let args = Args::parse();
-
-    // LASH_MAX_OUTPUT_TOKENS is read inside the openrouter adapter for each
-    // request. Setting it here (before any provider call) controls the cap for
-    // every child task in this process.
-    //
-    // SAFETY: set_var must be called on a single thread before tokio spawns
-    // workers. `main` is the first code path and has no concurrent readers.
-    #[allow(unsafe_code)]
-    unsafe {
-        env::set_var("LASH_MAX_OUTPUT_TOKENS", args.max_output_tokens.to_string());
-    }
 
     let state_root = PathBuf::from(STATE_ROOT);
     let vendor_dir = state_root.join("vendor").join("longcot");
@@ -661,7 +649,6 @@ async fn run_question(
                     text: LONGCOT_USER_DIRECTIVE.to_string(),
                 }],
                 image_blobs: Default::default(),
-                mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
@@ -1019,7 +1006,7 @@ fn build_projected_bindings(
 }
 
 fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
-    match args.provider_id.as_str() {
+    let mut provider = match args.provider_id.as_str() {
         // The original env-driven path: OpenRouter / any OpenAI-compatible
         // endpoint with a bare API key. Keeps the no-config workflow intact.
         "openai-compatible" => {
@@ -1028,8 +1015,10 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                     "missing API key — set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            let provider =
-                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
+            let provider = lash_provider_openai::OpenAiCompatibleProvider::new(
+                api_key,
+                resolve_base_url(args),
+            );
             Ok(ProviderHandle::new(provider.into_components()))
         }
         // Any other provider key (e.g. `codex`, `anthropic`) is resolved from
@@ -1049,7 +1038,11 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                 .map_err(anyhow::Error::msg)?;
             config.build_active_provider().map_err(anyhow::Error::msg)
         }
-    }
+    }?;
+    let mut options: ProviderOptions = provider.options();
+    options.max_output_tokens = (args.max_output_tokens > 0).then_some(args.max_output_tokens);
+    provider.set_options(options);
+    Ok(provider)
 }
 
 fn lash_home() -> PathBuf {

@@ -6,13 +6,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use lash::SchemaProjectionOverride;
-use lash::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
-use lash::llm::types::{
+use lash_core::SchemaProjectionOverride;
+use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
+use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
+    LlmStreamEvent, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+    ResponseTextMeta, ResponseTextPhase,
 };
-use lash::provider::{
+use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
     ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
     VariantRequestConfig,
@@ -168,13 +169,15 @@ impl CodexStreamState {
                 }
                 part @ LlmOutputPart::Reasoning { .. } => {
                     let part_item_id = match &part {
-                        LlmOutputPart::Reasoning { item_id, .. } => item_id.as_deref(),
+                        LlmOutputPart::Reasoning { replay, .. } => {
+                            replay.as_ref().and_then(|meta| meta.item_id.as_deref())
+                        }
                         _ => None,
                     };
                     if let Some(id) = part_item_id
                         && let Some(existing) =
                             self.parts.iter_mut().find(|existing| {
-                                matches!(existing, LlmOutputPart::Reasoning { item_id: existing_id, .. } if existing_id.as_deref() == Some(id))
+                                matches!(existing, LlmOutputPart::Reasoning { replay, .. } if replay.as_ref().and_then(|meta| meta.item_id.as_deref()) == Some(id))
                             })
                     {
                         *existing = part;
@@ -187,18 +190,25 @@ impl CodexStreamState {
                 part @ LlmOutputPart::ToolCall { .. } => {
                     let (part_item_id, part_call_id) = match &part {
                         LlmOutputPart::ToolCall {
-                            item_id, call_id, ..
-                        } => (item_id.as_deref(), call_id.as_str()),
+                            replay, call_id, ..
+                        } => (
+                            replay.as_ref().and_then(|meta| meta.item_id.as_deref()),
+                            call_id.as_str(),
+                        ),
                         _ => (None, ""),
                     };
                     let duplicate = self.parts.iter().any(|existing| match existing {
                         LlmOutputPart::ToolCall {
-                            item_id: existing_item_id,
+                            replay: existing_replay,
                             call_id: existing_call_id,
                             ..
                         } => {
                             part_item_id
-                                .zip(existing_item_id.as_deref())
+                                .zip(
+                                    existing_replay
+                                        .as_ref()
+                                        .and_then(|meta| meta.item_id.as_deref()),
+                                )
                                 .is_some_and(|(a, b)| a == b)
                                 || (!part_call_id.is_empty() && part_call_id == existing_call_id)
                         }
@@ -303,11 +313,7 @@ impl CodexStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Reasoning {
             text: String::new(),
-            signature: None,
-            redacted: false,
-            item_id: None,
-            encrypted_content: None,
-            summary: Vec::new(),
+            replay: None,
         });
         self.current_reasoning_part = Some(index);
     }
@@ -362,20 +368,15 @@ impl CodexStreamState {
         else {
             return;
         };
-        let LlmOutputPart::Reasoning {
-            item_id,
-            encrypted_content,
-            summary,
-            ..
-        } = part
-        else {
+        let LlmOutputPart::Reasoning { replay, .. } = part else {
             return;
         };
+        let meta = replay.get_or_insert_with(ProviderReasoningReplay::default);
         if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-            *item_id = Some(id.to_string());
+            meta.item_id = Some(id.to_string());
         }
         if let Some(blob) = item.get("encrypted_content").and_then(|v| v.as_str()) {
-            *encrypted_content = Some(blob.to_string());
+            meta.encrypted_content = Some(blob.to_string());
         }
         if let Some(arr) = item.get("summary").and_then(|v| v.as_array()) {
             let texts: Vec<String> = arr
@@ -383,7 +384,7 @@ impl CodexStreamState {
                 .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()).map(String::from))
                 .collect();
             if !texts.is_empty() {
-                *summary = texts;
+                meta.summary = texts;
             }
         }
     }
@@ -448,12 +449,10 @@ impl CodexStreamState {
             call_id: tool_call.call_id,
             tool_name: tool_call.tool_name,
             input_json: tool_call.input_json,
-            item_id: if tool_call.item_id.is_empty() {
-                None
-            } else {
-                Some(tool_call.item_id)
-            },
-            signature: None,
+            replay: (!tool_call.item_id.is_empty()).then_some(ProviderReplayMeta {
+                item_id: Some(tool_call.item_id),
+                opaque: None,
+            }),
         };
         if !self.parts.iter().any(|existing| existing == &part) {
             self.parts.push(part.clone());
@@ -765,21 +764,16 @@ impl CodexProvider {
                             pending_content.push(Self::input_image_part(att));
                         }
                     }
-                    LlmContentBlock::Reasoning {
-                        text,
-                        encrypted_content,
-                        signature,
-                        item_id,
-                        summary,
-                        redacted: _,
-                    } => {
+                    LlmContentBlock::Reasoning { text, replay } => {
                         Self::flush_pending_content(
                             &mut pending_content,
                             &mut input,
                             role_str,
                             matches!(msg.role, LlmRole::User),
                         );
-                        let payload = encrypted_content.as_deref().or(signature.as_deref());
+                        let payload = replay
+                            .as_ref()
+                            .and_then(|meta| meta.encrypted_content.as_deref());
                         // Only replay reasoning items that actually carry a
                         // Codex-style encrypted blob. Display-only summaries
                         // (no blob) must not be fed back — the server will
@@ -787,6 +781,10 @@ impl CodexProvider {
                         let Some(blob) = payload else {
                             continue;
                         };
+                        let summary = replay
+                            .as_ref()
+                            .map(|meta| meta.summary.as_slice())
+                            .unwrap_or_default();
                         let summary_items: Vec<Value> = if summary.is_empty() {
                             if text.is_empty() {
                                 Vec::new()
@@ -804,7 +802,7 @@ impl CodexProvider {
                             "summary": summary_items,
                             "encrypted_content": blob,
                         });
-                        if let Some(id) = item_id
+                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref())
                             && !id.is_empty()
                         {
                             item["id"] = json!(id);
@@ -815,8 +813,7 @@ impl CodexProvider {
                         call_id,
                         tool_name,
                         input_json,
-                        item_id,
-                        signature: _,
+                        replay,
                     } => {
                         Self::flush_pending_content(
                             &mut pending_content,
@@ -834,7 +831,7 @@ impl CodexProvider {
                         // function_call items with their sibling reasoning
                         // items across turns. Omit when absent so we don't
                         // send a bogus id.
-                        if let Some(id) = item_id {
+                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref()) {
                             item["id"] = json!(id);
                         }
                         input.push(item);
@@ -1272,7 +1269,7 @@ impl CodexProvider {
         has_final_response: bool,
     ) {
         tracing::debug!(
-            target: "lash::llm::codex_oauth",
+            target: "lash_core::llm::codex_oauth",
             event_type,
             raw_len = raw.len(),
             delta_count = added_deltas.len(),
@@ -1541,14 +1538,19 @@ impl CodexProvider {
                         let text = summary.join("\n\n");
                         parts.push(LlmOutputPart::Reasoning {
                             text,
-                            signature: None,
-                            redacted: false,
-                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                            encrypted_content: item
-                                .get("encrypted_content")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                            summary,
+                            replay: Some(ProviderReasoningReplay {
+                                item_id: item
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string),
+                                encrypted_content: item
+                                    .get("encrypted_content")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string),
+                                signature: None,
+                                redacted: false,
+                                summary,
+                            }),
                         });
                     }
                     "message" => {
@@ -1582,8 +1584,12 @@ impl CodexProvider {
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                             tool_name: name.to_string(),
                             input_json,
-                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                            signature: None,
+                            replay: item.get("id").and_then(|v| v.as_str()).map(|id| {
+                                ProviderReplayMeta {
+                                    item_id: Some(id.to_string()),
+                                    opaque: None,
+                                }
+                            }),
                         });
                     }
                     _ => {}
@@ -1951,7 +1957,7 @@ impl ProviderTransport for CodexProvider {
 
         if stream_events.is_some() && !is_sse {
             tracing::debug!(
-                target: "lash::llm::codex_oauth",
+                target: "lash_core::llm::codex_oauth",
                 status = status.as_u16(),
                 content_type = content_type.as_deref().unwrap_or("<missing>"),
                 "Codex streaming response did not advertise SSE; parsing as stream because stream=true was requested"
@@ -2044,7 +2050,7 @@ pub struct CodexProviderFactory;
 
 impl CodexProviderFactory {
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
@@ -2070,8 +2076,8 @@ impl ProviderFactory for CodexProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
-    use lash::provider::ProviderModelPolicy;
+    use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash_core::provider::ProviderModelPolicy;
     use std::sync::Arc;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
@@ -2138,7 +2144,7 @@ mod tests {
 
         let exposed = CodexProvider::new("access", "refresh", 0)
             .with_options(ProviderOptions {
-                thinking: lash::ProviderThinkingPolicy { expose: true },
+                thinking: lash_core::ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             })
             .build_request_body(&req, true)

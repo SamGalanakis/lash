@@ -5,11 +5,11 @@ members = [
     "lash-trace",
     "lash-trace-viewer",
     "lash-rlm-types",
-    "lash",
+    "lash-core",
     "lash-llm-transport",
     "lash-provider-auth",
     "lash-sqlite-store",
-    "lash-embed",
+    "lash",
     "lash-mode-rlm",
     "lash-mode-standard",
     "lash-plugin-mcp",
@@ -50,8 +50,8 @@ members = [
 # `cargo build` from the repo root compiles only the publishable SDK surface.
 # Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.
 default-members = [
+    "lash-core",
     "lash",
-    "lash-embed",
     "lash-trace",
     "lash-rlm-types",
     "lash-llm-transport",

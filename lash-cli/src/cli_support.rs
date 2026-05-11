@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::{CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec};
-use lash_embed::advanced::ExecutionMode;
-use lash_embed::plugins::PluginSurfaceEvent;
-use lash_embed::provider::ProviderHandle;
-use lash_embed::{TurnActivity, TurnEvent};
+use lash::advanced::ExecutionMode;
+use lash::plugins::PluginSurfaceEvent;
+use lash::provider::ProviderHandle;
+use lash::{TurnActivity, TurnEvent};
+use lash_core::{
+    CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
+};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
@@ -251,14 +253,14 @@ pub(crate) fn parse_execution_mode(input: &str) -> Result<ExecutionMode, String>
 
 pub(crate) fn parse_standard_context_approach(
     input: &str,
-) -> Result<lash::StandardContextApproach, String> {
+) -> Result<lash_core::StandardContextApproach, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "" => Err("Context approach cannot be empty.".to_string()),
         "rolling" | "rolling-history" | "rolling_history" => Ok(
-            lash::StandardContextApproach::RollingHistory(Default::default()),
+            lash_core::StandardContextApproach::RollingHistory(Default::default()),
         ),
         "om" | "observational" | "observational-memory" | "observational_memory" => Ok(
-            lash::StandardContextApproach::ObservationalMemory(Default::default()),
+            lash_core::StandardContextApproach::ObservationalMemory(Default::default()),
         ),
         other => Err(format!(
             "Unknown context approach `{other}`. Expected `rolling_history` or `observational_memory`."
@@ -268,7 +270,7 @@ pub(crate) fn parse_standard_context_approach(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_standard_context_approach_overrides(
-    mut approach: lash::StandardContextApproach,
+    mut approach: lash_core::StandardContextApproach,
     om_observation_message_tokens: Option<usize>,
     om_observation_buffer_tokens: Option<usize>,
     om_observation_block_after_tokens: Option<usize>,
@@ -277,7 +279,7 @@ pub(crate) fn apply_standard_context_approach_overrides(
     om_reflection_observation_tokens: Option<usize>,
     om_reflection_buffer_activation_percent: Option<u16>,
     om_reflection_block_after_tokens: Option<usize>,
-) -> Result<lash::StandardContextApproach, String> {
+) -> Result<lash_core::StandardContextApproach, String> {
     let has_om_overrides = om_observation_message_tokens.is_some()
         || om_observation_buffer_tokens.is_some()
         || om_observation_block_after_tokens.is_some()
@@ -290,7 +292,7 @@ pub(crate) fn apply_standard_context_approach_overrides(
         return Ok(approach);
     }
 
-    let lash::StandardContextApproach::ObservationalMemory(config) = &mut approach else {
+    let lash_core::StandardContextApproach::ObservationalMemory(config) = &mut approach else {
         return Err(
             "OM tuning flags require `--context-approach observational_memory`.".to_string(),
         );
@@ -368,7 +370,7 @@ pub(crate) fn apply_standard_context_approach_overrides(
 }
 
 pub(crate) fn execution_mode_usage() -> &'static str {
-    if lash::execution_mode_supported(&ExecutionMode::new("rlm")) {
+    if lash_core::execution_mode_supported(&ExecutionMode::new("rlm")) {
         "<rlm|standard>"
     } else {
         "<standard>"
@@ -378,7 +380,7 @@ pub(crate) fn execution_mode_usage() -> &'static str {
 pub(crate) fn ensure_supported_execution_mode(
     mode: ExecutionMode,
 ) -> Result<ExecutionMode, String> {
-    if lash::execution_mode_supported(&mode) {
+    if lash_core::execution_mode_supported(&mode) {
         Ok(mode)
     } else {
         Err(if mode == ExecutionMode::new("rlm") {
@@ -394,11 +396,11 @@ pub(crate) fn execution_mode_label(mode: &ExecutionMode) -> &str {
 }
 
 pub(crate) fn standard_context_approach_label(
-    approach: &lash::StandardContextApproach,
+    approach: &lash_core::StandardContextApproach,
 ) -> &'static str {
     match approach.kind() {
-        lash::StandardContextApproachKind::RollingHistory => "rolling_history",
-        lash::StandardContextApproachKind::ObservationalMemory => "observational_memory",
+        lash_core::StandardContextApproachKind::RollingHistory => "rolling_history",
+        lash_core::StandardContextApproachKind::ObservationalMemory => "observational_memory",
     }
 }
 
@@ -489,6 +491,12 @@ pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str 
     crate::provider_metadata::provider_cli_label(provider.kind())
 }
 
+pub(crate) fn expose_provider_thinking(provider: &mut ProviderHandle) {
+    let mut options = provider.options();
+    options.thinking.expose = true;
+    provider.set_options(options);
+}
+
 pub(crate) fn hash12(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("{:x}", digest)[..12].to_string()
@@ -514,14 +522,14 @@ pub(crate) fn version_text() -> String {
         "lash-cli {}
 lash-sansio {}",
         crate::APP_VERSION,
-        lash::SANSIO_VERSION
+        lash_core::SANSIO_VERSION
     )
 }
 
 pub(crate) fn info_text_unconfigured(execution_mode: &ExecutionMode, cwd: &str) -> String {
     [
         format!("lash-cli: {}", crate::APP_VERSION),
-        format!("lash-sansio: {}", lash::SANSIO_VERSION),
+        format!("lash-sansio: {}", lash_core::SANSIO_VERSION),
         "provider: (not configured)".to_string(),
         "configured model: (not configured)".to_string(),
         "resolved model: (not configured)".to_string(),
@@ -539,7 +547,7 @@ pub(crate) fn info_text(
     configured_model: &str,
     model_variant: Option<&str>,
     execution_mode: &ExecutionMode,
-    standard_context_approach: Option<&lash::StandardContextApproach>,
+    standard_context_approach: Option<&lash_core::StandardContextApproach>,
     context_window: Option<u64>,
     tool_summary: Option<(usize, &str)>,
     cwd: &str,
@@ -550,7 +558,7 @@ pub(crate) fn info_text(
     let resolved_model = provider.resolve_model(configured_model);
     let mut lines = vec![
         format!("lash-cli: {}", crate::APP_VERSION),
-        format!("lash-sansio: {}", lash::SANSIO_VERSION),
+        format!("lash-sansio: {}", lash_core::SANSIO_VERSION),
         format!(
             "provider: {} ({})",
             provider_display_label(provider),
@@ -736,7 +744,7 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
 }
 
 pub(crate) async fn collect_ui_snapshot(
-    session: lash_embed::LashSession,
+    session: lash::LashSession,
     ui_extensions: &TuiExtensions,
 ) -> crate::event::UiSnapshotResult {
     let started = std::time::Instant::now();
@@ -787,7 +795,7 @@ pub(crate) fn shell_escape_command(input: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::SessionMeta;
+    use lash_core::SessionMeta;
 
     #[test]
     fn desktop_notification_effect_respects_focus() {
@@ -872,7 +880,7 @@ mod tests {
     #[test]
     fn observational_memory_overrides_apply_to_standard_context_approach() {
         let approach = apply_standard_context_approach_overrides(
-            lash::StandardContextApproach::ObservationalMemory(Default::default()),
+            lash_core::StandardContextApproach::ObservationalMemory(Default::default()),
             Some(45_000),
             Some(8_000),
             None,
@@ -883,7 +891,7 @@ mod tests {
             None,
         )
         .expect("overrides");
-        let lash::StandardContextApproach::ObservationalMemory(config) = approach else {
+        let lash_core::StandardContextApproach::ObservationalMemory(config) = approach else {
             panic!("expected observational_memory");
         };
         assert_eq!(config.observation_message_tokens, 45_000);
@@ -896,7 +904,7 @@ mod tests {
     #[test]
     fn observational_memory_overrides_require_om_standard_context_approach() {
         let err = apply_standard_context_approach_overrides(
-            lash::StandardContextApproach::RollingHistory(Default::default()),
+            lash_core::StandardContextApproach::RollingHistory(Default::default()),
             Some(45_000),
             None,
             None,
@@ -913,7 +921,7 @@ mod tests {
     #[test]
     fn info_text_includes_session_id_and_db_path() {
         let provider = ProviderHandle::new(
-            lash_provider_openai::OpenAiGenericProvider::new(
+            lash_provider_openai::OpenAiCompatibleProvider::new(
                 "test",
                 "https://openrouter.ai/api/v1",
             )

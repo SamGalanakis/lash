@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::plugin::{PluginError, PluginFactory, PluginSessionContext, PluginSpecFactory};
+use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext, PluginSpecFactory};
 
 pub struct UiActivityPluginFactory;
 
@@ -12,25 +12,25 @@ impl PluginFactory for UiActivityPluginFactory {
     fn build(
         &self,
         _ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn lash::plugin::SessionPlugin>, PluginError> {
+    ) -> Result<Arc<dyn lash_core::plugin::SessionPlugin>, PluginError> {
         PluginSpecFactory::new(
             "ui_activity",
             Arc::new(|_ctx| {
                 Ok(
-                    lash::plugin::PluginSpec::new().with_after_turn(Arc::new(|ctx| {
+                    lash_core::plugin::PluginSpec::new().with_after_turn(Arc::new(|ctx| {
                         Box::pin(async move {
                             let body = match &ctx.turn.outcome {
-                                lash::TurnOutcome::Finished(_)
-                                | lash::TurnOutcome::Handoff { .. } => {
+                                lash_core::TurnOutcome::Finished(_)
+                                | lash_core::TurnOutcome::Handoff { .. } => {
                                     Some("Response complete".to_string())
                                 }
-                                lash::TurnOutcome::Stopped(_) => None,
+                                lash_core::TurnOutcome::Stopped(_) => None,
                             };
                             let Some(body) = body else {
                                 return Ok(Vec::new());
                             };
-                            Ok(vec![lash::plugin::PluginDirective::emit_events(vec![
-                                lash::PluginSurfaceEvent::Custom {
+                            Ok(vec![lash_core::plugin::PluginDirective::emit_events(vec![
+                                lash_core::PluginSurfaceEvent::Custom {
                                     name: "desktop_notification".to_string(),
                                     payload: serde_json::json!({
                                         "title": "lash",

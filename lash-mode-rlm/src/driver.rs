@@ -1,9 +1,9 @@
 use std::sync::RwLock;
 use std::{fmt::Write as _, sync::Arc};
 
-use lash::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
-use lash::sansio::ContextProjector;
-use lash::{
+use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
+use lash_core::sansio::ContextProjector;
+use lash_core::{
     ChronologicalEntry, ChronologicalPayload, LlmRequest, ModeBuildInput, ModeConfig, ModePreamble,
     ProjectorContext, PromptContribution, PromptUsage, head_tail_truncate,
 };
@@ -71,10 +71,10 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
 #[cfg(test)]
 mod catalogue_tests {
     use super::*;
-    use lash::{ExecutionMode, ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
+    use lash_core::{ExecutionMode, ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
 
-    fn tool(name: &str) -> lash::ToolDefinition {
-        lash::ToolDefinition::raw(
+    fn tool(name: &str) -> lash_core::ToolDefinition {
+        lash_core::ToolDefinition::raw(
             name,
             format!("Tool {name}"),
             serde_json::json!({
@@ -91,13 +91,13 @@ mod catalogue_tests {
 
     #[test]
     fn rlm_preamble_uses_resolved_tool_surface_without_search_tool_special_cases() {
-        let surface = lash::ToolSurface::from_tools(
+        let surface = lash_core::ToolSurface::from_tools(
             vec![tool("search_tools"), tool("grep")],
             ExecutionMode::new("test"),
         );
 
         let preamble = build_rlm_preamble(
-            lash::ModeBuildInput {
+            lash_core::ModeBuildInput {
                 mode: ExecutionMode::new("test"),
                 tool_surface: Arc::new(surface),
                 extra_prompt_contributions: Vec::new(),
@@ -140,15 +140,15 @@ struct RlmContextProjector {
     last_prompt_usage: SharedPromptUsage,
 }
 
-fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
+fn rlm_termination(options: &lash_core::ModeTurnOptions) -> RlmTermination {
     options
-        .decode(&lash::ExecutionMode::new("rlm"))
+        .decode(&lash_core::ExecutionMode::new("rlm"))
         .ok()
         .flatten()
         .unwrap_or_default()
 }
 
-impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
+impl ContextProjector<lash_core::HostModeProtocol> for RlmContextProjector {
     fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
         let projection = projection_from_projector_context(&ctx);
         let termination = rlm_termination(&ctx.config.termination);
@@ -196,7 +196,7 @@ impl ContextProjector<lash::HostModeProtocol> for RlmContextProjector {
 }
 
 fn build_rlm_history_messages(
-    projection: &lash::ChronologicalProjection,
+    projection: &lash_core::ChronologicalProjection,
     max_output_chars: usize,
     mode_iteration: usize,
     finalization: &str,
@@ -255,14 +255,14 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
 
 fn render_value_schema_contract(schema: &serde_json::Value) -> String {
     let input_contract =
-        lash::ToolDefinition::raw("submit", "", schema.clone(), serde_json::json!({}))
+        lash_core::ToolDefinition::raw("submit", "", schema.clone(), serde_json::json!({}))
             .compact_contract();
 
     if input_contract.parameters.is_empty() {
-        return lash::ToolDefinition::raw(
+        return lash_core::ToolDefinition::raw(
             "submit",
             "",
-            lash::ToolDefinition::default_input_schema(),
+            lash_core::ToolDefinition::default_input_schema(),
             schema.clone(),
         )
         .compact_contract()
@@ -318,9 +318,9 @@ fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBl
 fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
     match &entry.payload {
         ChronologicalPayload::Message(message) => match message.role {
-            lash::MessageRole::User => LlmRole::User,
-            lash::MessageRole::Assistant => LlmRole::Assistant,
-            lash::MessageRole::System => LlmRole::System,
+            lash_core::MessageRole::User => LlmRole::User,
+            lash_core::MessageRole::Assistant => LlmRole::Assistant,
+            lash_core::MessageRole::System => LlmRole::System,
         },
         ChronologicalPayload::ToolCall(_) => LlmRole::User,
         ChronologicalPayload::ModeEvent(_) => LlmRole::Assistant,
@@ -360,15 +360,17 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 
 impl RlmContextProjector {
     #[cfg(test)]
-    fn format_history(&self, projection: &lash::ChronologicalProjection) -> String {
+    fn format_history(&self, projection: &lash_core::ChronologicalProjection) -> String {
         let history = crate::rlm_history_projection(projection);
         render_history_prompt(history.history(), self.max_output_chars)
     }
 }
 
-fn projection_from_projector_context(ctx: &ProjectorContext<'_>) -> lash::ChronologicalProjection {
-    let read_view = lash::SessionReadView::from_derived_message_view(
-        lash::SessionStateEnvelope::default(),
+fn projection_from_projector_context(
+    ctx: &ProjectorContext<'_>,
+) -> lash_core::ChronologicalProjection {
+    let read_view = lash_core::SessionReadView::from_derived_message_view(
+        lash_core::SessionStateEnvelope::default(),
         Arc::new(ctx.events.to_vec()),
         Arc::new(ctx.messages.iter().cloned().collect()),
         Arc::new(Vec::new()),
@@ -377,9 +379,11 @@ fn projection_from_projector_context(ctx: &ProjectorContext<'_>) -> lash::Chrono
 }
 
 #[cfg(test)]
-fn projection_from_events(events: &[lash::SessionEventRecord]) -> lash::ChronologicalProjection {
-    let read_view = lash::SessionReadView::from_derived_message_view(
-        lash::SessionStateEnvelope::default(),
+fn projection_from_events(
+    events: &[lash_core::SessionEventRecord],
+) -> lash_core::ChronologicalProjection {
+    let read_view = lash_core::SessionReadView::from_derived_message_view(
+        lash_core::SessionStateEnvelope::default(),
         Arc::new(events.to_vec()),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -584,12 +588,12 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
 }
 
 fn append_entry_image_blocks(
-    entry: &lash::ChronologicalEntry,
+    entry: &lash_core::ChronologicalEntry,
     attachments: &mut Vec<LlmAttachment>,
     blocks: &mut Vec<LlmContentBlock>,
 ) {
     match &entry.payload {
-        lash::ChronologicalPayload::Message(message) => {
+        lash_core::ChronologicalPayload::Message(message) => {
             for part in message.parts.iter() {
                 let Some(attachment) = part.attachment.as_ref() else {
                     continue;
@@ -599,7 +603,7 @@ fn append_entry_image_blocks(
                 blocks.push(LlmContentBlock::Image { attachment_idx });
             }
         }
-        lash::ChronologicalPayload::ModeEvent(event) => {
+        lash_core::ChronologicalPayload::ModeEvent(event) => {
             if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
                 crate::decode_rlm_mode_event(event)
             {
@@ -610,7 +614,7 @@ fn append_entry_image_blocks(
                 }
             }
         }
-        lash::ChronologicalPayload::ToolCall(_) => {}
+        lash_core::ChronologicalPayload::ToolCall(_) => {}
     }
 }
 
@@ -646,22 +650,27 @@ fn append_history_message(
     }
 }
 
-fn message_history_text(message: &lash::Message) -> String {
+fn message_history_text(message: &lash_core::Message) -> String {
     let chunks = message
         .parts
         .iter()
-        .filter(|part| matches!(part.kind, lash::PartKind::Text | lash::PartKind::Prose))
+        .filter(|part| {
+            matches!(
+                part.kind,
+                lash_core::PartKind::Text | lash_core::PartKind::Prose
+            )
+        })
         .map(|part| part.content.trim())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
     chunks.join("\n\n")
 }
 
-fn history_role(role: lash::MessageRole) -> RlmHistoryRole {
+fn history_role(role: lash_core::MessageRole) -> RlmHistoryRole {
     match role {
-        lash::MessageRole::User => RlmHistoryRole::User,
-        lash::MessageRole::System => RlmHistoryRole::System,
-        lash::MessageRole::Assistant => RlmHistoryRole::Assistant,
+        lash_core::MessageRole::User => RlmHistoryRole::User,
+        lash_core::MessageRole::System => RlmHistoryRole::System,
+        lash_core::MessageRole::Assistant => RlmHistoryRole::Assistant,
     }
 }
 
@@ -822,7 +831,7 @@ fn reasoning_without_first_fence(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::session_model::{
+    use lash_core::session_model::{
         ConversationRecord, MessageRole, Part, PartKind, PruneState, SessionEventRecord,
     };
     use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
@@ -838,8 +847,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -870,9 +878,9 @@ mod tests {
     }
 
     fn tool_event() -> SessionEventRecord {
-        SessionEventRecord::Tool(lash::ToolEvent::Invocation {
+        SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
             stable_key: "call_1".to_string(),
-            record: lash::ToolCallRecord {
+            record: lash_core::ToolCallRecord {
                 call_id: Some("call_1".to_string()),
                 tool: "lookup".to_string(),
                 args: serde_json::json!({"q": "first"}),
@@ -961,14 +969,13 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
             .into(),
-            origin: Some(lash::MessageOrigin::Plugin {
+            origin: Some(lash_core::MessageOrigin::Plugin {
                 plugin_id: "test".to_string(),
                 transient: false,
             }),
@@ -991,9 +998,9 @@ mod tests {
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
                 tool_calls: Vec::new(),
-                images: vec![lash::AttachmentRef {
-                    id: lash::AttachmentId::new("img-ref"),
-                    media_type: lash::MediaType::Image(lash::ImageMediaType::Png),
+                images: vec![lash_core::AttachmentRef {
+                    id: lash_core::AttachmentId::new("img-ref"),
+                    media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
                     byte_len: 3,
                     width: Some(1),
                     height: Some(1),

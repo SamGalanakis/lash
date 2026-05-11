@@ -14,9 +14,9 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dirs = "6"
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-core = { path = "../lash-core", default-features = false, features = ["full"] }
 lash-cli = { path = "../lash-cli" }
-lash-embed = { path = "../lash-embed" }
+lash = { path = "../lash" }
 lash-providers-builtin = { path = "../lash-providers-builtin" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 lash-sansio = { path = "../lash-sansio" }

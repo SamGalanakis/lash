@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
-use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState, fresh_message_id};
-use lash::{
+use lash::control::SessionConfigPatch;
+use lash::{LashSession, ModelSelection};
+use lash_core::session_model::{
+    Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
+};
+use lash_core::{
     CachedModelCatalog, ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage,
     ProviderHandle, TokenUsage, ToolState,
 };
-use lash_embed::control::SessionConfigPatch;
-use lash_embed::{LashSession, ModelSelection};
 use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
@@ -17,15 +19,14 @@ fn push_history_system_message(history: &mut Vec<Message>, content: String) {
     history.push(Message {
         id: sys_id.clone(),
         role: MessageRole::System,
-        parts: lash::shared_parts(vec![Part {
+        parts: lash_core::shared_parts(vec![Part {
             id: format!("{}.p0", sys_id),
             kind: PartKind::Text,
             content,
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -138,11 +139,11 @@ async fn restore_model_from_graph_config(
 
 #[allow(clippy::too_many_arguments)]
 async fn apply_graph_resume_state(
-    graph: lash::SessionGraph,
-    config: Option<lash::PersistedSessionConfig>,
-    _token_ledger: Vec<lash::TokenLedgerEntry>,
-    checkpoint: Option<lash::HydratedSessionCheckpoint>,
-    _checkpoint_ref: Option<lash::BlobRef>,
+    graph: lash_core::SessionGraph,
+    config: Option<lash_core::PersistedSessionConfig>,
+    _token_ledger: Vec<lash_core::TokenLedgerEntry>,
+    checkpoint: Option<lash_core::HydratedSessionCheckpoint>,
+    _checkpoint_ref: Option<lash_core::BlobRef>,
     history: &mut Vec<Message>,
     runtime: &mut Option<LashSession>,
     app: &mut App,
@@ -161,10 +162,11 @@ async fn apply_graph_resume_state(
     if graph.heal_orphaned_leaf() {
         tracing::warn!("session graph leaf was orphaned on resume; healed to most recent message");
     }
-    let read_view = lash::SessionReadView::from_exported_state(&lash::SessionStateEnvelope {
-        session_graph: graph.clone(),
-        ..lash::SessionStateEnvelope::default()
-    });
+    let read_view =
+        lash_core::SessionReadView::from_exported_state(&lash_core::SessionStateEnvelope {
+            session_graph: graph.clone(),
+            ..lash_core::SessionStateEnvelope::default()
+        });
     let messages = read_view.messages().to_vec();
     let _tool_calls = read_view.tool_calls().to_vec();
     *history = messages.clone();
@@ -213,11 +215,11 @@ async fn apply_graph_resume_state(
     let restored_execution_mode = requested_execution_mode
         .clone()
         .and_then(|mode| crate::ensure_supported_execution_mode(mode).ok())
-        .unwrap_or_else(lash::default_execution_mode);
+        .unwrap_or_else(lash_core::default_execution_mode);
     *execution_mode = restored_execution_mode.clone();
 
     if let Some(requested_execution_mode) = requested_execution_mode.as_ref()
-        && !lash::execution_mode_supported(&restored_execution_mode)
+        && !lash_core::execution_mode_supported(&restored_execution_mode)
     {
         app.timeline.push(UiTimelineItem::SystemMessage(format!(
             "This build does not support `{}` mode; resuming in `standard`.",
@@ -371,24 +373,24 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
-    use lash::MemoryModelCatalogStore;
+    use lash_core::MemoryModelCatalogStore;
 
     fn persist_session_head(
         store: &Store,
-        graph: lash::SessionGraph,
-        checkpoint: lash::HydratedSessionCheckpoint,
+        graph: lash_core::SessionGraph,
+        checkpoint: lash_core::HydratedSessionCheckpoint,
     ) {
         let checkpoint_ref = store.put_checkpoint(&checkpoint).checkpoint_ref;
-        store.save_session_head(lash::SessionHead {
+        store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             graph,
-            config: lash::PersistedSessionConfig {
+            config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-5".to_string(),
                 context_window: 200_000,
                 execution_mode: ExecutionMode::standard(),
-                standard_context_approach: Some(lash::StandardContextApproach::default()),
+                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
@@ -401,11 +403,14 @@ mod tests {
         iteration: usize,
         token_usage: TokenUsage,
         last_prompt_usage: Option<PromptUsage>,
-    ) -> (lash::SessionGraph, lash::HydratedSessionCheckpoint) {
+    ) -> (
+        lash_core::SessionGraph,
+        lash_core::HydratedSessionCheckpoint,
+    ) {
         (
-            lash::SessionGraph::from_active_read_state(&messages, &[]),
-            lash::HydratedSessionCheckpoint {
-                turn_state: lash::PersistedTurnState {
+            lash_core::SessionGraph::from_active_read_state(&messages, &[]),
+            lash_core::HydratedSessionCheckpoint {
+                turn_state: lash_core::PersistedTurnState {
                     turn_index: iteration,
                     token_usage,
                     last_prompt_usage,
@@ -455,8 +460,8 @@ mod tests {
         );
         persist_session_head(&store, graph, checkpoint);
 
-        let provider = lash::ProviderHandle::new(
-            lash_provider_openai::OpenAiGenericProvider::new(
+        let provider = lash_core::ProviderHandle::new(
+            lash_provider_openai::OpenAiCompatibleProvider::new(
                 "test-key",
                 "https://example.invalid/v1",
             )

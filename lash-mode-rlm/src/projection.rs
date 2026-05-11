@@ -1,24 +1,27 @@
 use std::collections::HashSet;
 
-use lash::{ChronologicalPayload, ExecutionMode, Message, MessageRole, PartKind, ToolCallRecord};
+use lash_core::{
+    ChronologicalPayload, ExecutionMode, Message, MessageRole, PartKind, ToolCallRecord,
+};
 use lash_rlm_types::{
     RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmModeEvent, RlmTrajectoryEntry,
 };
 
-pub fn rlm_mode_event(event: RlmModeEvent) -> lash::ModeEvent {
-    lash::ModeEvent::typed(ExecutionMode::new("rlm"), event).expect("RLM mode events serialize")
+pub fn rlm_mode_event(event: RlmModeEvent) -> lash_core::ModeEvent {
+    lash_core::ModeEvent::typed(ExecutionMode::new("rlm"), event)
+        .expect("RLM mode events serialize")
 }
 
-pub fn decode_rlm_mode_event(event: &lash::ModeEvent) -> Option<RlmModeEvent> {
+pub fn decode_rlm_mode_event(event: &lash_core::ModeEvent) -> Option<RlmModeEvent> {
     event.decode(&ExecutionMode::new("rlm")).ok().flatten()
 }
 
 pub fn project_rlm_globals_from_events<'a>(
-    events: impl IntoIterator<Item = &'a lash::SessionEventRecord>,
+    events: impl IntoIterator<Item = &'a lash_core::SessionEventRecord>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut globals = serde_json::Map::new();
     for event in events {
-        if let lash::SessionEventRecord::Mode(event) = event
+        if let lash_core::SessionEventRecord::Mode(event) = event
             && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = decode_rlm_mode_event(event)
         {
             lash_rlm_types::apply_globals_patch(&mut globals, &patch);
@@ -33,7 +36,7 @@ pub struct RlmHistoryProjection {
 }
 
 impl RlmHistoryProjection {
-    pub fn from_chronological(projection: &lash::ChronologicalProjection) -> Self {
+    pub fn from_chronological(projection: &lash_core::ChronologicalProjection) -> Self {
         let mut history = Vec::with_capacity(projection.entries().len());
         let mut seen_tool_calls = HashSet::new();
         for entry in projection.entries() {
@@ -83,7 +86,9 @@ impl RlmHistoryProjection {
     }
 }
 
-pub fn rlm_history_projection(projection: &lash::ChronologicalProjection) -> RlmHistoryProjection {
+pub fn rlm_history_projection(
+    projection: &lash_core::ChronologicalProjection,
+) -> RlmHistoryProjection {
     RlmHistoryProjection::from_chronological(projection)
 }
 
@@ -155,7 +160,7 @@ fn history_role(role: MessageRole) -> RlmHistoryRole {
     }
 }
 
-fn image_ref(image: &lash::AttachmentRef) -> RlmImageRef {
+fn image_ref(image: &lash_core::AttachmentRef) -> RlmImageRef {
     RlmImageRef {
         id: image.id.to_string(),
         media_type: image.media_type,

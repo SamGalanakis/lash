@@ -14,7 +14,7 @@ use fff_search::{
 };
 use serde_json::json;
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{object_schema, require_str};
 
@@ -1431,7 +1431,7 @@ mod tests {
         .unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": "hello"})).await;
+        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "hello"})).await;
         assert!(result.success);
         assert_eq!(result.result["count"], 2);
         assert_eq!(result.result["matches"][0]["path"], "test.txt");
@@ -1445,7 +1445,7 @@ mod tests {
         std::fs::write(dir.path().join("alpha.rs"), "fn thing() {}\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": "thing"})).await;
+        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "thing"})).await;
         assert!(result.success);
         assert_eq!(result.result["files"][0]["path"], "alpha.rs");
         assert_eq!(result.result["files"][0]["count"], 1);
@@ -1458,7 +1458,7 @@ mod tests {
         std::fs::write(dir.path().join("alpha.rs"), "ctx\nctx\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
+        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
         assert!(result.success);
         assert_eq!(result.result["count"], 2);
         assert_eq!(result.result["files"][0]["count"], 2);
@@ -1470,7 +1470,8 @@ mod tests {
         std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
+        let result =
+            lash_core::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
         assert!(result.success);
         assert_eq!(result.result["matches"].as_array().unwrap().len(), 0);
         assert!(result.result["broadened_from"].is_null());
@@ -1484,7 +1485,7 @@ mod tests {
 
         let query = "definitely missing ".repeat(20);
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": query})).await;
+        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": query})).await;
 
         assert!(
             result.success,
@@ -1510,7 +1511,7 @@ mod tests {
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         assert!(tool.backend.get().is_none());
 
-        let result = lash::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
+        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
         assert!(result.success);
         assert!(tool.backend.get().is_some());
     }
@@ -1523,9 +1524,12 @@ mod tests {
         std::fs::write(dir.path().join("inner/inner.txt"), "banana in inner\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result =
-            lash::testing::run_tool(&tool, "grep", &json!({"query": "banana", "path": "inner"}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &tool,
+            "grep",
+            &json!({"query": "banana", "path": "inner"}),
+        )
+        .await;
         assert!(result.success);
         assert!(
             result.result["matches"]
@@ -1554,7 +1558,7 @@ mod tests {
         std::fs::write(dir.path().join("other.txt"), "banana\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({"query": "banana", "path": "notes.txt"}),
@@ -1601,7 +1605,7 @@ mod tests {
         .unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({
@@ -1635,7 +1639,7 @@ mod tests {
         std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
 
         let tool = Grep::with_base_path(workspace.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({
@@ -1667,7 +1671,7 @@ mod tests {
         std::fs::write(outside.path().join("external.txt"), "banana\n").unwrap();
 
         let tool = Grep::with_base_path(workspace.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({"query": format!("{} banana", outside.path().display())}),
@@ -1693,7 +1697,7 @@ mod tests {
         std::fs::write(&file, "banana split\n").unwrap();
 
         let tool = Grep::with_base_path(workspace.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({"query": format!("{} banana", file.display())}),
@@ -1725,7 +1729,7 @@ mod tests {
     async fn test_grep_path_missing_returns_clear_error() {
         let workspace = TempDir::new().unwrap();
         let tool = Grep::with_base_path(workspace.path().to_path_buf());
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &tool,
             "grep",
             &json!({"query": "banana", "path": "/nonexistent/totally/fake"}),

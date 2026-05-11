@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use crate::config::LashConfig;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use lash::provider::ProviderHandle;
+use lash_core::provider::ProviderHandle;
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_auth as oauth;
 use lash_provider_codex::CodexProvider;
 use lash_provider_codex::oauth as codex_oauth;
 use lash_provider_google::GoogleOAuthProvider;
 use lash_provider_google::oauth as google_oauth;
-use lash_provider_openai::OpenAiGenericProvider;
+use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_tui::{Frame, Line, Modifier, Rect, Span, Style, Terminal};
 use unicode_width::UnicodeWidthStr;
 
@@ -57,7 +57,8 @@ enum SetupStep {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CredentialMode {
     GoogleOAuth,
-    OpenAiGenericKey,
+    OpenAiKey,
+    OpenAiCompatibleKey,
     AnthropicKey,
 }
 
@@ -253,7 +254,7 @@ async fn run_setup_inner(
                         .and_then(|cfg| cfg.provider_spec(kind))
                         .cloned()
                     {
-                        match lash::build_provider(&saved_spec) {
+                        match lash_core::build_provider(&saved_spec) {
                             Ok(boxed) => {
                                 provider = Some(ProviderHandle::new(boxed));
                                 app.active_kind = Some(kind.to_string());
@@ -295,13 +296,6 @@ async fn run_setup_inner(
                 KeyCode::Backspace => delete_left(input, cursor),
                 KeyCode::Left => move_left(input, cursor),
                 KeyCode::Right => move_right(input, cursor),
-                KeyCode::Tab if *mode == CredentialMode::OpenAiGenericKey => {
-                    app.step = SetupStep::InputBaseUrl {
-                        api_key: String::new(),
-                        input: String::new(),
-                        cursor: 0,
-                    };
-                }
                 KeyCode::Enter => {
                     let value = input.trim().to_string();
                     match mode {
@@ -322,7 +316,28 @@ async fn run_setup_inner(
                                 }
                             };
                         }
-                        CredentialMode::OpenAiGenericKey => {
+                        CredentialMode::OpenAiKey => {
+                            if value.is_empty() {
+                                *error = Some("API key cannot be empty.".into());
+                                continue;
+                            }
+                            provider = Some(ProviderHandle::new(
+                                OpenAiProvider::new(value).into_components(),
+                            ));
+                            app.step = if tavily_key.is_some() {
+                                SetupStep::Done
+                            } else {
+                                SetupStep::InputTavily {
+                                    input: String::new(),
+                                    cursor: 0,
+                                }
+                            };
+                        }
+                        CredentialMode::OpenAiCompatibleKey => {
+                            if value.is_empty() {
+                                *error = Some("API key cannot be empty.".into());
+                                continue;
+                            }
                             app.step = SetupStep::InputBaseUrl {
                                 api_key: value,
                                 input: existing_openai_base_url(existing_config.as_ref()),
@@ -408,7 +423,7 @@ async fn run_setup_inner(
                         continue;
                     }
                     provider = Some(ProviderHandle::new(
-                        OpenAiGenericProvider::new(api_key.clone(), base_url).into_components(),
+                        OpenAiCompatibleProvider::new(api_key.clone(), base_url).into_components(),
                     ));
                     app.step = if tavily_key.is_some() {
                         SetupStep::Done
@@ -511,7 +526,7 @@ async fn start_provider_flow(app: &mut SetupApp, kind: &str, existing: Option<&L
                 }
             }
         }
-        "openai-compatible" => {
+        "openai" => {
             let existing_key = existing_openai_key(existing);
             app.step = SetupStep::InputCredential {
                 input: existing_key.clone(),
@@ -520,7 +535,19 @@ async fn start_provider_flow(app: &mut SetupApp, kind: &str, existing: Option<&L
                 verifier: None,
                 auth_url: None,
                 browser_error: None,
-                mode: CredentialMode::OpenAiGenericKey,
+                mode: CredentialMode::OpenAiKey,
+            };
+        }
+        "openai-compatible" => {
+            let existing_key = existing_openai_compatible_key(existing);
+            app.step = SetupStep::InputCredential {
+                input: existing_key.clone(),
+                cursor: existing_key.len(),
+                error: None,
+                verifier: None,
+                auth_url: None,
+                browser_error: None,
+                mode: CredentialMode::OpenAiCompatibleKey,
             };
         }
         "anthropic" => {
@@ -654,17 +681,21 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                     "Paste code or callback URL",
                     vec![("enter", "submit"), ("esc", "back"), ("ctrl+c", "quit")],
                 ),
-                CredentialMode::OpenAiGenericKey => (
-                    "OpenAI-Compatible",
-                    vec!["Paste an API key, or press Tab to skip if your endpoint does not require one.".to_string()],
+                CredentialMode::OpenAiKey => (
+                    "OpenAI API",
+                    vec!["Paste an OpenAI API key.".to_string()],
                     "API key",
-                    vec![("enter", "next"), ("tab", "skip"), ("esc", "back"), ("ctrl+c", "quit")],
+                    vec![("enter", "submit"), ("esc", "back"), ("ctrl+c", "quit")],
+                ),
+                CredentialMode::OpenAiCompatibleKey => (
+                    "OpenAI-Compatible",
+                    vec!["Paste the API key for your OpenAI-compatible endpoint.".to_string()],
+                    "API key",
+                    vec![("enter", "next"), ("esc", "back"), ("ctrl+c", "quit")],
                 ),
                 CredentialMode::AnthropicKey => (
                     "Anthropic API",
-                    vec![
-                        "Paste an Anthropic API key (starts with sk-ant-api...).".to_string(),
-                    ],
+                    vec!["Paste an Anthropic API key (starts with sk-ant-api...).".to_string()],
                     "API key",
                     vec![("enter", "submit"), ("esc", "back"), ("ctrl+c", "quit")],
                 ),
@@ -747,7 +778,7 @@ fn draw_setup(frame: &mut Frame<'_>, app: &SetupApp) {
                     title: "OpenAI-Compatible",
                     body: &[
                         "Enter the API base URL for your endpoint.".to_string(),
-                        "Example: https://api.openai.com/v1".to_string(),
+                        "Example: https://openrouter.ai/api/v1".to_string(),
                     ],
                     label: "Base URL",
                     input,
@@ -1110,6 +1141,10 @@ fn existing_openai_base_url(existing: Option<&LashConfig>) -> String {
 }
 
 fn existing_openai_key(existing: Option<&LashConfig>) -> String {
+    provider_spec_field(existing, "openai", "api_key")
+}
+
+fn existing_openai_compatible_key(existing: Option<&LashConfig>) -> String {
     provider_spec_field(existing, "openai-compatible", "api_key")
 }
 

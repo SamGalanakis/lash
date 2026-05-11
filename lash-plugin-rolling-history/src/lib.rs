@@ -17,16 +17,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use lash::plugin::{
+use lash_core::plugin::{
     DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
     HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
     PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
     SessionCreateRequest, SessionPlugin, SessionPluginMode, SessionStartPoint,
     TurnContextTransform, TurnTransformContext,
 };
-use lash::session_model::context::PreparedContext;
-use lash::session_model::format_tool_result_content;
-use lash::{
+use lash_core::session_model::context::PreparedContext;
+use lash_core::session_model::format_tool_result_content;
+use lash_core::{
     ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
     RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,
 };
@@ -317,10 +317,10 @@ fn hydrate_tool_result_parts(
             if !matches!(part.kind, PartKind::ToolResult) {
                 continue;
             }
-            if matches!(part.prune_state, lash::PruneState::Cleared) {
+            if matches!(part.prune_state, lash_core::PruneState::Cleared) {
                 continue;
             }
-            if !matches!(part.prune_state, lash::PruneState::Intact) {
+            if !matches!(part.prune_state, lash_core::PruneState::Intact) {
                 continue;
             }
             let Some(call_id) = part.tool_call_id.as_deref() else {
@@ -358,10 +358,10 @@ fn prune_old_tool_results(
             if !matches!(part.kind, PartKind::ToolResult) {
                 continue;
             }
-            if matches!(part.prune_state, lash::PruneState::Cleared) {
+            if matches!(part.prune_state, lash_core::PruneState::Cleared) {
                 break 'scan;
             }
-            if !matches!(part.prune_state, lash::PruneState::Intact) {
+            if !matches!(part.prune_state, lash_core::PruneState::Intact) {
                 continue;
             }
             let Some(call_id) = part.tool_call_id.as_deref() else {
@@ -388,7 +388,7 @@ fn prune_old_tool_results(
 
     for (msg_idx, part_idx) in to_prune {
         let parts = std::sync::Arc::make_mut(&mut messages[msg_idx].parts);
-        parts[part_idx].prune_state = lash::PruneState::Cleared;
+        parts[part_idx].prune_state = lash_core::PruneState::Cleared;
         parts[part_idx].content.clear();
     }
     true
@@ -528,13 +528,13 @@ async fn summarize_compaction_prefix(
     state: &SessionStateEnvelope,
     prefix_messages: Vec<Message>,
     instructions: Option<&str>,
-    host: Arc<dyn lash::HistoryHost>,
+    host: Arc<dyn lash_core::HistoryHost>,
 ) -> Result<Option<String>, HistoryError> {
     if prefix_messages.is_empty() {
         return Ok(None);
     }
 
-    let mut snapshot = lash::PersistedSessionState::from_state(state.clone());
+    let mut snapshot = lash_core::PersistedSessionState::from_state(state.clone());
     snapshot.policy.execution_mode = ExecutionMode::standard();
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
@@ -564,7 +564,7 @@ async fn summarize_compaction_prefix(
     let handle = host
         .create_session(SessionCreateRequest {
             session_id: Some(compaction_session_id),
-            relation: lash::SessionRelation::Child {
+            relation: lash_core::SessionRelation::Child {
                 parent_session_id: session_id.to_string(),
             },
             start: SessionStartPoint::Snapshot {
@@ -574,7 +574,7 @@ async fn summarize_compaction_prefix(
             plugin_mode: SessionPluginMode::Fresh,
             initial_nodes: Vec::new(),
             first_turn_input: None,
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             context_surface: SessionContextSurface {
                 include_base_tools: false,
@@ -599,11 +599,10 @@ async fn summarize_compaction_prefix(
             TurnInput {
                 items: vec![InputItem::Text { text: prompt_text }],
                 image_blobs: HashMap::new(),
-                mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
-                turn_context: lash::TurnContext::default(),
+                turn_context: lash_core::TurnContext::default(),
             },
         )
         .await;
@@ -627,16 +626,15 @@ fn apply_compaction_summary(messages: &[Message], summary: &str, cut_point: usiz
     out.push(Message {
         id: "compaction-summary".to_string(),
         role: MessageRole::Assistant,
-        parts: lash::shared_parts(vec![Part {
+        parts: lash_core::shared_parts(vec![Part {
             id: "compaction-summary.p0".to_string(),
             kind: PartKind::Prose,
             content: format!("{COMPACTION_SUMMARY_TITLE}\n{summary}"),
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: lash::PruneState::Intact,
+            tool_replay: None,
+            prune_state: lash_core::PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
         }]),
@@ -654,7 +652,7 @@ async fn compact_messages_core(
     state: &SessionStateEnvelope,
     messages: &[Message],
     instructions: Option<&str>,
-    host: Arc<dyn lash::HistoryHost>,
+    host: Arc<dyn lash_core::HistoryHost>,
 ) -> Result<Option<Vec<Message>>, HistoryError> {
     let prefix_len = leading_system_prefix_len(messages);
     let cut_point = find_compaction_cut_point(messages, prefix_len);
@@ -695,8 +693,8 @@ impl PluginFactory for RollingHistoryPluginFactory {
 
     fn supported_standard_context_approaches(
         &self,
-    ) -> &'static [lash::StandardContextApproachKind] {
-        &[lash::StandardContextApproachKind::RollingHistory]
+    ) -> &'static [lash_core::StandardContextApproachKind] {
+        &[lash_core::StandardContextApproachKind::RollingHistory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
@@ -891,9 +889,9 @@ impl HistoryRewriter for RollingHistoryRewriter {
                                 .iter_mut()
                             {
                                 if matches!(part.kind, PartKind::ToolResult)
-                                    && matches!(part.prune_state, lash::PruneState::Intact)
+                                    && matches!(part.prune_state, lash_core::PruneState::Intact)
                                 {
-                                    part.prune_state = lash::PruneState::Cleared;
+                                    part.prune_state = lash_core::PruneState::Cleared;
                                     part.content.clear();
                                 }
                             }
@@ -931,7 +929,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::SessionPolicy;
+    use lash_core::SessionPolicy;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -946,9 +944,8 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: lash::PruneState::Intact,
+                tool_replay: None,
+                prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
@@ -965,10 +962,10 @@ mod tests {
                 id: format!("{id}.p0"),
                 kind: PartKind::Image,
                 content: String::new(),
-                attachment: Some(lash::session_model::message::PartAttachment {
-                    reference: lash::AttachmentRef {
-                        id: lash::AttachmentId::new(format!("{id}-att")),
-                        media_type: lash::MediaType::Image(lash::ImageMediaType::Png),
+                attachment: Some(lash_core::session_model::message::PartAttachment {
+                    reference: lash_core::AttachmentRef {
+                        id: lash_core::AttachmentId::new(format!("{id}-att")),
+                        media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
                         byte_len: bytes.len() as u64,
                         width: None,
                         height: None,
@@ -977,9 +974,8 @@ mod tests {
                 }),
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: lash::PruneState::Intact,
+                tool_replay: None,
+                prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
@@ -1037,7 +1033,7 @@ mod tests {
         assert!(preview.contains("Full output saved to: /tmp/existing-shell-output.log"));
     }
 
-    use lash::testing::{MockSessionManager, mock_assembled_turn as empty_turn};
+    use lash_core::testing::{MockSessionManager, mock_assembled_turn as empty_turn};
 
     fn mock_manager() -> MockSessionManager {
         MockSessionManager::default()
@@ -1053,7 +1049,7 @@ mod tests {
         state: SessionStateEnvelope,
         prompt_usage: Option<PromptUsage>,
         max_context_tokens: Option<usize>,
-        host: Arc<dyn lash::HistoryHost>,
+        host: Arc<dyn lash_core::HistoryHost>,
     ) -> TurnTransformContext {
         TurnTransformContext {
             session_id: session_id.to_string(),
@@ -1099,9 +1095,8 @@ mod tests {
                         attachment: None,
                         tool_call_id: record.call_id.clone(),
                         tool_name: Some(record.tool.clone()),
-                        tool_item_id: None,
-                        tool_signature: None,
-                        prune_state: lash::PruneState::Intact,
+                        tool_replay: None,
+                        prune_state: lash_core::PruneState::Intact,
                         reasoning_meta: None,
                         response_meta: None,
                     })
@@ -1118,7 +1113,7 @@ mod tests {
         };
         state.replace_active_read_state(&messages, &tool_calls);
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
-        let host: Arc<dyn lash::HistoryHost> = Arc::new(mock_manager());
+        let host: Arc<dyn lash_core::HistoryHost> = Arc::new(mock_manager());
         let ctx = build_turn_ctx(
             "root",
             state,
@@ -1144,7 +1139,7 @@ mod tests {
         let cleared = built
             .iter()
             .flat_map(|message| message.parts.iter())
-            .filter(|part| matches!(part.prune_state, lash::PruneState::Cleared))
+            .filter(|part| matches!(part.prune_state, lash_core::PruneState::Cleared))
             .count();
         assert!(cleared > 0);
     }
@@ -1158,7 +1153,7 @@ mod tests {
         ];
 
         let state = SessionStateEnvelope::default();
-        let host: Arc<dyn lash::HistoryHost> = Arc::new(mock_manager());
+        let host: Arc<dyn lash_core::HistoryHost> = Arc::new(mock_manager());
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let ctx = build_turn_ctx(
             "root",
@@ -1191,7 +1186,7 @@ mod tests {
     #[tokio::test]
     async fn rolling_turn_transform_replaces_prefix_with_summary() {
         let manager = Arc::new(mock_manager());
-        let host: Arc<dyn lash::HistoryHost> = manager.clone();
+        let host: Arc<dyn lash_core::HistoryHost> = manager.clone();
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),

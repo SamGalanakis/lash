@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
@@ -184,7 +184,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
@@ -217,7 +217,7 @@ mod tests {
     async fn test_glob_no_matches() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
@@ -232,7 +232,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
         std::fs::write(dir.path().join("sub/deep/file.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
@@ -253,7 +253,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": 2}),
@@ -278,7 +278,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": null}),
@@ -300,7 +300,7 @@ mod tests {
     async fn test_glob_with_lines() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.rs"), "line1\nline2\nline3\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
@@ -316,7 +316,7 @@ mod tests {
     async fn test_glob_includes_hidden_by_default() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".hidden.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
@@ -340,7 +340,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({
@@ -368,7 +368,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
         std::fs::write(dir.path().join("ignored.rs"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({
@@ -393,7 +393,7 @@ mod tests {
             .current_dir(dir.path())
             .status()
             .unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Glob,
             "glob",
             &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),

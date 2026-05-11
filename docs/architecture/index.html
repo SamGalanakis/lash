@@ -27,6 +27,7 @@
             <li><a href="./deps.html">Dependencies</a></li>
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
           </ol>
         </details>
       </aside>
@@ -34,11 +35,11 @@
         <div>
           <div class="eyebrow">Current workspace architecture</div>
           <h1>lash<span class="slash">/</span>system</h1>
-          <p><strong>lash</strong> is a Rust workspace for embeddable coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by an async host runtime, with mode plugins, provider adapters, dynamic tools, durable session graph storage, embedding APIs, benchmark runners, and a CLI/TUI host on top.</p>
+          <p><strong>lash</strong> is a Rust workspace for coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by <code>lash-core</code>, with mode plugins, provider adapters, dynamic tools, durable session graph storage, benchmark runners, a CLI/TUI host, and an app-facing <code>lash</code> facade on top.</p>
         </div>
         <div class="hero-meta">
-          <article class="card"><div class="micro-label">Workspace</div><strong>38 Cargo members</strong><span>Runtime, embed API, CLI/TUI, providers, mode plugins, tool plugins, export, trace, file index, harness optimizer, lashlang, examples, and benchmark runners.</span></article>
-          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~196k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
+          <article class="card"><div class="micro-label">Workspace</div><strong>46 Cargo members</strong><span>Runtime core and facade, CLI/TUI, providers, mode and tool plugins (including MCP), export and trace utilities, lashlang, examples, and benchmark runners.</span></article>
+          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~200k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
           <article class="card"><div class="micro-label">Architecture root</div><strong><code>docs/architecture/</code></strong><span>Chaptered documentation matching the current runtime, projection seams, and handoff continuations.</span></article>
         </div>
       </header>
@@ -76,9 +77,9 @@
             </li>
             <li>
               <div class="path-meta">
-                <span class="path-eyebrow">Embedding lash</span>
+                <span class="path-eyebrow">Using lash from apps</span>
                 <h3>Wire it into another host</h3>
-                <p>System shape, the embed-API path, then the named contracts you'll reach for to compose providers, modes, and plugins.</p>
+                <p>System shape, the app-facing <code>lash</code> path, then the named contracts you'll reach for to compose providers, modes, and plugins.</p>
               </div>
               <ol class="path-route">
                 <li><a href="./overview.html">Overview</a></li>

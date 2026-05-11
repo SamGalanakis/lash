@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
-use lash::CachedModelCatalog;
-use lash_embed::control::SessionConfigPatch;
-use lash_embed::{LashSession, ModelSelection, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::control::SessionConfigPatch;
+use lash::{LashSession, ModelSelection, advanced::ExecutionMode, provider::ProviderHandle};
+use lash_core::CachedModelCatalog;
 use lash_tui::Terminal;
 
 use crate::app::App;
@@ -256,7 +256,7 @@ pub(super) async fn handle_change_provider(
 
     match setup_result {
         Ok(new_cfg) => {
-            let new_provider = match new_cfg.build_active_provider() {
+            let mut new_provider = match new_cfg.build_active_provider() {
                 Ok(p) => p,
                 Err(err) => {
                     push_system_message(
@@ -284,9 +284,10 @@ pub(super) async fn handle_change_provider(
                     format!("Provider updated, but saving config failed: {}", e),
                 );
             }
+            crate::expose_provider_thinking(&mut new_provider);
             *provider = new_provider;
             if let Err(err) = model_catalog
-                .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
+                .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
                 .await
             {
                 push_system_message(
@@ -483,7 +484,7 @@ mod tests {
         let temp = TempDirGuard::new("lash-provider-persist");
         let _lash_home = EnvVarGuard::set("LASH_HOME", temp.path());
         let path = crate::paths::config_file();
-        let provider = lash::testing::TestProvider::builder()
+        let provider = lash_core::testing::TestProvider::builder()
             .kind("persist-provider")
             .serialize_config(|| serde_json::json!({ "token": "refreshed" }))
             .build()

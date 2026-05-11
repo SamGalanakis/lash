@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
@@ -200,7 +200,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("subdir/nested.rs"), "").unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         let arr = items(&result);
@@ -217,7 +217,7 @@ mod tests {
     async fn test_ls_empty_dir() {
         let dir = TempDir::new().unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         assert!(items(&result).is_empty());
@@ -229,7 +229,7 @@ mod tests {
         let path = dir.path().join("file.txt");
         std::fs::write(&path, "").unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": path.to_str().unwrap()})).await;
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": path.to_str().unwrap()})).await;
         assert!(!result.success);
     }
 
@@ -238,7 +238,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
         std::fs::write(dir.path().join("a/b/c/file.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "depth": 1}),
@@ -261,7 +261,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
         std::fs::write(dir.path().join("b.txt"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "limit": 2}),
@@ -283,7 +283,7 @@ mod tests {
     async fn test_ls_with_lines() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "line1\nline2\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({"path": dir.path().to_str().unwrap(), "with_lines": true}),
@@ -300,7 +300,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".env"), "KEY=value\n").unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
@@ -316,7 +316,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
@@ -336,7 +336,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({
@@ -363,7 +363,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(dir.path().join("ignored.txt"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({
@@ -388,7 +388,7 @@ mod tests {
             .status()
             .unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
@@ -405,7 +405,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
         let result =
-            lash::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
+            lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
         assert!(result.success);
         let paths: Vec<&str> = items(&result)
@@ -420,7 +420,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &Ls,
             "ls",
             &json!({

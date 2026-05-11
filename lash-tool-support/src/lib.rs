@@ -1,4 +1,4 @@
-use lash::ToolResult;
+use lash_core::ToolResult;
 use lash_rlm_types::unwrap_projected_arg;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -121,8 +121,8 @@ pub fn object_schema(properties: serde_json::Value, required: &[&str]) -> serde_
     })
 }
 
-pub fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash::ToolDiscoveryMetadata {
-    lash::ToolDiscoveryMetadata {
+pub fn discovery_metadata(namespace: &str, aliases: &[&str]) -> lash_core::ToolDiscoveryMetadata {
+    lash_core::ToolDiscoveryMetadata {
         namespace: if namespace.is_empty() {
             None
         } else {

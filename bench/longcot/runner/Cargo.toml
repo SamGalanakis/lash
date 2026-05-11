@@ -10,8 +10,8 @@ name = "bench-longcot"
 path = "src/main.rs"
 
 [dependencies]
-lash = { path = "../../../lash", default-features = false, features = ["full"] }
-lash-embed = { path = "../../../lash-embed" }
+lash-core = { path = "../../../lash-core", default-features = false, features = ["full"] }
+lash = { path = "../../../lash" }
 lash-cli = { path = "../../../lash-cli" }
 lash-export = { path = "../../../lash-export" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }

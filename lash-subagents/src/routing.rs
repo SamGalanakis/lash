@@ -141,9 +141,9 @@ pub(crate) fn validate_segment(segment: &str) -> Result<String, String> {
 }
 
 pub fn truncate_snapshot_to_recent_turns(
-    mut snapshot: lash::SessionSnapshot,
+    mut snapshot: lash_core::SessionSnapshot,
     turns: usize,
-) -> lash::SessionSnapshot {
+) -> lash_core::SessionSnapshot {
     if turns == 0 {
         return snapshot;
     }
@@ -153,7 +153,7 @@ pub fn truncate_snapshot_to_recent_turns(
     let user_turn_starts = messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| matches!(message.role, lash::MessageRole::User))
+        .filter(|(_, message)| matches!(message.role, lash_core::MessageRole::User))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let Some(&start) = user_turn_starts.get(user_turn_starts.len().saturating_sub(turns)) else {

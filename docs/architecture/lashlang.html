@@ -28,6 +28,7 @@
             <li><a href="./deps.html">Dependencies</a></li>
             <li><a class="active" href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
@@ -63,12 +64,16 @@
             <h2>Language Reference</h2>
             <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. It keeps syntax close to Python where that helps agents, but routes effects through explicit host calls, typed values, and persistent runtime state.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3>Values</h3><p><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, async handles, and immutable <code>Image</code> handles. Lists and records are value-shaped and copy-on-write at mutation roots.</p></article>
-            <article class="panel"><h3>Statements</h3><p>Simple and path assignment, bare expression statements, <code>call</code>, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>parallel</code>, <code>cancel</code>, and <code>submit</code>.</p></article>
-            <article class="panel"><h3>Expressions</h3><p>Literals, variables, builtin calls, tool calls, <code>start call</code>, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</p></article>
-            <article class="panel"><h3>Effects</h3><p>All external work crosses <code>ToolHost</code>. Synchronous calls return wrapper records, background starts return handles, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>Values</dt>
+            <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, async handles, and immutable <code>Image</code> handles. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
+            <dt>Statements</dt>
+            <dd>Simple and path assignment, bare expression statements, <code>call</code>, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>parallel</code>, <code>cancel</code>, and <code>submit</code>.</dd>
+            <dt>Expressions</dt>
+            <dd>Literals, variables, builtin calls, tool calls, <code>start call</code>, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
+            <dt>Effects</dt>
+            <dd>All external work crosses <code>ToolHost</code>. Synchronous calls return wrapper records, background starts return handles, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations.</dd>
+          </dl>
         </div>
 
         <div class="section" id="program-form">
@@ -76,10 +81,12 @@
             <h2>Program Form</h2>
             <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output (the driver also accepts <code>rlm</code> and <code>lash</code> labels for legacy/internal callers, but only <code>lashlang</code> is advertised to the model). Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
           </div>
-          <div class="two-col">
-            <article class="panel"><h3>REPL state</h3><p>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</p></article>
-            <article class="panel"><h3>Completion</h3><p><code>submit</code> ends the program and turn. <code>call continue_as { task: ..., seed: { ... } }</code> is a host tool (not a keyword) that ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>REPL state</dt>
+            <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</dd>
+            <dt>Completion</dt>
+            <dd><code>submit</code> ends the program and turn. <code>call continue_as { task: ..., seed: { ... } }</code> is a host tool (not a keyword) that ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
+          </dl>
           <pre><code>```lashlang
 text = (call read_file { path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
@@ -105,12 +112,16 @@ call continue_as {
             <h2>Syntax And Values</h2>
             <p>The language accepts newline-separated statements. Commas are accepted in lists, records, type fields, and parallel branch lists where they make generated code easier to read.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3>Literals</h3><p>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</p></article>
-            <article class="panel"><h3>Strings</h3><p><code>"..."</code> supports <code>\n</code>, <code>\r</code>, <code>\t</code>, <code>\"</code>, and <code>\\</code>. <code>"""..."""</code> is multiline with escapes. <code>r"""..."""</code> and <code>r'''...'''</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs.</p></article>
-            <article class="panel"><h3>Fields And Indexes</h3><p><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists and records; record indexes are string-coerced and missing keys read as <code>null</code>. List indexes support negative offsets for reads and slices.</p></article>
-            <article class="panel"><h3>Images</h3><p><code>Image</code> values expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. Image fields are immutable. <code>len(image)</code> is invalid; use <code>image.size</code>.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>Literals</dt>
+            <dd>Use <code>null</code>, <code>true</code>, <code>false</code>, numbers, strings, lists like <code>[a, b]</code>, and records like <code>{ name: "lash", "with space": 1 }</code>. Record insertion order is preserved for display and serialization.</dd>
+            <dt>Strings</dt>
+            <dd><code>"..."</code> supports <code>\n</code>, <code>\r</code>, <code>\t</code>, <code>\"</code>, and <code>\\</code>. <code>"""..."""</code> is multiline with escapes. <code>r"""..."""</code> and <code>r'''...'''</code> preserve content exactly for patches, JSON, scripts, Markdown, and heredocs.</dd>
+            <dt>Fields and indexes</dt>
+            <dd><code>value.field</code> reads record and image fields. <code>value[index]</code> reads lists and records; record indexes are string-coerced and missing keys read as <code>null</code>. List indexes support negative offsets for reads and slices.</dd>
+            <dt>Images</dt>
+            <dd><code>Image</code> values expose <code>.id</code>, <code>.label</code>, <code>.size</code>, <code>.width</code>, and <code>.height</code>. Image fields are immutable. <code>len(image)</code> is invalid; use <code>image.size</code>.</dd>
+          </dl>
         </div>
 
         <div class="section" id="expressions">
@@ -138,10 +149,12 @@ call continue_as {
             <h2>Assignment And Mutation</h2>
             <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through Python-style alias mutation.</p>
           </div>
-          <div class="two-col">
-            <article class="panel"><h3>Supported targets</h3><p><code>name = expr</code>, <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and nested forms like <code>state.groups[g].count = count + 1</code>.</p></article>
-            <article class="panel"><h3>Rules</h3><p>Record field/index assignment inserts or replaces fields. List assignment replaces an existing integer index only. Assigning through a missing nested record key or image field is an error.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>Supported targets</dt>
+            <dd><code>name = expr</code>, <code>record.field = value</code>, <code>record[key] = value</code>, <code>list[i] = value</code>, and nested forms like <code>state.groups[g].count = count + 1</code>.</dd>
+            <dt>Rules</dt>
+            <dd>Record field/index assignment inserts or replaces fields. List assignment replaces an existing integer index only. Assigning through a missing nested record key or image field is an error.</dd>
+          </dl>
           <pre><code>counts = {}
 for group in groups {
   current = counts[group]
@@ -155,12 +168,16 @@ submit counts</code></pre>
             <h2>Control Flow</h2>
             <p>Control flow is statement-oriented. Loop cleanup is part of the runtime path, so loop escapes are explicit statements rather than arbitrary jumps.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3><code>if</code> / <code>else</code></h3><p>Conditionals use statement blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</p></article>
-            <article class="panel"><h3><code>for</code></h3><p><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</p></article>
-            <article class="panel"><h3><code>break</code> / <code>continue</code></h3><p><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</p></article>
-            <article class="panel"><h3><code>submit</code></h3><p><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt><code>if</code> / <code>else</code></dt>
+            <dd>Conditionals use statement blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</dd>
+            <dt><code>for</code></dt>
+            <dd><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
+            <dt><code>break</code> / <code>continue</code></dt>
+            <dd><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</dd>
+            <dt><code>submit</code></dt>
+            <dd><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</dd>
+          </dl>
           <p>A short walkthrough that exercises iteration, <code>else if</code> chains, <code>break</code>/<code>continue</code>, and <code>format</code>. Loop variables are scoped to the loop body and the prior binding of <code>label</code> is restored on <code>break</code>.</p>
           <pre><code>nums = [1, 2, 3, 4, 5, 6]
 seen = []
@@ -190,12 +207,16 @@ submit format("seen={} total={} label={}", join(seen, ","), total, label)</code>
             <h2>Projected Host Bindings</h2>
             <p>The host can inject named, read-only values into Lashlang scope without copying them into VM <code>State</code>. They behave like ordinary variables for read access but rejecting reassignment keeps the host-managed values authoritative.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3><code>ProjectedBindings</code></h3><p>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</p></article>
-            <article class="panel"><h3><code>ProjectedValue</code></h3><p>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</p></article>
-            <article class="panel"><h3><code>ProjectedHostValue</code></h3><p>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</p></article>
-            <article class="panel"><h3>Reserved names</h3><p><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt><code>ProjectedBindings</code></dt>
+            <dd>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</dd>
+            <dt><code>ProjectedValue</code></dt>
+            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</dd>
+            <dt><code>ProjectedHostValue</code></dt>
+            <dd>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</dd>
+            <dt>Reserved names</dt>
+            <dd><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</dd>
+          </dl>
         </div>
 
         <div class="section" id="tool-calls-and-async-handles">
@@ -203,12 +224,16 @@ submit format("seen={} total={} label={}", join(seen, ","), total, label)</code>
             <h2>Tool Calls And Async Handles</h2>
             <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3><code>call</code></h3><p><code>call tool { arg: expr }</code> returns <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path calls and keep the wrapper for retries or expected failures.</p></article>
-            <article class="panel"><h3><code>start call</code></h3><p><code>start call tool { ... }</code> returns a handle directly. Monitors and subagents are long-lived handle-producing tools; generic async tool starts use the same shape.</p></article>
-            <article class="panel"><h3><code>await</code></h3><p><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</p></article>
-            <article class="panel"><h3><code>cancel</code></h3><p><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt><code>call</code></dt>
+            <dd><code>call tool { arg: expr }</code> returns <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path calls and keep the wrapper for retries or expected failures.</dd>
+            <dt><code>start call</code></dt>
+            <dd><code>start call tool { ... }</code> returns a handle directly. Monitors and subagents are long-lived handle-producing tools; generic async tool starts use the same shape.</dd>
+            <dt><code>await</code></dt>
+            <dd><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</dd>
+            <dt><code>cancel</code></dt>
+            <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</dd>
+          </dl>
           <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome.</p>
           <pre><code>// Fail-fast: the block aborts if the file can't be read.
 manifest = (call read_file { path: "Cargo.toml" })?
@@ -257,10 +282,12 @@ submit {
             <h2>Parallel Blocks</h2>
             <p><code>parallel</code> is for independent work. Branches must not depend on each other's output, and branch-local assignments are merged only when unambiguous.</p>
           </div>
-          <div class="two-col">
-            <article class="panel"><h3>Named branches</h3><p><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</p></article>
-            <article class="panel"><h3>Positional branches</h3><p><code>parallel { call ...; call ... }</code> returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt>Named branches</dt>
+            <dd><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</dd>
+            <dt>Positional branches</dt>
+            <dd><code>parallel { call ...; call ... }</code> returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
+          </dl>
           <pre><code>a = start call spawn_agent { agent_name: "one", task: "Read file A", capability: "explore" }
 b = start call spawn_agent { agent_name: "two", task: "Read file B", capability: "explore" }
 results = parallel { one: (await a)?, two: (await b)? }
@@ -421,10 +448,12 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <h2>Images And Attachments</h2>
             <p>Image support is a first-class runtime feature, not a plain record convention.</p>
           </div>
-          <div class="two-col">
-            <article class="panel"><h3><code>print(image)</code></h3><p>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</p></article>
-            <article class="panel"><h3><code>submit(image)</code></h3><p>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</p></article>
-          </div>
+          <dl class="def-list">
+            <dt><code>print(image)</code></dt>
+            <dd>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</dd>
+            <dt><code>submit(image)</code></dt>
+            <dd>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</dd>
+          </dl>
         </div>
 
         <div class="section" id="runtime-internals">
@@ -432,12 +461,32 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <h2>Runtime Internals</h2>
             <p>The implementation compiles AST to a compact VM instruction stream, then executes async host effects without blocking the RLM runtime.</p>
           </div>
-          <div class="module-grid">
-            <article class="panel"><h3>Parser</h3><p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p></article>
-            <article class="panel"><h3>Compiler</h3><p><code>runtime/compiler.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p></article>
-            <article class="panel"><h3>VM</h3><p><code>runtime/vm.rs</code> stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment.</p></article>
-            <article class="panel"><h3>Profiling</h3><p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> (in <code>examples/bench_support/mod.rs</code>) cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p></article>
-          </div>
+          <ol class="principle-list">
+            <li>
+              <div>
+                <h3>Parser</h3>
+                <p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Compiler</h3>
+                <p><code>runtime/compiler.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>VM</h3>
+                <p><code>runtime/vm.rs</code> stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Profiling</h3>
+                <p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> (in <code>examples/bench_support/mod.rs</code>) cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p>
+              </div>
+            </li>
+          </ol>
         </div>
 
         <div class="section" id="important-files">

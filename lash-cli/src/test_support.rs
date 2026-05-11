@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lash::{PromptRequest, PromptResponse, SessionEvent, TurnEvent};
+use lash_core::{PromptRequest, PromptResponse, SessionEvent, TurnEvent};
 use lash_tui::ScreenSnapshot;
 use lash_tui_extensions::TuiExtensions;
 use tokio::sync::Mutex;
@@ -200,7 +200,7 @@ fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::{PluginSurfaceEvent, SessionEvent};
+    use lash_core::{PluginSurfaceEvent, SessionEvent};
     use serde_json::json;
 
     fn line_index_containing(lines: &[String], needle: &str) -> Option<usize> {
@@ -321,11 +321,14 @@ mod tests {
             .app
             .queue_pending_steer(PreparedTurn::new("follow up now".into(), Vec::new()));
         harness.dispatch_event(SessionEvent::InjectedTurnInputAccepted {
-            inputs: vec![lash::AcceptedInjectedTurnInput {
+            inputs: vec![lash_core::AcceptedInjectedTurnInput {
                 id: None,
-                message: lash::PluginMessage::text(lash::MessageRole::User, "follow up now"),
+                message: lash_core::PluginMessage::text(
+                    lash_core::MessageRole::User,
+                    "follow up now",
+                ),
             }],
-            checkpoint: lash::CheckpointKind::AfterWork,
+            checkpoint: lash_core::CheckpointKind::AfterWork,
         });
         harness.dispatch_event(SessionEvent::TextDelta {
             content: "I saw the follow up.".into(),

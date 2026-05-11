@@ -1,4 +1,4 @@
-use lash::{ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode};
+use lash_core::{ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode};
 
 pub fn batch_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(

@@ -270,11 +270,11 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
     )]));
     for task in &app.background_tasks {
         let state = match task.run_state {
-            lash::ManagedRunState::Running => "running",
-            lash::ManagedRunState::Idle => "idle",
-            lash::ManagedRunState::Completed => "success",
-            lash::ManagedRunState::Failed => "error",
-            lash::ManagedRunState::Cancelled => "cancelled",
+            lash_core::ManagedRunState::Running => "running",
+            lash_core::ManagedRunState::Idle => "idle",
+            lash_core::ManagedRunState::Completed => "success",
+            lash_core::ManagedRunState::Failed => "error",
+            lash_core::ManagedRunState::Cancelled => "cancelled",
         };
         let kind = task.kind.as_str();
         let elapsed_duration = task
@@ -285,10 +285,10 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
         let state_style = match task.run_state {
-            lash::ManagedRunState::Running => theme::turn_status_state(),
-            lash::ManagedRunState::Idle => theme::text_subtle_style(),
-            lash::ManagedRunState::Completed => theme::tool_success(),
-            lash::ManagedRunState::Failed | lash::ManagedRunState::Cancelled => {
+            lash_core::ManagedRunState::Running => theme::turn_status_state(),
+            lash_core::ManagedRunState::Idle => theme::text_subtle_style(),
+            lash_core::ManagedRunState::Completed => theme::tool_success(),
+            lash_core::ManagedRunState::Failed | lash_core::ManagedRunState::Cancelled => {
                 theme::tool_failure()
             }
         };

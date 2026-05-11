@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use lash::ProviderSpec;
-use lash::provider::build_provider;
-use lash::{ExecutionMode, ProviderHandle};
+use lash_core::ProviderHandle;
+use lash_core::ProviderSpec;
+use lash_core::provider::build_provider;
 use lash_plugin_mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
 
@@ -22,19 +22,6 @@ pub struct AuxiliarySecrets {
 impl AuxiliarySecrets {
     fn is_empty(&self) -> bool {
         self.tavily_api_key.is_none()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub explore_tier_subagent_execution_mode: Option<ExecutionMode>,
-}
-
-impl RuntimeSettings {
-    fn is_default(&self) -> bool {
-        self.explore_tier_subagent_execution_mode.is_none()
     }
 }
 
@@ -66,8 +53,6 @@ pub struct LashConfig {
     /// resumes still use the session head's persisted model instead.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_defaults: BTreeMap<String, ModelDefault>,
-    #[serde(default, skip_serializing_if = "RuntimeSettings::is_default")]
-    pub runtime: RuntimeSettings,
 }
 
 impl LashConfig {
@@ -85,7 +70,6 @@ impl LashConfig {
             mcp_servers: BTreeMap::new(),
             agent_models: BTreeMap::new(),
             model_defaults: BTreeMap::new(),
-            runtime: RuntimeSettings::default(),
         }
     }
 
@@ -229,8 +213,12 @@ mod tests {
     #[test]
     fn lash_config_roundtrips_existing_shape() {
         let raw = serde_json::json!({
-            "active_provider": "openai-compatible",
+            "active_provider": "openai",
             "providers": {
+                "openai": {
+                    "type": "openai",
+                    "api_key": "direct-k"
+                },
                 "openai-compatible": {
                     "type": "openai-compatible",
                     "api_key": "k",
@@ -239,10 +227,12 @@ mod tests {
             }
         });
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
-        assert_eq!(cfg.active_provider, "openai-compatible");
+        assert_eq!(cfg.active_provider, "openai");
         let spec = cfg.active_provider_spec();
-        assert_eq!(spec.kind, "openai-compatible");
-        assert_eq!(spec.config["api_key"], serde_json::json!("k"));
+        assert_eq!(spec.kind, "openai");
+        assert_eq!(spec.config["api_key"], serde_json::json!("direct-k"));
+        let compatible = cfg.provider_spec("openai-compatible").expect("compatible");
+        assert_eq!(compatible.config["base_url"], "https://example.com/v1");
     }
 
     #[test]

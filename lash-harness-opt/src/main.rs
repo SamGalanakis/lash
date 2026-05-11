@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
-use lash::TurnInput;
+use lash::advanced::ModeTurnOptions;
+use lash::{LashCore, TurnActivity, TurnEvent};
 use lash_cli::config::LashConfig;
-use lash_embed::advanced::ModeTurnOptions;
-use lash_embed::{LashCore, TurnActivity, TurnEvent};
+use lash_core::TurnInput;
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{
     ReflectiveGepaStrategy, ReflectiveProposalRequest, ReflectiveProposer,
@@ -363,7 +363,7 @@ async fn load_clbench_config(path: PathBuf) -> Result<ClbenchProject> {
 }
 
 struct LashRlmReflectiveProposer {
-    provider: lash::ProviderHandle,
+    provider: lash_core::ProviderHandle,
     model: Option<String>,
     variant: Option<String>,
     max_context_tokens: usize,
@@ -372,7 +372,7 @@ struct LashRlmReflectiveProposer {
 
 impl LashRlmReflectiveProposer {
     fn new(
-        provider: lash::ProviderHandle,
+        provider: lash_core::ProviderHandle,
         model: Option<String>,
         variant: Option<String>,
         max_context_tokens: usize,
@@ -431,7 +431,7 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
             .cancel(cancellation)
             .mode_turn_options(
                 ModeTurnOptions::typed(
-                    lash::ExecutionMode::new("rlm"),
+                    lash_core::ExecutionMode::new("rlm"),
                     RlmTermination::SubmitRequired {
                         schema: Some(request.output_schema.clone()),
                     },
@@ -444,8 +444,10 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
 
         let assistant_prose = assistant_prose(&turn.activities);
         match turn.result.outcome {
-            lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { value })
-            | lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { value, .. }) => {
+            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value })
+            | lash_core::TurnOutcome::Finished(lash_core::TurnFinish::ToolValue {
+                value, ..
+            }) => {
                 let output_path = request.artifact_dir.join("output.json");
                 tokio::fs::write(
                     &output_path,
@@ -566,7 +568,7 @@ Rules:
 Return only by calling `submit <object>` from a fenced `lashlang` block. The submitted object must match the required output schema."#
 }
 
-fn resolve_provider(provider_id: Option<&str>) -> Result<lash::ProviderHandle> {
+fn resolve_provider(provider_id: Option<&str>) -> Result<lash_core::ProviderHandle> {
     let config_path = lash_home().join("config.json");
     let mut config = LashConfig::load(&config_path)
         .ok_or_else(|| anyhow::anyhow!("missing or invalid {}", config_path.display()))?;

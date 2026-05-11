@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quickstart - lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main class="page">
+    <div class="frame">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="sidebar__exit" href="./index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Guide</span>
+            <span class="sidebar__current">Quickstart</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a class="active" href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./embedding.html">Lash API</a></li>
+            <li><a href="./example-agent-service.html">Agent Service</a></li>
+            <li><a href="./cli.html">CLI</a></li>
+            <li><a href="./plugins.html">Plugins</a></li>
+            <li><a href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
+            <li><a href="./architecture/">Architecture</a></li>
+            <li><a href="./design-language.html">Design Language</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#add-the-crates">Add The Crates</a></li>
+            <li><a href="#core-concepts">Core Concepts</a></li>
+            <li><a href="#hello-turn">Hello, Turn</a></li>
+            <li><a href="#whats-next">What's Not Here Yet</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <header class="hero">
+        <div class="eyebrow">lash guide</div>
+        <h1>quick<span class="slash">/</span>start</h1>
+        <p>The shortest path to a working Lash turn. Add the crate, pick a provider, open a session, run one turn. Once this works you can layer on tools, modes, plugins, persistence, and tracing as you need them.</p>
+      </header>
+
+      <section class="content" id="content">
+        <div class="section" id="add-the-crates">
+          <div class="section-header">
+            <h2>Add The Crates</h2>
+            <p>The <code>lash</code> crate is the user-facing facade. Pull in a provider crate (or <code>lash-providers-builtin</code> for the bundled set) and a mode preset.</p>
+          </div>
+          <pre><code>[dependencies]
+lash = { path = "path/to/lash" }
+lash-providers-builtin = { path = "path/to/lash-providers-builtin" }
+tokio = { version = "1", features = ["full"] }</code></pre>
+          <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>TokioSessionTaskExecutor</code> values.</p>
+        </div>
+
+        <div class="section" id="core-concepts">
+          <div class="section-header">
+            <h2>Core Concepts</h2>
+            <p>The example below uses five named types. Skim these before reading the code — the rest follows from how they compose.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>LashCore</code></dt>
+            <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins. One per app, cloned freely.</dd>
+            <dt><code>LashSession</code></dt>
+            <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
+            <dt><code>TurnInput</code></dt>
+            <dd>Semantic input to a turn — text plus image references. Use <code>TurnInput::text(...)</code> for the common case.</dd>
+            <dt><code>TurnBuilder</code></dt>
+            <dd>Per-turn configuration returned by <code>session.turn(input)</code>. Call <code>.run()</code> for a collected result, <code>.stream(&amp;sink)</code> for live events.</dd>
+            <dt><code>ProviderHandle</code></dt>
+            <dd>A typed adapter around a provider crate. <code>lash_providers_builtin::register_all()</code> wires the OpenAI / Anthropic / Codex / Google factories into the global registry once at process start.</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="hello-turn">
+          <div class="section-header">
+            <h2>Hello, Turn</h2>
+            <p>The smallest meaningful program: build a core, open a session, run one turn, print the assistant's prose.</p>
+          </div>
+          <pre><code>use lash::{LashCore, TurnEvent, TurnInput, provider::ProviderHandle};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    // Register the bundled OpenAI/Anthropic/Codex/Google factories with the
+    // global provider registry. Do this once at process start.
+    lash_providers_builtin::register_all();
+
+    // Build a provider handle. Substitute your own creds + base URL.
+    let api_key = std::env::var("OPENROUTER_API_KEY")?;
+    let provider = ProviderHandle::new(
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
+    );
+
+    // One LashCore per app, cloned freely.
+    let core = LashCore::builder()
+        .provider(provider)
+        .model("anthropic/claude-sonnet-4.6", None)
+        .max_context_tokens(200_000)
+        .build()?;
+
+    // One session per chat / task.
+    let session = core.session("hello-1").open().await?;
+
+    // Run one turn; collect prose from the activity stream.
+    let result = session
+        .turn(TurnInput::text("Say hi in one short sentence."))
+        .run()
+        .await?;
+
+    let prose: String = result.activities.iter().filter_map(|a| match &amp;a.event {
+        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
+        _ =&gt; None,
+    }).collect();
+
+    println!("{prose}");
+    Ok(())
+}</code></pre>
+          <p>That's the whole flow: <code>LashCore</code> for shared configuration, <code>LashSession</code> for one logical conversation, <code>TurnBuilder::run()</code> for a single collected turn. Nothing more is required.</p>
+        </div>
+
+        <div class="section" id="whats-next">
+          <div class="section-header">
+            <h2>What's Not Here Yet</h2>
+            <p>The example above has no persistence (the session lives in memory and goes away when the process exits), no host tools, no plugins, no tracing, and no live streaming. Each is a small additional step.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3>Live streaming</h3><p>Use <code>TurnBuilder::stream(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding.html#semantic-events">Lash API guide</a> covers the full event taxonomy.</p></article>
+            <article class="panel"><h3>Host tools</h3><p>Implement <code>ToolProvider</code>, hand it to <code>.tools(Arc::new(MyTools))</code> on the builder. See the <a href="./plugins.html">Plugins guide</a>.</p></article>
+            <article class="panel"><h3>Persistence</h3><p>Pass a <code>SessionStoreFactory</code> to <code>.store_factory(...)</code> so sessions survive process restarts. See the <a href="./persistence.html">Persistence guide</a>.</p></article>
+            <article class="panel"><h3>Tracing</h3><p>Attach a <code>TraceSink</code> via <code>.trace_sink(Some(Arc::new(sink)))</code> for JSONL traces of every turn. See the <a href="./tracing.html">Tracing guide</a>.</p></article>
+            <article class="panel"><h3>RLM mode</h3><p>Install <code>ModePreset::rlm()</code> for Lashlang-driven agentic turns with structured submit/handoff semantics. See <a href="./embedding.html#rlm-and-submit">RLM And Submit</a>.</p></article>
+            <article class="panel"><h3>MCP servers</h3><p>Wire up MCP via <code>McpPluginFactory::new(servers).await?</code> and pass it to <code>.plugin(...)</code>. See the <a href="./embedding.html#mcp-servers">MCP Servers</a> section in the Lash API guide.</p></article>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <span></span>
+          <a href="./embedding.html"><span>Next</span><strong>Lash API</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>lash/src/core.rs</code>, <code>lash/src/session.rs</code>, <code>lash-providers-builtin/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>.</footer>
+    </div>
+  </main>
+</body>
+</html>

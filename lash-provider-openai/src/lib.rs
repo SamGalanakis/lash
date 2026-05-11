@@ -9,6 +9,6 @@ mod support;
 mod tests;
 mod transport;
 
-pub use common::OPENROUTER_BASE_URL;
-pub use config::{OpenAiCacheRetention, OpenAiGenericProvider, OpenAiWireApi};
-pub use transport::OpenAiGenericProviderFactory;
+pub use common::{OPENAI_BASE_URL, OPENROUTER_BASE_URL};
+pub use config::{OpenAiCompatibleProvider, OpenAiProvider};
+pub use transport::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};

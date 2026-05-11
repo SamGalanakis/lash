@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use lash::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
-use lash::{Effect, ExecutionMode, TurnMachine, TurnMachineConfig};
+use lash_core::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
+use lash_core::{Effect, ExecutionMode, TurnMachine, TurnMachineConfig};
 use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
@@ -16,7 +16,7 @@ fn test_config_with_termination(
     mode: ExecutionMode,
     rlm_termination: RlmTermination,
 ) -> TurnMachineConfig {
-    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash::HostModeProtocol>> = match &mode {
+    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>> = match &mode {
         mode if *mode == ExecutionMode::standard() => Arc::new(StandardDriver),
         mode if *mode == ExecutionMode::new("rlm") => Arc::new(RlmDriver),
         _ => Arc::new(StandardDriver),
@@ -34,8 +34,11 @@ fn test_config_with_termination(
         system_prompt: std::sync::Arc::from(""),
         session_id: "test".to_string(),
         emit_llm_trace: false,
-        termination: lash::ModeTurnOptions::typed(lash::ExecutionMode::new("rlm"), rlm_termination)
-            .expect("valid rlm turn options"),
+        termination: lash_core::ModeTurnOptions::typed(
+            lash_core::ExecutionMode::new("rlm"),
+            rlm_termination,
+        )
+        .expect("valid rlm turn options"),
     }
 }
 
@@ -50,8 +53,7 @@ fn user_message(content: &str) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -117,7 +119,7 @@ fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash::SessionEventRecord::Mode(event) => {
+            lash_core::SessionEventRecord::Mode(event) => {
                 match lash_mode_rlm::decode_rlm_mode_event(event) {
                     Some(RlmModeEvent::RlmTrajectoryEntry(entry)) => Some(entry),
                     _ => None,
@@ -184,8 +186,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     call_id: "tc1".to_string(),
                     tool_name: "read_file".to_string(),
                     input_json: r#"{"path":"foo.txt"}"#.to_string(),
-                    item_id: None,
-                    signature: None,
+                    replay: None,
                 },
             ],
             ..LlmResponse::default()
@@ -216,7 +217,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             duration_ms: 10,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -249,8 +250,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
                 call_id: "tc1".to_string(),
                 tool_name: "update_plan".to_string(),
                 input_json: r#"{"plan":[{"step":"done","status":"completed"}]}"#.to_string(),
-                item_id: None,
-                signature: None,
+                replay: None,
             }],
             ..LlmResponse::default()
         }),
@@ -273,7 +273,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
             duration_ms: 1,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -336,8 +336,7 @@ fn standard_max_turns_stops_iteration() {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
                 input_json: "{}".to_string(),
-                item_id: None,
-                signature: None,
+                replay: None,
             }],
             ..LlmResponse::default()
         }),
@@ -360,7 +359,7 @@ fn standard_max_turns_stops_iteration() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             duration_ms: 1,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -599,7 +598,7 @@ fn rlm_exec_tool_call_events_keep_call_id() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("rlm-call-1".to_string()),
                 tool: "read_file".to_string(),
                 args: serde_json::json!({"path": "foo"}),
@@ -659,14 +658,14 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_handoff".to_string(),
                 args: serde_json::json!({}),
                 result: serde_json::json!({"ok": true}),
                 success: true,
                 duration_ms: 3,
-                control: Some(lash::ToolControl::Handoff {
+                control: Some(lash_core::ToolControl::Handoff {
                     session_id: "successor-session".to_string(),
                 }),
             }],
@@ -696,7 +695,7 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash::TurnOutcome::Handoff { session_id }
+            outcome: lash_core::TurnOutcome::Handoff { session_id }
         }) if session_id == "successor-session"
     )));
     assert!(find_done(&effects).is_some());
@@ -737,14 +736,14 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_fail".to_string(),
                 args: serde_json::json!({}),
                 result: serde_json::json!({"ok": true}),
                 success: true,
                 duration_ms: 3,
-                control: Some(lash::ToolControl::Fail {
+                control: Some(lash_core::ToolControl::Fail {
                     value: serde_json::json!({ "reason": "no valid result" }),
                 }),
             }],
@@ -774,7 +773,7 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash::TurnOutcome::Stopped(lash::TurnStop::ToolError {
+            outcome: lash_core::TurnOutcome::Stopped(lash_core::TurnStop::ToolError {
                 tool_name: name,
                 value,
             })
@@ -943,11 +942,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
             parts: vec![
                 LlmOutputPart::Reasoning {
                     text: "I'll answer directly.".to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
+                    replay: None,
                 },
                 LlmOutputPart::Text {
                     text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),

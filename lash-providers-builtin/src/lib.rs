@@ -7,7 +7,8 @@ pub fn register_all() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         lash_provider_anthropic::AnthropicProviderFactory::register();
-        lash_provider_openai::OpenAiGenericProviderFactory::register();
+        lash_provider_openai::OpenAiProviderFactory::register();
+        lash_provider_openai::OpenAiCompatibleProviderFactory::register();
         lash_provider_codex::CodexProviderFactory::register();
         lash_provider_google::GoogleOAuthProviderFactory::register();
     });

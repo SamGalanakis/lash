@@ -8,20 +8,22 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
-use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
-use lash::testing::TestProvider;
-use lash::{
-    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, ExecutionMode, InputItem,
-    MessageRole, ModeTurnOptions, PluginFactory, PluginHost, PluginMessage, ProviderHandle,
-    RunMode, SessionAppendNode, SessionGraph, SessionPolicy, SessionStateEnvelope,
-    StandardContextApproach, StandardContextApproachKind, TokenUsage, ToolCall, ToolDefinition,
-    ToolExecutionMode, ToolProvider, ToolResult, TurnContext, TurnInput, TurnOutcome, TurnStop,
-    diff_usage_reports,
+use lash::usage::{SessionUsageReport, TokenLedgerEntry};
+use lash_core::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
+use lash_core::store;
+use lash_core::testing::TestProvider;
+use lash_core::{
+    AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
+    LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
+    PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RuntimeCommit,
+    RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint, SessionGraph,
+    SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope, SessionStoreCreateRequest,
+    SessionStoreFactory, StandardContextApproach, TokenUsage, TokioSessionTaskExecutor,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnInput, VacuumReport,
 };
-use lash_embed::usage::{SessionUsageReport, TokenLedgerEntry};
 use lash_mode_rlm::RlmTurnInputExt;
-use lash_provider_openai::OpenAiGenericProvider;
+use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_standard_plugins::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
@@ -409,56 +411,66 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, store::StoreError> {
+        let RuntimeCommit {
+            session_id,
+            expected_head_revision,
+            config,
+            graph: graph_delta,
+            checkpoint,
+            usage_deltas,
+        } = commit;
         let mut meta_guard = self
             .session_head_meta
             .lock()
             .expect("lock perf session head meta");
         let actual = meta_guard.as_ref().map_or(0, |meta| meta.head_revision);
-        if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
-        {
+        if expected_head_revision.is_some() && expected_head_revision != Some(actual) {
             return Err(store::StoreError::HeadRevisionConflict {
-                expected: commit.expected_head_revision,
+                expected: expected_head_revision,
                 actual,
             });
         }
         let mut graph = self.session_graph.lock().expect("lock perf graph");
-        let leaf_node_id = match &commit.graph {
+        let leaf_node_id = match graph_delta {
             GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
             GraphCommitDelta::Append {
                 nodes,
                 leaf_node_id,
             } => {
-                graph.extend_node_records(nodes.iter().cloned());
-                leaf_node_id.clone()
+                graph.extend_node_records(nodes);
+                leaf_node_id
             }
             GraphCommitDelta::ReplaceFull(next) => {
-                *graph = next.clone();
-                next.leaf_node_id.clone()
+                let leaf_node_id = next.leaf_node_id.clone();
+                *graph = next;
+                leaf_node_id
             }
         };
-        if !commit.usage_deltas.is_empty() {
+        if !usage_deltas.is_empty() {
             self.usage_deltas
                 .lock()
                 .expect("lock perf usage deltas")
-                .extend(commit.usage_deltas.iter().cloned());
+                .extend(usage_deltas);
         }
+        let manifest = SessionCheckpoint {
+            turn_state: checkpoint.turn_state,
+            tool_state_ref: checkpoint.tool_state_ref,
+            plugin_snapshot_ref: checkpoint.plugin_snapshot_ref,
+            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+            execution_state_ref: checkpoint.execution_state_ref,
+        };
+        let graph_node_count = graph.nodes.len();
+        drop(graph);
         let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
-        let manifest = SessionCheckpoint {
-            turn_state: commit.checkpoint.turn_state,
-            tool_state_ref: commit.checkpoint.tool_state_ref,
-            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
-            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
-            execution_state_ref: commit.checkpoint.execution_state_ref,
-        };
         let head_revision = actual + 1;
         *meta_guard = Some(SessionHeadMeta {
-            session_id: commit.session_id,
+            session_id,
             head_revision,
-            config: commit.config,
+            config,
             checkpoint_ref: Some(checkpoint_ref.clone()),
             leaf_node_id,
-            graph_node_count: graph.nodes.len(),
+            graph_node_count,
             token_ledger: Vec::new(),
         });
         Ok(RuntimeCommitResult {
@@ -648,7 +660,7 @@ impl ToolProvider for BenchmarkEchoTool {
         ]
     }
 
-    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         if call.name != "benchmark_echo" {
             return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name));
         }
@@ -879,11 +891,10 @@ async fn run_once(
                 text: benchmark_prompt(scenario, turn_index),
             }],
             image_blobs: Default::default(),
-            mode: Some(RunMode::Normal),
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         };
         if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
             turn_input =
@@ -919,8 +930,9 @@ async fn run_once(
             sum_allocation_deltas([&run_turn_alloc, &await_background_work_alloc]);
 
         let cumulative_usage = runtime.usage_report();
-        let usage_delta_entries = lash::diff_usage_reports(&before_turn_usage, &cumulative_usage)
-            .map_err(anyhow::Error::msg)?;
+        let usage_delta_entries =
+            lash_core::diff_usage_reports(&before_turn_usage, &cumulative_usage)
+                .map_err(anyhow::Error::msg)?;
         turns.push(RuntimePerfTurnResult {
             turn_index,
             run_turn_ms,
@@ -1014,9 +1026,7 @@ async fn run_once_embed(
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(lash_embed::ModeId::new(
-            scenario.execution_mode().plugin_id(),
-        ))
+        .mode(lash::ModeId::new(scenario.execution_mode().plugin_id()))
         .open()
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;
@@ -1037,7 +1047,7 @@ async fn run_once_embed(
         let turn_before_memory = process_memory_sample();
         let turn_started = Instant::now();
         let turn = session
-            .run(lash::TurnInput::text(benchmark_prompt(
+            .run(lash_core::TurnInput::text(benchmark_prompt(
                 scenario, turn_index,
             )))
             .await
@@ -1141,12 +1151,12 @@ async fn run_once_embed(
 fn build_embed_core(
     scenario: RuntimePerfScenario,
     store: Arc<RuntimePerfStore>,
-) -> anyhow::Result<lash_embed::LashCore> {
+) -> anyhow::Result<lash::LashCore> {
     let mut builder = match scenario {
-        RuntimePerfScenario::EmbedStandard => lash_embed::LashCore::standard(),
-        RuntimePerfScenario::EmbedRlm => lash_embed::LashCore::rlm()
+        RuntimePerfScenario::EmbedStandard => lash::LashCore::standard(),
+        RuntimePerfScenario::EmbedRlm => lash::LashCore::rlm()
             .tools(Arc::new(BenchmarkEchoTool))
-            .default_mode(lash_embed::ModeId::rlm()),
+            .default_mode(lash::ModeId::rlm()),
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
     };
     builder = builder
@@ -1171,7 +1181,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .unwrap_or_else(|| "https://example.invalid/v1".to_string());
     let provider: ProviderHandle = match scenario {
         RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(
-            OpenAiGenericProvider::new("test-key", base_url.clone()).into_components(),
+            OpenAiCompatibleProvider::new("test-key", base_url.clone()).into_components(),
         ),
         _ => benchmark_provider(scenario).into_handle(),
     };
@@ -1194,9 +1204,9 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         tavily_api_key: None,
         instruction_source: None,
     });
-    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
-    factories.push(Arc::new(lash::plugin::StaticPluginFactory::new(
+    factories.push(Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()));
+    factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));

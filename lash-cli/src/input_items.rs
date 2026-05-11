@@ -39,7 +39,7 @@ pub fn build_items_from_editor_input(
             image_blobs
                 .entry(id.clone())
                 .or_insert_with(|| bytes.clone());
-            items.push(InputItem::ImageRef { id });
+            items.push(InputItem::image_ref(id));
             i = next_i;
             continue;
         }
@@ -95,9 +95,7 @@ fn push_text_item(items: &mut Vec<InputItem>, text: &mut String) {
         text.clear();
         return;
     }
-    items.push(InputItem::Text {
-        text: std::mem::take(text),
-    });
+    items.push(InputItem::text(std::mem::take(text)));
 }
 
 pub(crate) fn parse_image_marker_at(input: &str, start: usize) -> Option<(usize, usize)> {

@@ -3,12 +3,12 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
-use lash::instructions::InstructionSource;
-use lash::plugin::{
+use lash_core::instructions::InstructionSource;
+use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
-use lash::{
+use lash_core::{
     MessageRole, PluginMessage, ToolCall, ToolDefinition, ToolExecutionMode, ToolImage,
     ToolProvider, ToolResult,
 };
@@ -556,7 +556,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ReadFile,
             "read_file",
             &json!({"path": path.to_str().unwrap()}),
@@ -575,7 +575,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ReadFile,
             "read_file",
             &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
@@ -600,7 +600,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(&path, content).unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ReadFile,
             "read_file",
             &json!({"path": path.to_str().unwrap(), "limit": 200}),
@@ -614,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent() {
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ReadFile,
             "read_file",
             &json!({"path": "/nonexistent/path/to/file.txt"}),

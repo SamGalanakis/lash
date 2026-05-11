@@ -12,23 +12,20 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash_embed::{
+use lash::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
-    TurnBuilder, TurnEvent, TurnInput,
-    persistence::{
-        RuntimePersistence, SessionMeta, SessionStoreCreateRequest, SessionStoreFactory,
-    },
+    TurnBuilder, TurnEvent, TurnInput, TurnOutput,
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult},
     tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -38,34 +35,35 @@ type AppResult<T> = Result<T, AppError>;
 struct AppStateData {
     core: LashCore,
     db: Arc<Mutex<AppDb>>,
-    sessions: Arc<AsyncMutex<HashMap<String, LashSession>>>,
+    default_model: String,
+    default_model_variant: Option<String>,
 }
 
 impl AppStateData {
-    async fn session_for(&self, chat_id: &str) -> AppResult<LashSession> {
-        if let Some(session) = self.sessions.lock().await.get(chat_id).cloned() {
-            return Ok(session);
-        }
-        let session = self
+    async fn open_session(&self, chat_id: &str) -> AppResult<LashSession> {
+        Ok(self
             .core
             .session(chat_id)
             .rlm()
-            .use_plugin::<DemoPlugin>(DemoPluginConfig)?
+            .plugin::<DemoPlugin>(DemoPluginConfig)
             .open()
-            .await?;
-        self.sessions
-            .lock()
-            .await
-            .insert(chat_id.to_string(), session.clone());
-        Ok(session)
+            .await?)
     }
 
-    fn with_db<T>(&self, f: impl FnOnce(&mut AppDb) -> AppResult<T>) -> AppResult<T> {
-        let mut db = self
-            .db
-            .lock()
-            .map_err(|_| AppError::internal("database lock poisoned"))?;
-        f(&mut db)
+    async fn with_db<T, F>(&self, f: F) -> AppResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut AppDb) -> AppResult<T> + Send + 'static,
+    {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let mut db = db
+                .lock()
+                .map_err(|_| AppError::internal("database lock poisoned"))?;
+            f(&mut db)
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("database task failed: {err}")))?
     }
 }
 
@@ -103,8 +101,8 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
-impl From<lash_embed::EmbedError> for AppError {
-    fn from(err: lash_embed::EmbedError) -> Self {
+impl From<lash::EmbedError> for AppError {
+    fn from(err: lash::EmbedError) -> Self {
         Self::internal(err.to_string())
     }
 }
@@ -116,6 +114,8 @@ struct ChatSummary {
     created_at: String,
     updated_at: String,
     model: String,
+    model_variant: Option<String>,
+    model_label: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -132,12 +132,35 @@ struct ChatMessage {
 #[derive(Debug, Deserialize)]
 struct CreateChatRequest {
     title: Option<String>,
+    model: Option<String>,
+    model_variant: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateChatModelRequest {
+    model: String,
+    model_variant: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SendMessageRequest {
     text: String,
     board: BoardState,
+    model: Option<String>,
+    model_variant: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AppSettings {
+    default_model: String,
+    default_model_variant: Option<String>,
+    model_variants: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug)]
+struct ChatModelSelection {
+    model: String,
+    model_variant: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -197,18 +220,19 @@ async fn main() -> anyhow_like::Result<()> {
     eprintln!("agent-service trace: {}", trace_path.display());
 
     let provider = ProviderHandle::new(
-        OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
                 thinking: ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             })
             .into_components(),
     );
-    let store_factory = Arc::new(ChatStoreFactory::new(data_dir.join("lash-sessions")));
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        data_dir.join("lash-sessions"),
+    ));
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::rlm())
-        .register_plugin::<DemoPlugin>()
         .provider(provider)
         .model(model.clone(), Some(model_variant.clone()))
         .max_context_tokens(200_000)
@@ -223,20 +247,22 @@ async fn main() -> anyhow_like::Result<()> {
         .build()
         .map_err(|err| err.to_string())?;
 
-    let app_db = AppDb::open(
-        &data_dir.join("app.db"),
-        format!("{model} ({model_variant})"),
-    )
-    .map_err(|err| err.to_string())?;
+    let app_db = AppDb::open(&data_dir.join("app.db")).map_err(|err| err.to_string())?;
     let state = AppStateData {
         core,
         db: Arc::new(Mutex::new(app_db)),
-        sessions: Arc::new(AsyncMutex::new(HashMap::new())),
+        default_model: model,
+        default_model_variant: Some(model_variant),
     };
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/settings", get(settings))
         .route("/api/chats", get(list_chats).post(create_chat))
+        .route(
+            "/api/chats/{chat_id}/model",
+            axum::routing::post(update_chat_model),
+        )
         .route(
             "/api/chats/{chat_id}/messages",
             get(list_messages).post(send_message),
@@ -258,7 +284,15 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn list_chats(State(state): State<AppStateData>) -> AppResult<Json<Vec<ChatSummary>>> {
-    state.with_db(|db| db.list_chats()).map(Json)
+    state.with_db(|db| db.list_chats()).await.map(Json)
+}
+
+async fn settings(State(state): State<AppStateData>) -> Json<AppSettings> {
+    Json(AppSettings {
+        default_model: state.default_model,
+        default_model_variant: state.default_model_variant,
+        model_variants: vec!["low", "medium", "high"],
+    })
 }
 
 async fn create_chat(
@@ -271,7 +305,39 @@ async fn create_chat(
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .unwrap_or("New chat");
-    state.with_db(|db| db.create_chat(title)).map(Json)
+    let title = title.to_string();
+    let selection = normalize_model_selection(
+        request.model.as_deref(),
+        request.model_variant.as_deref(),
+        &state.default_model,
+        state.default_model_variant.as_deref(),
+    )?;
+    state
+        .with_db(move |db| {
+            db.create_chat(&title, &selection.model, selection.model_variant.as_deref())
+        })
+        .await
+        .map(Json)
+}
+
+async fn update_chat_model(
+    State(state): State<AppStateData>,
+    AxumPath(chat_id): AxumPath<String>,
+    Json(request): Json<UpdateChatModelRequest>,
+) -> AppResult<Json<ChatSummary>> {
+    let selection =
+        normalize_optional_model_selection(Some(&request.model), request.model_variant.as_deref())?
+            .ok_or_else(|| AppError::bad_request("model is required"))?;
+    state
+        .with_db(move |db| {
+            db.update_chat_model(
+                &chat_id,
+                &selection.model,
+                selection.model_variant.as_deref(),
+            )
+        })
+        .await
+        .map(Json)
 }
 
 async fn list_messages(
@@ -279,10 +345,11 @@ async fn list_messages(
     AxumPath(chat_id): AxumPath<String>,
 ) -> AppResult<Json<Vec<ChatMessage>>> {
     state
-        .with_db(|db| {
+        .with_db(move |db| {
             db.require_chat(&chat_id)?;
             db.list_messages(&chat_id)
         })
+        .await
         .map(Json)
 }
 
@@ -295,22 +362,41 @@ async fn send_message(
     if text.is_empty() {
         return Err(AppError::bad_request("message text is required"));
     }
+    let request_model = normalize_optional_model_selection(
+        request.model.as_deref(),
+        request.model_variant.as_deref(),
+    )?;
 
     // Persist the submitted board with the user message so reload can replay
     // human-only terminal states, including a final X move that ends in draw.
     let user_board = request.board.clone();
-    let user_message = state.with_db(|db| {
-        db.require_chat(&chat_id)?;
-        db.maybe_title_from_first_message(&chat_id, &text)?;
-        db.insert_message_with_payload(
-            &chat_id,
-            "user",
-            &text,
-            Some(json!({ "board": user_board })),
-        )
-    })?;
+    let (user_message, model_selection) = state
+        .with_db({
+            let chat_id = chat_id.clone();
+            let text = text.clone();
+            move |db| {
+                db.require_chat(&chat_id)?;
+                if let Some(selection) = request_model {
+                    db.update_chat_model(
+                        &chat_id,
+                        &selection.model,
+                        selection.model_variant.as_deref(),
+                    )?;
+                }
+                let model_selection = db.chat_model_selection(&chat_id)?;
+                db.maybe_title_from_first_message(&chat_id, &text)?;
+                let message = db.insert_message_with_payload(
+                    &chat_id,
+                    "user",
+                    &text,
+                    Some(json!({ "board": user_board })),
+                )?;
+                Ok((message, model_selection))
+            }
+        })
+        .await?;
 
-    let session = state.session_for(&chat_id).await?;
+    let session = state.open_session(&chat_id).await?;
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let run_state = state.clone();
     tokio::spawn(async move {
@@ -328,21 +414,25 @@ async fn send_message(
         };
         let turn = session
             .turn(TurnInput::text(text))
+            .model(model_selection.model, model_selection.model_variant)
             .with_board(request.board)
             .require_submit();
         let turn = match turn {
-            Ok(turn) => turn.collect_with(&ui_events).await.map(|_| ()),
+            Ok(turn) => turn.collect_with(&ui_events).await,
             Err(err) => Err(err),
         };
         match turn {
-            Ok(_) => {
-                let assistant_text = turn_state
-                    .lock()
-                    .expect("turn state lock")
-                    .assistant_prose
-                    .clone();
+            Ok(output) => {
+                let assistant_text = assistant_text_for_persistence(
+                    &output,
+                    &turn_state.lock().expect("turn state lock").assistant_prose,
+                );
                 let inserted = run_state
-                    .with_db(|db| db.insert_message(&chat_id, "assistant", &assistant_text));
+                    .with_db({
+                        let chat_id = chat_id.clone();
+                        move |db| db.insert_message(&chat_id, "assistant", &assistant_text)
+                    })
+                    .await;
                 match inserted {
                     Ok(message) => {
                         let _ = tx.send(StreamItem::Message { message }).await;
@@ -432,14 +522,23 @@ impl ChannelTurnEvents {
             if let Some((id, reasoning, insert)) = update {
                 let result = if insert {
                     self.state
-                        .with_db(|db| db.insert_reasoning(&self.chat_id, &reasoning))
+                        .with_db({
+                            let chat_id = self.chat_id.clone();
+                            let reasoning = reasoning.clone();
+                            move |db| db.insert_reasoning(&chat_id, &reasoning)
+                        })
+                        .await
                         .map(|message| {
                             self.turn_state.lock().expect("turn state lock").reasoning =
                                 Some((message.id, reasoning));
                         })
                 } else {
                     self.state
-                        .with_db(|db| db.update_reasoning(id, &reasoning))
+                        .with_db({
+                            let reasoning = reasoning.clone();
+                            move |db| db.update_reasoning(id, &reasoning)
+                        })
+                        .await
                         .map(|_| ())
                 };
                 if let Err(err) = result {
@@ -456,9 +555,16 @@ impl ChannelTurnEvents {
         }
         if let TurnEvent::CodeBlockStarted { code, .. } = &event {
             self.turn_state.lock().expect("turn state lock").code = Some(code.clone());
-            match self.state.with_db(|db| {
-                db.insert_code_block(&self.chat_id, event.clone(), Some(code.clone()))
-            }) {
+            match self
+                .state
+                .with_db({
+                    let chat_id = self.chat_id.clone();
+                    let event = event.clone();
+                    let code = code.clone();
+                    move |db| db.insert_code_block(&chat_id, event, Some(code))
+                })
+                .await
+            {
                 Ok(message) => {
                     self.turn_state
                         .lock()
@@ -480,7 +586,12 @@ impl ChannelTurnEvents {
         if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
             match self
                 .state
-                .with_db(|db| db.insert_tool_call(&self.chat_id, event.clone()))
+                .with_db({
+                    let chat_id = self.chat_id.clone();
+                    let event = event.clone();
+                    move |db| db.insert_tool_call(&chat_id, event)
+                })
+                .await
             {
                 Ok(message) => {
                     self.turn_state
@@ -508,13 +619,20 @@ impl ChannelTurnEvents {
                 .expect("turn state lock")
                 .tools
                 .remove(&activity.correlation_id.0);
-            let result = self.state.with_db(|db| {
-                if let Some(id) = existing {
-                    db.update_tool_call(id, event.clone())
-                } else {
-                    db.insert_tool_call(&self.chat_id, event.clone())
-                }
-            });
+            let result = self
+                .state
+                .with_db({
+                    let chat_id = self.chat_id.clone();
+                    let event = event.clone();
+                    move |db| {
+                        if let Some(id) = existing {
+                            db.update_tool_call(id, event)
+                        } else {
+                            db.insert_tool_call(&chat_id, event)
+                        }
+                    }
+                })
+                .await;
             if let Err(err) = result {
                 let _ = self
                     .tx
@@ -531,13 +649,20 @@ impl ChannelTurnEvents {
                 let mut state = self.turn_state.lock().expect("turn state lock");
                 (state.code.take(), state.code_message.take())
             };
-            let result = self.state.with_db(|db| {
-                if let Some(id) = existing {
-                    db.update_code_block(id, event.clone(), code.clone())
-                } else {
-                    db.insert_code_block(&self.chat_id, event.clone(), code.clone())
-                }
-            });
+            let result = self
+                .state
+                .with_db({
+                    let chat_id = self.chat_id.clone();
+                    let event = event.clone();
+                    move |db| {
+                        if let Some(id) = existing {
+                            db.update_code_block(id, event, code)
+                        } else {
+                            db.insert_code_block(&chat_id, event, code)
+                        }
+                    }
+                })
+                .await;
             if let Err(err) = result {
                 let _ = self
                     .tx
@@ -580,7 +705,7 @@ struct BoardState {
 }
 
 #[derive(Clone, Debug)]
-struct DemoTurnContext {
+struct DemoTurnInput {
     board: BoardState,
 }
 
@@ -590,20 +715,20 @@ trait BoardTurnExt {
 
 impl BoardTurnExt for TurnBuilder {
     fn with_board(self, board: BoardState) -> Self {
-        self.with_plugin_context::<DemoPlugin>(DemoTurnContext { board })
+        self.with_plugin_input::<DemoPlugin>(DemoTurnInput { board })
     }
 }
 
 impl PluginBinding for DemoPlugin {
     const ID: &'static str = "demo_tic_tac_toe";
     type SessionConfig = DemoPluginConfig;
-    type TurnContext = DemoTurnContext;
+    type Input = DemoTurnInput;
 
     fn factory(_config: &Self::SessionConfig) -> Arc<dyn PluginFactory> {
         Arc::new(DemoPluginFactory)
     }
 
-    fn requires_turn_context(_config: &Self::SessionConfig) -> bool {
+    fn requires_turn_input(_config: &Self::SessionConfig) -> bool {
         true
     }
 }
@@ -632,7 +757,7 @@ impl SessionPlugin for DemoSessionPlugin {
             Box::pin(async move {
                 let Some(input) = ctx
                     .turn_context
-                    .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
+                    .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
                 else {
                     return Ok(Vec::new());
                 };
@@ -657,11 +782,8 @@ impl ToolProvider for DemoTools {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let Some(input) = call
-            .context
-            .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
-        else {
-            return ToolResult::err_fmt("missing board turn context");
+        let Some(input) = call.context.plugin_input::<DemoTurnInput>(DemoPlugin::ID) else {
+            return ToolResult::err_fmt("missing board turn input");
         };
 
         match call.name {
@@ -849,11 +971,10 @@ fn winner(cells: &[Option<String>]) -> Option<&'static str> {
 
 struct AppDb {
     conn: Connection,
-    model: String,
 }
 
 impl AppDb {
-    fn open(path: &Path, model: String) -> rusqlite::Result<Self> {
+    fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
@@ -867,7 +988,8 @@ impl AppDb {
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                model TEXT NOT NULL
+                model TEXT NOT NULL,
+                model_variant TEXT
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -882,14 +1004,17 @@ impl AppDb {
                 ON messages(chat_id, id);
             ",
         )?;
+        add_column_if_missing(&conn, "chats", "model_variant", "TEXT")?;
         add_column_if_missing(&conn, "messages", "kind", "TEXT NOT NULL DEFAULT 'message'")?;
         add_column_if_missing(&conn, "messages", "payload", "TEXT")?;
-        Ok(Self { conn, model })
+        let mut db = Self { conn };
+        db.migrate_legacy_chat_model_labels()?;
+        Ok(db)
     }
 
     fn list_chats(&mut self) -> AppResult<Vec<ChatSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, created_at, updated_at, model
+            "SELECT id, title, created_at, updated_at, model, model_variant
              FROM chats ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], chat_summary_from_row)?;
@@ -897,13 +1022,18 @@ impl AppDb {
             .map_err(AppError::from)
     }
 
-    fn create_chat(&mut self, title: &str) -> AppResult<ChatSummary> {
+    fn create_chat(
+        &mut self,
+        title: &str,
+        model: &str,
+        model_variant: Option<&str>,
+    ) -> AppResult<ChatSummary> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now();
         self.conn.execute(
-            "INSERT INTO chats (id, title, created_at, updated_at, model)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, title, now, now, self.model],
+            "INSERT INTO chats (id, title, created_at, updated_at, model, model_variant)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, title, now, now, model, model_variant],
         )?;
         Ok(self.chat(&id)?)
     }
@@ -920,10 +1050,71 @@ impl AppDb {
 
     fn chat(&mut self, chat_id: &str) -> rusqlite::Result<ChatSummary> {
         self.conn.query_row(
-            "SELECT id, title, created_at, updated_at, model FROM chats WHERE id = ?1",
+            "SELECT id, title, created_at, updated_at, model, model_variant FROM chats WHERE id = ?1",
             params![chat_id],
             chat_summary_from_row,
         )
+    }
+
+    fn update_chat_model(
+        &mut self,
+        chat_id: &str,
+        model: &str,
+        model_variant: Option<&str>,
+    ) -> AppResult<ChatSummary> {
+        let changed = self.conn.execute(
+            "UPDATE chats SET model = ?1, model_variant = ?2, updated_at = ?3 WHERE id = ?4",
+            params![model, model_variant, now(), chat_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("chat `{chat_id}` not found"),
+            });
+        }
+        Ok(self.chat(chat_id)?)
+    }
+
+    fn chat_model_selection(&mut self, chat_id: &str) -> AppResult<ChatModelSelection> {
+        self.conn
+            .query_row(
+                "SELECT model, model_variant FROM chats WHERE id = ?1",
+                params![chat_id],
+                |row| {
+                    Ok(ChatModelSelection {
+                        model: row.get(0)?,
+                        model_variant: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(AppError::from)
+    }
+
+    fn migrate_legacy_chat_model_labels(&mut self) -> rusqlite::Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, model, model_variant FROM chats")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let updates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for (id, model, variant) in updates {
+            if variant.is_some() {
+                continue;
+            }
+            if let Some((model, variant)) = split_legacy_model_label(&model) {
+                self.conn.execute(
+                    "UPDATE chats SET model = ?1, model_variant = ?2 WHERE id = ?3",
+                    params![model, variant, id],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn maybe_title_from_first_message(&mut self, chat_id: &str, text: &str) -> AppResult<()> {
@@ -1190,12 +1381,17 @@ fn tool_payload(event: TurnEvent) -> AppResult<serde_json::Value> {
 }
 
 fn chat_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary> {
+    let model: String = row.get(4)?;
+    let model_variant: Option<String> = row.get(5)?;
+    let model_label = model_label(&model, model_variant.as_deref());
     Ok(ChatSummary {
         id: row.get(0)?,
         title: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
-        model: row.get(4)?,
+        model,
+        model_variant,
+        model_label,
     })
 }
 
@@ -1232,41 +1428,96 @@ fn add_column_if_missing(
     Ok(())
 }
 
-#[derive(Clone)]
-struct ChatStoreFactory {
-    sessions_dir: PathBuf,
-}
-
-impl ChatStoreFactory {
-    fn new(sessions_dir: PathBuf) -> Self {
-        Self { sessions_dir }
-    }
-}
-
-impl SessionStoreFactory for ChatStoreFactory {
-    fn create_store(
-        &self,
-        request: &SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn RuntimePersistence>, String> {
-        std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
-        let path = self.sessions_dir.join(format!("{}.db", request.session_id));
-        let store = Arc::new(lash_sqlite_store::Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(SessionMeta {
-            session_id: request.session_id.clone(),
-            session_name: request.session_id.clone(),
-            created_at: now(),
-            model: request.policy.model.clone(),
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string)),
-            parent_session_id: request.parent_session_id.clone(),
-        });
-        Ok(store as Arc<dyn RuntimePersistence>)
-    }
-}
-
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+fn normalize_model_selection(
+    model: Option<&str>,
+    model_variant: Option<&str>,
+    default_model: &str,
+    default_model_variant: Option<&str>,
+) -> AppResult<ChatModelSelection> {
+    let model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(default_model)
+        .to_string();
+    let model_variant = normalize_model_variant(model_variant).or_else(|| {
+        default_model_variant
+            .map(str::trim)
+            .filter(|variant| !variant.is_empty())
+            .map(str::to_string)
+    });
+    if model.trim().is_empty() {
+        return Err(AppError::bad_request("model is required"));
+    }
+    Ok(ChatModelSelection {
+        model,
+        model_variant,
+    })
+}
+
+fn normalize_optional_model_selection(
+    model: Option<&str>,
+    model_variant: Option<&str>,
+) -> AppResult<Option<ChatModelSelection>> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(ChatModelSelection {
+        model: model.to_string(),
+        model_variant: normalize_model_variant(model_variant),
+    }))
+}
+
+fn normalize_model_variant(model_variant: Option<&str>) -> Option<String> {
+    model_variant
+        .map(str::trim)
+        .filter(|variant| !variant.is_empty())
+        .map(str::to_string)
+}
+
+fn model_label(model: &str, model_variant: Option<&str>) -> String {
+    match model_variant
+        .map(str::trim)
+        .filter(|variant| !variant.is_empty())
+    {
+        Some(variant) => format!("{model} ({variant})"),
+        None => model.to_string(),
+    }
+}
+
+fn split_legacy_model_label(label: &str) -> Option<(String, String)> {
+    let label = label.trim();
+    let (model, variant) = label.rsplit_once(" (")?;
+    let variant = variant.strip_suffix(')')?.trim();
+    let model = model.trim();
+    if model.is_empty() || variant.is_empty() {
+        return None;
+    }
+    Some((model.to_string(), variant.to_string()))
+}
+
+fn assistant_text_for_persistence(output: &TurnOutput, streamed_prose: &str) -> String {
+    if let Some(value) = output.submitted_value() {
+        return terminal_value_text(value);
+    }
+    if let Some((_tool_name, value)) = output.tool_value() {
+        return terminal_value_text(value);
+    }
+    output
+        .assistant_message()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(streamed_prose)
+        .to_string()
+}
+
+fn terminal_value_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn compact_title(text: &str) -> String {
@@ -1332,6 +1583,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .topbar-title { display:grid; gap:2px; min-width:0; }
     .topbar-title strong { font-family:"Chivo Mono", monospace; font-size:13px; color:var(--sun); }
     .topbar-title span { color:var(--muted); font-size:12px; }
+    .model-controls { display:grid; grid-template-columns:minmax(210px, 340px) 120px; gap:8px; align-items:end; margin-left:auto; }
+    .model-controls .field { gap:4px; }
+    .model-controls input, .model-controls select { font-family:"Chivo Mono", monospace; font-size:12px; padding:8px; }
     .game { border-bottom:1px solid var(--line); padding:22px 26px; display:grid; grid-template-columns:auto minmax(260px,380px); grid-template-areas:"board status" "board actions"; gap:14px 26px; align-items:start; justify-content:start; background:var(--panel-2); }
     .board { display:grid; grid-template-columns:repeat(3,64px); grid-template-rows:repeat(3,64px); gap:7px; }
     .game .board { grid-area:board; }
@@ -1379,7 +1633,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     @media (max-width: 760px) {
       .app { grid-template-columns:1fr; }
       aside { display:none; }
-      .topbar { padding:11px 14px; }
+      .topbar { padding:11px 14px; display:grid; grid-template-columns:1fr auto; }
+      .model-controls { grid-column:1 / -1; grid-template-columns:1fr 118px; width:100%; margin-left:0; }
       .game { grid-template-columns:1fr; grid-template-areas:"board" "status" "actions"; padding:18px 14px; justify-items:start; }
       .game-status { align-self:start; }
       form { grid-template-columns:1fr; }
@@ -1401,6 +1656,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="topbar-title">
           <strong id="activeTitle">No chat</strong>
           <span>Board state is sent to the agent each turn</span>
+        </div>
+        <div class="model-controls">
+          <label class="field">Model
+            <input id="modelInput" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">Variant
+            <select id="variantInput">
+              <option value="">default</option>
+            </select>
+          </label>
         </div>
         <button id="mobileNew" class="secondary">New chat</button>
       </div>
@@ -1428,11 +1693,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const messagesEl = document.querySelector('#messages');
     const titleEl = document.querySelector('#activeTitle');
     const form = document.querySelector('#composer');
+    const modelInput = document.querySelector('#modelInput');
+    const variantInput = document.querySelector('#variantInput');
     const boardEl = document.querySelector('#board');
     const gameStatusEl = document.querySelector('#gameStatus');
     const gameHintEl = document.querySelector('#gameHint');
     let chats = [];
     let activeChat = null;
+    let settings = { default_model:'openai/gpt-5.5', default_model_variant:'medium', model_variants:['low','medium','high'] };
     let streaming = null;
     let reasoning = null;
     let pendingCodeBlock = null;
@@ -1498,6 +1766,40 @@ const INDEX_HTML: &str = r#"<!doctype html>
         : board.turn === 'X'
           ? 'Your turn: click any empty square.'
           : 'Agent turn: waiting for O to play.';
+    }
+    function selectedModel() {
+      return {
+        model: modelInput.value.trim() || settings.default_model,
+        model_variant: variantInput.value || null
+      };
+    }
+    function setModelControls(chat) {
+      const model = chat?.model || settings.default_model;
+      const variant = chat?.model_variant ?? settings.default_model_variant ?? '';
+      modelInput.value = model;
+      variantInput.value = variant || '';
+    }
+    async function loadSettings() {
+      settings = await (await api('/api/settings')).json();
+      variantInput.innerHTML = '<option value="">default</option>';
+      for (const variant of settings.model_variants || []) {
+        const option = document.createElement('option');
+        option.value = variant;
+        option.textContent = variant;
+        variantInput.appendChild(option);
+      }
+      setModelControls(null);
+    }
+    async function saveActiveModel() {
+      if (!activeChat || busy) return;
+      const selection = selectedModel();
+      const chat = await (await api(`/api/chats/${activeChat}/model`, {
+        method:'POST',
+        body: JSON.stringify(selection)
+      })).json();
+      const index = chats.findIndex(item => item.id === chat.id);
+      if (index >= 0) chats[index] = chat;
+      renderChats();
     }
     function setBoard(board) {
       if (!activeChat || !board || !Array.isArray(board.cells)) return;
@@ -1588,15 +1890,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
         b.className = 'chat-row' + (chat.id === activeChat ? ' active' : '');
         b.innerHTML = `<span class="chat-title"></span><span class="chat-model"></span>`;
         b.querySelector('.chat-title').textContent = chat.title;
-        b.querySelector('.chat-model').textContent = chat.model;
+        b.querySelector('.chat-model').textContent = chat.model_label;
         b.onclick = async () => { activeChat = chat.id; renderChats(); await loadMessages(chat.id); };
         chatsEl.appendChild(b);
       }
       const current = chats.find(c => c.id === activeChat);
       titleEl.textContent = current ? current.title : 'No chat';
+      if (current) setModelControls(current);
     }
     async function newChat() {
-      const chat = await (await api('/api/chats', { method:'POST', body: JSON.stringify({}) })).json();
+      const chat = await (await api('/api/chats', { method:'POST', body: JSON.stringify(selectedModel()) })).json();
       chats.unshift(chat); activeChat = chat.id; boards.set(chat.id, emptyBoard()); renderChats(); renderBoard(); messagesEl.innerHTML = '';
     }
     async function loadMessages(id) {
@@ -1741,7 +2044,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         method:'POST',
         body: JSON.stringify({
           text,
-          board: currentBoard()
+          board: currentBoard(),
+          ...selectedModel()
         })
       });
       const reader = res.body.getReader();
@@ -1784,6 +2088,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.querySelector('#newChat').onclick = newChat;
     document.querySelector('#mobileNew').onclick = newChat;
     document.querySelector('#resetBoard').onclick = resetBoard;
+    modelInput.addEventListener('change', saveActiveModel);
+    variantInput.addEventListener('change', saveActiveModel);
     document.querySelector('#text').addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
@@ -1792,7 +2098,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     });
     form.onsubmit = send;
     renderBoard();
-    loadChats().then(() => { if (!activeChat) newChat(); else renderBoard(); });
+    loadSettings().then(() => loadChats()).then(() => { if (!activeChat) newChat(); else renderBoard(); });
   </script>
 </body>
 </html>"#;

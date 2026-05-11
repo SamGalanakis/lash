@@ -6,26 +6,26 @@ use tokio::sync::Mutex;
 
 use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
-use lash::plugin::{
+use lash_core::plugin::{
     PluginDirective, PluginError, SessionPluginMode, SessionStartPoint, ToolCallHookContext,
     ToolResultHookContext, ToolSurfaceContext,
 };
-use lash::{
+use lash_core::{
     AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
     RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView,
     SessionSnapshot, SessionSnapshotHost, SessionStateEnvelope, ToolCatalogHost, ToolDefinition,
     ToolProvider, ToolRegistry, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
-use lash::{SessionLifecycleHost, ToolStateHost, TurnHost};
+use lash_core::{SessionLifecycleHost, ToolStateHost, TurnHost};
 
-use lash::testing::{MockSessionManager, mock_assembled_turn};
+use lash_core::testing::{MockSessionManager, mock_assembled_turn};
 
 #[async_trait::async_trait]
 trait PlanTestHostCore: Send + Sync {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
     async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
     async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
-    async fn tool_state(&self, _session_id: &str) -> Result<lash::ToolState, PluginError> {
+    async fn tool_state(&self, _session_id: &str) -> Result<lash_core::ToolState, PluginError> {
         Err(PluginError::Session(
             "tool state is unavailable in this session".to_string(),
         ))
@@ -33,7 +33,7 @@ trait PlanTestHostCore: Send + Sync {
     async fn apply_tool_state(
         &self,
         _session_id: &str,
-        _snapshot: lash::ToolState,
+        _snapshot: lash_core::ToolState,
     ) -> Result<u64, PluginError> {
         Err(PluginError::Session(
             "tool state mutation is unavailable in this session".to_string(),
@@ -48,13 +48,13 @@ trait PlanTestHostCore: Send + Sync {
         &self,
         session_id: &str,
         input: TurnInput,
-    ) -> Result<lash::plugin::SessionTurnHandle, PluginError>;
+    ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError>;
     async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
     async fn prompt_user(
         &self,
-        _request: lash::PromptRequest,
-    ) -> Result<lash::PromptResponse, PluginError> {
+        _request: lash_core::PromptRequest,
+    ) -> Result<lash_core::PromptResponse, PluginError> {
         Err(PluginError::Session("prompt unavailable".to_string()))
     }
 }
@@ -62,7 +62,7 @@ trait PlanTestHostCore: Send + Sync {
 macro_rules! impl_plan_test_host {
     ($ty:ty) => {
         #[async_trait::async_trait]
-        impl lash::SessionSnapshotHost for $ty {
+        impl lash_core::SessionSnapshotHost for $ty {
             async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
                 PlanTestHostCore::snapshot_current(self).await
             }
@@ -75,7 +75,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash::ToolCatalogHost for $ty {
+        impl lash_core::ToolCatalogHost for $ty {
             async fn tool_catalog(
                 &self,
                 session_id: &str,
@@ -85,21 +85,24 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash::ToolStateHost for $ty {
-            async fn tool_state(&self, session_id: &str) -> Result<lash::ToolState, PluginError> {
+        impl lash_core::ToolStateHost for $ty {
+            async fn tool_state(
+                &self,
+                session_id: &str,
+            ) -> Result<lash_core::ToolState, PluginError> {
                 PlanTestHostCore::tool_state(self, session_id).await
             }
             async fn apply_tool_state(
                 &self,
                 session_id: &str,
-                snapshot: lash::ToolState,
+                snapshot: lash_core::ToolState,
             ) -> Result<u64, PluginError> {
                 PlanTestHostCore::apply_tool_state(self, session_id, snapshot).await
             }
         }
 
         #[async_trait::async_trait]
-        impl lash::SessionLifecycleHost for $ty {
+        impl lash_core::SessionLifecycleHost for $ty {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
@@ -112,12 +115,12 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash::TurnHost for $ty {
+        impl lash_core::TurnHost for $ty {
             async fn start_turn_stream(
                 &self,
                 session_id: &str,
                 input: TurnInput,
-            ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+            ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
                 PlanTestHostCore::start_turn_stream(self, session_id, input).await
             }
             async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
@@ -132,17 +135,17 @@ macro_rules! impl_plan_test_host {
         impl lash_plugin_plan_mode::PlanModePrompt for $ty {
             async fn prompt_user(
                 &self,
-                request: lash::PromptRequest,
-            ) -> Result<lash::PromptResponse, PluginError> {
+                request: lash_core::PromptRequest,
+            ) -> Result<lash_core::PromptResponse, PluginError> {
                 PlanTestHostCore::prompt_user(self, request).await
             }
         }
 
-        impl lash::TaskHost for $ty {}
-        impl lash::MonitorHost for $ty {}
-        impl lash::SessionGraphHost for $ty {}
-        impl lash::DirectCompletionHost for $ty {}
-        impl lash::TraceHost for $ty {}
+        impl lash_core::TaskHost for $ty {}
+        impl lash_core::MonitorHost for $ty {}
+        impl lash_core::SessionGraphHost for $ty {}
+        impl lash_core::DirectCompletionHost for $ty {}
+        impl lash_core::TraceHost for $ty {}
     };
 }
 
@@ -166,8 +169,8 @@ fn mock_read_view(run_session_id: &str) -> SessionReadView {
 fn test_tool(
     name: &str,
     description: &str,
-    availability: lash::ToolAvailabilityConfig,
-    execution_mode: lash::ToolExecutionMode,
+    availability: lash_core::ToolAvailabilityConfig,
+    execution_mode: lash_core::ToolExecutionMode,
 ) -> ToolDefinition {
     ToolDefinition::raw(
         name,
@@ -188,14 +191,14 @@ impl ToolProvider for PlanModeTestTools {
             test_tool(
                 "plan_exit",
                 "Ask whether to exit plan mode.",
-                lash::ToolAvailabilityConfig::off(),
-                lash::ToolExecutionMode::Parallel,
+                lash_core::ToolAvailabilityConfig::off(),
+                lash_core::ToolExecutionMode::Parallel,
             )
             .with_examples(vec!["plan_exit()".to_string()]),
         ]
     }
 
-    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
     }
 }
@@ -268,7 +271,7 @@ fn empty_turn(session_id: &str) -> AssembledTurn {
 }
 
 fn plan_mode_host(plan_factory: PlanModePluginFactory) -> PluginHost {
-    let mut factories = lash::testing::test_mode_factories();
+    let mut factories = lash_core::testing::test_mode_factories();
     factories.push(Arc::new(plan_factory));
     PluginHost::new(factories)
 }
@@ -317,7 +320,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     );
 
     restored
-        .restore(&lash::PluginSessionSnapshot::default())
+        .restore(&lash_core::PluginSessionSnapshot::default())
         .expect("reset restore");
     let reset_toggle = restored
         .invoke_plugin_action(
@@ -351,8 +354,8 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("initial tool state");
     assert!(initial.get("plan_exit").is_some_and(|tool| {
         tool.definition()
-            .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Off
+            .effective_availability(&lash_core::ExecutionMode::standard())
+            == lash_core::ToolAvailability::Off
     }));
 
     session
@@ -372,8 +375,8 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("enabled tool state");
     assert!(enabled.get("plan_exit").is_some_and(|tool| {
         tool.definition()
-            .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Showcased
+            .effective_availability(&lash_core::ExecutionMode::standard())
+            == lash_core::ToolAvailability::Showcased
     }));
 
     session
@@ -387,8 +390,8 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .expect("disabled tool state");
     assert!(disabled.get("plan_exit").is_some_and(|tool| {
         tool.definition()
-            .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Off
+            .effective_availability(&lash_core::ExecutionMode::standard())
+            == lash_core::ToolAvailability::Off
     }));
 }
 
@@ -411,7 +414,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_turn");
@@ -433,7 +436,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 PluginDirective::EmitEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        lash::plugin::PluginSurfaceEvent::ModeIndicatorUpsert { label, .. }
+                        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorUpsert { label, .. }
                             if label == "plan"
                     ))
             )
@@ -445,7 +448,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 PluginDirective::EmitEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        lash::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
+                        lash_core::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
                             if title == "PLAN"
                                 && content.contains("Path: `.lash/plans/run-session.md`")
                     ))
@@ -459,7 +462,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             tool_name: "exec_command".to_string(),
             args: json!({"cmd":"cargo test -q"}),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -471,7 +474,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -485,35 +488,35 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 test_tool(
                     "search_tools",
                     "Discover tools",
-                    lash::ToolAvailabilityConfig::callable(),
-                    lash::ToolExecutionMode::Parallel,
+                    lash_core::ToolAvailabilityConfig::callable(),
+                    lash_core::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
                     "read_file",
                     "Read files",
-                    lash::ToolAvailabilityConfig::showcased(),
-                    lash::ToolExecutionMode::Parallel,
+                    lash_core::ToolAvailabilityConfig::showcased(),
+                    lash_core::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
                     "search_web",
                     "Search the web",
-                    lash::ToolAvailabilityConfig::showcased(),
-                    lash::ToolExecutionMode::Parallel,
+                    lash_core::ToolAvailabilityConfig::showcased(),
+                    lash_core::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
                     "apply_patch",
                     "Apply patches",
-                    lash::ToolAvailabilityConfig::showcased(),
-                    lash::ToolExecutionMode::Serial,
+                    lash_core::ToolAvailabilityConfig::showcased(),
+                    lash_core::ToolExecutionMode::Serial,
                 ),
                 test_tool(
                     "plan_exit",
                     "Exit plan mode",
-                    lash::ToolAvailabilityConfig::off(),
-                    lash::ToolExecutionMode::Parallel,
+                    lash_core::ToolAvailabilityConfig::off(),
+                    lash_core::ToolExecutionMode::Parallel,
                 ),
             ],
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
         .expect("tool surface");
@@ -522,14 +525,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .tools
             .iter()
             .find(|tool| tool.definition.name == "search_web")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Showcased)
+            .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
     );
     assert!(
         surface
             .tools
             .iter()
             .find(|tool| tool.definition.name == "plan_exit")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Showcased)
+            .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
     );
     assert!(
         surface
@@ -546,7 +549,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "path":"src/main.rs"
             }),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -560,7 +563,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "query":"surrealdb datetime best practices"
             }),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -574,7 +577,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -588,7 +591,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
             }),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -609,9 +612,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .expect("enable");
 
     let checkpoint = session
-        .at_checkpoint(lash::CheckpointHookContext {
+        .at_checkpoint(lash_core::CheckpointHookContext {
             session_id: "root".to_string(),
-            checkpoint: lash::CheckpointKind::AfterWork,
+            checkpoint: lash_core::CheckpointKind::AfterWork,
             state: mock_read_view("run-session"),
             host: manager.clone(),
         })
@@ -630,7 +633,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn("root"))),
+            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager,
         })
         .await
@@ -656,7 +661,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("first before_turn");
@@ -669,7 +674,9 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash::TurnResultSummary::from_assembled(&empty_turn("root"))),
+            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager.clone(),
         })
         .await
@@ -680,7 +687,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("second before_turn");
@@ -709,7 +716,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             tool_name: "read_file".to_string(),
             args: json!({"path":"src/main.rs"}),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -723,7 +730,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
             }),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_tool_call");
@@ -754,14 +761,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             self.base.tool_catalog(session_id).await
         }
 
-        async fn tool_state(&self, session_id: &str) -> Result<lash::ToolState, PluginError> {
+        async fn tool_state(&self, session_id: &str) -> Result<lash_core::ToolState, PluginError> {
             self.base.tool_state(session_id).await
         }
 
         async fn apply_tool_state(
             &self,
             session_id: &str,
-            snapshot: lash::ToolState,
+            snapshot: lash_core::ToolState,
         ) -> Result<u64, PluginError> {
             self.base.apply_tool_state(session_id, snapshot).await
         }
@@ -781,7 +788,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
             self.base.start_turn_stream(session_id, input).await
         }
 
@@ -795,14 +802,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 
         async fn prompt_user(
             &self,
-            request: lash::PromptRequest,
-        ) -> Result<lash::PromptResponse, PluginError> {
+            request: lash_core::PromptRequest,
+        ) -> Result<lash_core::PromptResponse, PluginError> {
             assert!(request.question.contains(".lash/plans/run-session.md"));
             assert!(request.allows_note());
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
             assert_eq!(panel.markdown, ready_plan_markdown().trim_end());
-            Ok(lash::PromptResponse::Single {
+            Ok(lash_core::PromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: Some("start with the safe slice".to_string()),
             })
@@ -848,16 +855,16 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager_host.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_turn");
 
     let plan_exit_args = json!({});
-    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager_host.clone());
+    let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager_host.clone());
     let result = session
         .tools()
-        .execute(lash::ToolCall {
+        .execute(lash_core::ToolCall {
             name: "plan_exit",
             args: &plan_exit_args,
             context: &plan_exit_ctx,
@@ -885,13 +892,13 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic = lash::ToolStateHost::tool_state(manager.as_ref(), "root")
+    let dynamic = lash_core::ToolStateHost::tool_state(manager.as_ref(), "root")
         .await
         .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
         tool.definition()
-            .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Off
+            .effective_availability(&lash_core::ExecutionMode::standard())
+            == lash_core::ToolAvailability::Off
     }));
 }
 
@@ -937,7 +944,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
             let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
@@ -954,8 +961,8 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
 
         async fn prompt_user(
             &self,
-            request: lash::PromptRequest,
-        ) -> Result<lash::PromptResponse, PluginError> {
+            request: lash_core::PromptRequest,
+        ) -> Result<lash_core::PromptResponse, PluginError> {
             assert_eq!(
                 request.question,
                 "Review the plan in `.lash/plans/run-session.md`. What next?"
@@ -963,7 +970,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             let panel = request.panel.expect("plan review panel");
             assert_eq!(panel.title, "PLAN");
             assert!(panel.markdown.contains("# Plan"));
-            Ok(lash::PromptResponse::Single {
+            Ok(lash_core::PromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: None,
             })
@@ -988,16 +995,16 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_turn");
 
     let plan_exit_args = json!({});
-    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager.clone());
+    let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager.clone());
     let result = session
         .tools()
-        .execute(lash::ToolCall {
+        .execute(lash_core::ToolCall {
             name: "plan_exit",
             args: &plan_exit_args,
             context: &plan_exit_ctx,
@@ -1063,7 +1070,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             &self,
             session_id: &str,
             input: TurnInput,
-        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
             let base = mock_session_manager("run-session");
             base.start_turn_stream(session_id, input).await
         }
@@ -1080,9 +1087,9 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
 
         async fn prompt_user(
             &self,
-            _request: lash::PromptRequest,
-        ) -> Result<lash::PromptResponse, PluginError> {
-            Ok(lash::PromptResponse::Single {
+            _request: lash_core::PromptRequest,
+        ) -> Result<lash_core::PromptResponse, PluginError> {
+            Ok(lash_core::PromptResponse::Single {
                 selection: "Start in fresh context".to_string(),
                 note: None,
             })
@@ -1107,16 +1114,16 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             session_id: "root".to_string(),
             state: mock_read_view("run-session"),
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("before_turn");
 
     let plan_exit_args = json!({});
-    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager.clone());
+    let plan_exit_ctx = lash_core::testing::mock_tool_context_with_host(manager.clone());
     let result = session
         .tools()
-        .execute(lash::ToolCall {
+        .execute(lash_core::ToolCall {
             name: "plan_exit",
             args: &plan_exit_args,
             context: &plan_exit_ctx,
@@ -1188,7 +1195,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
             &self,
             _session_id: &str,
             _input: TurnInput,
-        ) -> Result<lash::plugin::SessionTurnHandle, PluginError> {
+        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
 
@@ -1225,7 +1232,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
             })),
             duration_ms: 1,
             host: manager.clone(),
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         })
         .await
         .expect("after_tool_call");
@@ -1248,7 +1255,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         .first_turn_input
         .as_ref()
         .expect("first_turn_input set on CreateSession directive");
-    assert_eq!(seed.role, lash::MessageRole::User);
+    assert_eq!(seed.role, lash_core::MessageRole::User);
     assert_eq!(
         seed.content,
         "Do a full, faithful implementation of the plan found at: .lash/plans/run-session.md"
@@ -1292,14 +1299,14 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let response = session
         .transform_assistant_response(
             "root",
-            lash::llm::types::LlmResponse {
+            lash_core::llm::types::LlmResponse {
                 full_text: "Keep this text exactly.".into(),
                 deltas: Vec::new(),
-                parts: vec![lash::llm::types::LlmOutputPart::Text {
+                parts: vec![lash_core::llm::types::LlmOutputPart::Text {
                     text: "Keep this text exactly.".into(),
                     response_meta: None,
                 }],
-                usage: lash::llm::types::LlmUsage::default(),
+                usage: lash_core::llm::types::LlmUsage::default(),
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,

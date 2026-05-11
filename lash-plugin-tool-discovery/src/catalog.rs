@@ -1,4 +1,4 @@
-use lash::ToolDefinition;
+use lash_core::ToolDefinition;
 use serde_json::{Value, json};
 
 use crate::common::{output_contract_field, round_score, string_field, string_vec};

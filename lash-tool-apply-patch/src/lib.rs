@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
 
@@ -973,7 +973,7 @@ mod tests {
     use tempfile::TempDir;
 
     async fn run_patch(dir: &TempDir, input: impl Into<String>) -> ToolResult {
-        lash::testing::run_tool(
+        lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1255,7 +1255,7 @@ mod tests {
     async fn apply_patch_accepts_absolute_add_paths() {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("hello.txt");
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1274,7 +1274,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("main.rs");
         std::fs::write(&abs, "fn main() {\n    old();\n}\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1297,7 +1297,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("old.txt");
         std::fs::write(&abs, "gone\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1318,7 +1318,7 @@ mod tests {
         let source = dir.path().join("old.txt");
         let dest = dir.path().join("nested").join("new.txt");
         std::fs::write(&source, "line\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1337,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_lenient_heredoc_wrapper() {
         let dir = TempDir::new().unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1357,7 +1357,7 @@ mod tests {
     async fn apply_patch_treats_unified_diff_header_as_plain_context() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1383,7 +1383,7 @@ mod tests {
             "fn main() {\n    println!(\"old\");\n}\n",
         )
         .unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({
@@ -1408,7 +1408,7 @@ mod tests {
             "Hello from apply_patch!\nLine two.\n",
         )
         .unwrap();
-        let result = lash::testing::run_tool(
+        let result = lash_core::testing::run_tool(
             &ApplyPatchTool,
             "apply_patch",
             &json!({

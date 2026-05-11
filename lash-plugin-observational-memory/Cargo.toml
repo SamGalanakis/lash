@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
@@ -14,5 +14,5 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lash = { path = "../lash", features = ["testing"] }
+lash-core = { path = "../lash-core", features = ["testing"] }
 serde_json = { workspace = true }

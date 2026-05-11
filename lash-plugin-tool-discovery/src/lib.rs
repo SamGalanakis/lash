@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
-use lash::plugin::{
+use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolSurfaceContext,
 };
-use lash::{ToolAvailability, ToolProvider, ToolSurfaceContribution, ToolSurfaceOverride};
+use lash_core::{ToolAvailability, ToolProvider, ToolSurfaceContribution, ToolSurfaceOverride};
 
 mod catalog;
 mod common;
@@ -21,7 +21,7 @@ use common::{DEFAULT_LIMIT, DEFAULT_LLM_RERANK_MODEL, MAX_LIMIT};
 #[cfg(test)]
 use definitions::{load_tools_definition, search_tools_definition};
 #[cfg(test)]
-use lash::{
+use lash_core::{
     DirectOutputSpec, DirectPart, ToolActivation, ToolAvailabilityConfig, ToolDefinition,
     ToolExecutionMode,
 };
@@ -188,12 +188,12 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::plugin::{
+    use lash_core::plugin::{
         DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
         SessionLifecycleHost, SessionSnapshot, SessionSnapshotHost, SessionTurnHandle, TaskHost,
         ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{
+    use lash_core::{
         AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolCall,
         ToolSurfaceBuildInput, TurnInput, build_tool_surface,
     };
@@ -236,7 +236,7 @@ mod tests {
         catalog: Vec<Value>,
         promoted: Mutex<Vec<String>>,
         direct_response: Mutex<Option<String>>,
-        direct_requests: Mutex<Vec<lash::DirectRequest>>,
+        direct_requests: Mutex<Vec<lash_core::DirectRequest>>,
     }
 
     #[async_trait::async_trait]
@@ -280,7 +280,7 @@ mod tests {
     impl DirectCompletionHost for FakeSessionManager {
         async fn direct_completion(
             &self,
-            request: lash::DirectRequest,
+            request: lash_core::DirectRequest,
             _usage_source: &str,
         ) -> Result<DirectCompletion, PluginError> {
             self.direct_requests
@@ -304,7 +304,7 @@ mod tests {
     impl SessionLifecycleHost for FakeSessionManager {
         async fn create_session(
             &self,
-            _request: lash::plugin::SessionCreateRequest,
+            _request: lash_core::plugin::SessionCreateRequest,
         ) -> Result<SessionHandle, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
@@ -1245,7 +1245,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash::testing::mock_tool_context_with_host(host);
+        let context = lash_core::testing::mock_tool_context_with_host(host);
 
         let args = json!({
             "query": "cat",
@@ -1320,7 +1320,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash::testing::mock_tool_context_with_host(host);
+        let context = lash_core::testing::mock_tool_context_with_host(host);
 
         let spawn_args = json!({ "query": "spawn_agent", "limit": 1 });
         let result = provider
@@ -1458,7 +1458,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash::testing::mock_tool_context_with_host(host.clone());
+        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
 
         let args = json!({
             "query": "",
@@ -1515,7 +1515,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash::testing::mock_tool_context_with_host(host.clone());
+        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
 
         let args = json!({
             "names": ["mcp__appworld__spotify_search_songs", "fetch_url"]
@@ -1596,7 +1596,7 @@ mod tests {
             session_id: "session".to_string(),
             mode: mode.clone(),
             tools: tools.clone(),
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
         .unwrap();
@@ -1631,7 +1631,7 @@ mod tests {
             session_id: "session".to_string(),
             mode: mode.clone(),
             tools: tools.clone(),
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
         .unwrap();

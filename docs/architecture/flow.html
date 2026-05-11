@@ -28,6 +28,7 @@
             <li><a href="./deps.html">Dependencies</a></li>
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
           </ol>
         </details>
       </aside>
@@ -41,13 +42,13 @@
         <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a session's lashlang scope through <code>RlmProjectedBindings</code>: embedders apply them via <code>LashSession::rlm_project(bindings)</code>, which under the hood installs <code>rlm_session_projection_extension</code> on the runtime's RLM mode (see <code>lash-mode-rlm/src/projected_bindings.rs</code> and <code>lash-embed/src/lib.rs</code>).</p>
+            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a session's lashlang scope through <code>RlmProjectedBindings</code>: app hosts apply them via <code>LashSession::rlm_project(bindings)</code>, which under the hood installs <code>rlm_session_projection_extension</code> on the runtime's RLM mode (see <code>lash-mode-rlm/src/projected_bindings.rs</code> and <code>lash/src/session.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
             <div class="mermaid">
 sequenceDiagram
-  participant Host as CLI / Embedder
+  participant Host as CLI / app host
   participant Runtime as LashRuntime
   participant Plugins as PluginSession
   participant Machine as TurnMachine
@@ -56,7 +57,7 @@ sequenceDiagram
   participant Lang as RLM lashlang runtime
   participant Store as RuntimePersistence
 
-  Host->>Runtime: stream_turn(TurnInput)
+  Host->>Runtime: session.turn(TurnInput).stream(&sink)
   Runtime->>Runtime: normalize InputItem text/file/dir/image refs
   Runtime->>Plugins: prepare_turn + context transforms
   Runtime->>Machine: build_turn(ModePreamble, ToolSurface, PromptTemplate)
@@ -88,16 +89,16 @@ sequenceDiagram
         <div class="section">
           <div class="section-header">
             <h2>Handoff Continuations</h2>
-            <p>RLM's <code>continue_as</code> tool ends the current trajectory and queues a successor session with the packed <code>task</code> + <code>seed</code> as its first input. The runtime exposes this as <code>TurnOutcome::Handoff { session_id }</code>; hosts that just want a final answer wrap their call in <code>stream_turn_following_handoffs</code>, which drives the chain until a non-handoff outcome and returns a <code>FollowedTurn</code> whose <code>final_turn()</code> carries the actual answer.</p>
+            <p>RLM's <code>continue_as</code> tool ends the current trajectory and queues a successor session with the packed <code>task</code> + <code>seed</code> as its first input. The low-level runtime exposes this as <code>TurnOutcome::Handoff { session_id }</code>. App hosts call <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; the <code>lash</code> facade drives handoff chains and returns the final turn result. The underlying runtime primitive is <code>stream_turn_following_handoffs</code>.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">Handoff drive loop</div>
+            <div class="diagram-title">Handoff drive loop (runtime internal)</div>
             <div class="mermaid">
 flowchart LR
-  Host["host (CLI / bench / embed)"] --> Follow["stream_turn_following_handoffs"]
+  Host["host (CLI / bench / lash facade)"] --> Follow["runtime handoff follower"]
   Follow --> Turn["stream_turn"]
   Turn --> Outcome{"TurnOutcome"}
-  Outcome -->|Finished / Stopped| Done["FollowedTurn<br/>final_turn()"]
+  Outcome -->|Finished / Stopped| Done["final turn result"]
   Outcome -->|Handoff{session_id}| Pending["pending_first_turn_inputs<br/>(seeded by continue_as)"]
   Pending --> Successor["activate successor RLM session<br/>fresh window, inherited turn_index"]
   Successor --> Turn
@@ -213,7 +214,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Handoffs are not a separate channel.</h3>
-                <p>A handoff is an outcome of the same <code>stream_turn</code> path. Hosts opt in to chaining with <code>stream_turn_following_handoffs</code>; runtime internals (managed sessions, turn index, attachment store, trace ids) carry across the boundary automatically.</p>
+                <p>A handoff is an outcome of the same turn path. App hosts get chaining through <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code>; lower-level runtime callers opt in with <code>stream_turn_following_handoffs</code>. Managed sessions, turn index, attachment store, and trace ids carry across the boundary automatically.</p>
               </div>
             </li>
           </ol>
@@ -225,7 +226,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Flow anchors: <code>lash/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>lash/src/session_graph.rs</code>, <code>lash-cli/src/app/projection.rs</code>.</footer>
+      <footer class="footer">Flow anchors: <code>lash-core/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>lash-core/src/session_graph.rs</code>, <code>lash-cli/src/app/projection.rs</code>.</footer>
     </main>
   </div>
 </body>

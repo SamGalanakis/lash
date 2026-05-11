@@ -14,12 +14,6 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
-};
-use lash_embed::{
     TurnInput,
     advanced::{
         AssembledTurn, EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop,
@@ -28,6 +22,12 @@ use lash_embed::{
     prompt::{PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection},
     provider::ProviderHandle,
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
+};
+use lash_core::{
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -649,7 +649,6 @@ async fn run_question(
             (TurnInput {
                 items: vec![InputItem::Text { text: prompt }],
                 image_blobs: Default::default(),
-                mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
@@ -764,10 +763,7 @@ fn build_plugin_session(
     let mut subagent_models = std::collections::BTreeMap::new();
     subagent_models.insert("explore".to_string(), session_policy.model.clone());
     subagent_models.insert("peer".to_string(), session_policy.model.clone());
-    let registry = std::sync::Arc::new(lash_subagents::default_registry(
-        &subagent_models,
-        ExecutionMode::standard(),
-    ));
+    let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(LlmToolsPluginFactory));
     factories.push(Arc::new(SubagentsPluginFactory::new(
@@ -946,8 +942,10 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                     "missing API key for LongMemEval runner; set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            let provider =
-                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
+            let provider = lash_provider_openai::OpenAiCompatibleProvider::new(
+                api_key,
+                resolve_base_url(args),
+            );
             Ok(ProviderHandle::new(provider.into_components()))
         }
         other => bail!(

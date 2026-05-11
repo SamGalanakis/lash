@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lash::{
+use lash_core::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PromptContribution,
     SessionPlugin,
 };
@@ -233,9 +233,9 @@ mod tests {
     #[tokio::test]
     async fn plugin_contributes_docs_prompt() {
         let docs_dir = PathBuf::from("/tmp/lash-home/docs/lash-cli");
-        let plugin_host = lash::PluginHost::new(vec![
-            Arc::new(lash::BuiltinTaskControlsPluginFactory::new()),
-            Arc::new(lash::BuiltinMonitorToolPluginFactory::new()),
+        let plugin_host = lash_core::PluginHost::new(vec![
+            Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
             Arc::new(HostDocsPluginFactory::new(docs_dir.clone())),
         ]);
@@ -244,14 +244,14 @@ mod tests {
             .expect("session");
 
         let contributions = session
-            .collect_prompt_contributions(lash::PromptHookContext {
+            .collect_prompt_contributions(lash_core::PromptHookContext {
                 session_id: "root".to_string(),
-                host: Arc::new(lash::testing::MockSessionManager::default()),
-                state: lash::SessionReadView::from_exported_state(
-                    &lash::SessionStateEnvelope::default(),
+                host: Arc::new(lash_core::testing::MockSessionManager::default()),
+                state: lash_core::SessionReadView::from_exported_state(
+                    &lash_core::SessionStateEnvelope::default(),
                 ),
-                mode_turn_options: lash::ModeTurnOptions::default(),
-                turn_context: lash::TurnContext::default(),
+                mode_turn_options: lash_core::ModeTurnOptions::default(),
+                turn_context: lash_core::TurnContext::default(),
             })
             .await
             .expect("prompt contributions");
@@ -260,7 +260,7 @@ mod tests {
             .iter()
             .find(|contribution| contribution.title.as_deref() == Some("Lash CLI Host Docs"))
             .expect("host docs contribution");
-        assert_eq!(contribution.slot, lash::PromptSlot::Environment);
+        assert_eq!(contribution.slot, lash_core::PromptSlot::Environment);
         assert!(
             contribution
                 .content

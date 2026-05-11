@@ -5,11 +5,11 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-lash = { path = "../lash", features = ["testing"] }
+lash-core = { path = "../lash-core", features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }

@@ -4,34 +4,20 @@ version.workspace = true
 edition = "2024"
 license.workspace = true
 
-[features]
-# Keep core portable by default.
-default = []
-otel-trace = ["lash-trace/otel"]
-# Expose `lash::testing` for downstream plugin crates to share mock
-# session-manager/turn fixtures with lash's own tests.
-testing = []
-# Convenience umbrella for first-party consumers (e.g. lash-cli).
-full = []
-
 [dependencies]
-lash-sansio = { path = "../lash-sansio" }
-lash-trace = { path = "../lash-trace" }
-tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
-serde = { workspace = true, features = ["derive", "rc"] }
-serde_json = { workspace = true }
-schemars = { workspace = true, features = ["derive"] }
-jsonschema = { workspace = true }
 async-trait = { workspace = true }
-arc-swap = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+lash-core = { path = "../lash-core" }
+lash-mode-rlm = { path = "../lash-mode-rlm" }
+lash-mode-standard = { path = "../lash-mode-standard" }
+lash-rlm-types = { path = "../lash-rlm-types" }
+lash-trace = { path = "../lash-trace" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tempfile = { workspace = true }
-tracing = { workspace = true }
-regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
-tokio-util = { workspace = true, features = ["rt"] }
-sha2 = { workspace = true }
-chrono = { workspace = true }
-futures-util = { workspace = true }
-libc = "0.2"
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+lash-core = { path = "../lash-core", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+trybuild = "1"

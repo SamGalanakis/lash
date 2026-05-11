@@ -30,7 +30,7 @@ pub fn render(session: &LoadedSession) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use lash_core::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
     use std::path::PathBuf;
 
     #[test]

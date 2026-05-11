@@ -52,12 +52,10 @@ use clap::{Parser, ValueEnum};
 #[cfg(feature = "dhat-heap")]
 use dhat::Alloc as DhatAlloc;
 #[cfg(test)]
-use lash::InputItem;
+use lash::plugins::PluginSurfaceEvent;
+use lash::tracing::TraceLevel;
 #[cfg(test)]
-use lash_embed::plugins::PluginSurfaceEvent;
-use lash_embed::tracing::TraceLevel;
-#[cfg(test)]
-use lash_embed::{TurnActivity, TurnEvent};
+use lash::{InputItem, TurnActivity, TurnEvent};
 #[cfg(not(feature = "dhat-heap"))]
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 #[cfg(not(feature = "dhat-heap"))]
@@ -110,7 +108,7 @@ static GLOBAL_ALLOCATOR: DhatAlloc = DhatAlloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-fn turn_has_visible_output(turn: &lash_embed::TurnResult) -> bool {
+fn turn_has_visible_output(turn: &lash::TurnResult) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty() || !turn.errors.is_empty()
 }
 
@@ -147,8 +145,8 @@ fn normalized_cli_args() -> Vec<std::ffi::OsString> {
 #[derive(Parser)]
 #[command(name = "lash-cli", bin_name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
-    /// OpenAI-compatible API key (optional — use --provider to configure interactively)
-    #[arg(long, env = "OPENAI_COMPATIBLE_API_KEY")]
+    /// OpenAI API key, or OpenAI-compatible key when paired with --base-url
+    #[arg(long)]
     api_key: Option<String>,
 
     /// Tavily API key for web search
@@ -495,7 +493,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use lash::session_model::MessageRole;
+    use lash_core::session_model::MessageRole;
 
     use crate::app::App;
     use crate::cli_support::{CopyBinding, copy_binding_from_env};

@@ -6,11 +6,11 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 #[cfg(test)]
-use lash::ToolCallRecord;
-use lash::session_model::Message;
+use lash_core::ToolCallRecord;
+use lash_core::session_model::Message;
 #[cfg(test)]
-use lash::session_model::{MessageRole, PartKind};
-use lash::{SessionStateEnvelope, TokenUsage};
+use lash_core::session_model::{MessageRole, PartKind};
+use lash_core::{SessionStateEnvelope, TokenUsage};
 use lash_sqlite_store::Store;
 
 use crate::app::{
@@ -60,48 +60,6 @@ struct HostInputRecord {
     effective_text: String,
 }
 
-#[derive(Clone)]
-pub struct DbSessionStoreFactory {
-    sessions_dir: PathBuf,
-}
-
-impl DbSessionStoreFactory {
-    pub fn new(sessions_dir: PathBuf) -> Self {
-        Self { sessions_dir }
-    }
-
-    fn next_path(&self) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
-        let filename = format!(
-            "{}-{}.db",
-            chrono::Local::now().format("%Y%m%d_%H%M%S"),
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-        Ok(self.sessions_dir.join(filename))
-    }
-}
-
-impl lash::SessionStoreFactory for DbSessionStoreFactory {
-    fn create_store(
-        &self,
-        request: &lash::SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn lash::RuntimePersistence>, String> {
-        let path = self.next_path()?;
-        let store = Arc::new(Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(lash::SessionMeta {
-            session_id: request.session_id.clone(),
-            session_name: request.session_id.clone(),
-            created_at: chrono::Local::now().to_rfc3339(),
-            model: request.policy.model.clone(),
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string)),
-            parent_session_id: request.parent_session_id.clone(),
-        });
-        Ok(store as Arc<dyn lash::RuntimePersistence>)
-    }
-}
-
 impl SessionLogger {
     pub fn new(
         store: Arc<Store>,
@@ -112,7 +70,7 @@ impl SessionLogger {
     ) -> Result<Self> {
         std::fs::create_dir_all(sessions_dir())?;
         let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        store.save_session_meta(lash::SessionMeta {
+        store.save_session_meta(lash_core::SessionMeta {
             session_id: session_id.clone(),
             session_name: session_name.clone(),
             created_at: chrono::Local::now().to_rfc3339(),
@@ -179,7 +137,7 @@ impl SessionLogger {
             .store
             .load_session_meta()
             .ok_or_else(|| anyhow::anyhow!("Missing session metadata for {}", self.filename))?;
-        self.store.save_session_meta(lash::SessionMeta {
+        self.store.save_session_meta(lash_core::SessionMeta {
             session_id: meta.session_id,
             session_name: meta.session_name,
             created_at: meta.created_at,
@@ -316,7 +274,7 @@ pub fn load_session_start(filename: &str) -> Result<SessionStart> {
 
 fn filename_for_session_meta(
     candidates: Vec<(PathBuf, String, SystemTime)>,
-    mut matches: impl FnMut(&lash::SessionMeta) -> bool,
+    mut matches: impl FnMut(&lash_core::SessionMeta) -> bool,
 ) -> Option<String> {
     candidates.into_iter().find_map(|(path, filename, _)| {
         let store = Store::open_readonly(&path).ok()?;
@@ -427,17 +385,17 @@ mod tests {
         tool_calls: Vec<ToolCallRecord>,
         token_usage: TokenUsage,
     ) {
-        let graph = lash::SessionGraph::from_active_read_state(&messages, &tool_calls);
+        let graph = lash_core::SessionGraph::from_active_read_state(&messages, &tool_calls);
         let checkpoint_ref = store
-            .put_checkpoint(&lash::HydratedSessionCheckpoint {
-                turn_state: lash::PersistedTurnState {
+            .put_checkpoint(&lash_core::HydratedSessionCheckpoint {
+                turn_state: lash_core::PersistedTurnState {
                     turn_index: 1,
                     token_usage,
                     last_prompt_usage: None,
                     mode_turn_options: Default::default(),
                 },
                 tool_state_ref: None,
-                tool_state: Some(lash::ToolState::default()),
+                tool_state: Some(lash_core::ToolState::default()),
                 plugin_snapshot_ref: None,
                 plugin_snapshot_revision: None,
                 plugin_snapshot: None,
@@ -445,16 +403,16 @@ mod tests {
                 execution_state: None,
             })
             .checkpoint_ref;
-        store.save_session_head(lash::SessionHead {
+        store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             graph,
-            config: lash::PersistedSessionConfig {
+            config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 200_000,
-                execution_mode: lash::ExecutionMode::standard(),
-                standard_context_approach: Some(lash::StandardContextApproach::default()),
+                execution_mode: lash_core::ExecutionMode::standard(),
+                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
@@ -466,16 +424,15 @@ mod tests {
         Message {
             id: id.to_string(),
             role,
-            parts: vec![lash::Part {
+            parts: vec![lash_core::Part {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
                 content: content.to_string(),
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: lash::PruneState::Intact,
+                tool_replay: None,
+                prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
@@ -488,16 +445,15 @@ mod tests {
         Message {
             id: id.to_string(),
             role: MessageRole::User,
-            parts: vec![lash::Part {
+            parts: vec![lash_core::Part {
                 id: format!("{id}.p0"),
                 kind: PartKind::ToolResult,
                 content: String::new(),
                 attachment: None,
                 tool_call_id: Some(call_id.to_string()),
                 tool_name: Some(tool_name.to_string()),
-                tool_item_id: None,
-                tool_signature: None,
-                prune_state: lash::PruneState::Intact,
+                tool_replay: None,
+                prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
@@ -663,7 +619,7 @@ mod tests {
                 Vec::new(),
                 TokenUsage::default(),
             );
-            child_store.save_session_meta(lash::SessionMeta {
+            child_store.save_session_meta(lash_core::SessionMeta {
                 session_id: "child".to_string(),
                 session_name: "demo".to_string(),
                 created_at: "2026-03-25T10:00:00Z".to_string(),
@@ -703,7 +659,7 @@ mod tests {
                 "parent-name".into(),
             )
             .unwrap();
-            child_store.save_session_meta(lash::SessionMeta {
+            child_store.save_session_meta(lash_core::SessionMeta {
                 session_id: "child-id".to_string(),
                 session_name: "child-name".to_string(),
                 created_at: "2026-03-25T10:00:00Z".to_string(),

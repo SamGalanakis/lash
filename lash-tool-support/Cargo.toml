@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 
 [dependencies]
-lash = { path = "../lash", default-features = false }
+lash-core = { path = "../lash-core", default-features = false }
 lash-rlm-types = { path = "../lash-rlm-types" }
 tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }

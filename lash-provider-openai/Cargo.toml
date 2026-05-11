@@ -6,7 +6,7 @@ license.workspace = true
 description = "OpenAI-compatible (API key) provider for lash. Works with OpenRouter, OpenAI, vLLM, etc."
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 lash-llm-transport = { path = "../lash-llm-transport" }
 lash-openai-schema = { path = "../lash-openai-schema" }
 async-trait = { workspace = true }

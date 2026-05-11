@@ -6,9 +6,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-core = { path = "../lash-core", default-features = false, features = ["full"] }
 lash-tui-extensions = { path = "../lash-tui-extensions" }
-lash-embed = { path = "../lash-embed" }
+lash = { path = "../lash" }
 lash-tui = { path = "../lash-tui" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

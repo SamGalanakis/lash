@@ -1,31 +1,16 @@
 use crate::support::*;
 
 #[derive(Clone, Debug)]
-pub struct OpenAiGenericProvider {
+pub struct OpenAiCompatibleProvider {
     pub api_key: String,
     pub base_url: String,
     pub options: ProviderOptions,
-    pub wire_api: OpenAiWireApi,
-    pub cache_retention: OpenAiCacheRetention,
     pub(crate) client: reqwest::Client,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum OpenAiWireApi {
-    #[default]
-    Auto,
-    Responses,
-    ChatCompletions,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum OpenAiCacheRetention {
-    None,
-    #[default]
-    Short,
-    Long,
+#[derive(Clone, Debug)]
+pub struct OpenAiProvider {
+    pub(crate) inner: OpenAiCompatibleProvider,
 }
 
 #[derive(Clone, Debug)]

@@ -41,19 +41,19 @@ pub trait SubagentHost: Send + Sync {
 
     async fn spawn_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String>;
 
     async fn wait_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         request: WaitAgentRequest,
     ) -> Result<WaitAgentResponse, String>;
 
     async fn close_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String>;
 }

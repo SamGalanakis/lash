@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use lash::plugin::StaticPluginFactory;
-use lash::{
+use lash_core::plugin::StaticPluginFactory;
+use lash_core::{
     PluginError, PluginFactory, PluginSpec, ToolCall, ToolDefinition, ToolDiscoveryMetadata,
     ToolExecutionMode, ToolProvider, ToolResult,
 };
-use lash::{PromptRequest, PromptResponse, PromptSelectionMode};
+use lash_core::{PromptRequest, PromptResponse, PromptSelectionMode};
 use serde_json::json;
 
 use crate::event::{AppEvent, AppEventTx};

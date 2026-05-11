@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use lash::plugin::{
+use lash_core::plugin::{
     PluginAction, PluginActionContext, PluginActionFailure, PluginActionKind, PluginDirective,
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta,
     PromptHookContext, SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter,
     ToolCallHookContext, ToolResultHookContext, TurnResultHookContext,
 };
-use lash::{
+use lash_core::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolCall, ToolContext,
     ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
@@ -72,15 +72,15 @@ struct SummaryState {
     last_run: Option<LastRunSummary>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, lash::JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, lash_core::JsonSchema)]
 pub struct AutoresearchEmptyArgs {}
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, lash::JsonSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, lash_core::JsonSchema)]
 pub struct AutoresearchStartArgs {
     pub objective: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, lash::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, lash_core::JsonSchema)]
 pub struct AutoresearchCommandOutput {
     pub status: StatusSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ pub struct AutoresearchCommandOutput {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, lash::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, lash_core::JsonSchema)]
 pub struct AutoresearchExportOutput {
     pub status: StatusSummary,
     pub path: String,
@@ -261,7 +261,7 @@ impl SessionPlugin for AutoresearchPlugin {
                 if !state.mode.active
                     || !matches!(
                         &ctx.turn.outcome,
-                        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                        lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::Handoff { .. }
                     )
                 {
                     return Ok(Vec::new());
@@ -424,7 +424,7 @@ fn autoresearch_tool(
         input_schema,
         json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_availability(lash::ToolAvailabilityConfig::off())
+    .with_availability(lash_core::ToolAvailabilityConfig::off())
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -681,7 +681,7 @@ impl AutoresearchTools {
         &self,
         args: &Value,
         context: Option<&ToolContext>,
-        progress: Option<&lash::ProgressSender>,
+        progress: Option<&lash_core::ProgressSender>,
     ) -> ToolResult {
         let command = match require_string(args, "command") {
             Ok(value) => value,
@@ -811,7 +811,7 @@ async fn execute_shell_command(
     command: &str,
     timeout_seconds: u64,
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    progress: Option<&lash::ProgressSender>,
+    progress: Option<&lash_core::ProgressSender>,
 ) -> Result<CommandRun, String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
     let mut child = Command::new(shell);
@@ -843,7 +843,7 @@ async fn execute_shell_command(
             }
             bytes.extend_from_slice(&chunk[..read]);
             if let Some(progress) = progress.as_ref() {
-                let _ = progress.send(lash::SandboxMessage {
+                let _ = progress.send(lash_core::SandboxMessage {
                     text: String::from_utf8_lossy(&chunk[..read]).into_owned(),
                     kind: "tool_output".to_string(),
                 });
@@ -1006,9 +1006,9 @@ async fn set_autoresearch_tools_enabled(
         ));
     };
     let availability = if enabled {
-        Some(lash::ToolAvailability::Showcased)
+        Some(lash_core::ToolAvailability::Showcased)
     } else {
-        Some(lash::ToolAvailability::Off)
+        Some(lash_core::ToolAvailability::Off)
     };
     ctx.host
         .set_tools_availability(session_id, &autoresearch_tool_names(), availability)
@@ -1310,8 +1310,8 @@ mod tests {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
         assert!(tools.definitions().into_iter().all(|tool| {
-            tool.effective_availability(&lash::ExecutionMode::standard())
-                == lash::ToolAvailability::Off
+            tool.effective_availability(&lash_core::ExecutionMode::standard())
+                == lash_core::ToolAvailability::Off
         }));
     }
 }

@@ -1,7 +1,7 @@
 //! Per-core MCP connection pool.
 //!
 //! [`McpConnectionPool`] holds one client per configured server and is shared
-//! across every session built from the same [`lash::LashCore`]. Connections
+//! across every session built from the same [`lash_core::LashCore`]. Connections
 //! are established eagerly when the pool is constructed and held for the
 //! lifetime of the pool.
 //!
@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use base64::Engine;
 use rmcp::model::{CallToolRequestParams, ClientInfo, Content, Implementation, RawContent};
@@ -17,10 +18,9 @@ use rmcp::transport::child_process::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransport;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::RwLock;
 use tokio::time::timeout;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolImage, ToolResult};
+use lash_core::{ToolDefinition, ToolExecutionMode, ToolImage, ToolResult};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -82,7 +82,10 @@ impl McpConnectionPool {
     ) -> Result<(), McpError> {
         config.validate(&server_name)?;
         let entry = McpEntry::connect(server_name.clone(), config).await?;
-        let mut entries = self.entries.write().await;
+        let mut entries = self
+            .entries
+            .write()
+            .expect("MCP pool entries lock poisoned");
         entries.insert(server_name, Arc::new(entry));
         Ok(())
     }
@@ -90,7 +93,10 @@ impl McpConnectionPool {
     /// Remove and shut down one server.
     pub async fn detach(self: &Arc<Self>, server_name: &str) -> Result<(), McpError> {
         let removed = {
-            let mut entries = self.entries.write().await;
+            let mut entries = self
+                .entries
+                .write()
+                .expect("MCP pool entries lock poisoned");
             entries.remove(server_name)
         };
         if let Some(entry) = removed {
@@ -102,10 +108,7 @@ impl McpConnectionPool {
     /// All advertised tools across every server, with `mcp__<server>__<tool>`
     /// prefixed names. Cheap — these are precomputed `ToolDefinition` clones.
     pub fn advertised_tools_blocking(&self) -> Vec<ToolDefinition> {
-        // We hold an async RwLock but `definitions()` must be sync. Use
-        // `blocking_read` — safe here because all writers (attach/detach)
-        // run from async contexts that don't hold this lock across .await.
-        let guard = self.entries.blocking_read();
+        let guard = self.entries.read().expect("MCP pool entries lock poisoned");
         guard
             .values()
             .flat_map(|entry| {
@@ -119,7 +122,7 @@ impl McpConnectionPool {
 
     /// Same as [`advertised_tools_blocking`] but for use from async contexts.
     pub async fn advertised_tools(&self) -> Vec<ToolDefinition> {
-        let guard = self.entries.read().await;
+        let guard = self.entries.read().expect("MCP pool entries lock poisoned");
         guard
             .values()
             .flat_map(|entry| {
@@ -183,7 +186,7 @@ impl McpConnectionPool {
     }
 
     async fn lookup(&self, prefixed_name: &str) -> Option<(Arc<McpEntry>, String)> {
-        let guard = self.entries.read().await;
+        let guard = self.entries.read().expect("MCP pool entries lock poisoned");
         for entry in guard.values() {
             if let Some(tool) = entry.imported_tools.get(prefixed_name) {
                 return Some((Arc::clone(entry), tool.original_name.clone()));
@@ -196,7 +199,10 @@ impl McpConnectionPool {
     /// graceful shutdown; `Drop` itself cannot await.
     pub async fn shutdown_all(&self) {
         let entries: Vec<Arc<McpEntry>> = {
-            let mut guard = self.entries.write().await;
+            let mut guard = self
+                .entries
+                .write()
+                .expect("MCP pool entries lock poisoned");
             std::mem::take(&mut *guard).into_values().collect()
         };
         for entry in entries {
@@ -249,7 +255,7 @@ async fn connect_service(
 ) -> Result<RunningService<RoleClient, ClientInfo>, McpError> {
     let mut implementation = Implementation::default();
     implementation.name = "lash".to_string();
-    implementation.version = lash::VERSION.to_string();
+    implementation.version = lash_core::VERSION.to_string();
     let mut client_info = ClientInfo::default();
     client_info.client_info = implementation;
 

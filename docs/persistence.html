@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Persistence - lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main class="page">
+    <div class="frame">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="sidebar__exit" href="./index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Guide</span>
+            <span class="sidebar__current">Persistence</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./embedding.html">Lash API</a></li>
+            <li><a href="./example-agent-service.html">Agent Service</a></li>
+            <li><a href="./cli.html">CLI</a></li>
+            <li><a href="./plugins.html">Plugins</a></li>
+            <li><a class="active" href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
+            <li><a href="./architecture/">Architecture</a></li>
+            <li><a href="./design-language.html">Design Language</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#contract">The Contract</a></li>
+            <li><a href="#wiring">Wiring It Up</a></li>
+            <li><a href="#whats-persisted">What Gets Persisted</a></li>
+            <li><a href="#garbage-collection">Garbage Collection</a></li>
+            <li><a href="#end-to-end">End-To-End Example</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <header class="hero">
+        <div class="eyebrow">lash guide</div>
+        <h1>session<span class="slash">/</span>persistence</h1>
+        <p>Sessions persist their runtime state through a small interface, <code>RuntimePersistence</code>. The default first-party implementation is SQLite-backed (<code>lash-sqlite-store</code>) and is what the CLI uses. Host apps wire it up by passing a <code>SessionStoreFactory</code> to the core builder, or by handing a per-session store directly to <code>SessionBuilder</code>.</p>
+      </header>
+
+      <section class="content" id="content">
+        <div class="section" id="contract">
+          <div class="section-header">
+            <h2>The Contract</h2>
+            <p><code>RuntimePersistence</code> is the runtime-facing trait. Most app hosts never implement it themselves — they use <code>lash-sqlite-store</code> via its factory.</p>
+          </div>
+          <pre><code>#[async_trait]
+pub trait RuntimePersistence: Send + Sync {
+    async fn load_session(&amp;self, scope: SessionReadScope)
+        -&gt; Result&lt;Option&lt;PersistedSessionRead&gt;, StoreError&gt;;
+    async fn load_node(&amp;self, node_id: &amp;str)
+        -&gt; Result&lt;Option&lt;SessionNodeRecord&gt;, StoreError&gt;;
+    async fn commit_runtime_state(&amp;self, commit: RuntimeCommit)
+        -&gt; Result&lt;RuntimeCommitResult, StoreError&gt;;
+    async fn save_session_meta(&amp;self, meta: SessionMeta) -&gt; Result&lt;(), StoreError&gt;;
+    async fn load_session_meta(&amp;self) -&gt; Result&lt;Option&lt;SessionMeta&gt;, StoreError&gt;;
+    async fn tombstone_nodes(&amp;self, ids: &amp;[String]) -&gt; Result&lt;(), StoreError&gt;;
+    async fn vacuum(&amp;self) -&gt; Result&lt;VacuumReport, StoreError&gt;;
+    async fn gc_unreachable(&amp;self) -&gt; Result&lt;GcReport, StoreError&gt;;
+}</code></pre>
+          <p>A <code>SessionStoreFactory</code> produces stores on demand — one per session — keyed by the session id, parent id (for subagents / forks), and policy:</p>
+          <pre><code>pub trait SessionStoreFactory: Send + Sync {
+    fn create_store(
+        &amp;self,
+        request: &amp;SessionStoreCreateRequest,
+    ) -&gt; Result&lt;Arc&lt;dyn RuntimePersistence&gt;, String&gt;;
+}</code></pre>
+        </div>
+
+        <div class="section" id="wiring">
+          <div class="section-header">
+            <h2>Wiring It Up</h2>
+            <p>The common path is a single factory installed on the core. Every session opened from that core uses it.</p>
+          </div>
+          <pre><code>use std::sync::Arc;
+use lash::{LashCore, ModeId, ModePreset};
+use lash_sqlite_store::SqliteSessionStoreFactory;
+
+let store_factory = Arc::new(SqliteSessionStoreFactory::new("./.lash-data"));
+
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .build()?;</code></pre>
+          <p>Override per session — useful for tests that want an isolated in-memory or temp-directory store:</p>
+          <pre><code>let session = core
+    .session(chat_id)
+    .store(Arc::new(my_custom_persistence))
+    .open()
+    .await?;</code></pre>
+          <p>If no <code>store_factory</code> is set, sessions run in-memory: they accept turns and produce results, but nothing is written to disk and nothing can be resumed after the process exits. There's no separate "in-memory" implementation — absence of a factory is the mechanism.</p>
+        </div>
+
+        <div class="section" id="whats-persisted">
+          <div class="section-header">
+            <h2>What Gets Persisted</h2>
+            <p>The SQLite schema is exhaustive and stable. A single session's database holds:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel">
+              <h3>Graph nodes</h3>
+              <p>Every conversation event — user inputs, assistant responses, tool calls, mode events, prompt snapshots — lives in <code>graph_nodes</code> with a <code>tombstoned</code> flag for soft deletion. The runtime walks active paths from the session head.</p>
+            </article>
+            <article class="panel">
+              <h3>Session head</h3>
+              <p>A singleton row tracking the current logical head pointer and its revision. Optimistic concurrency uses the revision to detect conflicting writes.</p>
+            </article>
+            <article class="panel">
+              <h3>Checkpoint blobs</h3>
+              <p>Compressed snapshots of tool state, plugin state, execution state, and prompt material, keyed by content hash so identical blobs are deduplicated across resumes.</p>
+            </article>
+            <article class="panel">
+              <h3>Usage deltas</h3>
+              <p>Per-turn token counts: <code>input_tokens</code>, <code>output_tokens</code>, <code>cached_input_tokens</code>, <code>reasoning_tokens</code>. The runtime aggregates these into the session usage ledger surfaced by <code>SessionReadView</code>.</p>
+            </article>
+            <article class="panel">
+              <h3>Session metadata</h3>
+              <p>Session id, human-readable name, model, cwd, parent session id, creation timestamp. This is what the resume picker shows.</p>
+            </article>
+            <article class="panel">
+              <h3>Attachments</h3>
+              <p>Image / file attachments are stored as blobs and referenced from graph nodes by <code>BlobRef</code>. The same blob is reused by traces and exports.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="garbage-collection">
+          <div class="section-header">
+            <h2>Garbage Collection</h2>
+            <p>Two operations on <code>RuntimePersistence</code> reclaim space. Both are safe to run from a background task or a CLI maintenance command.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>gc_unreachable()</code></h3>
+              <p>Walks reachable blob references from the session head and active checkpoints, marks orphaned blobs for deletion, and returns a <code>GcReport</code> with the number of blobs removed. Run this after pruning a branch or discarding a long unused thread.</p>
+            </article>
+            <article class="panel">
+              <h3><code>vacuum()</code></h3>
+              <p>Physically removes tombstoned graph-node rows that gc has already detached, returning a <code>VacuumReport</code> with the row count. Use this after a <code>gc_unreachable</code> pass to reclaim file size.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="end-to-end">
+          <div class="section-header">
+            <h2>End-To-End Example</h2>
+            <p>The <code>agent-service</code> example shows the canonical wire-up: a SQLite factory, sessions opened from the same core by chat id, runtime persistence handled transparently while the app keeps its own product database (chat rows, board state, frontend events) alongside.</p>
+          </div>
+          <pre><code>// One factory at boot, shared across every chat.
+let store_factory = Arc::new(SqliteSessionStoreFactory::new(
+    data_dir.join("lash-sessions"),
+));
+
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .provider(provider)
+    .model(model.clone(), Some(model_variant.clone()))
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .build()?;
+
+// Per request: open a session keyed by the app's chat id.
+let session = core.session(chat_id).rlm().open().await?;</code></pre>
+          <p>The full source is at <code>examples/agent-service/src/main.rs</code>.</p>
+        </div>
+
+        <div class="section-nav">
+          <a href="./plugins.html"><span>Previous</span><strong>Plugins</strong></a>
+          <a href="./tracing.html"><span>Next</span><strong>Tracing</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>lash-core/src/store.rs</code>, <code>lash-core/src/runtime/mod.rs</code>, <code>lash/src/core.rs</code>, <code>lash/src/session.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>.</footer>
+    </div>
+  </main>
+</body>
+</html>

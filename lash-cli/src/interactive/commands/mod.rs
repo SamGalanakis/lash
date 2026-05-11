@@ -461,7 +461,7 @@ async fn handle_slash_command(
                 push_system_message(app, "Compaction is unavailable while a turn is running.");
                 return Ok(false);
             };
-            let trigger = lash::RewriteTrigger::Manual {
+            let trigger = lash_core::RewriteTrigger::Manual {
                 instructions: argument,
             };
             match rt.control().state().rewrite_history(trigger).await {

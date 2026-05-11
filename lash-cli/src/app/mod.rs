@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-use lash::SessionEvent;
-use lash::{
+use lash_core::SessionEvent;
+use lash_core::{
     ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
     PluginMessage, PluginSurfaceEvent, PromptUsage, TokenUsage, ToolCallRecord, TurnActivity,
     TurnEvent,
@@ -661,7 +661,7 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_from_read_view(&mut self, read_view: &lash::SessionReadView) {
+    pub fn finish_turn_from_read_view(&mut self, read_view: &lash_core::SessionReadView) {
         let current_turn_starts = user_turn_start_indices(self.timeline.items());
         let current_turn_start = current_turn_starts.last().copied();
 
@@ -1451,6 +1451,19 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
+            TurnEvent::SubmittedValue { value } => {
+                self.finalize_live_markdown();
+                let text = self::projection::render_submitted_value(&value);
+                if push_assistant_text_block(&mut self.timeline, &text) {
+                    self.mark_first_token_arrived();
+                    self.live_output_chars_estimate += text.chars().count() as i64;
+                    self.live_output_tokens_estimate =
+                        estimate_tokens_from_char_count(self.live_output_chars_estimate);
+                    self.mark_visible_output();
+                    self.invalidate_height_cache();
+                    self.scroll_to_bottom();
+                }
+            }
             TurnEvent::ToolCallCompleted {
                 name,
                 args,
@@ -1640,9 +1653,7 @@ impl App {
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::SubmittedValue { .. }
-            | TurnEvent::ToolValue { .. } => {}
+            TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
         }
     }
 

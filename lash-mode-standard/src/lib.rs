@@ -15,28 +15,28 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::llm::types::ResponseTextMeta;
-use lash::plugin::{
+use lash_core::llm::types::{ProviderReasoningReplay, ProviderReplayMeta, ResponseTextMeta};
+use lash_core::plugin::{
     ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeSessionContext, ModeSessionPlugin,
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::sansio::{
+use lash_core::sansio::{
     CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
     WaitingExecState, WaitingLlmState,
 };
-use lash::session_model::message::{PartAttachment, ReasoningMeta};
-use lash::session_model::{
+use lash_core::session_model::message::PartAttachment;
+use lash_core::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
     reassign_part_ids, shared_parts,
 };
-use lash::tool_dispatch::{
+use lash_core::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
 
 mod batch;
 use batch::batch_tool_definition;
-use lash::{
+use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
     ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
     ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
@@ -307,7 +307,7 @@ fn parse_batch_specs(args: &Value) -> Result<Vec<BatchCallSpec>, ToolResult> {
 /// Protocol driver for Standard execution mode. Consumes native
 /// tool-call envelopes from the LLM, dispatches them via
 /// `DriverAction::StartTools`, and splices reasoning parts into the
-/// assistant message so Codex-style roundtrips preserve
+/// assistant message so provider replay metadata preserves
 /// chain-of-thought ordering.
 pub struct StandardDriver;
 
@@ -315,8 +315,7 @@ struct StandardToolCall {
     call_id: String,
     tool_name: String,
     input_json: String,
-    item_id: Option<String>,
-    signature: Option<String>,
+    replay: Option<ProviderReplayMeta>,
 }
 
 fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
@@ -329,7 +328,7 @@ fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
     })
 }
 
-impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
+impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
     fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(true),
@@ -351,11 +350,11 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         // Reasoning items captured with their position in the original
         // response. The `usize` is the index in `tool_calls` that this
         // reasoning item originally preceded, so we can interleave
-        // reasoning → tool_call in the emission order Codex produced.
-        // `Option<ReasoningMeta>` carries the encrypted roundtrip payload
+        // reasoning → tool_call in the provider's original emission order.
+        // `Option<ProviderReasoningReplay>` carries roundtrip payload
         // when present (fix 1.3b); when None, the item is display-only
         // (fix 1.3a) — still rendered in the UI but never re-fed.
-        let mut reasoning_items: Vec<(usize, Option<ReasoningMeta>, String)> = Vec::new();
+        let mut reasoning_items: Vec<(usize, Option<ProviderReasoningReplay>, String)> = Vec::new();
         let mut actions = Vec::new();
 
         for part in response_parts {
@@ -376,45 +375,26 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                         }
                     }
                 }
-                LlmOutputPart::Reasoning {
-                    text,
-                    signature,
-                    redacted: _,
-                    item_id,
-                    encrypted_content,
-                    summary,
-                } => {
+                LlmOutputPart::Reasoning { text, replay } => {
                     let trimmed = text.trim().to_string();
-                    // The session snapshot stores a single opaque blob per
-                    // reasoning item — Codex fills `encrypted_content`,
-                    // Anthropic fills `signature`. Either counts as a
-                    // replayable payload.
-                    let payload = encrypted_content.clone().or(signature);
                     // Skip fully-empty reasoning items (no display text and
                     // no roundtrip payload).
-                    if trimmed.is_empty() && payload.is_none() {
+                    if trimmed.is_empty() && replay.as_ref().is_none_or(|meta| meta.is_empty()) {
                         continue;
                     }
-                    let meta = payload.map(|blob| ReasoningMeta {
-                        id: item_id.unwrap_or_default(),
-                        summary,
-                        encrypted_content: Some(blob),
-                    });
-                    reasoning_items.push((tool_calls.len(), meta, trimmed));
+                    reasoning_items.push((tool_calls.len(), replay, trimmed));
                 }
                 LlmOutputPart::ToolCall {
                     call_id,
                     tool_name,
                     input_json,
-                    item_id,
-                    signature,
+                    replay,
                 } => {
                     tool_calls.push(StandardToolCall {
                         call_id,
                         tool_name,
                         input_json,
-                        item_id,
-                        signature,
+                        replay,
                     });
                 }
             }
@@ -470,8 +450,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta,
@@ -521,8 +500,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta,
@@ -531,9 +509,9 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
 
         let mut calls = Vec::new();
         // Interleave reasoning items with tool calls to preserve the
-        // original emission order. Codex re-feeds expect the sequence
-        // `reasoning → function_call` from the turn in which both were
-        // produced — swapping them drops the chain-of-thought pairing.
+        // original emission order. Some provider replays expect the
+        // sequence `reasoning → function_call` from the turn in which both
+        // were produced; swapping them can drop the reasoning/tool pairing.
         let mut reasoning_iter = reasoning_items.into_iter().peekable();
         for (tool_index, tool_call) in tool_calls.into_iter().enumerate() {
             while let Some((insert_index, _, _)) = reasoning_iter.peek() {
@@ -550,8 +528,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 attachment: None,
                 tool_call_id: Some(tool_call.call_id.clone()),
                 tool_name: Some(tool_call.tool_name.clone()),
-                tool_item_id: tool_call.item_id.clone(),
-                tool_signature: tool_call.signature.clone(),
+                tool_replay: tool_call.replay.clone(),
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -563,7 +540,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 call_id: tool_call.call_id,
                 tool_name: tool_call.tool_name,
                 args,
-                item_id: tool_call.item_id,
+                replay: tool_call.replay,
             });
         }
         for (_, meta, text) in reasoning_iter {
@@ -597,20 +574,20 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         for outcome in completed {
             if terminal_outcome.is_none() && outcome.result.success {
                 terminal_outcome = match outcome.result.control.as_ref() {
-                    Some(lash::ToolControl::Handoff { session_id })
+                    Some(lash_core::ToolControl::Handoff { session_id })
                         if !session_id.trim().is_empty() =>
                     {
                         Some(TurnOutcome::Handoff {
                             session_id: session_id.clone(),
                         })
                     }
-                    Some(lash::ToolControl::Finish { value }) => {
+                    Some(lash_core::ToolControl::Finish { value }) => {
                         Some(TurnOutcome::Finished(TurnFinish::ToolValue {
                             tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
                         }))
                     }
-                    Some(lash::ToolControl::Fail { value }) => {
+                    Some(lash_core::ToolControl::Fail { value }) => {
                         Some(TurnOutcome::Stopped(TurnStop::ToolError {
                             tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
@@ -630,8 +607,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                 attachment: None,
                 tool_call_id: Some(outcome.call_id.clone()),
                 tool_name: Some(outcome.tool_name.clone()),
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -648,8 +624,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -659,7 +634,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     kind: PartKind::Image,
                     content: String::new(),
                     attachment: Some(PartAttachment {
-                        reference: lash::AttachmentRef {
+                        reference: lash_core::AttachmentRef {
                             label: reference
                                 .label
                                 .clone()
@@ -669,8 +644,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     }),
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -721,7 +695,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         &self,
         _ctx: DriverContextView<'_>,
         _waiting: WaitingExecState,
-        _result: Result<lash::ExecResponse, String>,
+        _result: Result<lash_core::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         Vec::new()
     }

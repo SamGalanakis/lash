@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 lash-tool-apply-patch = { path = "../lash-tool-apply-patch" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -15,7 +15,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash = { path = "../lash", features = ["testing"] }
+lash-core = { path = "../lash-core", features = ["testing"] }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

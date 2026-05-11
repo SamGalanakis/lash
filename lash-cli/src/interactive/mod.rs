@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event as TermEvent;
-use lash::session_model::Message;
-use lash::{CachedModelCatalog, TokenUsage, ToolState};
-use lash_embed::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
+use lash_core::session_model::Message;
+use lash_core::{CachedModelCatalog, TokenUsage, ToolState};
 use lash_sqlite_store::Store;
 use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
@@ -404,7 +404,7 @@ pub(crate) async fn run_app(
                     );
                     if done.stream_id == active_stream_id
                         && !pending_clear_after_return
-                        && let lash::TurnOutcome::Handoff { session_id } = &done.result.outcome
+                        && let lash_core::TurnOutcome::Handoff { session_id } = &done.result.outcome
                     {
                         let session_id = session_id.clone();
                         app.stop_turn();
@@ -475,7 +475,7 @@ pub(crate) async fn run_app(
                             let _ = rt.control().state().reset().await;
                             rt.control()
                                 .state()
-                                .set_persisted(lash::PersistedSessionState::from_state(
+                                .set_persisted(lash_core::PersistedSessionState::from_state(
                                     cleared_session_state(preserved_policy),
                                 ))
                                 .await;
@@ -502,11 +502,12 @@ pub(crate) async fn run_app(
                     }
                     let interrupted = matches!(
                         &done.result.outcome,
-                        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled)
+                        lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled)
                     );
                     let no_visible_output = matches!(
                         &done.result.outcome,
-                        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                        lash_core::TurnOutcome::Finished(_)
+                            | lash_core::TurnOutcome::Handoff { .. }
                     ) && !turn_has_visible_output(&done.result);
                     let state = done.result.state;
                     tracing::info!(

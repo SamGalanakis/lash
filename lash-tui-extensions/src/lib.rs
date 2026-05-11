@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_embed::control::PluginAction;
-use lash_embed::tools::{
+use lash::control::PluginAction;
+use lash::tools::{
     AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec,
     MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp,
     MonitorUpdateBatch, StartMonitorArgs, StopMonitorArgs,
 };
-use lash_embed::{PluginActions, TurnEvent};
+use lash::{PluginActions, TurnEvent};
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{

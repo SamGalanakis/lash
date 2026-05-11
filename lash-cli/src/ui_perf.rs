@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::SkillCatalog;
 use anyhow::Context;
 use chrono::Utc;
-use lash::TokenUsage;
+use lash_core::TokenUsage;
 use lash_file_index::{FileIndex, MatchResult};
 use lash_tui::{
     Color, Column, ColumnWidth, Frame, Line, PerfCounters, PerfPhase, Rect, Style, Table, TableRow,
@@ -1104,9 +1104,9 @@ impl TuiExtension for SurfaceBenchmarkTuiExtension {
         }
     }
 
-    fn handle_turn_event(&self, event: &lash::TurnEvent) -> Vec<TuiHostEffect> {
+    fn handle_turn_event(&self, event: &lash_core::TurnEvent) -> Vec<TuiHostEffect> {
         match event {
-            lash::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_mount" => vec![
+            lash_core::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_mount" => vec![
                 TuiHostEffect::MountSurface {
                     spec: TuiSurfaceSpec {
                         key: "workspace".to_string(),
@@ -1133,25 +1133,27 @@ impl TuiExtension for SurfaceBenchmarkTuiExtension {
                     key: "workspace".to_string(),
                 },
             ],
-            lash::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_overlay" => vec![
-                TuiHostEffect::MountSurface {
-                    spec: TuiSurfaceSpec {
-                        key: "overlay".to_string(),
-                        slot: TuiSurfaceSlot::Overlay,
-                        size: TuiSurfaceSize::Fixed {
-                            width: 36,
-                            height: 4,
+            lash_core::TurnEvent::AssistantProseDelta { text } if text == "ui_perf_overlay" => {
+                vec![
+                    TuiHostEffect::MountSurface {
+                        spec: TuiSurfaceSpec {
+                            key: "overlay".to_string(),
+                            slot: TuiSurfaceSlot::Overlay,
+                            size: TuiSurfaceSize::Fixed {
+                                width: 36,
+                                height: 4,
+                            },
+                            order: 10,
+                            focusable: true,
+                            visible: true,
+                            modal: true,
                         },
-                        order: 10,
-                        focusable: true,
-                        visible: true,
-                        modal: true,
                     },
-                },
-                TuiHostEffect::FocusSurface {
-                    key: "overlay".to_string(),
-                },
-            ],
+                    TuiHostEffect::FocusSurface {
+                        key: "overlay".to_string(),
+                    },
+                ]
+            }
             _ => Vec::new(),
         }
     }
@@ -1172,16 +1174,18 @@ fn build_benchmark_harness(scenario: UiPerfScenario, workload: UiPerfWorkload) -
             );
             apply_ui_host_effects(
                 &mut app,
-                ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+                ui_extensions.effects_for_turn_event(&lash_core::TurnEvent::AssistantProseDelta {
                     text: "ui_perf_mount".to_string(),
                 }),
             );
             if scenario == UiPerfScenario::WorkspaceOverlay {
                 apply_ui_host_effects(
                     &mut app,
-                    ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
-                        text: "ui_perf_overlay".to_string(),
-                    }),
+                    ui_extensions.effects_for_turn_event(
+                        &lash_core::TurnEvent::AssistantProseDelta {
+                            text: "ui_perf_overlay".to_string(),
+                        },
+                    ),
                 );
             }
             app.set_ui_extensions(ui_extensions);

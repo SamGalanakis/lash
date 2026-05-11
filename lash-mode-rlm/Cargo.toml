@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 lashlang = { path = "../lashlang" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 async-trait = { workspace = true }
@@ -18,6 +18,6 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash = { path = "../lash", features = ["testing"] }
+lash-core = { path = "../lash-core", features = ["testing"] }
 lash-sansio = { path = "../lash-sansio" }
 lash-mode-standard = { path = "../lash-mode-standard" }

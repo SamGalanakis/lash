@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use lash::{ToolAvailability, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult};
+use lash_core::{
+    ToolAvailability, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult,
+};
 use serde_json::{Value, json};
 
 use crate::catalog::CatalogTool;

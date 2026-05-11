@@ -7,7 +7,7 @@ use crate::app::timeline_from_read_view;
 use crate::assistant_text::normalize_assistant_text;
 use crate::theme;
 use async_trait::async_trait;
-use lash::{Part, PartKind, PromptRequest};
+use lash_core::{Part, PartKind, PromptRequest};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };
@@ -17,13 +17,13 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 fn timeline_items_from_test_read_view(
-    events: &[lash::SessionEventRecord],
-    messages: &[lash::Message],
-    tool_calls: &[lash::ToolCallRecord],
+    events: &[lash_core::SessionEventRecord],
+    messages: &[lash_core::Message],
+    tool_calls: &[lash_core::ToolCallRecord],
     ui_state: &crate::app::UiProjectionState,
 ) -> Vec<crate::app::UiTimelineItem> {
-    let read_view = lash::SessionReadView::from_derived_message_view(
-        lash::SessionStateEnvelope::default(),
+    let read_view = lash_core::SessionReadView::from_derived_message_view(
+        lash_core::SessionStateEnvelope::default(),
         Arc::new(events.to_vec()),
         Arc::new(messages.to_vec()),
         Arc::new(tool_calls.to_vec()),
@@ -335,9 +335,9 @@ fn prompt_panel_strips_redundant_h1_matching_panel_title() {
 
 #[test]
 fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
-    let message = lash::Message {
+    let message = lash_core::Message {
         id: "m1".into(),
-        role: lash::MessageRole::User,
+        role: lash_core::MessageRole::User,
         parts: vec![Part {
             id: "m1.p1".into(),
             kind: PartKind::Text,
@@ -345,9 +345,8 @@ fn interrupted_projection_hides_appended_skill_blocks_in_user_text() {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
-            prune_state: lash::PruneState::Intact,
+            tool_replay: None,
+            prune_state: lash_core::PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
         }]
@@ -1274,7 +1273,7 @@ fn live_reasoning_compacts_after_activity_appends_below_it() {
         "live reasoning should expand while it is the tail; got {live_text:?}",
     );
 
-    app.handle_session_event(lash::SessionEvent::ToolCall {
+    app.handle_session_event(lash_core::SessionEvent::ToolCall {
         call_id: None,
         name: "read_file".into(),
         args: serde_json::json!({ "path": "lash/src/provider.rs" }),
@@ -1317,7 +1316,7 @@ fn committed_reasoning_compacts_while_live_assistant_streams() {
     )]
     .into();
 
-    app.handle_session_event(lash::SessionEvent::TextDelta {
+    app.handle_session_event(lash_core::SessionEvent::TextDelta {
         content: "Answer is streaming.".into(),
     });
 

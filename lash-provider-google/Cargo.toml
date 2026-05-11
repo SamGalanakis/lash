@@ -6,7 +6,7 @@ license.workspace = true
 description = "Google OAuth (Gemini via Code Assist) provider for lash."
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 lash-llm-transport = { path = "../lash-llm-transport" }
 lash-provider-auth = { path = "../lash-provider-auth" }
 async-trait = { workspace = true }

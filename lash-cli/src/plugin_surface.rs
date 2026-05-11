@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use lash::PluginSurfaceEvent;
+use lash_core::PluginSurfaceEvent;
 
 use crate::app::{
     PlanDockItem, PlanDockItemStatus, PlanDockState, PluginPanelBlock, UiTimeline, UiTimelineItem,
@@ -163,7 +163,7 @@ pub fn apply_surface_event(
                         .all(|item| item.status == PlanDockItemStatus::Done);
                 if next.items.is_empty() || all_done {
                     tracing::info!(
-                        target: "lash::plan_dock",
+                        target: "lash_core::plan_dock",
                         plugin_id = plugin_id,
                         items = next.items.len(),
                         all_done = all_done,
@@ -172,7 +172,7 @@ pub fn apply_surface_event(
                     return PluginSurfaceMutation::plan_dock_update(None);
                 }
                 tracing::info!(
-                    target: "lash::plan_dock",
+                    target: "lash_core::plan_dock",
                     plugin_id = plugin_id,
                     items = next.items.len(),
                     "routing panel upsert to plan dock",
