@@ -1,4 +1,5 @@
 use super::*;
+use crate::assistant_text::{merge_assistant_reasoning_text, normalize_assistant_text};
 use std::collections::{HashMap, HashSet};
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
