@@ -68,7 +68,6 @@
     border: 1px solid var(--line);
     background: var(--form-raised);
     color: var(--chalk);
-    text-decoration: none;
     transition: border-color 200ms ease, transform 200ms ease;
   }
   .entry::before {
@@ -81,19 +80,28 @@
   .entry:hover {
     border-color: var(--line-strong);
     transform: translateY(-2px);
-    text-decoration: none;
   }
-  .entry:focus-visible {
+  .entry:focus-within {
     border-color: var(--line-strong);
     transform: translateY(-2px);
-    outline: none;
     box-shadow: var(--focus-ring);
-    text-decoration: none;
   }
   .entry h2 {
     margin: 0;
     font-size: clamp(2.4rem, 5vw, 3.2rem);
     line-height: 0.92;
+  }
+  .entry-link {
+    color: inherit;
+    text-decoration: none;
+  }
+  .entry-link::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+  }
+  .entry-link:focus-visible {
+    outline: none;
   }
   .entry p {
     margin: 0;
@@ -101,6 +109,11 @@
     font-family: var(--font-body);
     font-size: 1rem;
     max-width: none;
+  }
+  .entry p a {
+    position: relative;
+    z-index: 1;
+    color: var(--sodium);
   }
   .entry-foot {
     display: flex;
@@ -118,7 +131,7 @@
     transition: transform 200ms ease;
   }
   .entry:hover .entry-arrow,
-  .entry:focus-visible .entry-arrow {
+  .entry:focus-within .entry-arrow {
     transform: translateX(4px);
   }
   @media (max-width: 860px) {
@@ -143,50 +156,50 @@
       </header>
 
       <section class="entry-rail" id="content" aria-label="Documentation sections">
-        <a class="entry" href="./embedding.html">
+        <div class="entry">
           <div class="micro-label">Build an app</div>
           <div>
-            <h2>Lash API<span class="accent">.</span></h2>
+            <h2><a class="entry-link" href="./embedding.html">Lash API<span class="accent">.</span></a></h2>
             <p>How to configure <code>LashCore</code>, open sessions, stream semantic turn events, collect visible output, pass typed plugin context, and wire app tools. Start with <a href="./quickstart.html">Quickstart</a>, then read the <a href="./example-agent-service.html">Agent Service</a> walkthrough.</p>
           </div>
           <div class="entry-foot">
-            <span>Guide + how-tos</span>
+            <span>Guide</span>
             <span class="entry-arrow">→</span>
           </div>
-        </a>
-        <a class="entry" href="./cli.html">
+        </div>
+        <div class="entry">
           <div class="micro-label">Drive the binary</div>
           <div>
-            <h2>CLI<span class="accent">.</span></h2>
+            <h2><a class="entry-link" href="./cli.html">CLI<span class="accent">.</span></a></h2>
             <p>The <code>lash</code> terminal binary. Slash commands, keyboard shortcuts, every CLI flag, config file schema, environment variables, setup wizard, and resume/fork flows.</p>
           </div>
           <div class="entry-foot">
-            <span>User reference</span>
+            <span>Reference</span>
             <span class="entry-arrow">→</span>
           </div>
-        </a>
-        <a class="entry" href="./architecture/">
+        </div>
+        <div class="entry">
           <div class="micro-label">Read the system</div>
           <div>
-            <h2>Architecture<span class="accent">.</span></h2>
+            <h2><a class="entry-link" href="./architecture/">Architecture<span class="accent">.</span></a></h2>
             <p>Crates, execution paths, runtime residency, graph storage, providers, plugin contracts, Lashlang, UI projection, benchmarks, and high-signal files.</p>
           </div>
           <div class="entry-foot">
-            <span>10 chapters</span>
+            <span>Reference</span>
             <span class="entry-arrow">→</span>
           </div>
-        </a>
-        <a class="entry" href="./design-language.html">
+        </div>
+        <div class="entry">
           <div class="micro-label">Shape the interface</div>
           <div>
-            <h2>Design Language<span class="accent">.</span></h2>
+            <h2><a class="entry-link" href="./design-language.html">Design Language<span class="accent">.</span></a></h2>
             <p>The terminal product vocabulary. Sodium intent, ash structure, chalk text, plan dock, activity rendering, type, color, texture.</p>
           </div>
           <div class="entry-foot">
-            <span>7 sections</span>
+            <span>Reference</span>
             <span class="entry-arrow">→</span>
           </div>
-        </a>
+        </div>
       </section>
 
       <footer class="footer">Docs root · <code>docs/index.html</code></footer>
