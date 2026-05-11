@@ -45,12 +45,10 @@ impl LlmToolsProvider {
         let task = required_string(args, "task")?;
         let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
         let output_schema = parse_output_schema(args.get("output"))?;
-        let current_snapshot = context
-            .host()
-            .snapshot_session(context.session_id())
+        let session_model = context
+            .session_model()
             .await
-            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-        let policy = current_snapshot.policy;
+            .map_err(|err| format!("failed to read current session model: {err}"))?;
         let response_schema = llm_query_response_schema(output_schema.as_ref());
         let prompt = llm_query_prompt(&task, &inputs, output_schema.as_ref());
 
@@ -61,11 +59,10 @@ impl LlmToolsProvider {
         });
 
         let completion = context
-            .host()
             .direct_completion(
                 DirectRequest {
-                    model: policy.model,
-                    model_variant: policy.model_variant,
+                    model: session_model.model,
+                    model_variant: session_model.model_variant,
                     messages: vec![
                         DirectMessage {
                             role: DirectRole::System,

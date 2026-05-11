@@ -13,7 +13,7 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::{
-    TurnInput,
+    SessionSpec, TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
     prompt::{
@@ -25,10 +25,10 @@ use lash::{
 };
 use lash_cli::config::LashConfig;
 use lash_core::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
+    SessionPolicy, StandardContextApproach, TokioSessionTaskExecutor,
+    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -38,8 +38,7 @@ use lash_mode_rlm::{
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_sqlite_store::Store;
 use lash_subagents::{
-    CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
-    LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
+    CapabilityRegistry, LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -814,11 +813,11 @@ fn extract_text(content: Option<&Value>) -> String {
 /// be registered at the root.
 fn build_plugin_session(
     execution_mode: ExecutionMode,
-    policy: &SessionPolicy,
+    _policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<PluginSession>> {
     let _longcot_tools = longcot_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(ToolOutputBudgetPluginFactory::default()),
         Arc::new(BuiltinRlmModePluginFactory::new(RlmModePluginConfig {
             prompt_features: RlmPromptFeatures {
                 images: false,
@@ -831,20 +830,18 @@ fn build_plugin_session(
             "longcot_async_handles",
             PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),
         )),
-        Arc::new(SubagentsPluginFactory::new(
-            policy.clone(),
-            Arc::new(
-                CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
-                    SUBAGENT_CAPABILITY,
-                    CapabilitySpec {
-                        model: CapabilityField::Inherit,
-                        model_variant: CapabilityOptionalField::Inherit,
-                        execution_mode: CapabilityField::Inherit,
-                    },
-                ))),
-            ),
-            Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
-        )),
+        Arc::new(
+            SubagentsPluginFactory::new(
+                Arc::new(
+                    CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
+                        SUBAGENT_CAPABILITY,
+                        SessionSpec::inherit(),
+                    ))),
+                ),
+                Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
+            )
+            .with_session_spec(SessionSpec::inherit()),
+        ),
     ];
     PluginHost::new(factories)
         .build_session(

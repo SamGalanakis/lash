@@ -146,27 +146,27 @@ pub use monitor::{
 pub use plugin::{
     AckWakeArgs, AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
-    BuiltinToolResultProjectionPluginFactory, CheckpointHookContext, CheckpointHookHost,
-    DirectCompletion, DirectCompletionHost, DirectLlmCompletion, HistoryError, HistoryHost,
-    HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorAckWakeOp, MonitorEmptyArgs,
-    MonitorHost, MonitorRegisterSpecsOp, MonitorRegistrations, MonitorStartOp, MonitorStatusOp,
-    MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec, PersistentRuntimeServices, PluginAction,
-    PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionHost,
-    PluginActionInvokeError, PluginActionKind, PluginDirective, PluginError, PluginFactory,
-    PluginHost, PluginOwned, PluginRegistrar, PluginRuntimeEvent, PluginRuntimeEventHook,
-    PluginSession, PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact,
-    PluginSnapshotEntry, PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext,
-    PromptHookHost, RegisterSpecsArgs, RewriteContext, RewriteTrigger, RuntimeServices,
-    RuntimeSessionHost, SessionAppendNode, SessionConfigChangedContext, SessionContextSurface,
-    SessionCreateRequest, SessionGraphHost, SessionHandle, SessionLifecycleHost, SessionParam,
-    SessionPlugin, SessionPluginMode, SessionReadView, SessionRelation, SessionSnapshot,
-    SessionSnapshotHost, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
-    SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras, StartMonitorArgs,
-    StopMonitorArgs, SubagentSessionAuthority, TaskHost, ToolCatalogHost, ToolDiscoveryContext,
+    CheckpointHookContext, CheckpointHookHost, DirectCompletion, DirectCompletionHost,
+    DirectLlmCompletion, HistoryError, HistoryHost, HistoryRegistrations, HistoryRewriteMetadata,
+    HistoryRewriter, HistoryState, ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction,
+    MonitorAckWakeOp, MonitorEmptyArgs, MonitorHost, MonitorRegisterSpecsOp, MonitorRegistrations,
+    MonitorStartOp, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec,
+    PersistentRuntimeServices, PluginAction, PluginActionContext, PluginActionDef,
+    PluginActionFailure, PluginActionHost, PluginActionInvokeError, PluginActionKind,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginOwned, PluginRegistrar,
+    PluginRuntimeEvent, PluginRuntimeEventHook, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PluginSpec, PluginSpecFactory, PromptHookContext, PromptHookHost, RegisterSpecsArgs,
+    RewriteContext, RewriteTrigger, RuntimeServices, RuntimeSessionHost, SessionAppendNode,
+    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionGraphHost,
+    SessionHandle, SessionLifecycleHost, SessionParam, SessionPlugin, SessionPluginMode,
+    SessionReadView, SessionRelation, SessionSnapshot, SessionSnapshotHost, SessionStartPoint,
+    SessionStateChangedContext, SessionToolAccess, SessionTurnHandle, SnapshotReader,
+    SnapshotWriter, StandardCreateExtras, StartMonitorArgs, StopMonitorArgs,
+    SubagentSessionAuthority, TaskHost, ToolCatalogHost, ToolDiscoveryContext,
     ToolDiscoveryContribution, ToolDiscoveryContributor, ToolDiscoveryToolContribution,
-    ToolHookHost, ToolResultProjectionContext, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig, ToolResultProjector, ToolStateHost, ToolSurfaceContribution,
+    ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+    ToolResultProjectionContext, ToolResultProjector, ToolStateHost, ToolSurfaceContribution,
     TraceHost, TurnContextTransform, TurnHookContext, TurnHookHost, TurnHost,
     TurnResultHookContext, TurnResultHookHost, TurnResultSummary, TurnTransformContext,
     plugin_action_def,
@@ -200,11 +200,11 @@ pub use session_graph::{
     PersistedSessionConfig, PersistedTurnState, SessionGraph, SessionMessageTreeNode,
     SessionNodePayload, SessionNodeRecord,
 };
-pub use session_model::SessionPolicy;
 pub use session_model::context::PreparedContext;
 pub use session_model::{
     ConversationRecord, ModeEvent, SessionEventRecord, StateSnapshotEvent, ToolEvent,
 };
+pub use session_model::{SessionPolicy, SessionSpec};
 pub use store::{
     BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
@@ -212,4 +212,7 @@ pub use store::{
     load_persisted_session_state, load_persisted_session_state_active_path,
     refresh_persisted_session_state,
 };
-pub use tool_provider::{ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolProvider};
+pub use tool_provider::{
+    ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolProvider, ToolSessionControl,
+    ToolSessionModel, ToolTaskControl,
+};

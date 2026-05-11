@@ -1884,9 +1884,9 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
 
 #[tokio::test]
 async fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -> Result<()> {
-    let projection = Arc::new(lash_core::BuiltinToolResultProjectionPluginFactory::new(
-        lash_core::ToolResultProjectionPluginConfig {
-            mode: lash_core::ToolResultProjectionMode::Bytes,
+    let projection = Arc::new(lash_core::ToolOutputBudgetPluginFactory::new(
+        lash_core::ToolOutputBudgetConfig {
+            mode: lash_core::ToolOutputBudgetMode::Bytes,
             limit: 12,
             max_lines: 4,
         },
@@ -1935,7 +1935,9 @@ async fn tool_completed_activity_is_canonical_while_model_observation_is_project
         .provider(standard_provider)
         .model("mock-model", None)
         .tools(Arc::new(LongTextTools))
-        .plugin(projection.clone())
+        .configure_plugins(|plugins| {
+            plugins.replace(projection.clone());
+        })
         .max_context_tokens(200_000)
         .build()?;
     let standard_session = standard_core.session("standard-projection").open().await?;
@@ -1970,7 +1972,9 @@ async fn tool_completed_activity_is_canonical_while_model_observation_is_project
         ]))
         .model("mock-model", None)
         .tools(Arc::new(LongTextTools))
-        .plugin(projection)
+        .configure_plugins(|plugins| {
+            plugins.replace(projection);
+        })
         .max_context_tokens(200_000)
         .build()?;
     let rlm_session = rlm_core.session("rlm-projection").open().await?;

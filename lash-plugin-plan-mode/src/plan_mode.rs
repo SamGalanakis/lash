@@ -413,6 +413,40 @@ where
     Ok(path)
 }
 
+fn ensure_plan_path_from_snapshot(
+    state: &Arc<Mutex<PlanModeState>>,
+    snapshot: &lash_core::SessionSnapshot,
+) -> Result<PathBuf, PluginError> {
+    if let Some(path) = state
+        .lock()
+        .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
+        .plan_path()
+    {
+        return Ok(path);
+    }
+    let run_session_id =
+        effective_run_session_id(&snapshot.session_id, &snapshot.policy).to_string();
+    let path = resolve_plan_path(&run_session_id).map_err(PluginError::Session)?;
+    state
+        .lock()
+        .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
+        .set_plan_path(path.clone());
+    Ok(path)
+}
+
+async fn ensure_plan_report_for_tool_context(
+    state: &Arc<Mutex<PlanModeState>>,
+    context: &ToolContext,
+    seed_if_missing: bool,
+) -> Result<PlanReport, PluginError> {
+    let snapshot = context.session_snapshot().await?;
+    let path = ensure_plan_path_from_snapshot(state, &snapshot)?;
+    if seed_if_missing {
+        seed_plan_template(&path).map_err(PluginError::Session)?;
+    }
+    read_plan_report(&path).map_err(PluginError::Session)
+}
+
 async fn ensure_plan_report<H>(
     state: &Arc<Mutex<PlanModeState>>,
     session_id: &str,
@@ -476,6 +510,41 @@ where
         previous
     };
     if let Err(err) = sync_plan_exit_tool_state(host, session_id, enabled).await {
+        if previous != enabled {
+            let mut guard = state
+                .lock()
+                .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+            guard.set_enabled(previous);
+        }
+        return Err(err);
+    }
+    Ok(enabled)
+}
+
+async fn set_plan_mode_enabled_state_for_tool_context(
+    state: &Arc<Mutex<PlanModeState>>,
+    context: &ToolContext,
+    enabled: bool,
+) -> Result<bool, PluginError> {
+    let previous = {
+        let mut guard = state
+            .lock()
+            .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?;
+        let previous = guard.enabled;
+        if previous != enabled {
+            guard.set_enabled(enabled);
+        }
+        previous
+    };
+    let availability = if enabled {
+        Some(lash_core::ToolAvailability::Showcased)
+    } else {
+        Some(lash_core::ToolAvailability::Off)
+    };
+    let names = vec!["plan_exit".to_string()];
+    if let Err(err) = context.set_tools_availability(&names, availability).await
+        && !tool_state_unavailable(&err)
+    {
         if previous != enabled {
             let mut guard = state
                 .lock()
@@ -555,12 +624,10 @@ impl PlanModeTools {
             return ToolResult::err(json!("plan mode is not active"));
         }
 
-        let report =
-            match ensure_plan_report(&self.state, context.session_id(), context.host(), true).await
-            {
-                Ok(report) => report,
-                Err(err) => return ToolResult::err(json!(err.to_string())),
-            };
+        let report = match ensure_plan_report_for_tool_context(&self.state, context, true).await {
+            Ok(report) => report,
+            Err(err) => return ToolResult::err(json!(err.to_string())),
+        };
 
         let Some(prompt) = &self.prompt else {
             return ToolResult::err(json!(
@@ -604,8 +671,7 @@ impl PlanModeTools {
         };
 
         if let Err(err) =
-            set_plan_mode_enabled_state(&self.state, context.session_id(), context.host(), false)
-                .await
+            set_plan_mode_enabled_state_for_tool_context(&self.state, context, false).await
         {
             return ToolResult::err(json!(err.to_string()));
         }
@@ -812,7 +878,8 @@ impl SessionPlugin for PlanModePlugin {
                 }
 
                 if ctx.tool_name == "apply_patch" {
-                    let plan_path = ensure_plan_path(&state, &ctx.session_id, &ctx.host).await?;
+                    let snapshot = ctx.session_snapshot().await?;
+                    let plan_path = ensure_plan_path_from_snapshot(&state, &snapshot)?;
                     if let Err(message) = patch_allowed_for_plan_file(&ctx.args, &plan_path) {
                         return Ok(vec![PluginDirective::AbortTurn {
                             code: "plan_mode_tool_blocked".to_string(),
@@ -904,7 +971,9 @@ impl SessionPlugin for PlanModePlugin {
                     return Ok(Vec::new());
                 }
 
-                let report = ensure_plan_report(&state, &ctx.session_id, &ctx.host, false).await?;
+                let snapshot = ctx.session_snapshot().await?;
+                let path = ensure_plan_path_from_snapshot(&state, &snapshot)?;
+                let report = read_plan_report(&path).map_err(PluginError::Session)?;
                 Ok(vec![PluginDirective::emit_events(vec![plan_panel_event(
                     &report,
                 )])])

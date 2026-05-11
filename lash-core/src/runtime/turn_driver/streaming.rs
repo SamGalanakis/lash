@@ -43,7 +43,7 @@ impl RuntimeTurnDriver {
         let transforms = self
             .session
             .plugins()
-            .transform_assistant_stream(&self.session_id, chunk, self.session_manager.clone())
+            .transform_assistant_stream(&self.session_id, chunk)
             .await
             .map_err(|err| LlmCallError {
                 message: err.to_string(),
@@ -85,7 +85,7 @@ impl RuntimeTurnDriver {
         let transforms = self
             .session
             .plugins()
-            .transform_assistant_response(&self.session_id, response, self.session_manager.clone())
+            .transform_assistant_response(&self.session_id, response)
             .await
             .map_err(|err| LlmCallError {
                 message: err.to_string(),

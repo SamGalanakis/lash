@@ -9,16 +9,14 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
+    InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy, SessionSpec,
     SessionStartPoint, SessionToolAccess, ToolContext, ToolDefinition, ToolExecutionMode,
     ToolResult, ToolSurfaceContribution, TurnInput,
 };
 use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
 use serde_json::{Value, json};
 
-use crate::capability::{
-    CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
-};
+use crate::capability::{CapabilityContext, CapabilityRegistry};
 use crate::{SubagentSessionConfigurator, SubagentSpawnContext};
 
 pub(crate) fn fresh_child_request(
@@ -51,53 +49,20 @@ pub(crate) fn build_session_policy(
     capability_name: &str,
 ) -> Result<SessionPolicy, String> {
     let spec = resolve_capability_spec(registry, current_policy, capability_name)?;
-    Ok(session_policy_from_spec(&spec, current_policy))
+    Ok(spec.resolve_against(current_policy))
 }
 
 pub(crate) fn resolve_capability_spec(
     registry: &CapabilityRegistry,
     current_policy: &SessionPolicy,
     capability_name: &str,
-) -> Result<CapabilitySpec, String> {
+) -> Result<SessionSpec, String> {
     let capability = registry
         .get(capability_name)
         .ok_or_else(|| unknown_capability_message(capability_name, registry))?;
     Ok(capability.resolve(&CapabilityContext {
         parent_policy: current_policy,
     }))
-}
-
-fn session_policy_from_spec(
-    spec: &CapabilitySpec,
-    current_policy: &SessionPolicy,
-) -> SessionPolicy {
-    SessionPolicy {
-        model: resolve_field(&spec.model, &current_policy.model),
-        model_variant: resolve_optional_field(&spec.model_variant, &current_policy.model_variant),
-        provider: current_policy.provider.clone(),
-        max_context_tokens: current_policy.max_context_tokens,
-        max_turns: None,
-        execution_mode: resolve_field(&spec.execution_mode, &current_policy.execution_mode),
-        ..Default::default()
-    }
-}
-
-fn resolve_field<T: Clone>(field: &CapabilityField<T>, inherited: &T) -> T {
-    match field {
-        CapabilityField::Inherit => inherited.clone(),
-        CapabilityField::Set(value) => value.clone(),
-    }
-}
-
-fn resolve_optional_field<T: Clone>(
-    field: &CapabilityOptionalField<T>,
-    inherited: &Option<T>,
-) -> Option<T> {
-    match field {
-        CapabilityOptionalField::Inherit => inherited.clone(),
-        CapabilityOptionalField::Set(value) => Some(value.clone()),
-        CapabilityOptionalField::Clear => None,
-    }
 }
 
 pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
@@ -109,18 +74,19 @@ pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
 pub(crate) async fn build_spawn_create_request(
     registry: &CapabilityRegistry,
     context: &ToolContext,
+    session_spec: &SessionSpec,
     capability_name: &str,
     output_schema: Option<Value>,
     seed: ClassifiedSeed,
     configurator: &dyn SubagentSessionConfigurator,
 ) -> Result<SessionCreateRequest, String> {
     let current_snapshot = context
-        .host()
-        .snapshot_session(context.session_id())
+        .session_snapshot()
         .await
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
-    let spec = resolve_capability_spec(registry, &current_snapshot.policy, capability_name)?;
-    let mut policy = session_policy_from_spec(&spec, &current_snapshot.policy);
+    let mut policy = session_spec.resolve_against(&current_snapshot.policy);
+    let spec = resolve_capability_spec(registry, &policy, capability_name)?;
+    policy = spec.resolve_against(&policy);
     if output_schema.is_some() && policy.execution_mode != lash_core::ExecutionMode::new("rlm") {
         return Err(format!(
             "structured output is RLM-only; child capability `{capability_name}` runs in `{}` mode",

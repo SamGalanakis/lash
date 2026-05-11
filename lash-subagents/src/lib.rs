@@ -10,13 +10,13 @@ mod types;
 use std::sync::Arc;
 
 pub use capability::{
-    Capability, CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRegistry,
-    CapabilitySpec, DEFAULT_EXPLORE_EXECUTION_MODE, StaticCapability, TierCapability,
-    TierExecutionMode, default_explore_execution_mode, default_registry,
+    Capability, CapabilityContext, CapabilityRegistry, DEFAULT_EXPLORE_EXECUTION_MODE,
+    StaticCapability, TierCapability, TierExecutionMode, default_explore_execution_mode,
+    default_registry,
 };
 
 use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
-use lash_core::{PluginSpec, PluginSpecFactory, SessionPolicy, ToolProvider};
+use lash_core::{PluginSpec, PluginSpecFactory, SessionPolicy, SessionSpec, ToolProvider};
 
 pub use host::{
     AgentMetadata, CloseAgentRequest, CloseAgentResponse, LocalSubagentHost, SpawnAgentRequest,
@@ -54,24 +54,25 @@ impl SubagentSessionConfigurator for NoopSubagentSessionConfigurator {
 }
 
 pub struct SubagentsPluginFactory {
-    policy: SessionPolicy,
+    session_spec: SessionSpec,
     registry: Arc<CapabilityRegistry>,
     host: Arc<dyn SubagentHost>,
     configurator: Arc<dyn SubagentSessionConfigurator>,
 }
 
 impl SubagentsPluginFactory {
-    pub fn new(
-        policy: SessionPolicy,
-        registry: Arc<CapabilityRegistry>,
-        host: Arc<dyn SubagentHost>,
-    ) -> Self {
+    pub fn new(registry: Arc<CapabilityRegistry>, host: Arc<dyn SubagentHost>) -> Self {
         Self {
-            policy,
+            session_spec: SessionSpec::inherit(),
             registry,
             host,
             configurator: Arc::new(NoopSubagentSessionConfigurator),
         }
+    }
+
+    pub fn with_session_spec(mut self, spec: SessionSpec) -> Self {
+        self.session_spec = spec;
+        self
     }
 
     pub fn with_session_configurator(
@@ -92,11 +93,9 @@ impl PluginFactory for SubagentsPluginFactory {
         &self,
         ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
-        let mut policy = self.policy.clone();
-        policy.execution_mode = ctx.execution_mode.clone();
-
         let registry = Arc::clone(&self.registry);
         let host = Arc::clone(&self.host);
+        let session_spec = self.session_spec.clone();
         let configurator = Arc::clone(&self.configurator);
         let execution_mode = ctx.execution_mode.clone();
 
@@ -111,6 +110,7 @@ impl PluginFactory for SubagentsPluginFactory {
             Some(Arc::new(rlm::RlmSubagentToolsProvider {
                 registry: Arc::clone(&registry),
                 host: Arc::clone(&host),
+                session_spec: session_spec.clone(),
                 configurator: Arc::clone(&configurator),
                 include_submit_error: ctx.subagent.is_some(),
             }))
@@ -159,10 +159,9 @@ mod tests {
             execution_mode: lash_core::ExecutionMode::standard(),
             ..SessionPolicy::default()
         };
-        let mut spec = CapabilitySpec::inherit();
-        spec.model = CapabilityField::Set("child-model".to_string());
-        spec.model_variant = CapabilityOptionalField::Clear;
-        spec.execution_mode = CapabilityField::Set(lash_core::ExecutionMode::new("rlm"));
+        let spec = SessionSpec::inherit()
+            .model("child-model", None)
+            .mode(lash_core::ExecutionMode::new("rlm"));
         let registry =
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new("child", spec)));
 
@@ -327,6 +326,7 @@ mod tests {
         let request = build_spawn_create_request(
             &registry,
             &context,
+            &SessionSpec::inherit(),
             "explore",
             None,
             Default::default(),
@@ -355,6 +355,7 @@ mod tests {
         let structured_request = build_spawn_create_request(
             &registry,
             &context,
+            &SessionSpec::inherit(),
             "explore",
             Some(json!({
                 "type": "object",
@@ -378,7 +379,6 @@ mod tests {
     #[tokio::test]
     async fn standard_provider_does_not_expose_subagent_tools() {
         let factory = SubagentsPluginFactory::new(
-            SessionPolicy::default(),
             Arc::new(default_registry(&BTreeMap::new())),
             Arc::new(LocalSubagentHost::default()),
         );
@@ -398,7 +398,6 @@ mod tests {
     #[tokio::test]
     async fn rlm_provider_requires_background_task_support() {
         let factory = SubagentsPluginFactory::new(
-            SessionPolicy::default(),
             Arc::new(default_registry(&BTreeMap::new())),
             Arc::new(LocalSubagentHost::default()),
         );

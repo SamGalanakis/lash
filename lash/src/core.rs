@@ -19,21 +19,21 @@ impl LashCore {
         Self::builder()
             .install_mode(ModePreset::standard())
             .default_mode(ModeId::standard())
+            .plugins(PluginStack::runtime())
     }
 
     pub fn rlm() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
+            .plugins(PluginStack::runtime())
     }
 
     pub fn session(&self, session_id: impl Into<String>) -> SessionBuilder {
         SessionBuilder {
             core: self.clone(),
             session_id: session_id.into(),
-            mode: None,
-            provider: None,
-            prompt: PromptLayer::new(),
+            spec: SessionSpec::inherit(),
             parent_session_id: None,
             store: None,
             active_plugins: Vec::new(),
@@ -50,15 +50,12 @@ impl LashCore {
 pub struct LashCoreBuilder {
     pub(crate) modes: BTreeMap<ModeId, ModePreset>,
     pub(crate) default_mode: Option<ModeId>,
-    provider: Option<ProviderHandle>,
-    model: Option<ModelSelection>,
-    max_context_tokens: Option<usize>,
-    max_turns: Option<usize>,
+    session_spec: SessionSpec,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     attachment_store: Option<Arc<dyn AttachmentStore>>,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
-    plugin_factories: Vec<Arc<dyn PluginFactory>>,
+    plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
@@ -84,8 +81,13 @@ impl LashCoreBuilder {
         self
     }
 
+    pub fn mode(mut self, mode: ModeId) -> Self {
+        self.session_spec = self.session_spec.mode(mode.execution_mode());
+        self
+    }
+
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.provider = Some(provider);
+        self.session_spec = self.session_spec.provider(provider);
         self
     }
 
@@ -119,20 +121,22 @@ impl LashCoreBuilder {
     }
 
     pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.model = Some(ModelSelection {
-            model: model.into(),
-            variant,
-        });
+        self.session_spec = self.session_spec.model(model, variant);
         self
     }
 
     pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
-        self.max_context_tokens = Some(max_context_tokens);
+        self.session_spec = self.session_spec.max_context_tokens(max_context_tokens);
         self
     }
 
     pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.max_turns = Some(max_turns);
+        self.session_spec = self.session_spec.max_turns(max_turns);
+        self
+    }
+
+    pub fn session_spec(mut self, spec: SessionSpec) -> Self {
+        self.session_spec = spec;
         self
     }
 
@@ -157,7 +161,17 @@ impl LashCoreBuilder {
     }
 
     pub fn plugin(mut self, plugin: Arc<dyn PluginFactory>) -> Self {
-        self.plugin_factories.push(plugin);
+        self.plugin_stack.push(plugin);
+        self
+    }
+
+    pub fn plugins(mut self, stack: PluginStack) -> Self {
+        self.plugin_stack = stack;
+        self
+    }
+
+    pub fn configure_plugins(mut self, configure: impl FnOnce(&mut PluginStack)) -> Self {
+        configure(&mut self.plugin_stack);
         self
     }
 
@@ -181,38 +195,50 @@ impl LashCoreBuilder {
             return Err(EmbedError::NoModesInstalled);
         }
         let default_mode = self
-            .default_mode
-            .clone()
+            .session_spec
+            .execution_mode
+            .as_ref()
+            .map(|mode| ModeId::new(mode.plugin_id()))
+            .or_else(|| self.default_mode.clone())
             .ok_or(EmbedError::NoModesInstalled)?;
         if !self.modes.contains_key(&default_mode) {
             return Err(EmbedError::DefaultModeNotInstalled { mode: default_mode });
         }
         let max_context_tokens = self
+            .session_spec
             .max_context_tokens
             .ok_or(EmbedError::MissingMaxContextTokens)?;
-        let provider = self.provider.unwrap_or_default();
-        let model = self.model.unwrap_or_else(|| {
-            let model = provider.default_model().to_string();
-            ModelSelection {
-                variant: provider.default_model_variant(&model).map(str::to_string),
-                model,
-            }
-        });
+        let provider = self.session_spec.provider.clone().unwrap_or_default();
+        let model = self
+            .session_spec
+            .model
+            .clone()
+            .unwrap_or_else(|| provider.default_model().to_string());
+        let model_variant = self
+            .session_spec
+            .model_variant
+            .clone()
+            .unwrap_or_else(|| provider.default_model_variant(&model).map(str::to_string));
+        let model = ModelSelection {
+            model,
+            variant: model_variant,
+        };
 
         let default_preset = self
             .modes
             .get(&default_mode)
             .expect("default mode was validated");
-        let policy = SessionPolicy {
+        let base_policy = SessionPolicy {
             provider,
             model: model.model,
             model_variant: model.variant,
             max_context_tokens: Some(max_context_tokens),
-            max_turns: self.max_turns,
+            max_turns: self.session_spec.max_turns.flatten(),
             execution_mode: default_mode.execution_mode(),
             standard_context_approach: default_preset.standard_context_approach.clone(),
             ..SessionPolicy::default()
         };
+        let policy = self.session_spec.resolve_against(&base_policy);
 
         let plugin_factories = if let Some(plugin_host) = self.plugin_host {
             plugin_host.factories().to_vec()
@@ -231,7 +257,7 @@ impl LashCoreBuilder {
                 factories.push(Arc::new(StaticPluginFactory::new("embed_tools", spec))
                     as Arc<dyn PluginFactory>);
             }
-            factories.extend(self.plugin_factories);
+            factories.extend(self.plugin_stack.into_factories());
             PluginHost::new(factories).factories().to_vec()
         };
         let plugin_host = PluginHost::new(plugin_factories.clone());

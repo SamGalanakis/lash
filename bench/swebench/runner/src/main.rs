@@ -14,7 +14,7 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{SweBenchInstance, load_instances};
 use lash::{
-    TurnInput,
+    SessionSpec, TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{
         BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
@@ -25,10 +25,10 @@ use lash::{
 };
 use lash_cli::config::LashConfig;
 use lash_core::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
+    SessionPolicy, StandardContextApproach, TokioSessionTaskExecutor,
+    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -947,10 +947,10 @@ fn capture_git_diff(repo_dir: &Path) -> Result<String> {
 fn build_plugin_session(
     execution_mode: ExecutionMode,
     standard_context_approach: Option<StandardContextApproach>,
-    policy: &SessionPolicy,
+    _policy: &SessionPolicy,
 ) -> Result<Arc<PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
+        vec![Arc::new(ToolOutputBudgetPluginFactory::default())];
     if let Some(standard_context_approach) = &standard_context_approach {
         match standard_context_approach {
             StandardContextApproach::RollingHistory(_) => {
@@ -995,11 +995,10 @@ fn build_plugin_session(
     ))));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(LlmToolsPluginFactory));
-    factories.push(Arc::new(SubagentsPluginFactory::new(
-        policy.clone(),
-        registry,
-        subagent_host,
-    )));
+    factories.push(Arc::new(
+        SubagentsPluginFactory::new(registry, subagent_host)
+            .with_session_spec(SessionSpec::inherit()),
+    ));
 
     let plugin_host = PluginHost::new(factories);
     plugin_host

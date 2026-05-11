@@ -457,25 +457,25 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     assert!(plan_file_path(temp.path(), "run-session").is_file());
 
     let blocked_exec = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "exec_command".to_string(),
-            args: json!({"cmd":"cargo test -q"}),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "exec_command".to_string(),
+            json!({"cmd":"cargo test -q"}),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(!blocked_exec.is_empty());
 
     let allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "read_file".to_string(),
-            args: json!({"path":"src/main.rs"}),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "read_file".to_string(),
+            json!({"path":"src/main.rs"}),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(allowed.is_empty());
@@ -542,57 +542,51 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     );
 
     let read_allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "read_file".to_string(),
-            args: json!({
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "read_file".to_string(),
+            json!({
                 "path":"src/main.rs"
             }),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(read_allowed.is_empty());
 
     let web_allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "search_web".to_string(),
-            args: json!({
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "search_web".to_string(),
+            json!({
                 "query":"surrealdb datetime best practices"
             }),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(web_allowed.is_empty());
 
     let plan_patch_allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "apply_patch".to_string(),
-            args: json!({
+        .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            }), lash_core::TurnContext::default(), manager.clone()))
         .await
         .expect("before_tool_call");
     assert!(plan_patch_allowed.is_empty());
 
     let repo_patch_blocked = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "apply_patch".to_string(),
-            args: json!({
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "apply_patch".to_string(),
+            json!({
                 "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
             }),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(repo_patch_blocked.iter().any(|emitted| matches!(
@@ -711,27 +705,21 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
         .expect("enable");
 
     let allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "read_file".to_string(),
-            args: json!({"path":"src/main.rs"}),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+        .before_tool_call(ToolCallHookContext::new(
+            "root".to_string(),
+            "read_file".to_string(),
+            json!({"path":"src/main.rs"}),
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("before_tool_call");
     assert!(allowed.is_empty());
 
     let apply_patch_allowed = session
-        .before_tool_call(ToolCallHookContext {
-            session_id: "root".to_string(),
-            tool_name: "apply_patch".to_string(),
-            args: json!({
+        .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }),
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            }), lash_core::TurnContext::default(), manager.clone()))
         .await
         .expect("before_tool_call");
     assert!(apply_patch_allowed.is_empty());
@@ -1221,19 +1209,19 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         .expect("enable");
 
     let directives = session
-        .after_tool_call(ToolResultHookContext {
-            session_id: "root".to_string(),
-            tool_name: "plan_exit".to_string(),
-            args: json!({}),
-            result: ToolResult::ok(json!({
+        .after_tool_call(ToolResultHookContext::new(
+            "root".to_string(),
+            "plan_exit".to_string(),
+            json!({}),
+            ToolResult::ok(json!({
                 "approved": true,
                 "plan_path": ".lash/plans/run-session.md",
                 "execution_mode": "fresh_context",
             })),
-            duration_ms: 1,
-            host: manager.clone(),
-            turn_context: lash_core::TurnContext::default(),
-        })
+            1,
+            lash_core::TurnContext::default(),
+            manager.clone(),
+        ))
         .await
         .expect("after_tool_call");
 
@@ -1287,11 +1275,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
         .expect("enable");
 
     let stream = session
-        .transform_assistant_stream(
-            "root",
-            "Keep this text exactly.".to_string(),
-            manager.clone(),
-        )
+        .transform_assistant_stream("root", "Keep this text exactly.".to_string())
         .await
         .expect("stream");
     assert!(stream.is_empty());
@@ -1311,7 +1295,6 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
                 request_body: None,
                 http_summary: None,
             },
-            manager,
         )
         .await
         .expect("response");

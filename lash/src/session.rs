@@ -3,9 +3,7 @@ use crate::support::*;
 pub struct SessionBuilder {
     pub(crate) core: LashCore,
     pub(crate) session_id: String,
-    pub(crate) mode: Option<ModeId>,
-    pub(crate) provider: Option<ProviderHandle>,
-    pub(crate) prompt: PromptLayer,
+    pub(crate) spec: SessionSpec,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
@@ -14,32 +12,36 @@ pub struct SessionBuilder {
 
 impl SessionBuilder {
     pub fn standard(mut self) -> Self {
-        self.mode = Some(ModeId::standard());
+        self.spec = self.spec.mode(ModeId::standard().execution_mode());
         self
     }
 
     pub fn rlm(mut self) -> Self {
-        self.mode = Some(ModeId::rlm());
+        self.spec = self.spec.mode(ModeId::rlm().execution_mode());
         self
     }
 
     pub fn mode(mut self, mode: ModeId) -> Self {
-        self.mode = Some(mode);
+        self.spec = self.spec.mode(mode.execution_mode());
         self
     }
 
     pub fn provider(mut self, provider: ProviderHandle) -> Self {
-        self.provider = Some(provider);
+        self.spec = self.spec.provider(provider);
         self
     }
 
     pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        self.prompt.template = Some(template);
+        let mut prompt = self.spec.prompt.take().unwrap_or_default();
+        prompt.template = Some(template);
+        self.spec = self.spec.prompt_layer(prompt);
         self
     }
 
     pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        self.prompt.add_contribution(contribution);
+        let mut prompt = self.spec.prompt.take().unwrap_or_default();
+        prompt.add_contribution(contribution);
+        self.spec = self.spec.prompt_layer(prompt);
         self
     }
 
@@ -48,17 +50,26 @@ impl SessionBuilder {
         slot: PromptSlot,
         contributions: impl IntoIterator<Item = PromptContribution>,
     ) -> Self {
-        self.prompt.replace_slot(slot, contributions);
+        let mut prompt = self.spec.prompt.take().unwrap_or_default();
+        prompt.replace_slot(slot, contributions);
+        self.spec = self.spec.prompt_layer(prompt);
         self
     }
 
     pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        self.prompt.clear_slot(slot);
+        let mut prompt = self.spec.prompt.take().unwrap_or_default();
+        prompt.clear_slot(slot);
+        self.spec = self.spec.prompt_layer(prompt);
         self
     }
 
     pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.prompt = layer;
+        self.spec = self.spec.prompt_layer(layer);
+        self
+    }
+
+    pub fn session_spec(mut self, spec: SessionSpec) -> Self {
+        self.spec = spec;
         self
     }
 
@@ -105,26 +116,22 @@ impl SessionBuilder {
     }
 
     fn session_policy(&self) -> Result<(SessionPolicy, ModeId)> {
-        let mode = self
-            .mode
+        let execution_mode = self
+            .spec
+            .execution_mode
             .clone()
-            .unwrap_or_else(|| self.core.default_mode.clone());
+            .unwrap_or_else(|| self.core.default_mode.execution_mode());
+        let mode = ModeId::new(execution_mode.plugin_id());
         let preset = self
             .core
             .modes
             .get(&mode)
             .ok_or_else(|| EmbedError::ModeNotInstalled { mode: mode.clone() })?;
-        let mut policy = self.core.policy.clone();
+        let mut base = self.core.policy.clone();
+        base.execution_mode = execution_mode;
+        base.standard_context_approach = preset.standard_context_approach.clone();
+        let mut policy = self.spec.resolve_against(&base);
         policy.session_id = Some(self.session_id.clone());
-        policy.execution_mode = mode.execution_mode();
-        policy.standard_context_approach = preset.standard_context_approach.clone();
-        policy.prompt = self.prompt.clone();
-        if let Some(provider) = self.provider.as_ref() {
-            let model = provider.default_model().to_string();
-            policy.provider = provider.clone();
-            policy.model_variant = provider.default_model_variant(&model).map(str::to_string);
-            policy.model = model;
-        }
         Ok((policy, mode))
     }
 

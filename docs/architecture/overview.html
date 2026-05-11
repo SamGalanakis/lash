@@ -142,7 +142,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Tool output is projected, not raw.</h3>
-                <p>The <code>BuiltinToolResultProjectionPluginFactory</code> trims oversized tool results once at the <code>BeforeState</code>, <code>BeforeModel</code>, and <code>BeforeHistory</code> hook sites so on-disk state, the live model prompt, and rolled-up history each see a budgeted view.</p>
+                <p>The <code>ToolOutputBudgetPluginFactory</code> trims oversized tool results once at the <code>BeforeState</code>, <code>BeforeModel</code>, and <code>BeforeHistory</code> hook sites so on-disk state, the live model prompt, and rolled-up history each see a budgeted view.</p>
               </div>
             </li>
             <li>

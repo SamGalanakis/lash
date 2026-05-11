@@ -149,6 +149,136 @@ pub struct SessionPolicy {
     pub prompt: crate::PromptLayer,
 }
 
+/// Reusable session configuration overlay.
+///
+/// `SessionSpec` is the public configuration shape for callers that want to
+/// describe either a root session or a child session without constructing the
+/// resolved runtime-only [`SessionPolicy`] directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSpec {
+    inherit: bool,
+    pub provider: Option<ProviderHandle>,
+    pub model: Option<String>,
+    pub model_variant: Option<Option<String>>,
+    pub execution_mode: Option<ExecutionMode>,
+    pub max_context_tokens: Option<usize>,
+    pub max_turns: Option<Option<usize>>,
+    pub prompt: Option<crate::PromptLayer>,
+}
+
+impl SessionSpec {
+    /// Create an explicit root-style spec. Unset fields resolve from the
+    /// runtime's core defaults.
+    pub fn new() -> Self {
+        Self {
+            inherit: false,
+            provider: None,
+            model: None,
+            model_variant: None,
+            execution_mode: None,
+            max_context_tokens: None,
+            max_turns: None,
+            prompt: None,
+        }
+    }
+
+    /// Create a parent-relative spec. Unset fields inherit from the live
+    /// parent policy at resolution time.
+    pub fn inherit() -> Self {
+        Self {
+            inherit: true,
+            ..Self::new()
+        }
+    }
+
+    pub fn inherits(&self) -> bool {
+        self.inherit
+    }
+
+    pub fn provider(mut self, provider: ProviderHandle) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
+        self.model = Some(model.into());
+        self.model_variant = Some(variant);
+        self
+    }
+
+    pub fn model_variant(mut self, variant: impl Into<String>) -> Self {
+        self.model_variant = Some(Some(variant.into()));
+        self
+    }
+
+    pub fn clear_model_variant(mut self) -> Self {
+        self.model_variant = Some(None);
+        self
+    }
+
+    pub fn mode(mut self, mode: ExecutionMode) -> Self {
+        self.execution_mode = Some(mode);
+        self
+    }
+
+    pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
+        self.max_context_tokens = Some(max_context_tokens);
+        self
+    }
+
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = Some(Some(max_turns));
+        self
+    }
+
+    pub fn clear_max_turns(mut self) -> Self {
+        self.max_turns = Some(None);
+        self
+    }
+
+    pub fn prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
+        self.prompt = Some(prompt);
+        self
+    }
+
+    pub fn resolve_against(&self, base: &SessionPolicy) -> SessionPolicy {
+        let mut policy = base.clone();
+        if let Some(provider) = self.provider.as_ref() {
+            policy.provider = provider.clone();
+            if self.model.is_none() {
+                let model = provider.default_model().to_string();
+                policy.model_variant = provider.default_model_variant(&model).map(str::to_string);
+                policy.model = model;
+            }
+        }
+        if let Some(model) = self.model.as_ref() {
+            policy.model = model.clone();
+        }
+        if let Some(model_variant) = self.model_variant.as_ref() {
+            policy.model_variant = model_variant.clone();
+        }
+        if let Some(max_context_tokens) = self.max_context_tokens {
+            policy.max_context_tokens = Some(max_context_tokens);
+        }
+        if let Some(max_turns) = self.max_turns {
+            policy.max_turns = max_turns;
+        }
+        if let Some(execution_mode) = self.execution_mode.as_ref() {
+            policy.execution_mode = execution_mode.clone();
+        }
+        if let Some(prompt) = self.prompt.as_ref() {
+            policy.prompt = prompt.clone();
+        }
+        policy
+    }
+}
+
+impl Default for SessionSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for SessionPolicy {
     fn default() -> Self {
         Self {

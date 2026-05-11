@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 use lash_core::plugin::project_observation_text;
 use lash_core::{
     AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
-    ModeToolReply, SessionError, TextProjectionMetadata, ToolImage,
-    ToolResultProjectionPluginConfig,
+    ModeToolReply, SessionError, TextProjectionMetadata, ToolImage, ToolOutputBudgetConfig,
 };
 use lash_rlm_types::PROJECTED_JSON_TAG;
 use lashlang::{
@@ -28,12 +27,12 @@ pub struct RlmExecutionState {
     program_cache: CompiledProgramCache,
     scratch: ExecutionScratch,
     scratch_dir: tempfile::TempDir,
-    observe_projection: ToolResultProjectionPluginConfig,
+    observe_projection: ToolOutputBudgetConfig,
     dirty: bool,
 }
 
 impl RlmExecutionState {
-    pub fn new(config: ToolResultProjectionPluginConfig) -> Result<Self, SessionError> {
+    pub fn new(config: ToolOutputBudgetConfig) -> Result<Self, SessionError> {
         Ok(Self {
             rlm: FlowState::new(),
             program_cache: CompiledProgramCache::default(),
@@ -355,7 +354,7 @@ fn projected_index(index: &FlowValue, len: usize) -> Result<Option<usize>, ()> {
 
 struct HostBridge {
     ctx: ModeExecutionContext,
-    observe_projection: ToolResultProjectionPluginConfig,
+    observe_projection: ToolOutputBudgetConfig,
     observations: Mutex<Vec<String>>,
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
     printed_images: Mutex<Vec<AttachmentRef>>,
@@ -1024,7 +1023,7 @@ mod tests {
     fn projected_history_is_available_without_clobbering_executor_globals() {
         block_on(async {
             let mut state =
-                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
             let mut set_default = serde_json::Map::new();
             set_default.insert("diary".to_string(), serde_json::json!(["kept"]));
             state
@@ -1060,7 +1059,7 @@ mod tests {
     fn projected_history_defaults_to_empty_list_when_missing() {
         block_on(async {
             let mut state =
-                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
 
             let projected = projected_history(Vec::new());
             let compiled =
@@ -1082,8 +1081,7 @@ mod tests {
 
     #[test]
     fn set_default_initializes_once_and_does_not_mutate_projected_globals() {
-        let mut state =
-            RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
         let mut projected = serde_json::Map::new();
         projected.insert("current_query".to_string(), serde_json::json!("host"));
 
@@ -1127,8 +1125,7 @@ mod tests {
 
     #[test]
     fn set_default_rejects_projected_host_bindings() {
-        let mut state =
-            RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
         let projected =
             serde_json::Map::from_iter([("current_query".to_string(), serde_json::json!("host"))]);
 
@@ -1163,7 +1160,7 @@ mod tests {
     fn projected_scalar_bindings_are_read_only_and_not_snapshotted() {
         block_on(async {
             let mut state =
-                RlmExecutionState::new(ToolResultProjectionPluginConfig::default()).expect("state");
+                RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
             let mut projected = ProjectedBindings::new();
             projected.insert(
                 "current_query",

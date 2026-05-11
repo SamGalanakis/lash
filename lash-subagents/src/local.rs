@@ -29,7 +29,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lash_core::{
     AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, SessionToolAccess,
-    SubagentSessionAuthority, ToolHookHost,
+    SubagentSessionAuthority, ToolSessionControl, ToolTaskControl,
 };
 use std::collections::BTreeSet;
 
@@ -278,7 +278,8 @@ impl LocalSubagentHost {
     /// `tasks_stop` targets a subagent.
     pub async fn force_close_subtree(
         &self,
-        host: Arc<dyn ToolHookHost>,
+        sessions: ToolSessionControl,
+        tasks: ToolTaskControl,
         root_session_id: &str,
         target: &str,
     ) -> Result<Vec<String>, String> {
@@ -317,10 +318,10 @@ impl LocalSubagentHost {
             (paths, turn_ids, immediate_closes)
         };
         for turn_id in turn_ids {
-            let _ = host.cancel_turn(&turn_id).await;
+            let _ = sessions.cancel_turn(&turn_id).await;
         }
         for (path, session_id, owner_session_id) in &immediate_closes {
-            let _ = host.close_session(session_id).await;
+            let _ = sessions.close_session(session_id).await;
             {
                 let mut state = self.state_lock()?;
                 if let Some(tree) = state.trees.get_mut(root_session_id) {
@@ -342,26 +343,28 @@ impl LocalSubagentHost {
                 }
                 Self::remove_agent_locked(&mut state, root_session_id, path);
             }
-            host.complete_background_task(
-                owner_session_id,
-                &format!("subagent:{path}"),
-                ManagedRunState::Cancelled,
-            )
-            .await;
+            tasks
+                .complete_background_task_for_session(
+                    owner_session_id,
+                    &format!("subagent:{path}"),
+                    ManagedRunState::Cancelled,
+                )
+                .await;
         }
         Ok(paths)
     }
 
     async fn start_next_turn(
         &self,
-        manager: Arc<dyn ToolHookHost>,
+        sessions: ToolSessionControl,
+        tasks: ToolTaskControl,
         root_session_id: String,
         path: String,
     ) -> Result<(), String> {
         let Some(launch) = self.prepare_turn_launch(&root_session_id, &path)? else {
             return Ok(());
         };
-        let turn = manager
+        let turn = sessions
             .start_turn_stream(&launch.session_id, launch.turn_input)
             .await
             .map_err(|err| format!("failed to start child turn: {err}"))?;
@@ -409,8 +412,8 @@ impl LocalSubagentHost {
             None
         };
         if let Some(owner) = owner_session_id {
-            manager
-                .transition_background_task_live_state(
+            tasks
+                .transition_background_task_live_state_for_session(
                     &owner,
                     &format!("subagent:{path}"),
                     ManagedRunState::Running,
@@ -420,8 +423,8 @@ impl LocalSubagentHost {
 
         let host = self.clone();
         tokio::spawn(async move {
-            let outcome = manager.await_turn(&turn_id).await;
-            host.finish_turn(root_session_id, path, outcome, manager)
+            let outcome = sessions.await_turn(&turn_id).await;
+            host.finish_turn(root_session_id, path, outcome, sessions, tasks)
                 .await;
         });
         Ok(())
@@ -432,7 +435,8 @@ impl LocalSubagentHost {
         root_session_id: String,
         path: String,
         outcome: Result<AssembledTurn, lash_core::PluginError>,
-        manager: Arc<dyn ToolHookHost>,
+        sessions: ToolSessionControl,
+        tasks: ToolTaskControl,
     ) {
         let mut close_session_id = None;
         let mut start_next = false;
@@ -470,7 +474,7 @@ impl LocalSubagentHost {
         }
 
         if let Some(session_id) = close_session_id {
-            let _ = manager.close_session(&session_id).await;
+            let _ = sessions.close_session(&session_id).await;
             let owner_session_id = {
                 if let Ok(mut state) = self.state_lock() {
                     let owner = Self::owner_session_id_for_path(&state, &root_session_id, &path);
@@ -498,8 +502,12 @@ impl LocalSubagentHost {
                 }
             };
             if let Some(owner) = owner_session_id {
-                manager
-                    .complete_background_task(&owner, &format!("subagent:{path}"), terminal_state)
+                tasks
+                    .complete_background_task_for_session(
+                        &owner,
+                        &format!("subagent:{path}"),
+                        terminal_state,
+                    )
                     .await;
             }
             return;
@@ -509,7 +517,8 @@ impl LocalSubagentHost {
             let host = self.clone();
             tokio::task::block_in_place(move || {
                 let handle = tokio::runtime::Handle::current();
-                let _ = handle.block_on(host.start_next_turn(manager, root_session_id, path));
+                let _ =
+                    handle.block_on(host.start_next_turn(sessions, tasks, root_session_id, path));
             });
         }
     }
@@ -584,17 +593,11 @@ impl SubagentHost for LocalSubagentHost {
         context: &lash_core::ToolContext,
         mut request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String> {
-        if context
-            .host()
-            .tool_catalog(context.session_id())
-            .await
-            .ok()
-            .is_some_and(|catalog| {
-                catalog.iter().all(|tool| {
-                    tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
-                })
+        if context.tool_catalog().await.ok().is_some_and(|catalog| {
+            catalog.iter().all(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str) != Some("spawn_agent")
             })
-        {
+        }) {
             return Err("subagent spawning is unavailable in this session".to_string());
         }
         let session_id = request
@@ -691,7 +694,11 @@ impl SubagentHost for LocalSubagentHost {
             max_depth: MAX_SUBAGENT_DEPTH,
         });
 
-        let session = match context.host().create_session(request.create_request).await {
+        let session = match context
+            .sessions()
+            .create_session(request.create_request)
+            .await
+        {
             Ok(session) => session,
             Err(err) => {
                 let mut state = self.state_lock()?;
@@ -702,17 +709,22 @@ impl SubagentHost for LocalSubagentHost {
 
         // Register with the parent session's background task registry so it
         // shows up in `tasks_list` and can be cancelled via `tasks_stop`.
-        let cancel_host = context.host().clone();
+        let cancel_sessions = context.sessions();
+        let cancel_tasks = context.tasks();
         let cancel_self = self.clone();
         let cancel_root = root_session_id.clone();
         let cancel_path = path.clone();
         let cancel: lash_core::ManagedTaskCancel = Arc::new(move || {
-            let host = Arc::clone(&cancel_host);
+            let sessions = cancel_sessions.clone();
+            let tasks = cancel_tasks.clone();
             let this = cancel_self.clone();
             let root = cancel_root.clone();
             let target = cancel_path.clone();
             Box::pin(async move {
-                if let Err(err) = this.force_close_subtree(host, &root, &target).await {
+                if let Err(err) = this
+                    .force_close_subtree(sessions, tasks, &root, &target)
+                    .await
+                {
                     tracing::warn!(
                         error = %err,
                         agent_path = %target,
@@ -722,9 +734,8 @@ impl SubagentHost for LocalSubagentHost {
             })
         });
         if let Err(err) = context
-            .host()
+            .tasks()
             .register_background_task(
-                context.session_id(),
                 ManagedTaskSpec {
                     id: format!("subagent:{path}"),
                     kind: ManagedTaskKind::Subagent,
@@ -734,7 +745,7 @@ impl SubagentHost for LocalSubagentHost {
             )
             .await
         {
-            let _ = context.host().close_session(&session.session_id).await;
+            let _ = context.sessions().close_session(&session.session_id).await;
             let mut state = self.state_lock()?;
             Self::remove_agent_locked(&mut state, &root_session_id, &path);
             return Err(format!(
@@ -772,17 +783,18 @@ impl SubagentHost for LocalSubagentHost {
 
         if let Err(err) = self
             .start_next_turn(
-                context.host().clone(),
+                context.sessions(),
+                context.tasks(),
                 root_session_id.clone(),
                 path.clone(),
             )
             .await
         {
             context
-                .host()
-                .unregister_background_task(context.session_id(), &format!("subagent:{path}"))
+                .tasks()
+                .unregister_background_task(&format!("subagent:{path}"))
                 .await;
-            let _ = context.host().close_session(&session.session_id).await;
+            let _ = context.sessions().close_session(&session.session_id).await;
             let mut state = self.state_lock()?;
             Self::remove_agent_locked(&mut state, &root_session_id, &path);
             return Err(err);
@@ -977,7 +989,12 @@ impl SubagentHost for LocalSubagentHost {
             (root_session_id, target, agent_name)
         };
         let paths = self
-            .force_close_subtree(context.host().clone(), &root_session_id, &target)
+            .force_close_subtree(
+                context.sessions(),
+                context.tasks(),
+                &root_session_id,
+                &target,
+            )
             .await?;
         let closed = paths
             .into_iter()

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionSpec, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::Value;
 
@@ -24,6 +24,7 @@ use crate::types::{CloseAgentRequest, SpawnAgentRequest, WaitAgentRequest, WaitU
 pub(crate) struct RlmSubagentToolsProvider {
     pub(crate) registry: Arc<CapabilityRegistry>,
     pub(crate) host: Arc<dyn SubagentHost>,
+    pub(crate) session_spec: SessionSpec,
     pub(crate) configurator: Arc<dyn SubagentSessionConfigurator>,
     pub(crate) include_submit_error: bool,
 }
@@ -41,6 +42,7 @@ impl RlmSubagentToolsProvider {
         let create_request = build_spawn_create_request(
             &self.registry,
             context,
+            &self.session_spec,
             &capability_name,
             output_schema.clone(),
             seed,

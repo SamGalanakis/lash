@@ -727,7 +727,7 @@ impl crate::ToolProvider for ChildSessionTool {
     async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
         let context = call.context;
         let child = match context
-            .host()
+            .sessions()
             .create_session(crate::SessionCreateRequest {
                 session_id: Some("subagent-child".to_string()),
                 relation: crate::SessionRelation::Child {
@@ -751,7 +751,7 @@ impl crate::ToolProvider for ChildSessionTool {
         };
 
         let turn = match context
-            .host()
+            .sessions()
             .start_turn_stream(
                 &child.session_id,
                 TurnInput {
@@ -773,8 +773,8 @@ impl crate::ToolProvider for ChildSessionTool {
 
         drop(turn.events);
 
-        let result = context.host().await_turn(&turn.turn_id).await;
-        let _ = context.host().close_session(&child.session_id).await;
+        let result = context.sessions().await_turn(&turn.turn_id).await;
+        let _ = context.sessions().close_session(&child.session_id).await;
         match result {
             Ok(_) => crate::ToolResult::ok(json!({ "status": "ok" })),
             Err(err) => crate::ToolResult::err_fmt(format_args!("{err}")),

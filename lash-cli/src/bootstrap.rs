@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::LashConfig;
+use lash::SessionSpec;
 use lash::advanced::ExecutionMode;
 use lash::plugins::{
     BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
@@ -135,11 +136,10 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
     ));
     plugin_factories.push(Arc::new(LlmToolsPluginFactory));
-    plugin_factories.push(Arc::new(SubagentsPluginFactory::new(
-        session_policy,
-        capability_registry,
-        Arc::clone(&subagent_host),
-    )));
+    plugin_factories.push(Arc::new(
+        SubagentsPluginFactory::new(capability_registry, Arc::clone(&subagent_host))
+            .with_session_spec(SessionSpec::inherit()),
+    ));
     PluginFactoriesForSurface {
         factories: plugin_factories,
         subagent_host,

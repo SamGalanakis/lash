@@ -82,13 +82,13 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
 
     let directives = match context
         .plugins
-        .before_tool_call(ToolCallHookContext {
-            session_id: context.session_id.clone(),
-            tool_name: tool_name.clone(),
-            args: args.clone(),
-            host: Arc::clone(&context.host),
-            turn_context: context.turn_context.clone(),
-        })
+        .before_tool_call(ToolCallHookContext::new(
+            context.session_id.clone(),
+            tool_name.clone(),
+            args.clone(),
+            context.turn_context.clone(),
+            Arc::clone(&context.host),
+        ))
         .await
     {
         Ok(directives) => directives,
@@ -199,15 +199,15 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
 
     let result = match context
         .plugins
-        .after_tool_call(ToolResultHookContext {
-            session_id: context.session_id.clone(),
-            tool_name: tool_name.clone(),
-            args: args.clone(),
-            result: result.clone(),
+        .after_tool_call(ToolResultHookContext::new(
+            context.session_id.clone(),
+            tool_name.clone(),
+            args.clone(),
+            result.clone(),
             duration_ms,
-            host: Arc::clone(&context.host),
-            turn_context: context.turn_context.clone(),
-        })
+            context.turn_context.clone(),
+            Arc::clone(&context.host),
+        ))
         .await
     {
         Ok(directives) => {

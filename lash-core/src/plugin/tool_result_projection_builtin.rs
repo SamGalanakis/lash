@@ -11,30 +11,30 @@ use crate::plugin::{
 };
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
-pub const DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES: usize = 16 * 1024;
-pub const DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES: usize = 400;
+pub const DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES: usize = 16 * 1024;
+pub const DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES: usize = 400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolResultProjectionMode {
+pub enum ToolOutputBudgetMode {
     Bytes,
     Tokens,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct ToolResultProjectionPluginConfig {
-    pub mode: ToolResultProjectionMode,
+pub struct ToolOutputBudgetConfig {
+    pub mode: ToolOutputBudgetMode,
     pub limit: usize,
     pub max_lines: usize,
 }
 
-impl Default for ToolResultProjectionPluginConfig {
+impl Default for ToolOutputBudgetConfig {
     fn default() -> Self {
         Self {
-            mode: ToolResultProjectionMode::Bytes,
-            limit: DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
-            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
+            mode: ToolOutputBudgetMode::Bytes,
+            limit: DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES,
+            max_lines: DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
         }
     }
 }
@@ -45,41 +45,41 @@ enum ProjectionDirection {
     Tail,
 }
 
-pub struct BuiltinToolResultProjectionPluginFactory {
-    config: ToolResultProjectionPluginConfig,
+pub struct ToolOutputBudgetPluginFactory {
+    config: ToolOutputBudgetConfig,
 }
 
-impl BuiltinToolResultProjectionPluginFactory {
-    pub fn new(config: ToolResultProjectionPluginConfig) -> Self {
+impl ToolOutputBudgetPluginFactory {
+    pub fn new(config: ToolOutputBudgetConfig) -> Self {
         Self { config }
     }
 }
 
-impl Default for BuiltinToolResultProjectionPluginFactory {
+impl Default for ToolOutputBudgetPluginFactory {
     fn default() -> Self {
-        Self::new(ToolResultProjectionPluginConfig::default())
+        Self::new(ToolOutputBudgetConfig::default())
     }
 }
 
-impl PluginFactory for BuiltinToolResultProjectionPluginFactory {
+impl PluginFactory for ToolOutputBudgetPluginFactory {
     fn id(&self) -> &'static str {
-        "tool_result_projection"
+        "tool_output_budget"
     }
 
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(ToolResultProjectionPlugin {
+        Ok(Arc::new(ToolOutputBudgetPlugin {
             config: self.config.clone(),
         }))
     }
 }
 
-struct ToolResultProjectionPlugin {
-    config: ToolResultProjectionPluginConfig,
+struct ToolOutputBudgetPlugin {
+    config: ToolOutputBudgetConfig,
 }
 
-impl SessionPlugin for ToolResultProjectionPlugin {
+impl SessionPlugin for ToolOutputBudgetPlugin {
     fn id(&self) -> &'static str {
-        "tool_result_projection"
+        "tool_output_budget"
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
@@ -89,7 +89,7 @@ impl SessionPlugin for ToolResultProjectionPlugin {
 
 fn register_projector(
     reg: &mut PluginRegistrar,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
 ) -> Result<(), PluginError> {
     let config = config.clone();
     reg.tool_results().projector(Arc::new(move |ctx| {
@@ -99,7 +99,7 @@ fn register_projector(
 }
 
 fn project_tool_result(
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: ToolResultProjectionContext,
 ) -> ToolResult {
     let result = project_model_value(config, &ctx);
@@ -112,7 +112,7 @@ fn project_tool_result(
 }
 
 fn project_model_value(
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     if ctx.tool_name == "batch" {
@@ -147,7 +147,7 @@ fn render_tool_result_payload(success: bool, value: &serde_json::Value) -> Strin
 
 fn project_json_value(
     value: &serde_json::Value,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     match value {
@@ -171,7 +171,7 @@ fn project_json_value(
 
 fn project_text(
     text: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> String {
     if !needs_truncation(text, config) {
@@ -185,19 +185,19 @@ fn project_text(
     )
 }
 
-fn needs_truncation(text: &str, config: &ToolResultProjectionPluginConfig) -> bool {
+fn needs_truncation(text: &str, config: &ToolOutputBudgetConfig) -> bool {
     if text.lines().count() > config.max_lines {
         return true;
     }
     match config.mode {
-        ToolResultProjectionMode::Bytes => text.len() > config.limit,
-        ToolResultProjectionMode::Tokens => approx_token_count(text) > config.limit,
+        ToolOutputBudgetMode::Bytes => text.len() > config.limit,
+        ToolOutputBudgetMode::Tokens => approx_token_count(text) > config.limit,
     }
 }
 
 fn formatted_truncate_text(
     text: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     direction: ProjectionDirection,
     ctx: Option<&ToolResultProjectionContext>,
 ) -> String {
@@ -207,7 +207,7 @@ fn formatted_truncate_text(
     truncate_text_with_hint(text, config, direction, truncation_hint(ctx, text))
 }
 
-pub fn truncate_observation_text(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
+pub fn truncate_observation_text(text: &str, config: &ToolOutputBudgetConfig) -> String {
     if !needs_truncation(text, config) {
         return text.to_string();
     }
@@ -221,7 +221,7 @@ pub fn truncate_observation_text(text: &str, config: &ToolResultProjectionPlugin
 
 pub fn project_observation_text(
     text: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
 ) -> (String, crate::TextProjectionMetadata) {
     let projected = truncate_observation_text(text, config);
     let metadata = observation_projection_metadata(text, &projected, config);
@@ -231,11 +231,11 @@ pub fn project_observation_text(
 pub fn observation_projection_metadata(
     original: &str,
     projected: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
 ) -> crate::TextProjectionMetadata {
     let limit_mode = match config.mode {
-        ToolResultProjectionMode::Bytes => "bytes",
-        ToolResultProjectionMode::Tokens => "tokens",
+        ToolOutputBudgetMode::Bytes => "bytes",
+        ToolOutputBudgetMode::Tokens => "tokens",
     };
     crate::TextProjectionMetadata {
         truncated: original != projected,
@@ -251,7 +251,7 @@ pub fn observation_projection_metadata(
 
 fn truncate_text(
     text: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     direction: ProjectionDirection,
     ctx: Option<&ToolResultProjectionContext>,
 ) -> String {
@@ -260,7 +260,7 @@ fn truncate_text(
 
 fn truncate_text_with_hint(
     text: &str,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     direction: ProjectionDirection,
     hint: String,
 ) -> String {
@@ -268,8 +268,8 @@ fn truncate_text_with_hint(
         return String::new();
     }
     let max_bytes = match config.mode {
-        ToolResultProjectionMode::Bytes => config.limit,
-        ToolResultProjectionMode::Tokens => approx_bytes_for_tokens(config.limit),
+        ToolOutputBudgetMode::Bytes => config.limit,
+        ToolOutputBudgetMode::Tokens => approx_bytes_for_tokens(config.limit),
     };
     if max_bytes == 0 {
         return format_truncation_marker(
@@ -323,8 +323,8 @@ fn truncate_text_with_hint(
     };
     let unit = if hit_budget {
         match config.mode {
-            ToolResultProjectionMode::Bytes => "bytes",
-            ToolResultProjectionMode::Tokens => "tokens",
+            ToolOutputBudgetMode::Bytes => "bytes",
+            ToolOutputBudgetMode::Tokens => "tokens",
         }
     } else {
         "lines"
@@ -339,21 +339,17 @@ fn truncate_text_with_hint(
     }
 }
 
-fn format_truncation_marker(mode: ToolResultProjectionMode, removed: u64) -> String {
+fn format_truncation_marker(mode: ToolOutputBudgetMode, removed: u64) -> String {
     match mode {
-        ToolResultProjectionMode::Bytes => format!("…{removed} chars truncated…"),
-        ToolResultProjectionMode::Tokens => format!("…{removed} tokens truncated…"),
+        ToolOutputBudgetMode::Bytes => format!("…{removed} chars truncated…"),
+        ToolOutputBudgetMode::Tokens => format!("…{removed} tokens truncated…"),
     }
 }
 
-fn removed_units(
-    mode: ToolResultProjectionMode,
-    removed_bytes: usize,
-    removed_chars: usize,
-) -> u64 {
+fn removed_units(mode: ToolOutputBudgetMode, removed_bytes: usize, removed_chars: usize) -> u64 {
     match mode {
-        ToolResultProjectionMode::Bytes => u64::try_from(removed_chars).unwrap_or(u64::MAX),
-        ToolResultProjectionMode::Tokens => approx_tokens_from_byte_count(removed_bytes),
+        ToolOutputBudgetMode::Bytes => u64::try_from(removed_chars).unwrap_or(u64::MAX),
+        ToolOutputBudgetMode::Tokens => approx_tokens_from_byte_count(removed_bytes),
     }
 }
 
@@ -393,14 +389,14 @@ fn truncation_hint(ctx: Option<&ToolResultProjectionContext>, text: &str) -> Str
     }
 }
 
-fn observation_truncation_hint(text: &str, config: &ToolResultProjectionPluginConfig) -> String {
+fn observation_truncation_hint(text: &str, config: &ToolOutputBudgetConfig) -> String {
     let limit_unit = match config.mode {
-        ToolResultProjectionMode::Bytes => "bytes",
-        ToolResultProjectionMode::Tokens => "tokens",
+        ToolOutputBudgetMode::Bytes => "bytes",
+        ToolOutputBudgetMode::Tokens => "tokens",
     };
     let total_units = match config.mode {
-        ToolResultProjectionMode::Bytes => text.len(),
-        ToolResultProjectionMode::Tokens => approx_token_count(text),
+        ToolOutputBudgetMode::Bytes => text.len(),
+        ToolOutputBudgetMode::Tokens => approx_token_count(text),
     };
     let total_lines = text.lines().count();
     format!(
@@ -462,7 +458,7 @@ fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
 }
 
 fn project_batch_value(
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     let Some(map) = ctx.result.result.as_object() else {
@@ -489,7 +485,7 @@ fn project_batch_value(
 fn project_batch_child_value(
     index: usize,
     item: &serde_json::Value,
-    config: &ToolResultProjectionPluginConfig,
+    config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
     let Some(map) = item.as_object() else {
@@ -540,7 +536,6 @@ fn project_batch_child_value(
                     control: None,
                 },
                 duration_ms,
-                host: Arc::clone(&ctx.host),
             },
         )
     };
@@ -585,15 +580,14 @@ fn batch_child_args(batch_args: &serde_json::Value, index: usize) -> serde_json:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::services::NoopSessionManager;
     use serde_json::json;
 
     #[test]
     fn truncates_strings_with_terminal_style_marker() {
-        let config = ToolResultProjectionPluginConfig {
-            mode: ToolResultProjectionMode::Tokens,
+        let config = ToolOutputBudgetConfig {
+            mode: ToolOutputBudgetMode::Tokens,
             limit: 5,
-            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
+            max_lines: DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
         };
         let got = project_text(
             "this is an example of a long output that should be truncated",
@@ -604,7 +598,6 @@ mod tests {
                 args: json!({}),
                 result: ToolResult::ok(json!("unused")),
                 duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
             },
         );
         assert!(got.contains("tokens truncated"));
@@ -613,9 +606,9 @@ mod tests {
 
     #[test]
     fn truncation_hint_reuses_existing_full_output_path() {
-        let config = ToolResultProjectionPluginConfig {
+        let config = ToolOutputBudgetConfig {
             limit: 512,
-            ..ToolResultProjectionPluginConfig::default()
+            ..ToolOutputBudgetConfig::default()
         };
         let projected = project_tool_result(
             &config,
@@ -628,7 +621,6 @@ mod tests {
                     "full_output_path": "/tmp/existing-shell-output.log",
                 })),
                 duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
             },
         );
         let output = projected.result.as_str().unwrap_or_default();
@@ -637,10 +629,10 @@ mod tests {
 
     #[test]
     fn model_projection_can_collapse_large_structured_payload_to_string() {
-        let config = ToolResultProjectionPluginConfig {
-            mode: ToolResultProjectionMode::Bytes,
+        let config = ToolOutputBudgetConfig {
+            mode: ToolOutputBudgetMode::Bytes,
             limit: 40,
-            max_lines: DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
+            max_lines: DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
         };
         let projected = project_tool_result(
             &config,
@@ -652,7 +644,6 @@ mod tests {
                     "results": [{"output": "x".repeat(200)}]
                 })),
                 duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
             },
         );
         assert!(projected.result.is_string());
@@ -668,7 +659,7 @@ mod tests {
     #[test]
     fn batch_model_projection_preserves_projected_child_payloads() {
         let projected = project_tool_result(
-            &ToolResultProjectionPluginConfig::default(),
+            &ToolOutputBudgetConfig::default(),
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
                 tool_name: "batch".to_string(),
@@ -680,7 +671,6 @@ mod tests {
                     ]
                 })),
                 duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
             },
         );
         let results = projected
@@ -699,9 +689,9 @@ mod tests {
     #[test]
     fn batch_history_projection_recursively_projects_child_payloads() {
         let projected = project_tool_result(
-            &ToolResultProjectionPluginConfig {
+            &ToolOutputBudgetConfig {
                 limit: 8,
-                ..ToolResultProjectionPluginConfig::default()
+                ..ToolOutputBudgetConfig::default()
             },
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
@@ -714,7 +704,6 @@ mod tests {
                     ]
                 })),
                 duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
             },
         );
         let details = projected
@@ -733,8 +722,8 @@ mod tests {
 
     #[test]
     fn observation_truncation_uses_shared_limits_and_hint() {
-        let config = ToolResultProjectionPluginConfig {
-            mode: ToolResultProjectionMode::Bytes,
+        let config = ToolOutputBudgetConfig {
+            mode: ToolOutputBudgetMode::Bytes,
             limit: 12,
             max_lines: 2,
         };

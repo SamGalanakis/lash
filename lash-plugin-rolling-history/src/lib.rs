@@ -18,9 +18,9 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use lash_core::plugin::{
-    DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES, DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES,
-    HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
+    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES, HistoryError,
+    HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory, PluginRegistrar,
+    PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
     SessionCreateRequest, SessionPlugin, SessionPluginMode, SessionStartPoint,
     TurnContextTransform, TurnTransformContext,
 };
@@ -35,8 +35,8 @@ fn tool_spill_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("lash-tool-output")
 }
 
-const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES;
-const TOOL_RESULT_MAX_BYTES: usize = DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES;
+const TOOL_RESULT_MAX_LINES: usize = DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES;
+const TOOL_RESULT_MAX_BYTES: usize = DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES;
 const PRUNE_MINIMUM_TOKENS: usize = 20_000;
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
 const PRUNE_RECENT_USER_TURNS: usize = 2;
