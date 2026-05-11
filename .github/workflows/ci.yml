@@ -47,10 +47,13 @@ jobs:
         run: cargo test -p lash-sansio --locked
 
       - name: Test lash core
-        run: cargo test -p lash --locked --features fff-zlob
+        run: cargo test -p lash-core --locked
 
-      - name: Test first-party default tools
-        run: cargo test -p lash-default-tools --locked --features fff-zlob
+      - name: Test lash facade
+        run: cargo test -p lash --locked
+
+      - name: Test first-party standard plugins
+        run: cargo test -p lash-standard-plugins --locked --features fff-zlob
 
       - name: Test lash CLI
         run: cargo test -p lash-cli --locked --features fff-zlob
