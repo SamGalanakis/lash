@@ -6,13 +6,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use lash::SchemaProjectionOverride;
-use lash::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
-use lash::llm::types::{
+use lash_core::SchemaProjectionOverride;
+use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
+use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
     LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
-use lash::provider::{
+use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
     ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
     VariantRequestConfig,
@@ -1272,7 +1272,7 @@ impl CodexProvider {
         has_final_response: bool,
     ) {
         tracing::debug!(
-            target: "lash::llm::codex_oauth",
+            target: "lash_core::llm::codex_oauth",
             event_type,
             raw_len = raw.len(),
             delta_count = added_deltas.len(),
@@ -1951,7 +1951,7 @@ impl ProviderTransport for CodexProvider {
 
         if stream_events.is_some() && !is_sse {
             tracing::debug!(
-                target: "lash::llm::codex_oauth",
+                target: "lash_core::llm::codex_oauth",
                 status = status.as_u16(),
                 content_type = content_type.as_deref().unwrap_or("<missing>"),
                 "Codex streaming response did not advertise SSE; parsing as stream because stream=true was requested"
@@ -2044,7 +2044,7 @@ pub struct CodexProviderFactory;
 
 impl CodexProviderFactory {
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
@@ -2070,8 +2070,8 @@ impl ProviderFactory for CodexProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
-    use lash::provider::ProviderModelPolicy;
+    use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash_core::provider::ProviderModelPolicy;
     use std::sync::Arc;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
@@ -2138,7 +2138,7 @@ mod tests {
 
         let exposed = CodexProvider::new("access", "refresh", 0)
             .with_options(ProviderOptions {
-                thinking: lash::ProviderThinkingPolicy { expose: true },
+                thinking: lash_core::ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             })
             .build_request_body(&req, true)

@@ -5,12 +5,12 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use lash::llm::transport::LlmTransportError;
-use lash::llm::types::{
+use lash_core::llm::transport::LlmTransportError;
+use lash_core::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
 };
-use lash::provider::{
+use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
 };
@@ -25,7 +25,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 
 fn emit_provider_trace(
-    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
     provider: &'static str,
     raw: &str,
 ) {
@@ -1141,7 +1141,7 @@ impl ProviderTransport for AnthropicProvider {
 }
 
 /// Deserialize payload for `ProviderSpec::config` when building an
-/// `AnthropicProvider` from a stored [`lash::LashConfig`].
+/// `AnthropicProvider` from a stored [`lash_core::LashConfig`].
 #[derive(Deserialize)]
 struct AnthropicProviderConfig {
     api_key: String,
@@ -1158,7 +1158,7 @@ pub struct AnthropicProviderFactory;
 impl AnthropicProviderFactory {
     /// Convenience: install this factory into lash's global registry.
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
@@ -1182,7 +1182,7 @@ impl ProviderFactory for AnthropicProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::llm::types::{LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash_core::llm::types::{LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec};
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1275,7 +1275,7 @@ mod tests {
 
         let exposed = AnthropicProvider::new("key")
             .with_options(ProviderOptions {
-                thinking: lash::provider::ProviderThinkingPolicy { expose: true },
+                thinking: lash_core::provider::ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             })
             .build_request_body(&req)

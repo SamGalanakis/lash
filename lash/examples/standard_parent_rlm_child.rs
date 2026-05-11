@@ -1,7 +1,7 @@
-use lash_embed::{LashCore, ModeId, ModePreset};
+use lash::{LashCore, ModeId, ModePreset};
 
 #[tokio::main]
-async fn main() -> lash_embed::Result<()> {
+async fn main() -> lash::Result<()> {
     let core = LashCore::builder()
         .install_mode(ModePreset::standard())
         .install_mode(ModePreset::rlm())

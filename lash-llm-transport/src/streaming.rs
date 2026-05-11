@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use lash::LlmTransportError;
+use lash_core::LlmTransportError;
 use lash_sansio::llm::types::{LlmEventSender, LlmStreamEvent, LlmUsage};
 
 use std::time::Duration;

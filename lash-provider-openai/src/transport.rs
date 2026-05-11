@@ -2037,13 +2037,13 @@ pub struct OpenAiProviderFactory;
 
 impl OpenAiCompatibleProviderFactory {
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
 impl OpenAiProviderFactory {
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 

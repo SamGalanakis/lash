@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use lash::ProviderSpec;
-use lash::provider::build_provider;
-use lash::{ExecutionMode, ProviderHandle};
+use lash_core::ProviderSpec;
+use lash_core::provider::build_provider;
+use lash_core::{ExecutionMode, ProviderHandle};
 use lash_plugin_mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
 

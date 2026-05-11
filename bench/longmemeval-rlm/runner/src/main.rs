@@ -13,13 +13,13 @@ use bench_tools::{BenchmarkQuestionContext, LongMemEvalSessionTools};
 use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
-use lash::{
+use lash_core::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
     RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
-use lash_embed::{
+use lash::{
     TurnInput,
     advanced::{
         AssembledTurn, EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop,

@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{object_schema, require_str};
 
@@ -151,10 +151,10 @@ mod tests {
             definition.output_schema["additionalProperties"],
             serde_json::json!(false)
         );
-        assert_eq!(definition.activation, lash::ToolActivation::Always);
+        assert_eq!(definition.activation, lash_core::ToolActivation::Always);
         assert_eq!(
             definition.availability.standard,
-            lash::ToolAvailability::Showcased
+            lash_core::ToolAvailability::Showcased
         );
     }
 }

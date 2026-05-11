@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use lash::{AssembledTurn, TurnFinish, TurnInput, TurnOutcome, TurnStop};
+use lash_core::{AssembledTurn, TurnFinish, TurnInput, TurnOutcome, TurnStop};
 use serde_json::{Value, json};
 
 use crate::types::WaitAgentEvent;
@@ -157,7 +157,7 @@ pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
 pub(crate) fn task_completion_event(
     agent: &mut AgentRecord,
     task: String,
-    outcome: &Result<AssembledTurn, lash::PluginError>,
+    outcome: &Result<AssembledTurn, lash_core::PluginError>,
 ) -> WaitAgentEvent {
     match outcome {
         Ok(turn) => {
@@ -230,7 +230,7 @@ pub(crate) fn terminal_error_message(outcome: &TurnOutcome) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use lash::testing::mock_assembled_turn;
+    use lash_core::testing::mock_assembled_turn;
 
     use super::*;
 

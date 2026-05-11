@@ -87,8 +87,8 @@ impl ToolContext {
         self
     }
 
-    /// Constructor reserved for `lash::testing` helpers. Do not call directly;
-    /// use [`lash::testing::mock_tool_context`] instead.
+    /// Constructor reserved for `lash_core::testing` helpers. Do not call directly;
+    /// use [`lash_core::testing::mock_tool_context`] instead.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn __for_testing(

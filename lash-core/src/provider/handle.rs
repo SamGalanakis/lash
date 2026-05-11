@@ -265,7 +265,7 @@ impl ProviderHandle {
                         .retry
                         .delay_for_attempt(attempt, failure.retry_after);
                     tracing::debug!(
-                        target: "lash::provider::reliability",
+                        target: "lash_core::provider::reliability",
                         provider = self.kind(),
                         attempt = attempt + 1,
                         max_attempts = attempts,

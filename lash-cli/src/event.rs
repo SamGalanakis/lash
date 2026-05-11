@@ -1,5 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use lash::{ManagedTaskStatus, PromptRequest, PromptResponse, TurnActivity};
+use lash_core::{ManagedTaskStatus, PromptRequest, PromptResponse, TurnActivity};
 use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
 

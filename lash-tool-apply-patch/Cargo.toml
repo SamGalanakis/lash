@@ -5,12 +5,12 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash", default-features = false }
+lash-core = { path = "../lash-core", default-features = false }
 lash-tool-support = { path = "../lash-tool-support" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash = { path = "../lash", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

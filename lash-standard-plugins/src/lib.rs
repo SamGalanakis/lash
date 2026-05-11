@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use lash::instructions::InstructionSource;
-use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::{
+use lash_core::instructions::InstructionSource;
+use lash_core::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
+use lash_core::{
     BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
     StandardContextApproach, ToolProvider,
 };
@@ -43,10 +43,10 @@ impl DefaultToolSurfaceProfile {
         let mut bundles = vec![DefaultToolBundle::CoreRuntime];
         if let Some(standard_context_approach) = standard_context_approach {
             bundles.push(match standard_context_approach.kind() {
-                lash::StandardContextApproachKind::RollingHistory => {
+                lash_core::StandardContextApproachKind::RollingHistory => {
                     DefaultToolBundle::RollingHistory
                 }
-                lash::StandardContextApproachKind::ObservationalMemory => {
+                lash_core::StandardContextApproachKind::ObservationalMemory => {
                     DefaultToolBundle::ObservationalMemory
                 }
             });
@@ -173,7 +173,7 @@ pub trait EmbeddedRuntimeBuilderExt {
     ) -> Self;
 }
 
-impl EmbeddedRuntimeBuilderExt for lash::EmbeddedRuntimeBuilder {
+impl EmbeddedRuntimeBuilderExt for lash_core::EmbeddedRuntimeBuilder {
     fn with_default_tool_bundles(self, mut options: DefaultToolPluginOptions) -> Self {
         if options.bundles.is_empty()
             && let Some(policy) = self.policy()
@@ -247,12 +247,12 @@ mod tests {
     #[test]
     fn observational_memory_bundle_advertises_om_support() {
         let host = PluginHost::new(vec![
-            Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash::PluginFactory>,
-            Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash::PluginFactory>,
+            Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash_core::PluginFactory>,
+            Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash_core::PluginFactory>,
         ]);
         assert!(host.supports_standard_context_approach(
-            &lash::StandardContextApproach::ObservationalMemory(
-                lash::ObservationalMemoryConfig::default(),
+            &lash_core::StandardContextApproach::ObservationalMemory(
+                lash_core::ObservationalMemoryConfig::default(),
             )
         ));
     }

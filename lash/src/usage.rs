@@ -17,13 +17,13 @@
 //!   across the whole session, broken down by `source` × `model`. Right for
 //!   dashboards and "session so far."
 //!
-//! [`TurnEvent::Usage`]: lash::TurnEvent::Usage
-//! [`TurnEvent::ChildUsage`]: lash::TurnEvent::ChildUsage
+//! [`TurnEvent::Usage`]: lash_core::TurnEvent::Usage
+//! [`TurnEvent::ChildUsage`]: lash_core::TurnEvent::ChildUsage
 //! [`TurnResult::usage`]: crate::TurnResult::usage
 //! [`TurnResult::children_usage`]: crate::TurnResult::children_usage
 //! [`TurnResult::total_usage`]: crate::TurnResult::total_usage
 
-pub use lash::{
+pub use lash_core::{
     SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageReportRow, UsageTotals,
     diff_token_ledger, diff_usage_reports,
 };

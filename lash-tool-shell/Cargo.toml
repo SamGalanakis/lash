@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash", default-features = false }
+lash-core = { path = "../lash-core", default-features = false }
 lash-tool-support = { path = "../lash-tool-support" }
 async-trait = { workspace = true }
 libc = "0.2"
@@ -15,4 +15,4 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "r
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-lash = { path = "../lash", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }

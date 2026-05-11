@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::{
+use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
+use lash_core::{
     LlmOutputPart, LlmResponse, ToolCall, ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
-use lash_embed::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
 
-fn assistant_prose(result: &lash_embed::turn::TurnOutput) -> String {
+fn assistant_prose(result: &lash::turn::TurnOutput) -> String {
     result
         .result
         .assistant_message()
@@ -35,7 +35,7 @@ impl PluginBinding for TestPlugin {
     type SessionConfig = TestPluginConfig;
     type Input = TestTurnInput;
 
-    fn factory(config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
+    fn factory(config: &Self::SessionConfig) -> Arc<dyn lash_core::PluginFactory> {
         Arc::new(TestPluginFactory {
             config: config.clone(),
         })
@@ -50,15 +50,15 @@ struct TestPluginFactory {
     config: TestPluginConfig,
 }
 
-impl lash::PluginFactory for TestPluginFactory {
+impl lash_core::PluginFactory for TestPluginFactory {
     fn id(&self) -> &'static str {
         TestPlugin::ID
     }
 
     fn build(
         &self,
-        _ctx: &lash::PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, lash::PluginError> {
+        _ctx: &lash_core::PluginSessionContext,
+    ) -> Result<Arc<dyn lash_core::SessionPlugin>, lash_core::PluginError> {
         Ok(Arc::new(TestSessionPlugin {
             config: self.config.clone(),
         }))
@@ -69,12 +69,12 @@ struct TestSessionPlugin {
     config: TestPluginConfig,
 }
 
-impl lash::SessionPlugin for TestSessionPlugin {
+impl lash_core::SessionPlugin for TestSessionPlugin {
     fn id(&self) -> &'static str {
         TestPlugin::ID
     }
 
-    fn register(&self, reg: &mut lash::PluginRegistrar) -> Result<(), lash::PluginError> {
+    fn register(&self, reg: &mut lash_core::PluginRegistrar) -> Result<(), lash_core::PluginError> {
         let prompt_seen = Arc::clone(&self.config.prompt_seen);
         reg.prompt().contribute(Arc::new(move |ctx| {
             let prompt_seen = Arc::clone(&prompt_seen);
@@ -155,7 +155,7 @@ fn response_tool_call() -> LlmResponse {
 
 fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
     let responses = Arc::new(Mutex::new(responses.into_iter()));
-    let provider = lash::testing::TestProvider::builder()
+    let provider = lash_core::testing::TestProvider::builder()
         .complete(move |_request| {
             let responses = Arc::clone(&responses);
             async move {

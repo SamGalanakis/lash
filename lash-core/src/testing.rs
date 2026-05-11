@@ -55,7 +55,7 @@ fn empty_provider_config() -> serde_json::Value {
 }
 
 /// Configurable provider fixture used by lash's own tests and shared
-/// with downstream plugin crates through `lash::testing`.
+/// with downstream plugin crates through `lash_core::testing`.
 #[derive(Clone)]
 pub struct TestProvider {
     kind: &'static str,

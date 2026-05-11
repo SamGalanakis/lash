@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use lash::{ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta};
+use lash_core::{ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta};
 use lash_sqlite_store::Store;
 
 use crate::trace::{LlmPromptSnapshot, load_prompts_from_trace};
@@ -319,9 +319,9 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
 }
 
 fn build_chronological(graph: SessionGraph) -> Vec<ChronologicalEntry> {
-    let state = lash::SessionStateEnvelope {
+    let state = lash_core::SessionStateEnvelope {
         session_graph: graph,
-        ..lash::SessionStateEnvelope::default()
+        ..lash_core::SessionStateEnvelope::default()
     };
     state.read_view().chronological_projection().into_entries()
 }

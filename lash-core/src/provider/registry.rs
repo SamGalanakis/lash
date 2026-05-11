@@ -24,7 +24,7 @@ impl ProviderRegistry {
     pub fn build_from_spec(&self, spec: &ProviderSpec) -> Result<ProviderComponents, String> {
         let factory = self.factories.get(spec.kind.as_str()).ok_or_else(|| {
             format!(
-                "provider `{}` is not registered. Call `lash::register_provider_factory` at startup.",
+                "provider `{}` is not registered. Call `lash_core::register_provider_factory` at startup.",
                 spec.kind
             )
         })?;

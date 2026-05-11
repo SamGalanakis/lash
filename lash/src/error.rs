@@ -19,13 +19,13 @@ pub enum EmbedError {
     #[error("runtime session error: {0}")]
     Session(#[from] SessionError),
     #[error("runtime turn error: {0}")]
-    Runtime(#[from] lash::RuntimeError),
+    Runtime(#[from] lash_core::RuntimeError),
     #[error("runtime plugin/control error: {0}")]
-    Plugin(#[from] lash::PluginError),
+    Plugin(#[from] lash_core::PluginError),
     #[error("failed to encode mode turn options: {0}")]
     ModeTurnOptions(#[from] serde_json::Error),
     #[error("runtime control unavailable: {0}")]
-    Control(#[from] lash::PluginActionInvokeError),
+    Control(#[from] lash_core::PluginActionInvokeError),
     #[error("queued image `{id}` is missing its image blob")]
     MissingQueuedImageBlob { id: String },
 }

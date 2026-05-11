@@ -1,6 +1,6 @@
-use lash::session_model::Message;
-use lash::{CachedModelCatalog, SessionPolicy, ToolState};
-use lash_embed::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
+use lash_core::session_model::Message;
+use lash_core::{CachedModelCatalog, SessionPolicy, ToolState};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 

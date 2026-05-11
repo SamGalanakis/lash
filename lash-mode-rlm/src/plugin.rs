@@ -1,16 +1,16 @@
 use std::sync::{Arc, Mutex, RwLock};
 
-use lash::llm::types::{
+use lash_core::llm::types::{
     LlmContentBlock, LlmJsonSchema, LlmMessage, LlmOutputSpec, LlmRequest, LlmRole, LlmToolChoice,
 };
-use lash::plugin::{
+use lash_core::plugin::{
     CheckpointHookContext, HistoryError, ModeBeforeLlmCallContext, ModeLlmCallAction,
     ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin, TurnContextTransform, TurnTransformContext,
 };
-use lash::session_model::context::PreparedContext;
-use lash::{
+use lash_core::session_model::context::PreparedContext;
+use lash_core::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
     ToolResultProjectionPluginConfig,
 };
@@ -139,7 +139,7 @@ impl SessionPlugin for RlmModePlugin {
             .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
 
         let bound_vars_cache = Arc::new(BoundVariablesCache::new());
-        let bound_vars_hook: lash::plugin::PromptContributor = Arc::new(move |ctx| {
+        let bound_vars_hook: lash_core::plugin::PromptContributor = Arc::new(move |ctx| {
             let cache = Arc::clone(&bound_vars_cache);
             Box::pin(async move { Ok(cache.contributions(&ctx)) })
         });
@@ -251,7 +251,7 @@ impl RlmModeSession {
         })
     }
 
-    async fn projected_binding_prompt_contributions(&self) -> Vec<lash::PromptContribution> {
+    async fn projected_binding_prompt_contributions(&self) -> Vec<lash_core::PromptContribution> {
         let bindings = self.session_projected_bindings.lock().await;
         RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
@@ -282,7 +282,7 @@ impl RlmModeSession {
         }
         *warned = true;
         Ok(vec![PluginDirective::emit_events(vec![
-            lash::PluginSurfaceEvent::Status {
+            lash_core::PluginSurfaceEvent::Status {
                 key: BUDGET_WARNING_STATUS.to_string(),
                 label: "context budget".to_string(),
                 detail: Some(format!(
@@ -303,7 +303,7 @@ impl ModeSessionPlugin for RlmModeSession {
     async fn restore_session(
         &self,
         _ctx: ModeSessionContext<'_>,
-        state: &lash::runtime::PersistedSessionState,
+        state: &lash_core::runtime::PersistedSessionState,
     ) -> Result<(), SessionError> {
         let mut execution = self.execution.lock().await;
         let execution = execution
@@ -316,7 +316,7 @@ impl ModeSessionPlugin for RlmModeSession {
             execution.prune_projected_globals(&projected_globals);
         }
         for event in state.read_view().active_events() {
-            if let lash::SessionEventRecord::Mode(event) = event
+            if let lash_core::SessionEventRecord::Mode(event) = event
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     crate::decode_rlm_mode_event(event)
             {
@@ -329,7 +329,7 @@ impl ModeSessionPlugin for RlmModeSession {
     async fn append_session_nodes(
         &self,
         _ctx: ModeSessionContext<'_>,
-        nodes: &[lash::SessionAppendNode],
+        nodes: &[lash_core::SessionAppendNode],
     ) -> Result<(), SessionError> {
         let mut execution = self.execution.lock().await;
         let execution = execution
@@ -338,8 +338,8 @@ impl ModeSessionPlugin for RlmModeSession {
         let projected_globals = serde_json::Map::new();
         execution.prune_projected_globals(&projected_globals);
         for node in nodes {
-            if let lash::SessionAppendNode::Event {
-                event: lash::SessionEventRecord::Mode(event),
+            if let lash_core::SessionAppendNode::Event {
+                event: lash_core::SessionEventRecord::Mode(event),
             } = node
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     crate::decode_rlm_mode_event(event)
@@ -352,9 +352,9 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn execute_code(
         &self,
-        ctx: lash::ModeExecutionContext,
-        request: lash::ExecRequest,
-    ) -> Result<lash::ExecResponse, SessionError> {
+        ctx: lash_core::ModeExecutionContext,
+        request: lash_core::ExecRequest,
+    ) -> Result<lash_core::ExecResponse, SessionError> {
         let session_projected_bindings = self.session_projected_bindings.lock().await.clone();
         let mut guard = self.execution.lock().await;
         let state = guard
@@ -378,7 +378,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn apply_session_extension(
         &self,
-        extension: lash::ModeSessionExtensionHandle,
+        extension: lash_core::ModeSessionExtensionHandle,
     ) -> Result<(), SessionError> {
         let extension = extension
             .as_any()
@@ -400,7 +400,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn validate_turn_extension(
         &self,
-        extension: &lash::ModeTurnExtensionHandle,
+        extension: &lash_core::ModeTurnExtensionHandle,
     ) -> Result<(), SessionError> {
         let extension = extension
             .as_any()
@@ -521,14 +521,14 @@ impl ModeSessionPlugin for RlmModeSession {
     fn configure_runtime_from_request(
         &self,
         mut ctx: ModeRuntimeContext<'_>,
-        request: &lash::SessionCreateRequest,
+        request: &lash_core::SessionCreateRequest,
     ) {
         if let Ok(Some(extras)) = request
             .mode_extras
             .decode::<RlmCreateExtras>(&ExecutionMode::new("rlm"))
         {
             if let Ok(options) =
-                lash::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
+                lash_core::ModeTurnOptions::typed(ExecutionMode::new("rlm"), extras.termination)
             {
                 ctx.set_mode_turn_options(options);
             }
@@ -673,37 +673,37 @@ mod tests {
     struct NoopPromptManager;
 
     #[async_trait::async_trait]
-    impl lash::SessionSnapshotHost for NoopPromptManager {
+    impl lash_core::SessionSnapshotHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
-        ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
-            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
+            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<lash::PersistedSessionState, lash::plugin::PluginError> {
-            Err(lash::plugin::PluginError::Session("not used".to_string()))
+        ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
+            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
         }
     }
 
     #[async_trait::async_trait]
-    impl lash::ToolCatalogHost for NoopPromptManager {
+    impl lash_core::ToolCatalogHost for NoopPromptManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
-        ) -> Result<Vec<serde_json::Value>, lash::plugin::PluginError> {
+        ) -> Result<Vec<serde_json::Value>, lash_core::plugin::PluginError> {
             Ok(Vec::new())
         }
     }
 
-    impl lash::TaskHost for NoopPromptManager {}
-    impl lash::DirectCompletionHost for NoopPromptManager {}
-    impl lash::TraceHost for NoopPromptManager {}
+    impl lash_core::TaskHost for NoopPromptManager {}
+    impl lash_core::DirectCompletionHost for NoopPromptManager {}
+    impl lash_core::TraceHost for NoopPromptManager {}
 
-    fn prompt_usage(context_budget_tokens: usize) -> lash::PromptUsage {
-        lash::PromptUsage {
+    fn prompt_usage(context_budget_tokens: usize) -> lash_core::PromptUsage {
+        lash_core::PromptUsage {
             prompt_context_tokens: context_budget_tokens,
             input_tokens: context_budget_tokens,
             cached_input_tokens: 0,
@@ -783,15 +783,15 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl lash::SessionLifecycleHost for NoopPromptManager {
+    impl lash_core::SessionLifecycleHost for NoopPromptManager {
         async fn create_session(
             &self,
-            _request: lash::SessionCreateRequest,
-        ) -> Result<lash::SessionHandle, lash::plugin::PluginError> {
-            Err(lash::plugin::PluginError::Session("not used".to_string()))
+            _request: lash_core::SessionCreateRequest,
+        ) -> Result<lash_core::SessionHandle, lash_core::plugin::PluginError> {
+            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
         }
 
-        async fn close_session(&self, _session_id: &str) -> Result<(), lash::plugin::PluginError> {
+        async fn close_session(&self, _session_id: &str) -> Result<(), lash_core::plugin::PluginError> {
             Ok(())
         }
     }
@@ -904,28 +904,28 @@ mod tests {
             ..Default::default()
         })
         .expect("rlm mode session");
-        let state = lash::SessionStateEnvelope {
-            token_usage: lash::TokenUsage {
+        let state = lash_core::SessionStateEnvelope {
+            token_usage: lash_core::TokenUsage {
                 input_tokens: 120_292,
                 ..Default::default()
             },
             ..Default::default()
         };
         let directives = session
-            .soft_warn_directives(lash::plugin::CheckpointHookContext {
+            .soft_warn_directives(lash_core::plugin::CheckpointHookContext {
                 session_id: "root".to_string(),
-                checkpoint: lash::CheckpointKind::AfterWork,
-                state: lash::SessionReadView::from_exported_state(&state),
+                checkpoint: lash_core::CheckpointKind::AfterWork,
+                state: lash_core::SessionReadView::from_exported_state(&state),
                 host: std::sync::Arc::new(NoopPromptManager),
             })
             .expect("warning directives");
 
         assert_eq!(directives.len(), 1);
-        let lash::plugin::PluginDirective::EmitEvents { events } = &directives[0] else {
+        let lash_core::plugin::PluginDirective::EmitEvents { events } = &directives[0] else {
             panic!("budget warning must be a surface event, not an injected message");
         };
         assert_eq!(events.len(), 1);
-        let lash::PluginSurfaceEvent::Status {
+        let lash_core::PluginSurfaceEvent::Status {
             key,
             label,
             detail,

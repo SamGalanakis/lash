@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use lash::{SessionStateEnvelope, TurnOutcome};
-use lash_embed::{
+use lash::{
     LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput,
     plugins::PluginSurfaceEvent,
     usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
 };
+use lash_core::{SessionStateEnvelope, TurnOutcome};
 use tokio::sync::mpsc;
 
 use crate::SkillCatalog;

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash::{ExecutionMode, ProviderHandle, SessionPolicy};
+use lash_core::{ExecutionMode, ProviderHandle, SessionPolicy};
 
 /// State the registry exposes to a `Capability` while it resolves a spawn.
 pub struct CapabilityContext<'a> {

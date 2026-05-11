@@ -1,7 +1,7 @@
 //! Per-core MCP connection pool.
 //!
 //! [`McpConnectionPool`] holds one client per configured server and is shared
-//! across every session built from the same [`lash::LashCore`]. Connections
+//! across every session built from the same [`lash_core::LashCore`]. Connections
 //! are established eagerly when the pool is constructed and held for the
 //! lifetime of the pool.
 //!
@@ -20,7 +20,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolImage, ToolResult};
+use lash_core::{ToolDefinition, ToolExecutionMode, ToolImage, ToolResult};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -249,7 +249,7 @@ async fn connect_service(
 ) -> Result<RunningService<RoleClient, ClientInfo>, McpError> {
     let mut implementation = Implementation::default();
     implementation.name = "lash".to_string();
-    implementation.version = lash::VERSION.to_string();
+    implementation.version = lash_core::VERSION.to_string();
     let mut client_info = ClientInfo::default();
     client_info.client_info = implementation;
 

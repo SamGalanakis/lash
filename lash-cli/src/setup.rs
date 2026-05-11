@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::config::LashConfig;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use lash::provider::ProviderHandle;
+use lash_core::provider::ProviderHandle;
 use lash_provider_anthropic::AnthropicProvider;
 use lash_provider_auth as oauth;
 use lash_provider_codex::CodexProvider;
@@ -254,7 +254,7 @@ async fn run_setup_inner(
                         .and_then(|cfg| cfg.provider_spec(kind))
                         .cloned()
                     {
-                        match lash::build_provider(&saved_spec) {
+                        match lash_core::build_provider(&saved_spec) {
                             Ok(boxed) => {
                                 provider = Some(ProviderHandle::new(boxed));
                                 app.active_kind = Some(kind.to_string());

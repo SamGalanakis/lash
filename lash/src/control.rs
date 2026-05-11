@@ -1,11 +1,11 @@
 pub use crate::session::SessionConfigPatch;
 use crate::support::*;
-pub use lash::{AcceptedInjectedTurnInput, PluginAction};
+pub use lash_core::{AcceptedInjectedTurnInput, PluginAction};
 
 #[derive(Clone)]
 pub struct SessionControl {
     pub(crate) runtime: RuntimeHandle,
-    pub(crate) turn_input_injection_bridge: lash::TurnInputInjectionBridge,
+    pub(crate) turn_input_injection_bridge: lash_core::TurnInputInjectionBridge,
 }
 
 impl SessionControl {
@@ -86,7 +86,7 @@ impl SessionControl {
         self.runtime.publish_from(&runtime);
     }
 
-    async fn export_state(&self) -> lash::SessionStateEnvelope {
+    async fn export_state(&self) -> lash_core::SessionStateEnvelope {
         self.runtime.observe().read_view.to_owned_state()
     }
 
@@ -151,7 +151,7 @@ impl SessionControl {
 
     async fn apply_mode_session_extension(
         &self,
-        extension: lash::ModeSessionExtensionHandle,
+        extension: lash_core::ModeSessionExtensionHandle,
     ) -> Result<()> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
@@ -166,7 +166,7 @@ impl SessionControl {
     async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionStateEnvelope> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         let result = runtime
@@ -208,7 +208,7 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn call_plugin_action<Op: lash::PluginAction>(
+    async fn call_plugin_action<Op: lash_core::PluginAction>(
         &self,
         args: Op::Args,
     ) -> Result<Op::Output> {
@@ -216,7 +216,7 @@ impl SessionControl {
             .invoke_plugin_action(
                 Op::NAME,
                 serde_json::to_value(args).map_err(|err| {
-                    EmbedError::Plugin(lash::PluginError::Invoke(format!(
+                    EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                         "invalid {} args: {err}",
                         Op::NAME
                     )))
@@ -224,14 +224,14 @@ impl SessionControl {
             )
             .await?;
         if !result.success {
-            return Err(EmbedError::Plugin(lash::PluginError::Invoke(format!(
+            return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
                 result.result
             ))));
         }
         serde_json::from_value(result.result).map_err(|err| {
-            EmbedError::Plugin(lash::PluginError::Invoke(format!(
+            EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "invalid {} output: {err}",
                 Op::NAME
             )))
@@ -434,17 +434,17 @@ impl SessionControl {
 
     async fn inject_turn_input(&self, id: Option<String>, message: PluginMessage) -> Result<()> {
         self.turn_input_injection_bridge
-            .enqueue(vec![lash::InjectedTurnInput { id, message }])
+            .enqueue(vec![lash_core::InjectedTurnInput { id, message }])
             .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
     }
 
-    async fn inject_turn_inputs(&self, messages: Vec<lash::InjectedTurnInput>) -> Result<()> {
+    async fn inject_turn_inputs(&self, messages: Vec<lash_core::InjectedTurnInput>) -> Result<()> {
         self.turn_input_injection_bridge
             .enqueue(messages)
             .map_err(|message| EmbedError::Session(SessionError::Protocol(message)))
     }
 
-    async fn tool_registry(&self) -> Result<Arc<lash::ToolRegistry>> {
+    async fn tool_registry(&self) -> Result<Arc<lash_core::ToolRegistry>> {
         self.runtime
             .writer()
             .lock()
@@ -634,7 +634,7 @@ pub struct StateControl {
 }
 
 impl StateControl {
-    pub async fn export(&self) -> lash::SessionStateEnvelope {
+    pub async fn export(&self) -> lash_core::SessionStateEnvelope {
         self.control.export_state().await
     }
 
@@ -649,7 +649,7 @@ impl StateControl {
     pub async fn branch_to_node(
         &self,
         target_leaf: Option<String>,
-    ) -> Result<lash::SessionStateEnvelope> {
+    ) -> Result<lash_core::SessionStateEnvelope> {
         self.control.branch_to_node(target_leaf).await
     }
 
@@ -692,7 +692,7 @@ pub struct PluginActions {
 }
 
 impl PluginActions {
-    pub async fn call<Op: lash::PluginAction>(&self, args: Op::Args) -> Result<Op::Output> {
+    pub async fn call<Op: lash_core::PluginAction>(&self, args: Op::Args) -> Result<Op::Output> {
         self.control.call_plugin_action::<Op>(args).await
     }
 }
@@ -750,7 +750,10 @@ impl InjectionControl {
         self.control.inject_turn_input(id, message).await
     }
 
-    pub async fn inject_turn_inputs(&self, messages: Vec<lash::InjectedTurnInput>) -> Result<()> {
+    pub async fn inject_turn_inputs(
+        &self,
+        messages: Vec<lash_core::InjectedTurnInput>,
+    ) -> Result<()> {
         self.control.inject_turn_inputs(messages).await
     }
 }
@@ -763,7 +766,7 @@ pub struct ModeControl {
 impl ModeControl {
     pub async fn apply_session_extension(
         &self,
-        extension: lash::ModeSessionExtensionHandle,
+        extension: lash_core::ModeSessionExtensionHandle,
     ) -> Result<()> {
         self.control.apply_mode_session_extension(extension).await
     }

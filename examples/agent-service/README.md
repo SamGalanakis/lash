@@ -1,6 +1,6 @@
 # Agent Service
 
-SQLite-backed localhost chat example for `lash-embed`, RLM mode, and typed
+SQLite-backed localhost chat example for `lash`, RLM mode, and typed
 session plugins.
 
 Run it:

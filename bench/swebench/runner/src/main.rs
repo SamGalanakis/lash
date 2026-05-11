@@ -13,14 +13,14 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Parser;
 use dataset::{SweBenchInstance, load_instances};
-use lash::{
+use lash_core::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
     RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_cli::config::LashConfig;
-use lash_embed::{
+use lash::{
     TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{

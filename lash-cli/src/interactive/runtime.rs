@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use lash::session_model::{Part, PartKind, PruneState};
-use lash::{
+use lash::LashSession;
+use lash_core::session_model::{Part, PartKind, PruneState};
+use lash_core::{
     AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, InputItem,
     MediaType, Message, MessageRole, PluginMessage, ToolState, TurnInput,
 };
-use lash_embed::LashSession;
 
 use super::helpers::TurnActivityBridge;
 use super::*;
@@ -62,7 +62,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     id: String::new(),
                     kind: PartKind::Image,
                     content: String::new(),
-                    attachment: Some(lash::session_model::message::PartAttachment { reference }),
+                    attachment: Some(lash_core::session_model::message::PartAttachment {
+                        reference,
+                    }),
                     tool_call_id: None,
                     tool_name: None,
                     tool_item_id: None,

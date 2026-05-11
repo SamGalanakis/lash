@@ -5,7 +5,7 @@ use crate::support::*;
 /// A binding is not a second plugin implementation model. It gives embed hosts
 /// typed session configuration and typed per-turn input while still building
 /// a normal [`PluginFactory`] whose session plugin registers capabilities
-/// through `lash::PluginRegistrar`.
+/// through `lash_core::PluginRegistrar`.
 ///
 /// Plugin crates should expose a small domain extension trait over
 /// [`TurnBuilder`] for their turn input instead of asking app route code to
@@ -16,7 +16,7 @@ use crate::support::*;
 ///     fn with_tone(self, tone: Tone) -> Self;
 /// }
 ///
-/// impl ToneTurnExt for lash_embed::TurnBuilder {
+/// impl ToneTurnExt for lash::TurnBuilder {
 ///     fn with_tone(self, tone: Tone) -> Self {
 ///         self.with_plugin_input::<TonePlugin>(ToneInput { tone })
 ///     }

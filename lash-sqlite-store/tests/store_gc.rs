@@ -1,4 +1,4 @@
-use lash::{
+use lash_core::{
     ExecutionMode, HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState,
     PersistedTurnState, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, SessionGraph,
     SessionHead, SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
@@ -198,7 +198,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
     assert_eq!(meta.model, "first-model");
 
     store
-        .save_session_meta(lash::SessionMeta {
+        .save_session_meta(lash_core::SessionMeta {
             session_id: "chat/alpha".to_string(),
             session_name: "Renamed".to_string(),
             created_at: "original".to_string(),

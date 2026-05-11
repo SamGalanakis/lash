@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use lash::PromptContribution;
-use lash::PromptUsage;
-use lash::plugin::PromptHookContext;
+use lash_core::PromptContribution;
+use lash_core::PromptUsage;
+use lash_core::plugin::PromptHookContext;
 
 /// Render the "Context Budget" line for the volatile turn-tail message.
 /// Returns the formatted text (status line + optional escalation tail)

@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 async-trait = { workspace = true }
 flate2 = "1"
 rmp-serde = "1"

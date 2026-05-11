@@ -7,8 +7,8 @@
 //! Per-mode prose, tool descriptions, and dispatch live in `standard.rs`
 //! and `rlm.rs`.
 
-use lash::plugin::PluginError;
-use lash::{
+use lash_core::plugin::PluginError;
+use lash_core::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
     SessionStartPoint, SessionToolAccess, ToolContext, ToolDefinition, ToolExecutionMode,
     ToolResult, ToolSurfaceContribution, TurnInput,
@@ -30,7 +30,7 @@ pub(crate) fn fresh_child_request(
 ) -> SessionCreateRequest {
     SessionCreateRequest {
         session_id: Some(uuid::Uuid::new_v4().to_string()),
-        relation: lash::SessionRelation::Child { parent_session_id },
+        relation: lash_core::SessionRelation::Child { parent_session_id },
         start,
         policy: Some(policy),
         plugin_mode: SessionPluginMode::Fresh,
@@ -38,7 +38,7 @@ pub(crate) fn fresh_child_request(
         first_turn_input: None,
         tool_access: SessionToolAccess::default(),
         subagent: None,
-        context_surface: lash::SessionContextSurface::default(),
+        context_surface: lash_core::SessionContextSurface::default(),
         mode_extras,
         usage_source: Some(usage_source.into()),
     }
@@ -101,7 +101,7 @@ fn resolve_optional_field<T: Clone>(
 }
 
 pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
-    if policy.execution_mode != lash::ExecutionMode::standard() {
+    if policy.execution_mode != lash_core::ExecutionMode::standard() {
         policy.standard_context_approach = None;
     }
 }
@@ -121,20 +121,20 @@ pub(crate) async fn build_spawn_create_request(
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
     let spec = resolve_capability_spec(registry, &current_snapshot.policy, capability_name)?;
     let mut policy = session_policy_from_spec(&spec, &current_snapshot.policy);
-    if output_schema.is_some() && policy.execution_mode != lash::ExecutionMode::new("rlm") {
+    if output_schema.is_some() && policy.execution_mode != lash_core::ExecutionMode::new("rlm") {
         return Err(format!(
             "structured output is RLM-only; child capability `{capability_name}` runs in `{}` mode",
             policy.execution_mode.plugin_id()
         ));
     }
-    if !seed.projected.is_empty() && policy.execution_mode != lash::ExecutionMode::new("rlm") {
+    if !seed.projected.is_empty() && policy.execution_mode != lash_core::ExecutionMode::new("rlm") {
         return Err(format!(
             "projected seed is RLM-only; child capability `{capability_name}` runs in `{}` mode",
             policy.execution_mode.plugin_id()
         ));
     }
     let mut mode_extras = ModeExtras::default();
-    if policy.execution_mode == lash::ExecutionMode::new("rlm") {
+    if policy.execution_mode == lash_core::ExecutionMode::new("rlm") {
         let termination = match output_schema.clone() {
             Some(schema) => RlmTermination::SubmitRequired {
                 schema: Some(schema),
@@ -147,7 +147,7 @@ pub(crate) async fn build_spawn_create_request(
             Some(seed.projected.clone())
         };
         mode_extras = ModeExtras::typed(
-            lash::ExecutionMode::new("rlm"),
+            lash_core::ExecutionMode::new("rlm"),
             lash_rlm_types::RlmCreateExtras {
                 termination,
                 projected_seed,
@@ -227,7 +227,7 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,
-        turn_context: lash::TurnContext::default(),
+        turn_context: lash_core::TurnContext::default(),
     }
 }
 
@@ -330,14 +330,14 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
 }
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
-    ToolResult::ok(args.clone()).with_control(lash::ToolControl::Fail {
+    ToolResult::ok(args.clone()).with_control(lash_core::ToolControl::Fail {
         value: args.clone(),
     })
 }
 
 /// Apply the spawned subagent's tool authority as a tool surface override.
 pub(crate) fn subagent_surface_contribution(
-    ctx: lash::plugin::ToolSurfaceContext,
+    ctx: lash_core::plugin::ToolSurfaceContext,
 ) -> Result<ToolSurfaceContribution, PluginError> {
     let Some(authority) = ctx.subagent else {
         return Ok(ToolSurfaceContribution::default());

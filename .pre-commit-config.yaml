@@ -8,7 +8,15 @@ repos:
 
   - repo: local
     hooks:
-      # Rust — lash (core library)
+      # Rust — lash-core (runtime library)
+      - id: cargo-fmt-lash-core
+        name: cargo fmt (lash-core)
+        language: system
+        entry: cargo fmt --manifest-path lash-core/Cargo.toml
+        files: '^lash-core/.*\.rs$'
+        pass_filenames: false
+
+      # Rust — lash (facade)
       - id: cargo-fmt-lash
         name: cargo fmt (lash)
         language: system
@@ -24,7 +32,15 @@ repos:
         files: '^lash-cli/.*\.rs$'
         pass_filenames: false
 
-      # Rust clippy — lash (core library)
+      # Rust clippy — lash-core (runtime library)
+      - id: cargo-clippy-lash-core
+        name: cargo clippy (lash-core)
+        language: system
+        entry: cargo clippy --manifest-path lash-core/Cargo.toml -- -D warnings
+        files: '^lash-core/.*\.rs$'
+        pass_filenames: false
+
+      # Rust clippy — lash (facade)
       - id: cargo-clippy-lash
         name: cargo clippy (lash)
         language: system

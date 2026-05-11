@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use lash::{
+use lash_core::{
     BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
     SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest,
@@ -200,7 +200,7 @@ pub struct StoredSessionCheckpoint {
 
 /// Explicit first-party factory for one SQLite session database per Lash session.
 ///
-/// Hosts opt into this by passing it to `lash_embed::LashCoreBuilder::store_factory`.
+/// Hosts opt into this by passing it to `lash::LashCoreBuilder::store_factory`.
 /// The factory never becomes a default: app storage and runtime storage remain
 /// host-owned decisions.
 #[derive(Clone, Debug)]
@@ -421,8 +421,8 @@ fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     rmp_serde::from_slice(bytes).ok()
 }
 
-fn merge_token_ledger_entries(entries: Vec<lash::TokenLedgerEntry>) -> Vec<lash::TokenLedgerEntry> {
-    let mut merged: Vec<lash::TokenLedgerEntry> = Vec::new();
+fn merge_token_ledger_entries(entries: Vec<lash_core::TokenLedgerEntry>) -> Vec<lash_core::TokenLedgerEntry> {
+    let mut merged: Vec<lash_core::TokenLedgerEntry> = Vec::new();
     for entry in entries {
         if entry.usage.total() == 0 {
             continue;
@@ -446,7 +446,7 @@ impl Store {
     fn load_session_graph_from_conn(
         conn: &Connection,
         leaf_node_id: Option<String>,
-    ) -> lash::SessionGraph {
+    ) -> lash_core::SessionGraph {
         // Tombstoned rows are physically still present until `vacuum()` is
         // called; the runtime view should never see them.
         let mut stmt = match conn
@@ -455,14 +455,14 @@ impl Store {
             Ok(stmt) => stmt,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to prepare graph load statement");
-                return lash::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
+                return lash_core::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
             }
         };
         let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
             Ok(rows) => rows,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to query graph rows");
-                return lash::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
+                return lash_core::SessionGraph::from_nodes(Vec::new(), leaf_node_id);
             }
         };
         let mut nodes = Vec::new();
@@ -470,20 +470,20 @@ impl Store {
             let Ok(node_json) = row else {
                 continue;
             };
-            let Ok(node) = serde_json::from_str::<lash::SessionNodeRecord>(&node_json) else {
+            let Ok(node) = serde_json::from_str::<lash_core::SessionNodeRecord>(&node_json) else {
                 continue;
             };
             nodes.push(node);
         }
-        lash::SessionGraph::from_nodes(nodes, leaf_node_id)
+        lash_core::SessionGraph::from_nodes(nodes, leaf_node_id)
     }
 
     fn load_active_path_session_graph_from_conn(
         conn: &Connection,
         leaf_node_id: Option<String>,
-    ) -> rusqlite::Result<lash::SessionGraph> {
+    ) -> rusqlite::Result<lash_core::SessionGraph> {
         let Some(leaf_node_id) = leaf_node_id else {
-            return Ok(lash::SessionGraph::default());
+            return Ok(lash_core::SessionGraph::default());
         };
         let mut stmt = conn.prepare(
             "WITH RECURSIVE active(node_id, node_json, parent_node_id, depth) AS (
@@ -512,11 +512,11 @@ impl Store {
         let mut nodes = Vec::new();
         for row in rows {
             let node_json = row?;
-            if let Ok(node) = serde_json::from_str::<lash::SessionNodeRecord>(&node_json) {
+            if let Ok(node) = serde_json::from_str::<lash_core::SessionNodeRecord>(&node_json) {
                 nodes.push(node);
             }
         }
-        Ok(lash::SessionGraph::from_nodes(nodes, Some(leaf_node_id)))
+        Ok(lash_core::SessionGraph::from_nodes(nodes, Some(leaf_node_id)))
     }
 
     fn insert_artifact_blob_conn(
@@ -652,7 +652,7 @@ impl Store {
         })
     }
 
-    fn load_usage_deltas_conn(conn: &Connection) -> Vec<lash::TokenLedgerEntry> {
+    fn load_usage_deltas_conn(conn: &Connection) -> Vec<lash_core::TokenLedgerEntry> {
         let mut stmt = match conn.prepare(
             "SELECT source, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens
              FROM usage_deltas ORDER BY seq ASC",
@@ -661,10 +661,10 @@ impl Store {
             Err(_) => return Vec::new(),
         };
         let rows = match stmt.query_map([], |row| {
-            Ok(lash::TokenLedgerEntry {
+            Ok(lash_core::TokenLedgerEntry {
                 source: row.get(0)?,
                 model: row.get(1)?,
-                usage: lash::TokenUsage {
+                usage: lash_core::TokenUsage {
                     input_tokens: row.get(2)?,
                     output_tokens: row.get(3)?,
                     cached_input_tokens: row.get(4)?,
@@ -879,7 +879,7 @@ impl Store {
         Self::get_checkpoint_conn(&conn, blob_ref)
     }
 
-    pub fn append_usage_deltas(&self, entries: &[lash::TokenLedgerEntry]) {
+    pub fn append_usage_deltas(&self, entries: &[lash_core::TokenLedgerEntry]) {
         if entries.is_empty() {
             return;
         }
@@ -908,7 +908,7 @@ impl Store {
         tx.commit().expect("usage delta commit");
     }
 
-    pub fn load_usage_deltas(&self) -> Vec<lash::TokenLedgerEntry> {
+    pub fn load_usage_deltas(&self) -> Vec<lash_core::TokenLedgerEntry> {
         let conn = self.conn.lock().unwrap();
         Self::load_usage_deltas_conn(&conn)
     }
@@ -930,7 +930,7 @@ impl Store {
         load_session_head_meta_from_conn(&conn)
     }
 
-    pub fn replace_session_graph(&self, graph: &lash::SessionGraph) {
+    pub fn replace_session_graph(&self, graph: &lash_core::SessionGraph) {
         let mut conn = self.conn.lock().unwrap();
         let tx = match conn.transaction() {
             Ok(tx) => tx,
@@ -958,7 +958,7 @@ impl Store {
         }
     }
 
-    pub fn append_session_graph_nodes(&self, nodes: &[lash::SessionNodeRecord]) {
+    pub fn append_session_graph_nodes(&self, nodes: &[lash_core::SessionNodeRecord]) {
         if nodes.is_empty() {
             return;
         }
@@ -985,7 +985,7 @@ impl Store {
         }
     }
 
-    pub fn load_session_graph(&self) -> lash::SessionGraph {
+    pub fn load_session_graph(&self) -> lash_core::SessionGraph {
         let conn = self.conn.lock().unwrap();
         Self::load_session_graph_from_conn(&conn, None)
     }
@@ -1187,7 +1187,7 @@ impl RuntimePersistence for Store {
     async fn load_node(
         &self,
         node_id: &str,
-    ) -> Result<Option<lash::SessionNodeRecord>, StoreError> {
+    ) -> Result<Option<lash_core::SessionNodeRecord>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let row: Option<String> = conn
             .query_row(

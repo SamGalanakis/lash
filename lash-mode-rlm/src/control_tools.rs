@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use lash::session_model::SessionEventRecord;
-use lash::{
+use lash_core::session_model::SessionEventRecord;
+use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
     SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation, SessionSnapshotHost,
     SessionStartPoint, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolExecutionMode,
@@ -118,16 +118,16 @@ where
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
     let termination = current_snapshot
         .mode_turn_options
-        .decode(&lash::ExecutionMode::new("rlm"))
+        .decode(&lash_core::ExecutionMode::new("rlm"))
         .ok()
         .flatten()
         .unwrap_or_default();
     let mut policy = current_snapshot.policy.clone();
-    policy.execution_mode = lash::ExecutionMode::new("rlm");
+    policy.execution_mode = lash_core::ExecutionMode::new("rlm");
     normalize_context_policy(&mut policy);
 
     let mode_extras = ModeExtras::typed(
-        lash::ExecutionMode::new("rlm"),
+        lash_core::ExecutionMode::new("rlm"),
         lash_rlm_types::RlmCreateExtras {
             termination,
             projected_seed: (!seed.projected.is_empty()).then(|| seed.projected.clone()),
@@ -175,9 +175,9 @@ fn fresh_successor_request(
         plugin_mode: SessionPluginMode::Fresh,
         initial_nodes: Vec::new(),
         first_turn_input: None,
-        tool_access: lash::SessionToolAccess::default(),
+        tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
-        context_surface: lash::SessionContextSurface::default(),
+        context_surface: lash_core::SessionContextSurface::default(),
         mode_extras,
         usage_source: Some(usage_source.into()),
     }
@@ -201,7 +201,7 @@ pub fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<Sessi
 }
 
 fn normalize_context_policy(policy: &mut SessionPolicy) {
-    if policy.execution_mode != lash::ExecutionMode::standard() {
+    if policy.execution_mode != lash_core::ExecutionMode::standard() {
         policy.standard_context_approach = None;
     }
 }
@@ -232,12 +232,12 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use lash::plugin::{
+    use lash_core::plugin::{
         DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
         SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
         ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{PersistedSessionState, TurnInput};
+    use lash_core::{PersistedSessionState, TurnInput};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
     #[derive(Default)]
@@ -301,7 +301,7 @@ mod tests {
             Err(PluginError::Session("not used".to_string()))
         }
 
-        async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+        async fn await_turn(&self, _turn_id: &str) -> Result<lash_core::AssembledTurn, PluginError> {
             Err(PluginError::Session("not used".to_string()))
         }
 
@@ -329,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
-        let mut session_graph = lash::SessionGraph::default();
+        let mut session_graph = lash_core::SessionGraph::default();
         session_graph.append_event(SessionEventRecord::Mode(crate::rlm_mode_event(
             RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
                 set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
@@ -338,14 +338,14 @@ mod tests {
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
-                    execution_mode: lash::ExecutionMode::new("rlm"),
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
-                    standard_context_approach: Some(lash::StandardContextApproach::default()),
+                    standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                     ..SessionPolicy::default()
                 },
-                mode_turn_options: lash::ModeTurnOptions::typed(
-                    lash::ExecutionMode::new("rlm"),
+                mode_turn_options: lash_core::ModeTurnOptions::typed(
+                    lash_core::ExecutionMode::new("rlm"),
                     RlmTermination::SubmitRequired {
                         schema: Some(json!({
                             "type": "object",
@@ -361,7 +361,7 @@ mod tests {
             created: Mutex::new(Vec::new()),
         });
         let provider = RlmControlToolsProvider;
-        let context = lash::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
             "task": "finish from here",
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(seed.set_default["query"], json!("original"));
         let extras = request
             .mode_extras
-            .decode::<RlmCreateExtras>(&lash::ExecutionMode::new("rlm"))
+            .decode::<RlmCreateExtras>(&lash_core::ExecutionMode::new("rlm"))
             .expect("decode extras")
             .expect("rlm extras");
         assert!(matches!(
@@ -443,7 +443,7 @@ mod tests {
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
-                    execution_mode: lash::ExecutionMode::new("rlm"),
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
                     ..SessionPolicy::default()
@@ -453,7 +453,7 @@ mod tests {
             created: Mutex::new(Vec::new()),
         });
         let provider = RlmControlToolsProvider;
-        let context = lash::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
             "task": "finish from here",
@@ -499,7 +499,7 @@ mod tests {
         // Projected: rides on mode_extras as the snapshot.
         let extras = request
             .mode_extras
-            .decode::<RlmCreateExtras>(&lash::ExecutionMode::new("rlm"))
+            .decode::<RlmCreateExtras>(&lash_core::ExecutionMode::new("rlm"))
             .expect("decode extras")
             .expect("rlm extras");
         let snapshot = extras

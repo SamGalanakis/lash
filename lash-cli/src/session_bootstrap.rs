@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{
+use lash::{LashCore, LashSession, ModeId, ModePreset};
+use lash_core::{
     PersistedSessionConfig, PersistedSessionState, PluginHost, RuntimeCoreConfig,
     RuntimePersistence, SessionGraph, SessionHead, SessionPolicy, SessionTaskExecutor,
 };
-use lash_embed::{LashCore, LashSession, ModeId, ModePreset};
 use lash_sqlite_store::Store;
 
 use crate::session_log::{self, SessionLogger, SessionStart};

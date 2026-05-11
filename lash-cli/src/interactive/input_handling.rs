@@ -4,9 +4,9 @@ use std::sync::atomic::AtomicBool;
 use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
-use lash::session_model::Message;
-use lash::{CachedModelCatalog, InjectedTurnInput, RunMode, ToolState};
-use lash_embed::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
+use lash::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
+use lash_core::session_model::Message;
+use lash_core::{CachedModelCatalog, InjectedTurnInput, RunMode, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -213,7 +213,7 @@ fn apply_scroll_input_action(
 pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
     session_id: String,
-    _history: &mut Vec<lash::session_model::Message>,
+    _history: &mut Vec<lash_core::session_model::Message>,
     runtime: &mut Option<LashSession>,
     _turn_counter: &mut usize,
     _current_execution_mode: &mut ExecutionMode,
@@ -282,7 +282,7 @@ pub(super) async fn process_pending_monitor_wakes(
     ui_trace: &mut Option<UiTraceRecorder>,
     logger: &mut SessionLogger,
     runtime: &mut Option<LashSession>,
-    history: &mut Vec<lash::session_model::Message>,
+    history: &mut Vec<lash_core::session_model::Message>,
     runtime_return_rx: &mut Option<tokio::sync::oneshot::Receiver<RuntimeRunResult>>,
     cancel_token: &mut Option<CancellationToken>,
     active_stream_id: &mut u64,
@@ -311,7 +311,7 @@ pub(super) async fn process_pending_monitor_wakes(
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,
-        turn_context: lash::TurnContext::default(),
+        turn_context: lash_core::TurnContext::default(),
     };
     send_user_message(
         prepared_turn,
@@ -1277,7 +1277,7 @@ pub(super) async fn handle_key_event(
                     app.restore_prepared_turn(queued);
                     return Ok(false);
                 }
-                let injection = lash::InjectedTurnInput {
+                let injection = lash_core::InjectedTurnInput {
                     id: None,
                     message: make_injected_plugin_message(&queued),
                 };

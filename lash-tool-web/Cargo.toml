@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash", default-features = false }
+lash-core = { path = "../lash-core", default-features = false }
 lash-tool-support = { path = "../lash-tool-support" }
 async-trait = { workspace = true }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }

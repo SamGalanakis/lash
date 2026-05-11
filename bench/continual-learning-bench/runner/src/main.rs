@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Parser;
-use lash::{
+use lash_core::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
     EmbeddedRuntimeHost, FollowedTurn, InputItem, LashRuntime, NoopEventSink,
     PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
@@ -14,7 +14,7 @@ use lash::{
     TurnInputInjectionBridge,
 };
 use lash_cli::config::LashConfig;
-use lash_embed::{
+use lash::{
     TurnInput,
     advanced::{
         EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
@@ -139,7 +139,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
     );
-    let state = lash::load_persisted_session_state(store.as_ref())
+    let state = lash_core::load_persisted_session_state(store.as_ref())
         .await
         .context("load session state")?
         .unwrap_or_else(|| PersistedSessionState {

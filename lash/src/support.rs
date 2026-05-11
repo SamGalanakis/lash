@@ -3,8 +3,8 @@ pub(crate) use std::fmt;
 pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 
 pub(crate) use async_trait::async_trait;
-pub(crate) use lash::plugin::StaticPluginFactory;
-pub(crate) use lash::{
+pub(crate) use lash_core::plugin::StaticPluginFactory;
+pub(crate) use lash_core::{
     ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
     RuntimeEnvironment, RuntimeHandle, RuntimeObservation, SessionPolicy,
 };
@@ -12,7 +12,7 @@ pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio_util::sync::CancellationToken;
 
-pub(crate) use lash::{
+pub(crate) use lash_core::{
     AssembledTurn, AssistantOutput, AttachmentStore, EventSink, ExecutionSummary,
     ManagedTaskStatus, Message, ModeTurnOptions, PluginFactory, PluginMessage, ProviderHandle,
     Residency, RewriteTrigger, RuntimePersistence, RuntimeSessionHost, SessionCreateRequest,
@@ -22,11 +22,11 @@ pub(crate) use lash::{
     ToolCallRecord, ToolDefinition, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink,
     TurnIssue, TurnOutcome,
 };
-pub(crate) use lash::{InputItem, TokenLedgerEntry, TokenUsage};
-pub(crate) use lash::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
-pub(crate) use lash::{TurnActivity, TurnInput};
+pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
+pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
+pub(crate) use lash_core::{TurnActivity, TurnInput};
 #[cfg(test)]
-pub(crate) use lash::{TurnActivityId, TurnEvent};
+pub(crate) use lash_core::{TurnActivityId, TurnEvent};
 
 pub(crate) use crate::ToolState;
 pub(crate) use crate::control::*;

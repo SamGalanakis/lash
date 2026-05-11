@@ -14,8 +14,8 @@ pub use capability::{
     CapabilitySpec, StaticCapability, TierCapability, TierExecutionMode, default_registry,
 };
 
-use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
-use lash::{PluginSpec, PluginSpecFactory, SessionPolicy, ToolProvider};
+use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
+use lash_core::{PluginSpec, PluginSpecFactory, SessionPolicy, ToolProvider};
 
 pub use host::{
     AgentMetadata, CloseAgentRequest, CloseAgentResponse, LocalSubagentHost, SpawnAgentRequest,
@@ -35,7 +35,7 @@ pub trait SubagentSessionConfigurator: Send + Sync {
     fn configure(
         &self,
         ctx: &SubagentSpawnContext<'_>,
-        request: &mut lash::SessionCreateRequest,
+        request: &mut lash_core::SessionCreateRequest,
     ) -> Result<(), String>;
 }
 
@@ -46,7 +46,7 @@ impl SubagentSessionConfigurator for NoopSubagentSessionConfigurator {
     fn configure(
         &self,
         _ctx: &SubagentSpawnContext<'_>,
-        _request: &mut lash::SessionCreateRequest,
+        _request: &mut lash_core::SessionCreateRequest,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -90,7 +90,7 @@ impl PluginFactory for SubagentsPluginFactory {
     fn build(
         &self,
         ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
+    ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
         let mut policy = self.policy.clone();
         policy.execution_mode = ctx.execution_mode.clone();
 
@@ -99,7 +99,7 @@ impl PluginFactory for SubagentsPluginFactory {
         let configurator = Arc::clone(&self.configurator);
         let execution_mode = ctx.execution_mode.clone();
 
-        let is_rlm = execution_mode == lash::ExecutionMode::new("rlm");
+        let is_rlm = execution_mode == lash_core::ExecutionMode::new("rlm");
         if is_rlm && !ctx.background_tasks_available {
             return Err(PluginError::Registration(
                 "subagents require session background-task support; configure a SessionTaskExecutor before installing SubagentsPluginFactory"
@@ -141,13 +141,13 @@ mod tests {
 
     use crate::shared::{build_session_policy, build_spawn_create_request};
     use async_trait::async_trait;
-    use lash::PersistedSessionState;
-    use lash::plugin::{
+    use lash_core::PersistedSessionState;
+    use lash_core::plugin::{
         DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
         SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
         ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
+    use lash_core::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
     use serde_json::json;
 
     #[test]
@@ -155,13 +155,13 @@ mod tests {
         let current = SessionPolicy {
             model: "parent-model".to_string(),
             model_variant: Some("parent-variant".to_string()),
-            execution_mode: lash::ExecutionMode::standard(),
+            execution_mode: lash_core::ExecutionMode::standard(),
             ..SessionPolicy::default()
         };
         let mut spec = CapabilitySpec::inherit();
         spec.model = CapabilityField::Set("child-model".to_string());
         spec.model_variant = CapabilityOptionalField::Clear;
-        spec.execution_mode = CapabilityField::Set(lash::ExecutionMode::new("rlm"));
+        spec.execution_mode = CapabilityField::Set(lash_core::ExecutionMode::new("rlm"));
         let registry =
             CapabilityRegistry::new().with(Arc::new(StaticCapability::new("child", spec)));
 
@@ -169,12 +169,12 @@ mod tests {
 
         assert_eq!(policy.model, "child-model");
         assert_eq!(policy.model_variant, None);
-        assert_eq!(policy.execution_mode, lash::ExecutionMode::new("rlm"));
+        assert_eq!(policy.execution_mode, lash_core::ExecutionMode::new("rlm"));
     }
 
     #[test]
     fn rlm_definitions_expose_spawn_without_mini_api() {
-        let registry = default_registry(&BTreeMap::new(), lash::ExecutionMode::standard());
+        let registry = default_registry(&BTreeMap::new(), lash_core::ExecutionMode::standard());
         let rlm_defs = rlm::rlm_subagent_tool_definitions(&registry.names());
 
         assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
@@ -258,7 +258,7 @@ mod tests {
                 Err(PluginError::Session("not used in test".to_string()))
             }
 
-            async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+            async fn await_turn(&self, _turn_id: &str) -> Result<lash_core::AssembledTurn, PluginError> {
                 Err(PluginError::Session("not used in test".to_string()))
             }
 
@@ -278,18 +278,18 @@ mod tests {
         // one. Each stub returns a different per-tier model from
         // `default_agent_model` so the final child policy's model shows
         // which provider the capability lookup resolved against.
-        fn tiered_provider(tag: &'static str) -> lash::testing::TestProvider {
+        fn tiered_provider(tag: &'static str) -> lash_core::testing::TestProvider {
             let (kind, default_model, explore_model) = match tag {
                 "stale" => ("stale-stub", "stale-model", "stale-explore"),
                 "live" => ("live-stub", "live-model", "live-explore"),
                 _ => ("stub", "mock-model", "mock-explore"),
             };
-            lash::testing::TestProvider::builder()
+            lash_core::testing::TestProvider::builder()
                 .kind(kind)
                 .default_model(default_model)
                 .default_agent_model(move |tier| {
                     if tier == "explore" {
-                        Some(lash::AgentModelSelection {
+                        Some(lash_core::AgentModelSelection {
                             model: explore_model.to_string(),
                             variant: None,
                         })
@@ -302,20 +302,20 @@ mod tests {
         }
         let stale_policy = SessionPolicy {
             provider: tiered_provider("stale").into_handle(),
-            execution_mode: lash::ExecutionMode::standard(),
+            execution_mode: lash_core::ExecutionMode::standard(),
             ..SessionPolicy::default()
         };
         let live_policy = SessionPolicy {
             provider: tiered_provider("live").into_handle(),
-            execution_mode: lash::ExecutionMode::standard(),
+            execution_mode: lash_core::ExecutionMode::standard(),
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
         };
         let registry = Arc::new(default_registry(
             &BTreeMap::new(),
-            lash::ExecutionMode::new("rlm"),
+            lash_core::ExecutionMode::new("rlm"),
         ));
-        let context = lash::testing::mock_tool_context_with_host(Arc::new(SnapshotManager {
+        let context = lash_core::testing::mock_tool_context_with_host(Arc::new(SnapshotManager {
             snapshot: PersistedSessionState {
                 policy: live_policy.clone(),
                 ..PersistedSessionState::default()
@@ -368,7 +368,7 @@ mod tests {
         let structured_policy = structured_request.policy.expect("structured child policy");
         assert_eq!(
             structured_policy.execution_mode,
-            lash::ExecutionMode::new("rlm"),
+            lash_core::ExecutionMode::new("rlm"),
             "explore runs in RLM so typed output uses native submit"
         );
         assert!(structured_request.tool_access.tools.is_empty());
@@ -380,15 +380,15 @@ mod tests {
             SessionPolicy::default(),
             Arc::new(default_registry(
                 &BTreeMap::new(),
-                lash::ExecutionMode::standard(),
+                lash_core::ExecutionMode::standard(),
             )),
             Arc::new(LocalSubagentHost::default()),
         );
         let ctx = PluginSessionContext {
             session_id: "parent".to_string(),
-            execution_mode: lash::ExecutionMode::standard(),
+            execution_mode: lash_core::ExecutionMode::standard(),
             standard_context_approach: None,
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             background_tasks_available: false,
             parent_session_id: None,
@@ -403,15 +403,15 @@ mod tests {
             SessionPolicy::default(),
             Arc::new(default_registry(
                 &BTreeMap::new(),
-                lash::ExecutionMode::new("rlm"),
+                lash_core::ExecutionMode::new("rlm"),
             )),
             Arc::new(LocalSubagentHost::default()),
         );
         let ctx = PluginSessionContext {
             session_id: "parent".to_string(),
-            execution_mode: lash::ExecutionMode::new("rlm"),
+            execution_mode: lash_core::ExecutionMode::new("rlm"),
             standard_context_approach: None,
-            tool_access: lash::SessionToolAccess::default(),
+            tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
             background_tasks_available: false,
             parent_session_id: None,
@@ -439,11 +439,11 @@ mod tests {
 
     #[test]
     fn subagent_surface_reports_authority_notes() {
-        use lash::plugin::ToolSurfaceContext;
+        use lash_core::plugin::ToolSurfaceContext;
 
         let ctx = ToolSurfaceContext {
             session_id: "child".to_string(),
-            mode: lash::ExecutionMode::standard(),
+            mode: lash_core::ExecutionMode::standard(),
             tools: vec![
                 dummy_tool("read_file"),
                 dummy_tool("ask"),
@@ -453,8 +453,8 @@ mod tests {
                 dummy_tool("apply_patch"),
                 dummy_tool("spawn_agent"),
             ],
-            tool_access: lash::SessionToolAccess::default(),
-            subagent: Some(lash::SubagentSessionAuthority {
+            tool_access: lash_core::SessionToolAccess::default(),
+            subagent: Some(lash_core::SubagentSessionAuthority {
                 agent_name: "probe".to_string(),
                 parent_session_id: "root".to_string(),
                 capability: "explore".to_string(),

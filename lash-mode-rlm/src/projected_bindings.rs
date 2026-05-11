@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use lash::{
+use lash_core::{
     ModeSessionExtension, ModeTurnExtension, ModeTurnExtensionHandle, PromptContribution, TurnInput,
 };
 
@@ -140,8 +140,8 @@ impl ModeSessionExtension for RlmProjectionExtension {
 
 pub fn rlm_session_projection_extension(
     bindings: RlmProjectedBindings,
-) -> lash::ModeSessionExtensionHandle {
-    lash::ModeSessionExtensionHandle::new(RlmProjectionExtension::new(bindings))
+) -> lash_core::ModeSessionExtensionHandle {
+    lash_core::ModeSessionExtensionHandle::new(RlmProjectionExtension::new(bindings))
 }
 
 pub trait RlmTurnInputExt {
@@ -219,7 +219,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -246,7 +246,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("stable".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -272,7 +272,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()
@@ -287,7 +287,7 @@ mod tests {
             mode_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         }
         .rlm_project(
             RlmProjectedBindings::new()

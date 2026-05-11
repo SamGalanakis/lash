@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::app::App;
 use crate::editor::PendingImage;
-use lash::InputItem;
+use lash_core::InputItem;
 
 /// Build structured turn items from editor input:
 /// - `@path` becomes a host-prepared text marker when resolvable

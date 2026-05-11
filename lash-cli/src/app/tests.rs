@@ -1,7 +1,7 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use async_trait::async_trait;
-use lash::{Part, PruneState, SessionEvent, TurnEvent};
+use lash_core::{Part, PruneState, SessionEvent, TurnEvent};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };
@@ -32,11 +32,13 @@ fn part(id: &str, kind: PartKind, content: &str) -> Part {
     }
 }
 
-fn conversation_event(message: Message) -> lash::SessionEventRecord {
-    lash::SessionEventRecord::Conversation(lash::ConversationRecord::from_message(message))
+fn conversation_event(message: Message) -> lash_core::SessionEventRecord {
+    lash_core::SessionEventRecord::Conversation(lash_core::ConversationRecord::from_message(
+        message,
+    ))
 }
 
-fn events_from_messages(messages: &[Message]) -> Vec<lash::SessionEventRecord> {
+fn events_from_messages(messages: &[Message]) -> Vec<lash_core::SessionEventRecord> {
     messages.iter().cloned().map(conversation_event).collect()
 }
 
@@ -44,28 +46,28 @@ fn events_from_messages(messages: &[Message]) -> Vec<lash::SessionEventRecord> {
 fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let started_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
-    app.update_background_tasks(vec![lash::ManagedTaskStatus {
+    app.update_background_tasks(vec![lash_core::ManagedTaskStatus {
         id: "subagent:smoke".into(),
-        kind: lash::ManagedTaskKind::Subagent,
+        kind: lash_core::ManagedTaskKind::Subagent,
         producer: "subagent".into(),
-        run_state: lash::ManagedRunState::Running,
+        run_state: lash_core::ManagedRunState::Running,
         started_at,
     }]);
     assert_eq!(app.background_tasks.len(), 1);
     assert_eq!(app.background_tasks[0].terminal_duration, None);
 
-    app.update_background_tasks(vec![lash::ManagedTaskStatus {
+    app.update_background_tasks(vec![lash_core::ManagedTaskStatus {
         id: "subagent:smoke".into(),
-        kind: lash::ManagedTaskKind::Subagent,
+        kind: lash_core::ManagedTaskKind::Subagent,
         producer: "subagent".into(),
-        run_state: lash::ManagedRunState::Completed,
+        run_state: lash_core::ManagedRunState::Completed,
         started_at,
     }]);
 
     assert_eq!(app.background_tasks.len(), 1);
     assert_eq!(
         app.background_tasks[0].run_state,
-        lash::ManagedRunState::Completed
+        lash_core::ManagedRunState::Completed
     );
     assert!(app.background_tasks[0].transient_until.is_some());
     assert!(
@@ -76,12 +78,12 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
 }
 
 fn test_read_view(
-    events: &[lash::SessionEventRecord],
+    events: &[lash_core::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
-) -> lash::SessionReadView {
-    lash::SessionReadView::from_derived_message_view(
-        lash::SessionStateEnvelope::default(),
+) -> lash_core::SessionReadView {
+    lash_core::SessionReadView::from_derived_message_view(
+        lash_core::SessionStateEnvelope::default(),
         std::sync::Arc::new(events.to_vec()),
         std::sync::Arc::new(messages.to_vec()),
         std::sync::Arc::new(tool_calls.to_vec()),
@@ -89,7 +91,7 @@ fn test_read_view(
 }
 
 fn timeline_items_from_test_read_view(
-    events: &[lash::SessionEventRecord],
+    events: &[lash_core::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
@@ -101,7 +103,7 @@ fn timeline_items_from_test_read_view(
 }
 
 fn timeline_from_test_read_view(
-    events: &[lash::SessionEventRecord],
+    events: &[lash_core::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
@@ -111,7 +113,7 @@ fn timeline_from_test_read_view(
 }
 
 fn interrupted_blocks_from_test_read_view(
-    events: &[lash::SessionEventRecord],
+    events: &[lash_core::SessionEventRecord],
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
     ui_state: &UiProjectionState,
@@ -751,7 +753,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash::SessionEventRecord::Mode(
+    let events = vec![lash_core::SessionEventRecord::Mode(
         lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
     )];
 
@@ -780,7 +782,7 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
         error: None,
         final_output: Some(serde_json::json!("Hi!")),
     };
-    let events = vec![lash::SessionEventRecord::Mode(
+    let events = vec![lash_core::SessionEventRecord::Mode(
         lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
     )];
 
@@ -807,7 +809,7 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     };
     let events = vec![
         conversation_event(user.clone()),
-        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
+        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
         )),
         conversation_event(assistant.clone()),
@@ -856,7 +858,7 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         error: None,
         final_output: None,
     };
-    let events = vec![lash::SessionEventRecord::Mode(
+    let events = vec![lash_core::SessionEventRecord::Mode(
         lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
     )];
 
@@ -915,10 +917,10 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
     };
     let assistant = text_message("a1", MessageRole::Assistant, "Done.");
     let events = vec![
-        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
+        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(first),
         )),
-        lash::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
+        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(second),
         )),
         conversation_event(assistant.clone()),
@@ -1104,7 +1106,7 @@ fn update_plan_panel_lights_up_plan_dock() {
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "update_plan".into(),
-        event: lash::PluginSurfaceEvent::PanelUpsert {
+        event: lash_core::PluginSurfaceEvent::PanelUpsert {
             key: "plan".into(),
             title: "PLAN".into(),
             content: "- [x] Inspect\n- [~] Patch layout\n- [ ] Run tests\n".into(),
@@ -1133,7 +1135,7 @@ fn rlm_budget_warning_uses_status_not_user_message() {
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "mode_rlm".into(),
-        event: lash::PluginSurfaceEvent::Status {
+        event: lash_core::PluginSurfaceEvent::Status {
             key: "rlm_context_budget_warning".into(),
             label: "context budget".into(),
             detail: Some("120292 tokens used; warn at 100000; choose handoff path".into()),
@@ -1162,7 +1164,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
     app.start_turn();
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "demo".into(),
-        event: lash::PluginSurfaceEvent::PanelUpsert {
+        event: lash_core::PluginSurfaceEvent::PanelUpsert {
             key: "panel:1".into(),
             title: "TASK BOARD".into(),
             content: "1. Inspect\n2. Patch".into(),
@@ -1180,7 +1182,7 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "demo".into(),
-        event: lash::PluginSurfaceEvent::PanelClear {
+        event: lash_core::PluginSurfaceEvent::PanelClear {
             key: "panel:1".into(),
         },
     });
@@ -1231,7 +1233,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single(
+        request: lash_core::PromptRequest::single(
             "Review the plan",
             vec!["Start implementing now".into(), "Keep planning".into()],
         )
@@ -1312,7 +1314,7 @@ fn cancelled_error_renders_as_system_message() {
     app.note_manual_interrupt_requested();
     app.handle_session_event(SessionEvent::Error {
         message: "LLM error: cancelled".into(),
-        envelope: Some(lash::session_model::ErrorEnvelope {
+        envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
             user_message: "LLM error: cancelled".into(),
@@ -1334,7 +1336,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
     app.start_turn();
     app.handle_session_event(SessionEvent::Error {
         message: "LLM error: cancelled".into(),
-        envelope: Some(lash::session_model::ErrorEnvelope {
+        envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
             user_message: "LLM error: cancelled".into(),
@@ -1356,7 +1358,7 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
     app.start_turn();
     let cancelled = SessionEvent::Error {
         message: "LLM error: cancelled".into(),
-        envelope: Some(lash::session_model::ErrorEnvelope {
+        envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
             user_message: "LLM error: cancelled".into(),
@@ -1557,7 +1559,7 @@ fn non_manual_error_sets_transient_status() {
     });
     app.handle_session_event(SessionEvent::Error {
         message: "LLM error: Claude request failed with 500".into(),
-        envelope: Some(lash::session_model::ErrorEnvelope {
+        envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("http_500".into()),
             user_message: "LLM error: Claude request failed with 500".into(),
@@ -1734,11 +1736,11 @@ fn accepted_injected_turn_input_renders_matching_pending_steer() {
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        inputs: vec![lash::AcceptedInjectedTurnInput {
+        inputs: vec![lash_core::AcceptedInjectedTurnInput {
             id: None,
             message: PluginMessage::text(MessageRole::User, "follow up"),
         }],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     assert!(app.pending_steers.is_empty());
@@ -1760,14 +1762,14 @@ fn accepted_injected_turn_input_matches_by_runtime_content_even_when_display_tex
     app.queue_pending_steer(turn.clone());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        inputs: vec![lash::AcceptedInjectedTurnInput {
+        inputs: vec![lash_core::AcceptedInjectedTurnInput {
             id: None,
             message: PluginMessage::text(
                 MessageRole::User,
                 "/localref lash for context if needed\n\n<skill>\n<name>localref</name>\nbody\n</skill>",
             ),
         }],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     assert!(app.pending_steers.is_empty());
@@ -1782,7 +1784,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        inputs: vec![lash::AcceptedInjectedTurnInput {
+        inputs: vec![lash_core::AcceptedInjectedTurnInput {
             id: None,
             message: PluginMessage {
                 role: MessageRole::User,
@@ -1791,7 +1793,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
                 images: Vec::new(),
             },
         }],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     app.handle_session_event(SessionEvent::InjectedMessagesCommitted {
@@ -1801,7 +1803,7 @@ fn accepted_injected_turn_input_without_pending_match_still_renders_once() {
             parts: Vec::new(),
             images: Vec::new(),
         }],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     let matching_blocks = app
@@ -1824,11 +1826,11 @@ fn accepted_injected_turn_input_removes_matching_pending_steer_without_popping_w
     ));
 
     app.handle_session_event(SessionEvent::InjectedTurnInputAccepted {
-        inputs: vec![lash::AcceptedInjectedTurnInput {
+        inputs: vec![lash_core::AcceptedInjectedTurnInput {
             id: None,
             message: PluginMessage::text(MessageRole::User, "uhh do not switch nvm"),
         }],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     assert_eq!(app.pending_steers.len(), 1);
@@ -1867,7 +1869,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
             MessageRole::User,
             "Why are you still dillydallying",
         )],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     let matching_blocks = app
@@ -1898,7 +1900,7 @@ fn injected_messages_committed_do_not_duplicate_existing_visible_user_input() {
             MessageRole::User,
             "(I want future migrations to work though!)",
         )],
-        checkpoint: lash::CheckpointKind::AfterWork,
+        checkpoint: lash_core::CheckpointKind::AfterWork,
     });
 
     let matching_blocks = app
@@ -2076,7 +2078,7 @@ fn take_prompt_response_renders_visible_user_block() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::freeform("Pick one"),
+        request: lash_core::PromptRequest::freeform("Pick one"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -2091,7 +2093,7 @@ fn take_prompt_response_renders_visible_user_block() {
     assert_eq!(response.as_deref(), Some("red"));
     assert_eq!(
         rx.recv().expect("response"),
-        lash::PromptResponse::Text {
+        lash_core::PromptResponse::Text {
             text: "red".to_string(),
         }
     );
@@ -2108,7 +2110,7 @@ fn dismiss_prompt_marks_ui_dirty() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single("Pick one", vec!["red".into()]),
+        request: lash_core::PromptRequest::single("Pick one", vec!["red".into()]),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
         scroll_offset: 0,
@@ -2122,7 +2124,7 @@ fn dismiss_prompt_marks_ui_dirty() {
 
     assert_eq!(
         rx.recv().expect("response"),
-        lash::PromptResponse::Single {
+        lash_core::PromptResponse::Single {
             selection: String::new(),
             note: None,
         }
@@ -2667,7 +2669,7 @@ fn prepared_turn_history_text_keeps_long_user_text_without_middle_truncation() {
 fn prompt_insert_text_inserts_literal_payload_at_cursor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::freeform("Question?"),
+        request: lash_core::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -2688,7 +2690,7 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
 fn prompt_toggle_current_option_ignores_freeform_prompts() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::freeform("Question?"),
+        request: lash_core::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -2710,7 +2712,7 @@ fn prompt_toggle_current_option_ignores_freeform_prompts() {
 fn prompt_toggle_note_focus_switches_between_choices_and_note() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
+        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
@@ -2736,7 +2738,7 @@ fn take_prompt_response_defers_option_prompt_display() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
+        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,
@@ -2755,7 +2757,7 @@ fn take_prompt_response_defers_option_prompt_display() {
     );
     assert_eq!(
         rx.recv().expect("response"),
-        lash::PromptResponse::Single {
+        lash_core::PromptResponse::Single {
             selection: "blue".to_string(),
             note: Some("ship the blue path".to_string()),
         }
@@ -2772,7 +2774,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
+        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
         scroll_offset: 0,
@@ -2806,7 +2808,7 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
+        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
             .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,

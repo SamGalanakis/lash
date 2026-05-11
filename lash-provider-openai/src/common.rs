@@ -21,7 +21,7 @@ pub(crate) fn sanitize_surrogates(s: &str) -> &str {
 }
 
 pub(crate) fn emit_provider_request_trace(
-    provider_trace: Option<&lash::llm::types::LlmProviderTraceSender>,
+    provider_trace: Option<&lash_core::llm::types::LlmProviderTraceSender>,
     endpoint: &str,
     body: &Value,
 ) {

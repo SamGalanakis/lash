@@ -8,15 +8,15 @@
 //! - Typed-RLM schema validation and the auxiliary messages used when
 //!   the model fails to produce a schema-matching `submit`.
 
-use lash::sansio::{
+use lash_core::sansio::{
     CheckpointResumeAction, CompletedToolCall, ProtocolDriverHandle, WaitingExecState,
     WaitingLlmState, driver_state,
 };
-use lash::session_model::{
+use lash_core::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, fresh_message_id, make_error_event, shared_parts,
 };
-use lash::{
+use lash_core::{
     AttachmentRef, CheckpointKind, DriverAction, DriverContextView, ExecResponse, LlmOutputPart,
     LlmResponse, ToolCallRecord, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
     normalized_response_parts,
@@ -263,9 +263,9 @@ pub fn rlm_execution_section_with_features(features: RlmPromptFeatures) -> Strin
 
 pub struct RlmDriver;
 
-fn rlm_termination(options: &lash::ModeTurnOptions) -> RlmTermination {
+fn rlm_termination(options: &lash_core::ModeTurnOptions) -> RlmTermination {
     options
-        .decode(&lash::ExecutionMode::new("rlm"))
+        .decode(&lash_core::ExecutionMode::new("rlm"))
         .ok()
         .flatten()
         .unwrap_or_default()
@@ -291,7 +291,7 @@ struct FenceExtraction {
     had_extra_fences: bool,
 }
 
-impl ProtocolDriverHandle<lash::HostModeProtocol> for RlmDriver {
+impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
     fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(false),
@@ -585,20 +585,20 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
         return None;
     }
     match record.control.as_ref()? {
-        lash::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
+        lash_core::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
             Some(TurnOutcome::Handoff {
                 session_id: session_id.clone(),
             })
         }
-        lash::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::ToolValue {
+        lash_core::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::ToolValue {
             tool_name: record.tool.clone(),
             value: value.clone(),
         })),
-        lash::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::ToolError {
+        lash_core::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::ToolError {
             tool_name: record.tool.clone(),
             value: value.clone(),
         })),
-        lash::ToolControl::Handoff { .. } => None,
+        lash_core::ToolControl::Handoff { .. } => None,
     }
 }
 
@@ -762,14 +762,14 @@ fn combine_reasoning_and_text(reasoning: &str, text: &str) -> String {
 fn internal_assistant_prose_message(content: String) -> Message {
     prose_message(
         content,
-        Some(lash::MessageOrigin::Plugin {
+        Some(lash_core::MessageOrigin::Plugin {
             plugin_id: "mode_rlm".to_string(),
             transient: false,
         }),
     )
 }
 
-fn prose_message(content: String, origin: Option<lash::MessageOrigin>) -> Message {
+fn prose_message(content: String, origin: Option<lash_core::MessageOrigin>) -> Message {
     let id = fresh_message_id();
     Message {
         id: id.clone(),
@@ -814,7 +814,7 @@ fn submit_required_reminder_message(requires_schema: bool) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        origin: Some(lash::MessageOrigin::Plugin {
+        origin: Some(lash_core::MessageOrigin::Plugin {
             plugin_id: "mode_rlm".to_string(),
             transient: false,
         }),
@@ -841,7 +841,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        origin: Some(lash::MessageOrigin::Plugin {
+        origin: Some(lash_core::MessageOrigin::Plugin {
             plugin_id: "mode_rlm".to_string(),
             transient: false,
         }),

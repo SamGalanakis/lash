@@ -26,9 +26,9 @@
       </aside>
 
       <header class="hero">
-        <div class="eyebrow">lash-embed guide</div>
+        <div class="eyebrow">lash guide</div>
         <h1>embedding<span class="slash">/</span>api</h1>
-        <p><code>lash-embed</code> is the app-facing layer for building Lash into a web service, desktop app, benchmark harness, or product workflow. Your app owns storage, auth, HTTP, frontend protocols, and product state; Lash owns model turns, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
+        <p><code>lash</code> is the app-facing layer for building Lash into a web service, desktop app, benchmark harness, or product workflow. Your app owns storage, auth, HTTP, frontend protocols, and product state; Lash owns model turns, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
       </header>
 
       <section class="content">
@@ -41,7 +41,7 @@
             <div class="diagram-title">Embed host boundary</div>
             <pre><code>use std::sync::Arc;
 
-use lash_embed::{tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
+use lash::{tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
 
 let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new("lash-sessions"));
 
@@ -132,7 +132,7 @@ persist(app_turn_state.assistant_text(), turn.total_usage())?;</code></pre>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
             <pre><code>use async_trait::async_trait;
-use lash_embed::{TurnActivity, TurnActivitySink, TurnEvent};
+use lash::{TurnActivity, TurnActivitySink, TurnEvent};
 
 struct AppEvents;
 
@@ -202,7 +202,7 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
             <dt><code>session.usage_report()</code> → <code>SessionUsageReport</code></dt>
             <dd>Aggregate across the whole session, broken down by <code>source × model</code>. Right for dashboards and "session so far."</dd>
           </dl>
-          <p>The full re-export and well-known <code>source</code> label constants live in <code>lash_embed::usage</code>.</p>
+          <p>The full re-export and well-known <code>source</code> label constants live in <code>lash::usage</code>.</p>
         </div>
 
         <div class="section">
@@ -246,11 +246,11 @@ let prose_or_submit = session
         <div class="section">
           <div class="section-header">
             <h2>Prompt Templates And Slots</h2>
-            <p><code>lash-embed</code> exposes the same prompt model as the runtime: one effective template chooses the layout, while slot contributions supply app, session, and turn-specific content. Core, session, and turn layers inherit by default; a lower layer can replace or clear one slot without rebuilding the whole template.</p>
+            <p><code>lash</code> exposes the same prompt model as the runtime: one effective template chooses the layout, while slot contributions supply app, session, and turn-specific content. Core, session, and turn layers inherit by default; a lower layer can replace or clear one slot without rebuilding the whole template.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Template layout is separate from slot content</div>
-            <pre><code>use lash_embed::{
+            <pre><code>use lash::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
     PromptTemplateEntry, PromptTemplateSection,
 };
@@ -266,7 +266,7 @@ let template = PromptTemplate::new(vec![
     ),
 ]);
 
-let core = lash_embed::LashCore::standard()
+let core = lash::LashCore::standard()
     .provider(provider)
     .model("gpt-5.4", None)
     .max_context_tokens(200_000)
@@ -318,7 +318,7 @@ struct BoardTurnInput {
     board: BoardState,
 }
 
-impl lash_embed::PluginBinding for BoardPlugin {
+impl lash::PluginBinding for BoardPlugin {
     const ID: &amp;'static str = "board";
     type SessionConfig = BoardConfig;
     type Input = BoardTurnInput;
@@ -352,14 +352,14 @@ impl lash::SessionPlugin for BoardSessionPlugin {
 }
 
 #[async_trait::async_trait]
-impl lash_embed::tools::ToolProvider for BoardTools {
-    fn definitions(&amp;self) -&gt; Vec&lt;lash_embed::tools::ToolDefinition&gt; {
+impl lash::tools::ToolProvider for BoardTools {
+    fn definitions(&amp;self) -&gt; Vec&lt;lash::tools::ToolDefinition&gt; {
         vec![/* read_board, play_move, app tools */]
     }
 
-    async fn execute(&amp;self, call: lash_embed::tools::ToolCall&lt;'_&gt;) -&gt; lash_embed::tools::ToolResult {
+    async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
         let Some(input) = call.context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
-            return lash_embed::tools::ToolResult::err_fmt("missing board input");
+            return lash::tools::ToolResult::err_fmt("missing board input");
         };
         run_board_tool(call.name, call.args, &amp;input.board)
     }
@@ -371,7 +371,7 @@ impl lash_embed::tools::ToolProvider for BoardTools {
     fn with_board(self, board: BoardState) -&gt; Self;
 }
 
-impl BoardTurnExt for lash_embed::TurnBuilder {
+impl BoardTurnExt for lash::TurnBuilder {
     fn with_board(self, board: BoardState) -&gt; Self {
         self.with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
     }
@@ -436,7 +436,7 @@ let result = session
         </div>
       </section>
 
-      <footer class="footer">Embedding anchors: <code>lash-embed/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash/src/runtime/*</code>.</footer>
+      <footer class="footer">Embedding anchors: <code>lash/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash/src/runtime/*</code>.</footer>
     </div>
   </main>
 </body>

@@ -17,10 +17,10 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use lash::plugin::{
+use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
-use lash::{
+use lash_core::{
     ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall,
     ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     async fn run(shell: &StandardShell, name: &str, args: &serde_json::Value) -> ToolResult {
-        lash::testing::run_tool(shell, name, args).await
+        lash_core::testing::run_tool(shell, name, args).await
     }
 
     #[tokio::test]
@@ -2304,7 +2304,7 @@ mod tests {
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = lash::testing::mock_tool_context().with_async_task("test", token.clone());
+        let ctx = lash_core::testing::mock_tool_context().with_async_task("test", token.clone());
 
         // A long-running sleep that would otherwise hold the tool call for
         // 5s. The dispatcher must return promptly once the token fires, and
@@ -2355,7 +2355,7 @@ mod tests {
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = lash::testing::mock_tool_context().with_async_task("test", token.clone());
+        let ctx = lash_core::testing::mock_tool_context().with_async_task("test", token.clone());
 
         // Open a long-lived child. `echo $$` reports the shell's pid, then
         // `exec sleep 5` replaces the shell with sleep so the printed pid is

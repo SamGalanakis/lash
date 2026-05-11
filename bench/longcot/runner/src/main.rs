@@ -12,14 +12,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
-use lash::{
+use lash_core::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
     InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
     RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
     TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_cli::config::LashConfig;
-use lash_embed::{
+use lash::{
     TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},

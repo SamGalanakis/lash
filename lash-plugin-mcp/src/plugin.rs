@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::plugin::{
+use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -115,7 +115,7 @@ impl ToolProvider for McpToolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::ToolDefinition;
+    use lash_core::ToolDefinition;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
 

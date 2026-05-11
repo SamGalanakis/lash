@@ -5,9 +5,9 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash = { path = "../lash", features = ["testing"] }
+lash-core = { path = "../lash-core", features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use lash::plugin::project_observation_text;
-use lash::{
+use lash_core::plugin::project_observation_text;
+use lash_core::{
     AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
     ModeToolReply, SessionError, TextProjectionMetadata, ToolImage,
     ToolResultProjectionPluginConfig,
@@ -359,7 +359,7 @@ struct HostBridge {
     observations: Mutex<Vec<String>>,
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
     printed_images: Mutex<Vec<AttachmentRef>>,
-    tool_calls: Mutex<Vec<lash::ToolCallRecord>>,
+    tool_calls: Mutex<Vec<lash_core::ToolCallRecord>>,
     tool_images: Mutex<Vec<ToolImage>>,
     next_tool_index: Mutex<usize>,
 }
@@ -529,13 +529,13 @@ struct CollectedExecutionOutput {
     observations: Vec<String>,
     observation_truncation: Vec<TextProjectionMetadata>,
     printed_images: Vec<AttachmentRef>,
-    tool_calls: Vec<lash::ToolCallRecord>,
+    tool_calls: Vec<lash_core::ToolCallRecord>,
     tool_images: Vec<ToolImage>,
 }
 
 async fn collect_printed_images(
     value: &FlowValue,
-    attachment_store: &dyn lash::AttachmentStore,
+    attachment_store: &dyn lash_core::AttachmentStore,
 ) -> Result<Vec<AttachmentRef>, ToolHostError> {
     let mut seen = HashSet::new();
     let mut images = Vec::new();
@@ -545,7 +545,7 @@ async fn collect_printed_images(
 
 fn collect_printed_images_inner<'a>(
     value: &'a FlowValue,
-    attachment_store: &'a dyn lash::AttachmentStore,
+    attachment_store: &'a dyn lash_core::AttachmentStore,
     seen: &'a mut HashSet<String>,
     images: &'a mut Vec<AttachmentRef>,
 ) -> ProjectedFuture<'a, Result<(), ToolHostError>> {
@@ -556,7 +556,7 @@ fn collect_printed_images_inner<'a>(
                     return Ok(());
                 }
                 let reference = attachment_store
-                    .get(&lash::AttachmentId::new(image.id.clone()))
+                    .get(&lash_core::AttachmentId::new(image.id.clone()))
                     .ok()
                     .map(|stored| stored.meta.as_ref())
                     .ok_or_else(|| {
@@ -595,7 +595,7 @@ fn collect_printed_images_inner<'a>(
 fn lift_tool_result_to_flow_value(
     result: Value,
     tool_images: Vec<ToolImage>,
-    attachment_store: &dyn lash::AttachmentStore,
+    attachment_store: &dyn lash_core::AttachmentStore,
 ) -> FlowValue {
     if tool_images.is_empty() {
         return json_to_flow_value(result);
@@ -632,13 +632,13 @@ fn lift_tool_result_to_flow_value(
 
 fn register_tool_image(
     mut image: ToolImage,
-    attachment_store: &dyn lash::AttachmentStore,
+    attachment_store: &dyn lash_core::AttachmentStore,
 ) -> ImageValue {
     let reference = if let Some(reference) = image.reference.take() {
         reference
-    } else if let Some(media_type) = lash::MediaType::from_mime(&image.mime) {
-        let meta = lash::AttachmentMeta::new(
-            lash::AttachmentId::new("pending"),
+    } else if let Some(media_type) = lash_core::MediaType::from_mime(&image.mime) {
+        let meta = lash_core::AttachmentMeta::new(
+            lash_core::AttachmentId::new("pending"),
             media_type,
             image.data.len() as u64,
             image.width,
@@ -647,8 +647,8 @@ fn register_tool_image(
         );
         attachment_store
             .put(std::mem::take(&mut image.data), meta)
-            .unwrap_or_else(|_| lash::AttachmentRef {
-                id: lash::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
+            .unwrap_or_else(|_| lash_core::AttachmentRef {
+                id: lash_core::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
                 media_type,
                 byte_len: 0,
                 width: image.width,
@@ -656,9 +656,9 @@ fn register_tool_image(
                 label: Some(image.label.clone()),
             })
     } else {
-        lash::AttachmentRef {
-            id: lash::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
-            media_type: lash::MediaType::Image(lash::ImageMediaType::Png),
+        lash_core::AttachmentRef {
+            id: lash_core::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
+            media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
             byte_len: image.data.len() as u64,
             width: image.width,
             height: image.height,

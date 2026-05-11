@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use lash::PromptContribution;
-use lash::instructions::InstructionSource;
-use lash::plugin::{
+use lash_core::PromptContribution;
+use lash_core::instructions::InstructionSource;
+use lash_core::plugin::{
     HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     TurnContextTransform, TurnTransformContext,
 };
-use lash::session_model::context::PreparedContext;
-use lash::{ExecutionMode, Message, MessageRole, Part, PartKind, PruneState, shared_parts};
+use lash_core::session_model::context::PreparedContext;
+use lash_core::{ExecutionMode, Message, MessageRole, Part, PartKind, PruneState, shared_parts};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptContextPluginConfig {
@@ -51,7 +51,7 @@ impl PluginFactory for PromptContextPluginFactory {
     fn build(
         &self,
         ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
+    ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
         Ok(Arc::new(PromptContextPlugin {
             instruction_source: Arc::clone(&self.instruction_source),
             config: self.config.clone(),
@@ -66,7 +66,7 @@ struct PromptContextPlugin {
     execution_mode: ExecutionMode,
 }
 
-impl lash::SessionPlugin for PromptContextPlugin {
+impl lash_core::SessionPlugin for PromptContextPlugin {
     fn id(&self) -> &'static str {
         "prompt_context"
     }
@@ -120,9 +120,9 @@ impl TurnContextTransform for EnvironmentTailTransform {
         messages.push(environment_tail_message(context));
 
         let base = Arc::new(messages);
-        let cache = Arc::new(lash::BaseRenderCache::new());
+        let cache = Arc::new(lash_core::BaseRenderCache::new());
         Ok(PreparedContext {
-            messages: lash::MessageSequence::from_base(base).with_base_render_cache(cache),
+            messages: lash_core::MessageSequence::from_base(base).with_base_render_cache(cache),
             ..input
         })
     }
@@ -146,7 +146,7 @@ fn environment_tail_message(content: String) -> Message {
             reasoning_meta: None,
             response_meta: None,
         }]),
-        origin: Some(lash::MessageOrigin::Plugin {
+        origin: Some(lash_core::MessageOrigin::Plugin {
             plugin_id: "prompt_context".to_string(),
             transient: true,
         }),

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Anthropic API (Claude) provider for lash."
 
 [dependencies]
-lash = { path = "../lash" }
+lash-core = { path = "../lash-core" }
 lash-llm-transport = { path = "../lash-llm-transport" }
 async-trait = { workspace = true }
 base64 = { workspace = true }

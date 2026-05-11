@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
-use lash::{
+use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
+use lash_core::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
     ToolProvider, ToolResult,
@@ -19,8 +19,8 @@ impl PluginFactory for LlmToolsPluginFactory {
     fn build(
         &self,
         ctx: &PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, PluginError> {
-        let is_rlm = ctx.execution_mode == lash::ExecutionMode::new("rlm");
+    ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
+        let is_rlm = ctx.execution_mode == lash_core::ExecutionMode::new("rlm");
         let provider: Option<Arc<dyn ToolProvider>> =
             is_rlm.then(|| Arc::new(LlmToolsProvider) as Arc<dyn ToolProvider>);
 
@@ -342,17 +342,17 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use lash::plugin::{
+    use lash_core::plugin::{
         DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
         SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
         ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
+    use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
 
     #[derive(Default)]
     struct DirectCompletionManager {
         snapshot: PersistedSessionState,
-        requests: Mutex<Vec<(lash::DirectRequest, String)>>,
+        requests: Mutex<Vec<(lash_core::DirectRequest, String)>>,
         response_text: String,
     }
 
@@ -406,7 +406,7 @@ mod tests {
             Err(PluginError::Session("not used".to_string()))
         }
 
-        async fn await_turn(&self, _turn_id: &str) -> Result<lash::AssembledTurn, PluginError> {
+        async fn await_turn(&self, _turn_id: &str) -> Result<lash_core::AssembledTurn, PluginError> {
             Err(PluginError::Session("not used".to_string()))
         }
 
@@ -419,16 +419,16 @@ mod tests {
     impl DirectCompletionHost for DirectCompletionManager {
         async fn direct_completion(
             &self,
-            request: lash::DirectRequest,
+            request: lash_core::DirectRequest,
             usage_source: &str,
-        ) -> Result<lash::DirectCompletion, PluginError> {
+        ) -> Result<lash_core::DirectCompletion, PluginError> {
             self.requests
                 .lock()
                 .expect("requests")
                 .push((request, usage_source.to_string()));
-            Ok(lash::DirectCompletion {
+            Ok(lash_core::DirectCompletion {
                 text: self.response_text.clone(),
-                usage: lash::TokenUsage::default(),
+                usage: lash_core::TokenUsage::default(),
             })
         }
     }
@@ -507,11 +507,11 @@ mod tests {
     async fn llm_query_uses_current_policy_and_direct_completion() {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: PersistedSessionState {
-                policy: lash::SessionPolicy {
+                policy: lash_core::SessionPolicy {
                     model: "root-model".to_string(),
                     model_variant: Some("fast".to_string()),
-                    execution_mode: lash::ExecutionMode::new("rlm"),
-                    ..lash::SessionPolicy::default()
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
+                    ..lash_core::SessionPolicy::default()
                 },
                 ..PersistedSessionState::default()
             },
@@ -521,7 +521,7 @@ mod tests {
                     .to_string(),
         });
         let provider = LlmToolsProvider;
-        let context = lash::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
             "task": "extract root cause",
@@ -549,15 +549,15 @@ mod tests {
         assert_eq!(request.model_variant.as_deref(), Some("fast"));
         assert!(matches!(
             request.output,
-            lash::DirectOutputSpec::JsonSchema(_)
+            lash_core::DirectOutputSpec::JsonSchema(_)
         ));
         let prompt = request
             .messages
             .iter()
             .flat_map(|message| message.parts.iter())
             .filter_map(|part| match part {
-                lash::DirectPart::Text(text) => Some(text.as_str()),
-                lash::DirectPart::Image(_) => None,
+                lash_core::DirectPart::Text(text) => Some(text.as_str()),
+                lash_core::DirectPart::Image(_) => None,
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -569,9 +569,9 @@ mod tests {
     async fn llm_query_error_result_fails_tool_call() {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: PersistedSessionState {
-                policy: lash::SessionPolicy {
-                    execution_mode: lash::ExecutionMode::new("rlm"),
-                    ..lash::SessionPolicy::default()
+                policy: lash_core::SessionPolicy {
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
+                    ..lash_core::SessionPolicy::default()
                 },
                 ..PersistedSessionState::default()
             },
@@ -580,7 +580,7 @@ mod tests {
                 .to_string(),
         });
         let provider = LlmToolsProvider;
-        let context = lash::testing::mock_tool_context_with_host(manager);
+        let context = lash_core::testing::mock_tool_context_with_host(manager);
 
         let args = json!({ "task": "answer from missing evidence" });
         let result = provider

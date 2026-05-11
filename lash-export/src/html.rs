@@ -19,15 +19,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
-use lash::session_model::{Message, MessageRole, Part, PartKind, PruneState};
-use lash::{ChronologicalPayload, ToolCallRecord};
+use lash_core::session_model::{Message, MessageRole, Part, PartKind, PruneState};
+use lash_core::{ChronologicalPayload, ToolCallRecord};
 use lash_rlm_types::RlmTrajectoryEntry;
 
 use crate::LoadedSession;
 use crate::trace::{LlmCallUsage, LlmPromptSnapshot};
 use crate::tree::{LoadedSessionNode, LoadedSessionTree, NodeRelation, SubagentEdge};
 
-fn chronological_rlm_step(event: &lash::ModeEvent) -> Option<RlmTrajectoryEntry> {
+fn chronological_rlm_step(event: &lash_core::ModeEvent) -> Option<RlmTrajectoryEntry> {
     match lash_mode_rlm::decode_rlm_mode_event(event)? {
         lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step) => Some(step),
         _ => None,
@@ -1064,7 +1064,7 @@ fn render_rlm_step_with_fanout(
 /// Standard mode has no `RlmStep` entries, so we positionally bind each
 /// prompt to the matching assistant message instead.
 fn compute_prompt_insertions(
-    chronological: &[lash::ChronologicalEntry],
+    chronological: &[lash_core::ChronologicalEntry],
     prompts: &[LlmPromptSnapshot],
 ) -> PromptInsertions {
     let mut before_index = vec![Vec::new(); chronological.len()];
@@ -3491,8 +3491,8 @@ const JS: &str = include_str!("html_assets/script.js");
 mod tests {
     use super::*;
     use crate::trace::{LlmCallUsage, LlmPromptSnapshot, RequestMessage};
-    use lash::session_model::{Part, PartKind, PruneState, shared_parts};
-    use lash::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
+    use lash_core::session_model::{Part, PartKind, PruneState, shared_parts};
+    use lash_core::{ChronologicalEntry, ChronologicalPayload, ToolCallRecord};
     use std::path::PathBuf;
 
     fn prompt_snapshot(mode_iteration: u64, text: &str) -> LlmPromptSnapshot {
@@ -3521,10 +3521,10 @@ mod tests {
         }
     }
 
-    fn user_message(id: &str, text: &str) -> lash::session_model::Message {
-        lash::session_model::Message {
+    fn user_message(id: &str, text: &str) -> lash_core::session_model::Message {
+        lash_core::session_model::Message {
             id: id.to_string(),
-            role: lash::session_model::MessageRole::User,
+            role: lash_core::session_model::MessageRole::User,
             parts: shared_parts(vec![Part {
                 id: format!("{id}.p0"),
                 kind: PartKind::Text,
@@ -3657,9 +3657,9 @@ mod tests {
             reasoning_meta: None,
             response_meta: None,
         };
-        let assistant_msg = lash::session_model::Message {
+        let assistant_msg = lash_core::session_model::Message {
             id: "m0".to_string(),
-            role: lash::session_model::MessageRole::Assistant,
+            role: lash_core::session_model::MessageRole::Assistant,
             parts: shared_parts(vec![tool_part]),
             origin: None,
         };

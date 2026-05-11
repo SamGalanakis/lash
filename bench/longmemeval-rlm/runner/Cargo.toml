@@ -10,8 +10,8 @@ name = "bench-longmemeval-rlm"
 path = "src/main.rs"
 
 [dependencies]
-lash = { path = "../../../lash", default-features = false, features = ["full"] }
-lash-embed = { path = "../../../lash-embed" }
+lash-core = { path = "../../../lash-core", default-features = false, features = ["full"] }
+lash = { path = "../../../lash" }
 lash-mode-rlm = { path = "../../../lash-mode-rlm" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-llm-tools = { path = "../../../lash-llm-tools" }

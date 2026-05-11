@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use lash::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
-use lash::{Effect, ExecutionMode, TurnMachine, TurnMachineConfig};
+use lash_core::sansio::{self, ChatContextProjector, ProtocolDriverHandle, Response};
+use lash_core::{Effect, ExecutionMode, TurnMachine, TurnMachineConfig};
 use lash_mode_rlm::RlmDriver;
 use lash_mode_standard::StandardDriver;
 use lash_rlm_types::{RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
@@ -16,7 +16,7 @@ fn test_config_with_termination(
     mode: ExecutionMode,
     rlm_termination: RlmTermination,
 ) -> TurnMachineConfig {
-    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash::HostModeProtocol>> = match &mode {
+    let protocol_driver: Arc<dyn ProtocolDriverHandle<lash_core::HostModeProtocol>> = match &mode {
         mode if *mode == ExecutionMode::standard() => Arc::new(StandardDriver),
         mode if *mode == ExecutionMode::new("rlm") => Arc::new(RlmDriver),
         _ => Arc::new(StandardDriver),
@@ -34,7 +34,7 @@ fn test_config_with_termination(
         system_prompt: std::sync::Arc::from(""),
         session_id: "test".to_string(),
         emit_llm_trace: false,
-        termination: lash::ModeTurnOptions::typed(lash::ExecutionMode::new("rlm"), rlm_termination)
+        termination: lash_core::ModeTurnOptions::typed(lash_core::ExecutionMode::new("rlm"), rlm_termination)
             .expect("valid rlm turn options"),
     }
 }
@@ -117,7 +117,7 @@ fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
         .events()
         .iter()
         .filter_map(|event| match event {
-            lash::SessionEventRecord::Mode(event) => {
+            lash_core::SessionEventRecord::Mode(event) => {
                 match lash_mode_rlm::decode_rlm_mode_event(event) {
                     Some(RlmModeEvent::RlmTrajectoryEntry(entry)) => Some(entry),
                     _ => None,
@@ -599,7 +599,7 @@ fn rlm_exec_tool_call_events_keep_call_id() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("rlm-call-1".to_string()),
                 tool: "read_file".to_string(),
                 args: serde_json::json!({"path": "foo"}),
@@ -659,14 +659,14 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_handoff".to_string(),
                 args: serde_json::json!({}),
                 result: serde_json::json!({"ok": true}),
                 success: true,
                 duration_ms: 3,
-                control: Some(lash::ToolControl::Handoff {
+                control: Some(lash_core::ToolControl::Handoff {
                     session_id: "successor-session".to_string(),
                 }),
             }],
@@ -696,7 +696,7 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash::TurnOutcome::Handoff { session_id }
+            outcome: lash_core::TurnOutcome::Handoff { session_id }
         }) if session_id == "successor-session"
     )));
     assert!(find_done(&effects).is_some());
@@ -737,14 +737,14 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
             output: String::new(),
             observations: Vec::new(),
             observation_truncation: Vec::new(),
-            tool_calls: vec![lash::ToolCallRecord {
+            tool_calls: vec![lash_core::ToolCallRecord {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_fail".to_string(),
                 args: serde_json::json!({}),
                 result: serde_json::json!({"ok": true}),
                 success: true,
                 duration_ms: 3,
-                control: Some(lash::ToolControl::Fail {
+                control: Some(lash_core::ToolControl::Fail {
                     value: serde_json::json!({ "reason": "no valid result" }),
                 }),
             }],
@@ -774,7 +774,7 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Emit(SessionEvent::TurnOutcome {
-            outcome: lash::TurnOutcome::Stopped(lash::TurnStop::ToolError {
+            outcome: lash_core::TurnOutcome::Stopped(lash_core::TurnStop::ToolError {
                 tool_name: name,
                 value,
             })

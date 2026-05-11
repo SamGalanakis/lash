@@ -1,6 +1,6 @@
 use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
-use lash::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
 use std::sync::Arc;
 
 fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -51,7 +51,7 @@ fn responses_body_does_not_request_reasoning_summaries_by_default() {
 #[test]
 fn responses_body_requests_reasoning_summaries_when_provider_exposes_thinking() {
     let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
-        thinking: lash::provider::ProviderThinkingPolicy { expose: true },
+        thinking: lash_core::provider::ProviderThinkingPolicy { expose: true },
         ..ProviderOptions::default()
     });
     let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
@@ -191,7 +191,7 @@ fn chat_tools_use_projected_openai_schema_and_preserve_override() {
             description: "Override".to_string(),
             input_schema: json!({"type": "object", "properties": {"raw": {"const": "x"}}}),
             output_schema: json!({}),
-            input_schema_projections: vec![lash::SchemaProjectionOverride {
+            input_schema_projections: vec![lash_core::SchemaProjectionOverride {
                 profile: OpenAiSchemaProfile::ToolParameters
                     .projection_id()
                     .to_string(),

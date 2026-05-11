@@ -41,7 +41,7 @@
         <div class="section">
           <div class="section-header">
             <h2>CLI Startup</h2>
-            <p>The CLI resolves durable session state and runtime composition before entering the terminal UI or single-shot autonomous runner. The <code>lash-embed</code> host is a separate path (covered below) that builds its own <code>LashRuntime</code> through <code>LashCore</code> and never goes through <code>bootstrap::run</code>.</p>
+            <p>The CLI resolves durable session state and runtime composition before entering the terminal UI or single-shot autonomous runner. The <code>lash</code> host is a separate path (covered below) that builds its own <code>LashRuntime</code> through <code>LashCore</code> and never goes through <code>bootstrap::run</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Command execution path</div>
@@ -79,7 +79,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Embedded API</h2>
-            <p><code>lash-embed</code> is the higher-level app-facing API used by the examples. It hides CLI bootstrap details while leaving providers, app persistence, HTTP protocols, auth, and frontend streaming under the host application's ownership.</p>
+            <p><code>lash</code> is the higher-level app-facing API used by the examples. It hides CLI bootstrap details while leaving providers, app persistence, HTTP protocols, auth, and frontend streaming under the host application's ownership.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">App embedding facade</div>

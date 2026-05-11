@@ -2,17 +2,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
-use lash::provider::ProviderHandle;
+use lash_core::provider::ProviderHandle;
 use lash_sqlite_store::Store;
 
 use crate::persistence::persist_committed_runtime_state;
 use crate::session_bootstrap::SessionBootstrap;
 use crate::session_log::SessionLogger;
 
-async fn persist_parent_root_snapshot(
-    session: &lash_embed::LashSession,
-    store: &Store,
-) -> Result<()> {
+async fn persist_parent_root_snapshot(session: &lash::LashSession, store: &Store) -> Result<()> {
     let mut state = session
         .control()
         .state()
@@ -554,9 +551,9 @@ fn materialize_child_from_graph(
     child_session_id: &str,
     child_store: &Store,
     parent_store: &Store,
-    graph: &lash::SessionGraph,
-    config: &lash::PersistedSessionConfig,
-    checkpoint_ref: Option<&lash::BlobRef>,
+    graph: &lash_core::SessionGraph,
+    config: &lash_core::PersistedSessionConfig,
+    checkpoint_ref: Option<&lash_core::BlobRef>,
 ) {
     let child_graph = graph.fork_current_path();
     let child_checkpoint_ref = checkpoint_ref.and_then(|blob_ref| {
@@ -564,7 +561,7 @@ fn materialize_child_from_graph(
             .get_checkpoint(blob_ref)
             .map(|checkpoint| child_store.put_checkpoint(&checkpoint).checkpoint_ref)
     });
-    child_store.save_session_head(lash::SessionHead {
+    child_store.save_session_head(lash_core::SessionHead {
         session_id: child_session_id.to_string(),
         head_revision: 0,
         graph: child_graph.clone(),
@@ -583,7 +580,7 @@ pub struct ForkedSession {
 }
 
 pub async fn fork_current_session(
-    session: Option<&lash_embed::LashSession>,
+    session: Option<&lash::LashSession>,
     logger: &SessionLogger,
     _provider: &ProviderHandle,
     configured_model: &str,
@@ -601,16 +598,16 @@ pub async fn fork_current_session(
     let parent_head = logger
         .store()
         .load_session_head()
-        .unwrap_or(lash::SessionHead {
+        .unwrap_or(lash_core::SessionHead {
             session_id: child_meta.session_id.clone(),
             head_revision: 0,
-            graph: lash::SessionGraph::default(),
-            config: lash::PersistedSessionConfig {
+            graph: lash_core::SessionGraph::default(),
+            config: lash_core::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
                 configured_model: configured_model.to_string(),
                 context_window: _context_window,
-                execution_mode: lash::ExecutionMode::standard(),
-                standard_context_approach: Some(lash::StandardContextApproach::default()),
+                execution_mode: lash_core::ExecutionMode::standard(),
+                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                 model_variant: _model_variant.map(str::to_string),
             },
             checkpoint_ref: None,
@@ -636,8 +633,8 @@ mod fork_tests {
     use super::*;
     use crate::session_log;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
-    use lash::ToolState;
-    use lash::provider::ProviderHandle;
+    use lash_core::ToolState;
+    use lash_core::provider::ProviderHandle;
     use std::sync::Arc;
 
     fn dummy_provider() -> ProviderHandle {
@@ -654,15 +651,18 @@ mod fork_tests {
         ToolState::default()
     }
 
-    fn persisted_graph(messages: Vec<lash::Message>, _iteration: usize) -> lash::SessionGraph {
-        lash::SessionGraph::from_active_read_state(&messages, &[])
+    fn persisted_graph(
+        messages: Vec<lash_core::Message>,
+        _iteration: usize,
+    ) -> lash_core::SessionGraph {
+        lash_core::SessionGraph::from_active_read_state(&messages, &[])
     }
 
-    fn persisted_checkpoint(iteration: usize) -> lash::HydratedSessionCheckpoint {
-        lash::HydratedSessionCheckpoint {
-            turn_state: lash::PersistedTurnState {
+    fn persisted_checkpoint(iteration: usize) -> lash_core::HydratedSessionCheckpoint {
+        lash_core::HydratedSessionCheckpoint {
+            turn_state: lash_core::PersistedTurnState {
                 turn_index: iteration,
-                token_usage: lash::TokenUsage {
+                token_usage: lash_core::TokenUsage {
                     input_tokens: 10,
                     output_tokens: 3,
                     cached_input_tokens: 1,
@@ -681,20 +681,20 @@ mod fork_tests {
         }
     }
 
-    fn save_persisted_root(store: &Store, graph: lash::SessionGraph, iteration: usize) {
+    fn save_persisted_root(store: &Store, graph: lash_core::SessionGraph, iteration: usize) {
         let checkpoint_ref = store
             .put_checkpoint(&persisted_checkpoint(iteration))
             .checkpoint_ref;
-        store.save_session_head(lash::SessionHead {
+        store.save_session_head(lash_core::SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             graph,
-            config: lash::PersistedSessionConfig {
+            config: lash_core::PersistedSessionConfig {
                 provider_id: dummy_provider().kind().to_string(),
                 configured_model: "gpt-test".to_string(),
                 context_window: 1024,
-                execution_mode: lash::ExecutionMode::standard(),
-                standard_context_approach: Some(lash::StandardContextApproach::default()),
+                execution_mode: lash_core::ExecutionMode::standard(),
+                standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                 model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
@@ -741,19 +741,19 @@ mod fork_tests {
             "parent".into(),
         )
         .expect("parent logger");
-        let messages = vec![lash::Message {
+        let messages = vec![lash_core::Message {
             id: "u1".to_string(),
-            role: lash::MessageRole::User,
-            parts: vec![lash::Part {
+            role: lash_core::MessageRole::User,
+            parts: vec![lash_core::Part {
                 id: "u1.p0".to_string(),
-                kind: lash::PartKind::Text,
+                kind: lash_core::PartKind::Text,
                 content: "hello".to_string(),
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
                 tool_item_id: None,
                 tool_signature: None,
-                prune_state: lash::PruneState::Intact,
+                prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
             }]
@@ -795,11 +795,11 @@ mod fork_tests {
             .turn_state;
         assert_eq!(child_turn.turn_index, 1);
 
-        let child_state = lash::SessionStateEnvelope {
+        let child_state = lash_core::SessionStateEnvelope {
             session_graph: child_graph,
-            ..lash::SessionStateEnvelope::default()
+            ..lash_core::SessionStateEnvelope::default()
         };
-        let child_view = lash::SessionReadView::from_exported_state(&child_state);
+        let child_view = lash_core::SessionReadView::from_exported_state(&child_state);
         assert_eq!(child_view.messages().len(), 1);
         assert_eq!(child_view.messages()[0].parts[0].content, "hello");
     }

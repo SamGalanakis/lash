@@ -409,7 +409,7 @@ impl App {
         self.overlay = Some(OverlayState::SkillPicker(PickerState::new(items)));
     }
 
-    pub fn show_tree(&mut self, roots: Vec<lash::SessionMessageTreeNode>) {
+    pub fn show_tree(&mut self, roots: Vec<lash_core::SessionMessageTreeNode>) {
         self.overlay = Some(OverlayState::Tree(crate::overlay::TreeState::new(roots)));
     }
 

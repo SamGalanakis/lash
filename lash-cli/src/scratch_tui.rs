@@ -696,12 +696,12 @@ fn background_task_summary(app: &App) -> Option<String> {
     let running = app
         .background_tasks
         .iter()
-        .filter(|task| task.run_state == lash::ManagedRunState::Running)
+        .filter(|task| task.run_state == lash_core::ManagedRunState::Running)
         .count();
     let idle = app
         .background_tasks
         .iter()
-        .filter(|task| task.run_state == lash::ManagedRunState::Idle)
+        .filter(|task| task.run_state == lash_core::ManagedRunState::Idle)
         .count();
     match (running, idle) {
         (0, 0) => None,
@@ -1124,9 +1124,9 @@ fn draw_tree(frame: &mut Frame<'_>, app: &App, history_area: Rect) {
                 "·"
             };
             let role = match row.message.role {
-                lash::MessageRole::User => "user",
-                lash::MessageRole::Assistant => "assistant",
-                lash::MessageRole::System => "system",
+                lash_core::MessageRole::User => "user",
+                lash_core::MessageRole::Assistant => "assistant",
+                lash_core::MessageRole::System => "system",
             };
             let preview = crate::overlay::tree_message_preview(&row.message);
             let active_marker = if row.active { " *" } else { "" };
@@ -1292,7 +1292,7 @@ fn bg(color: lash_tui::Color) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::{PromptRequest, PromptUsage};
+    use lash_core::{PromptRequest, PromptUsage};
     use lash_tui_extensions::{
         TuiExtension, TuiExtensions, TuiHostEffect, TuiRenderContext, TuiSurfaceSize,
         TuiSurfaceSlot, TuiSurfaceSpec,
@@ -1545,9 +1545,9 @@ mod tests {
             frame.write_text(0, 0, label, Style::default(), frame.area().width);
         }
 
-        fn handle_turn_event(&self, event: &lash::TurnEvent) -> Vec<TuiHostEffect> {
+        fn handle_turn_event(&self, event: &lash_core::TurnEvent) -> Vec<TuiHostEffect> {
             match event {
-                lash::TurnEvent::AssistantProseDelta { text } if text == "mount" => vec![
+                lash_core::TurnEvent::AssistantProseDelta { text } if text == "mount" => vec![
                     TuiHostEffect::MountSurface {
                         spec: TuiSurfaceSpec {
                             key: "workspace".to_string(),
@@ -1571,7 +1571,7 @@ mod tests {
                         },
                     },
                 ],
-                lash::TurnEvent::AssistantProseDelta { text } if text == "overlay" => vec![
+                lash_core::TurnEvent::AssistantProseDelta { text } if text == "overlay" => vec![
                     TuiHostEffect::MountSurface {
                         spec: TuiSurfaceSpec {
                             key: "overlay".to_string(),
@@ -1603,7 +1603,7 @@ mod tests {
             TuiExtensions::new(vec![Arc::new(SurfaceTestTuiExtension)])
                 .expect("surface extensions"),
         );
-        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+        ui_extensions.effects_for_turn_event(&lash_core::TurnEvent::AssistantProseDelta {
             text: "mount".to_string(),
         });
         app.set_ui_extensions(Arc::clone(&ui_extensions));
@@ -1623,10 +1623,10 @@ mod tests {
             TuiExtensions::new(vec![Arc::new(SurfaceTestTuiExtension)])
                 .expect("surface extensions"),
         );
-        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+        ui_extensions.effects_for_turn_event(&lash_core::TurnEvent::AssistantProseDelta {
             text: "mount".to_string(),
         });
-        ui_extensions.effects_for_turn_event(&lash::TurnEvent::AssistantProseDelta {
+        ui_extensions.effects_for_turn_event(&lash_core::TurnEvent::AssistantProseDelta {
             text: "overlay".to_string(),
         });
         app.set_ui_extensions(Arc::clone(&ui_extensions));

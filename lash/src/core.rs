@@ -289,7 +289,7 @@ pub struct AdvancedLashCoreBuilder {
 }
 
 impl AdvancedLashCoreBuilder {
-    pub fn runtime_core_config(mut self, core: lash::RuntimeCoreConfig) -> Self {
+    pub fn runtime_core_config(mut self, core: lash_core::RuntimeCoreConfig) -> Self {
         self.builder.attachment_store = Some(core.attachment_store);
         self.builder.trace_sink = core.trace_sink;
         self.builder.trace_level = Some(core.trace_level);

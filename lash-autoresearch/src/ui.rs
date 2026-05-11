@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_embed::TurnEvent;
-use lash_embed::control::PluginAction;
+use lash::TurnEvent;
+use lash::control::PluginAction;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,
@@ -221,7 +221,7 @@ impl TuiExtension for AutoresearchTuiExtension {
         if plugin_id != PLUGIN_ID {
             return Vec::new();
         }
-        let lash::PluginSurfaceEvent::Custom { name, payload } = event else {
+        let lash_core::PluginSurfaceEvent::Custom { name, payload } = event else {
             return Vec::new();
         };
         if name != "autoresearch.status" {

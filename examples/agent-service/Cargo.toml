@@ -11,7 +11,7 @@ axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true }
 lash-sqlite-store = { path = "../../lash-sqlite-store" }
-lash-embed = { path = "../../lash-embed" }
+lash = { path = "../../lash" }
 lash-provider-openai = { path = "../../lash-provider-openai" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }

@@ -12,7 +12,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash_embed::{
+use lash::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
     TurnBuilder, TurnEvent, TurnInput,
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
@@ -100,8 +100,8 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
-impl From<lash_embed::EmbedError> for AppError {
-    fn from(err: lash_embed::EmbedError) -> Self {
+impl From<lash::EmbedError> for AppError {
+    fn from(err: lash::EmbedError) -> Self {
         Self::internal(err.to_string())
     }
 }

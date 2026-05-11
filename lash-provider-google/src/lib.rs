@@ -9,12 +9,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use lash::llm::transport::LlmTransportError;
-use lash::llm::types::{
+use lash_core::llm::transport::LlmTransportError;
+use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
     LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage,
 };
-use lash::provider::{
+use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
 };
@@ -27,7 +27,7 @@ use lash_llm_transport::timeouts::{
 pub mod oauth;
 
 fn emit_provider_trace(
-    tx: Option<&lash::llm::types::LlmProviderTraceSender>,
+    tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
     provider: &'static str,
     raw: &str,
 ) {
@@ -899,8 +899,8 @@ impl GoogleOAuthProvider {
         &self,
         access_token: &str,
         request: Value,
-        stream_events: Option<lash::llm::types::LlmEventSender>,
-        provider_trace: Option<lash::llm::types::LlmProviderTraceSender>,
+        stream_events: Option<lash_core::llm::types::LlmEventSender>,
+        provider_trace: Option<lash_core::llm::types::LlmProviderTraceSender>,
     ) -> Result<LlmResponse, LlmTransportError> {
         let request_body = serde_json::to_string(&request).ok();
         let method = if stream_events.is_some() {
@@ -1304,7 +1304,7 @@ pub struct GoogleOAuthProviderFactory;
 
 impl GoogleOAuthProviderFactory {
     pub fn register() {
-        lash::register_provider_factory(std::sync::Arc::new(Self));
+        lash_core::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
@@ -1332,7 +1332,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use lash::llm::types::{LlmEventSender, LlmMessage, LlmToolSpec};
+    use lash_core::llm::types::{LlmEventSender, LlmMessage, LlmToolSpec};
 
     fn request(model_variant: Option<&str>) -> LlmRequest {
         LlmRequest {
@@ -1370,7 +1370,7 @@ mod tests {
 
         let exposed_provider =
             GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
-                thinking: lash::ProviderThinkingPolicy { expose: true },
+                thinking: lash_core::ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             });
         let exposed = GoogleOAuthProvider::build_request(

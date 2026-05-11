@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-use lash::SessionEvent;
-use lash::{
+use lash_core::SessionEvent;
+use lash_core::{
     ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
     PluginMessage, PluginSurfaceEvent, PromptUsage, TokenUsage, ToolCallRecord, TurnActivity,
     TurnEvent,
@@ -661,7 +661,7 @@ impl App {
         UiProjectionState::from_app(self)
     }
 
-    pub fn finish_turn_from_read_view(&mut self, read_view: &lash::SessionReadView) {
+    pub fn finish_turn_from_read_view(&mut self, read_view: &lash_core::SessionReadView) {
         let current_turn_starts = user_turn_start_indices(self.timeline.items());
         let current_turn_start = current_turn_starts.last().copied();
 

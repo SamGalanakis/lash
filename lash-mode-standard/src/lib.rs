@@ -15,28 +15,28 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::llm::types::ResponseTextMeta;
-use lash::plugin::{
+use lash_core::llm::types::ResponseTextMeta;
+use lash_core::plugin::{
     ModeNativeToolsPlugin, ModeProtocolDriverPlugin, ModeSessionContext, ModeSessionPlugin,
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::sansio::{
+use lash_core::sansio::{
     CheckpointResumeAction, CompletedToolCall, PendingToolCall, ProtocolDriverHandle,
     WaitingExecState, WaitingLlmState,
 };
-use lash::session_model::message::{PartAttachment, ReasoningMeta};
-use lash::session_model::{
+use lash_core::session_model::message::{PartAttachment, ReasoningMeta};
+use lash_core::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
     SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
     reassign_part_ids, shared_parts,
 };
-use lash::tool_dispatch::{
+use lash_core::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
 };
 
 mod batch;
 use batch::batch_tool_definition;
-use lash::{
+use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
     ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
     ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
@@ -329,7 +329,7 @@ fn last_message_has_tool_result(ctx: &DriverContextView<'_>) -> bool {
     })
 }
 
-impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
+impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
     fn prepare_mode_iteration(&self, ctx: DriverContextView<'_>) -> Vec<DriverAction> {
         vec![DriverAction::StartLlm {
             request: ctx.project_llm_request(true),
@@ -597,20 +597,20 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         for outcome in completed {
             if terminal_outcome.is_none() && outcome.result.success {
                 terminal_outcome = match outcome.result.control.as_ref() {
-                    Some(lash::ToolControl::Handoff { session_id })
+                    Some(lash_core::ToolControl::Handoff { session_id })
                         if !session_id.trim().is_empty() =>
                     {
                         Some(TurnOutcome::Handoff {
                             session_id: session_id.clone(),
                         })
                     }
-                    Some(lash::ToolControl::Finish { value }) => {
+                    Some(lash_core::ToolControl::Finish { value }) => {
                         Some(TurnOutcome::Finished(TurnFinish::ToolValue {
                             tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
                         }))
                     }
-                    Some(lash::ToolControl::Fail { value }) => {
+                    Some(lash_core::ToolControl::Fail { value }) => {
                         Some(TurnOutcome::Stopped(TurnStop::ToolError {
                             tool_name: outcome.tool_name.clone(),
                             value: value.clone(),
@@ -659,7 +659,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
                     kind: PartKind::Image,
                     content: String::new(),
                     attachment: Some(PartAttachment {
-                        reference: lash::AttachmentRef {
+                        reference: lash_core::AttachmentRef {
                             label: reference
                                 .label
                                 .clone()
@@ -721,7 +721,7 @@ impl ProtocolDriverHandle<lash::HostModeProtocol> for StandardDriver {
         &self,
         _ctx: DriverContextView<'_>,
         _waiting: WaitingExecState,
-        _result: Result<lash::ExecResponse, String>,
+        _result: Result<lash_core::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         Vec::new()
     }

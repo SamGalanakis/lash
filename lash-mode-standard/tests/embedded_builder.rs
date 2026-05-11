@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash::{
+use lash_core::{
     ExecutionMode, LashRuntime, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
     PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, TokenUsage,
 };
@@ -32,7 +32,7 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
 async fn embedded_runtime_builder_loads_state_from_store() {
     let store = Arc::new(Store::memory().expect("store"));
     let checkpoint_ref = store
-        .put_checkpoint(&lash::HydratedSessionCheckpoint {
+        .put_checkpoint(&lash_core::HydratedSessionCheckpoint {
             turn_state: PersistedTurnState {
                 turn_index: 3,
                 token_usage: TokenUsage {
@@ -65,7 +65,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
             execution_mode: ExecutionMode::standard(),
-            standard_context_approach: Some(lash::StandardContextApproach::default()),
+            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             model_variant: None,
         },
         checkpoint_ref: Some(checkpoint_ref),
@@ -103,7 +103,7 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
             configured_model: "gpt-5.4-mini".into(),
             context_window: 200_000,
             execution_mode: ExecutionMode::standard(),
-            standard_context_approach: Some(lash::StandardContextApproach::default()),
+            standard_context_approach: Some(lash_core::StandardContextApproach::default()),
             model_variant: None,
         },
         checkpoint_ref: None,

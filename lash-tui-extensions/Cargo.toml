@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash-embed = { path = "../lash-embed" }
+lash = { path = "../lash" }
 lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode" }
 lash-tui = { path = "../lash-tui" }
 async-trait = { workspace = true }

@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::{MessageRole, PluginMessage, SessionPolicy, SessionStateEnvelope};
-use lash_embed::{
+use lash::{
     TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, advanced::ExecutionMode,
 };
+use lash_core::{MessageRole, PluginMessage, SessionPolicy, SessionStateEnvelope};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
 };
@@ -142,7 +142,7 @@ pub(super) struct UiSnapshotWorker {
 
 struct UiSnapshotRequest {
     generation: u64,
-    session: lash_embed::LashSession,
+    session: lash::LashSession,
 }
 
 impl UiSnapshotWorker {
@@ -199,7 +199,7 @@ impl UiSnapshotWorker {
         }
     }
 
-    pub(super) fn request(&mut self, session: lash_embed::LashSession) {
+    pub(super) fn request(&mut self, session: lash::LashSession) {
         if self.in_flight {
             self.pending = true;
             return;
@@ -214,7 +214,7 @@ impl UiSnapshotWorker {
         });
     }
 
-    pub(super) fn complete(&mut self, generation: u64, session: lash_embed::LashSession) -> bool {
+    pub(super) fn complete(&mut self, generation: u64, session: lash::LashSession) -> bool {
         if generation != self.next_generation {
             return false;
         }
@@ -236,7 +236,7 @@ pub(super) fn cleared_session_state(policy: SessionPolicy) -> SessionStateEnvelo
 pub(super) fn log_runtime_handoff(
     phase: &str,
     app: &App,
-    runtime: &Option<lash_embed::LashSession>,
+    runtime: &Option<lash::LashSession>,
     runtime_return_rx_present: bool,
     cancel_token_present: bool,
     active_stream_id: u64,

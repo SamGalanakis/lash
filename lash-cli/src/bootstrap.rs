@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
 use crate::config::LashConfig;
-use lash::{
-    FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
-    PluginHost, PromptLayer, RuntimeCoreConfig, SessionPolicy, TokioSessionTaskExecutor, ToolState,
-};
-use lash_embed::advanced::ExecutionMode;
-use lash_embed::plugins::{
+use lash::advanced::ExecutionMode;
+use lash::plugins::{
     BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
 };
-use lash_embed::prompt::{
+use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection,
 };
-use lash_embed::provider::ProviderHandle;
+use lash::provider::ProviderHandle;
 #[cfg(test)]
-use lash_embed::tools::{
+use lash::tools::{
     ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
-use lash_embed::tracing::TraceLevel;
+use lash::tracing::TraceLevel;
+use lash_core::{
+    FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
+    PluginHost, PromptLayer, RuntimeCoreConfig, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -160,7 +160,7 @@ fn autonomous_tool_allowed(name: &str) -> bool {
         && name != "request_user_input"
 }
 
-async fn apply_autonomous_tool_policy(session: &lash_embed::LashSession) -> anyhow::Result<()> {
+async fn apply_autonomous_tool_policy(session: &lash::LashSession) -> anyhow::Result<()> {
     let mut snapshot = session.control().tools().state().await?;
     retain_autonomous_tools(&mut snapshot);
     session
@@ -427,7 +427,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     };
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
-        .refresh_if_stale(lash::model_info::DEFAULT_REFRESH_INTERVAL)
+        .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
         .await
     {
         eprintln!("warning: failed to refresh models.dev catalog: {err}");
@@ -723,7 +723,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::ToolRegistry;
+    use lash_core::ToolRegistry;
 
     struct DummyToolProvider;
 

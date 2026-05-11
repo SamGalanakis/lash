@@ -4,13 +4,13 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 pub(crate) use std::collections::HashMap;
 
-pub(crate) use lash::SchemaProjectionOverride;
-pub(crate) use lash::llm::transport::{LlmTransportError, ProviderFailureKind};
-pub(crate) use lash::llm::types::{
+pub(crate) use lash_core::SchemaProjectionOverride;
+pub(crate) use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
+pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
     LlmStreamEvent, LlmToolChoice, LlmUsage, ResponseTextMeta, ResponseTextPhase,
 };
-pub(crate) use lash::provider::{
+pub(crate) use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
 };

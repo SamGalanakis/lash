@@ -164,7 +164,7 @@ impl TurnStream {
 
     pub async fn finish(self) -> Result<TurnResult> {
         self.completion.await.map_err(|err| {
-            EmbedError::Runtime(lash::RuntimeError {
+            EmbedError::Runtime(lash_core::RuntimeError {
                 code: "turn_stream_join".to_string(),
                 message: format!("turn stream task failed: {err}"),
             })
@@ -246,13 +246,17 @@ pub(crate) async fn stream_prepared_assembled(
         }
         (None, None) => {
             writer
-                .stream_turn_events_following_handoffs(input, &lash::NoopTurnActivitySink, cancel)
+                .stream_turn_events_following_handoffs(
+                    input,
+                    &lash_core::NoopTurnActivitySink,
+                    cancel,
+                )
                 .await?
         }
     };
     runtime.publish_from(&writer);
     turn.into_final_turn().ok_or_else(|| {
-        EmbedError::Runtime(lash::RuntimeError {
+        EmbedError::Runtime(lash_core::RuntimeError {
             code: "empty_followed_turn".to_string(),
             message: "runtime completed without an assembled turn".to_string(),
         })
@@ -279,7 +283,7 @@ pub struct TurnResult {
 }
 
 impl TurnResult {
-    fn from_assembled(turn: lash::AssembledTurn) -> Self {
+    fn from_assembled(turn: lash_core::AssembledTurn) -> Self {
         Self {
             state: turn.state,
             outcome: turn.outcome,
@@ -304,21 +308,21 @@ impl TurnResult {
 
     pub fn assistant_message(&self) -> Option<&str> {
         match &self.outcome {
-            TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { text }) => Some(text),
+            TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { text }) => Some(text),
             _ => None,
         }
     }
 
     pub fn submitted_value(&self) -> Option<&serde_json::Value> {
         match &self.outcome {
-            TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { value }) => Some(value),
+            TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value }) => Some(value),
             _ => None,
         }
     }
 
     pub fn tool_value(&self) -> Option<(&str, &serde_json::Value)> {
         match &self.outcome {
-            TurnOutcome::Finished(lash::TurnFinish::ToolValue { tool_name, value }) => {
+            TurnOutcome::Finished(lash_core::TurnFinish::ToolValue { tool_name, value }) => {
                 Some((tool_name.as_str(), value))
             }
             _ => None,

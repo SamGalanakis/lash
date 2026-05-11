@@ -8,11 +8,12 @@ use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
-use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
-use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
-use lash::store;
-use lash::testing::TestProvider;
-use lash::{
+use lash::usage::{SessionUsageReport, TokenLedgerEntry};
+use lash_core::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
+use lash_core::store;
+use lash_core::testing::TestProvider;
+use lash_core::{
     AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
     LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
     PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RunMode, RuntimeCommit,
@@ -21,7 +22,6 @@ use lash::{
     SessionStoreFactory, StandardContextApproach, TokenUsage, TokioSessionTaskExecutor,
     ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnInput, VacuumReport,
 };
-use lash_embed::usage::{SessionUsageReport, TokenLedgerEntry};
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_standard_plugins::{
@@ -660,7 +660,7 @@ impl ToolProvider for BenchmarkEchoTool {
         ]
     }
 
-    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         if call.name != "benchmark_echo" {
             return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name));
         }
@@ -895,7 +895,7 @@ async fn run_once(
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
-            turn_context: lash::TurnContext::default(),
+            turn_context: lash_core::TurnContext::default(),
         };
         if matches!(scenario, RuntimePerfScenario::RlmGlobals) {
             turn_input =
@@ -931,8 +931,9 @@ async fn run_once(
             sum_allocation_deltas([&run_turn_alloc, &await_background_work_alloc]);
 
         let cumulative_usage = runtime.usage_report();
-        let usage_delta_entries = lash::diff_usage_reports(&before_turn_usage, &cumulative_usage)
-            .map_err(anyhow::Error::msg)?;
+        let usage_delta_entries =
+            lash_core::diff_usage_reports(&before_turn_usage, &cumulative_usage)
+                .map_err(anyhow::Error::msg)?;
         turns.push(RuntimePerfTurnResult {
             turn_index,
             run_turn_ms,
@@ -1026,9 +1027,7 @@ async fn run_once_embed(
     let core = build_embed_core(scenario, Arc::clone(&store))?;
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))
-        .mode(lash_embed::ModeId::new(
-            scenario.execution_mode().plugin_id(),
-        ))
+        .mode(lash::ModeId::new(scenario.execution_mode().plugin_id()))
         .open()
         .await
         .with_context(|| format!("open embed session for {}", scenario.name()))?;
@@ -1049,7 +1048,7 @@ async fn run_once_embed(
         let turn_before_memory = process_memory_sample();
         let turn_started = Instant::now();
         let turn = session
-            .run(lash::TurnInput::text(benchmark_prompt(
+            .run(lash_core::TurnInput::text(benchmark_prompt(
                 scenario, turn_index,
             )))
             .await
@@ -1153,12 +1152,12 @@ async fn run_once_embed(
 fn build_embed_core(
     scenario: RuntimePerfScenario,
     store: Arc<RuntimePerfStore>,
-) -> anyhow::Result<lash_embed::LashCore> {
+) -> anyhow::Result<lash::LashCore> {
     let mut builder = match scenario {
-        RuntimePerfScenario::EmbedStandard => lash_embed::LashCore::standard(),
-        RuntimePerfScenario::EmbedRlm => lash_embed::LashCore::rlm()
+        RuntimePerfScenario::EmbedStandard => lash::LashCore::standard(),
+        RuntimePerfScenario::EmbedRlm => lash::LashCore::rlm()
             .tools(Arc::new(BenchmarkEchoTool))
-            .default_mode(lash_embed::ModeId::rlm()),
+            .default_mode(lash::ModeId::rlm()),
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
     };
     builder = builder
@@ -1206,9 +1205,9 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         tavily_api_key: None,
         instruction_source: None,
     });
-    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
-    factories.push(Arc::new(lash::plugin::StaticPluginFactory::new(
+    factories.push(Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()));
+    factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));

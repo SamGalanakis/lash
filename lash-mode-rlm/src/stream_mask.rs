@@ -7,8 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use lash::PluginSurfaceEvent;
-use lash::plugin::{
+use lash_core::PluginSurfaceEvent;
+use lash_core::plugin::{
     AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
 };
 
@@ -30,7 +30,7 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
 
     let response_state = Arc::clone(&state);
     reg.output().response(Arc::new(
-        move |ctx: lash::plugin::AssistantResponseHookContext| {
+        move |ctx: lash_core::plugin::AssistantResponseHookContext| {
             let state = Arc::clone(&response_state);
             Box::pin(async move {
                 let mut response = ctx.response;
@@ -73,9 +73,9 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
                         let needs_text_part = !response
                             .parts
                             .iter()
-                            .any(|part| matches!(part, lash::LlmOutputPart::Text { .. }));
+                            .any(|part| matches!(part, lash_core::LlmOutputPart::Text { .. }));
                         if needs_text_part {
-                            response.parts.push(lash::LlmOutputPart::Text {
+                            response.parts.push(lash_core::LlmOutputPart::Text {
                                 text: spliced,
                                 response_meta: None,
                             });
@@ -83,7 +83,7 @@ pub fn register_stream_mask(reg: &mut PluginRegistrar) -> Result<(), PluginError
                     }
                     detector.reset();
                 }
-                Ok(lash::plugin::AssistantResponseTransform {
+                Ok(lash_core::plugin::AssistantResponseTransform {
                     response,
                     events: Vec::new(),
                 })

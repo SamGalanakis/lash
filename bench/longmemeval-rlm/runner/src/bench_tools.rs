@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash_embed::tools::{
+use lash::tools::{
     ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use regex::RegexBuilder;

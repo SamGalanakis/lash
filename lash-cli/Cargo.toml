@@ -9,9 +9,10 @@ default = []
 dhat-heap = ["dep:dhat"]
 fff-zlob = ["lash-standard-plugins/fff-zlob"]
 semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
-# Hidden `--runtime-perf-benchmark` self-benchmark mode. Requires `lash/testing`
-# fixtures and is intended for CI / dev profiling, not user-facing builds.
-runtime-perf = ["lash/testing"]
+# Hidden `--runtime-perf-benchmark` self-benchmark mode. Requires
+# `lash-core/testing` fixtures and is intended for CI / dev profiling,
+# not user-facing builds.
+runtime-perf = ["lash-core/testing"]
 
 [lib]
 name = "lash_cli"
@@ -22,8 +23,8 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
-lash-embed = { path = "../lash-embed" }
+lash-core = { path = "../lash-core", default-features = false, features = ["full", "testing"] }
+lash = { path = "../lash" }
 lash-plugin-mcp = { path = "../lash-plugin-mcp" }
 lash-sqlite-store = { path = "../lash-sqlite-store" }
 lash-llm-tools = { path = "../lash-llm-tools" }

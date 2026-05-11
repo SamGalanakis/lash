@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash::{
+use lash_core::{
     AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, SessionToolAccess,
     SubagentSessionAuthority, ToolHookHost,
 };
@@ -431,7 +431,7 @@ impl LocalSubagentHost {
         &self,
         root_session_id: String,
         path: String,
-        outcome: Result<AssembledTurn, lash::PluginError>,
+        outcome: Result<AssembledTurn, lash_core::PluginError>,
         manager: Arc<dyn ToolHookHost>,
     ) {
         let mut close_session_id = None;
@@ -533,16 +533,16 @@ impl LocalSubagentHost {
     }
 }
 
-fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash::PluginError>) -> ManagedRunState {
+fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash_core::PluginError>) -> ManagedRunState {
     let Ok(turn) = outcome else {
         return ManagedRunState::Failed;
     };
     match &turn.outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => {
+        lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::Handoff { .. } => {
             ManagedRunState::Completed
         }
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => ManagedRunState::Cancelled,
-        lash::TurnOutcome::Stopped(_) => ManagedRunState::Failed,
+        lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled) => ManagedRunState::Cancelled,
+        lash_core::TurnOutcome::Stopped(_) => ManagedRunState::Failed,
     }
 }
 
@@ -577,7 +577,7 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn spawn_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         mut request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String> {
         if context
@@ -702,7 +702,7 @@ impl SubagentHost for LocalSubagentHost {
         let cancel_self = self.clone();
         let cancel_root = root_session_id.clone();
         let cancel_path = path.clone();
-        let cancel: lash::ManagedTaskCancel = Arc::new(move || {
+        let cancel: lash_core::ManagedTaskCancel = Arc::new(move || {
             let host = Arc::clone(&cancel_host);
             let this = cancel_self.clone();
             let root = cancel_root.clone();
@@ -793,7 +793,7 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn wait_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         request: WaitAgentRequest,
     ) -> Result<WaitAgentResponse, String> {
         if request.all
@@ -958,7 +958,7 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn close_agent(
         &self,
-        context: &lash::ToolContext,
+        context: &lash_core::ToolContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String> {
         let (root_session_id, target, agent_name) = {

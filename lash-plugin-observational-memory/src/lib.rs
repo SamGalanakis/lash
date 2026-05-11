@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use lash::plugin::{
+use lash_core::plugin::{
     HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginRuntimeEvent,
     PluginSessionContext, SessionPlugin, TurnContextTransform, TurnTransformContext,
 };
-use lash::session_model::context::PreparedContext;
-use lash::{
+use lash_core::session_model::context::PreparedContext;
+use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectMessage, DirectOutputSpec,
     DirectPart, DirectRequest, DirectRole, Message, MessageOrigin, MessageRole,
     ObservationalMemoryConfig, Part, PartKind, SessionAppendNode, SessionGraph,
@@ -302,12 +302,12 @@ impl PluginFactory for ObservationalMemoryPluginFactory {
 
     fn supported_standard_context_approaches(
         &self,
-    ) -> &'static [lash::StandardContextApproachKind] {
-        &[lash::StandardContextApproachKind::ObservationalMemory]
+    ) -> &'static [lash_core::StandardContextApproachKind] {
+        &[lash_core::StandardContextApproachKind::ObservationalMemory]
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        if ctx.execution_mode != lash::ExecutionMode::standard() {
+        if ctx.execution_mode != lash_core::ExecutionMode::standard() {
             return Ok(Arc::new(DisabledObservationalMemoryPlugin));
         }
         let Some(StandardContextApproach::ObservationalMemory(config)) =
@@ -468,9 +468,9 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         // additions during the turn land in the delta and re-render
         // each iteration as before.
         let base = std::sync::Arc::new(messages);
-        let cache = std::sync::Arc::new(lash::BaseRenderCache::new());
+        let cache = std::sync::Arc::new(lash_core::BaseRenderCache::new());
         Ok(PreparedContext {
-            messages: lash::MessageSequence::from_base(base).with_base_render_cache(cache),
+            messages: lash_core::MessageSequence::from_base(base).with_base_render_cache(cache),
             ..input
         })
     }
@@ -532,8 +532,8 @@ fn should_run_async_maintenance(config: &ObservationalMemoryConfig, graph: &Sess
 async fn maybe_advance_memory_state(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: &lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: &lash_core::SessionPolicy,
     mut graph: SessionGraph,
 ) -> Result<SessionGraph, PluginError> {
     for _ in 0..6 {
@@ -591,8 +591,8 @@ async fn maybe_advance_memory_state(
 async fn maybe_buffer_observations(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: &lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
     let om_state = build_graph_state(graph);
@@ -680,8 +680,8 @@ async fn maybe_buffer_observations(
 async fn maybe_buffer_reflection(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: &lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
     let om_state = build_graph_state(graph);
@@ -734,7 +734,7 @@ async fn maybe_buffer_reflection(
 async fn activate_buffered_observations(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
+    host: &Arc<dyn lash_core::HistoryHost>,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -809,7 +809,7 @@ async fn activate_buffered_observations(
 
 async fn activate_buffered_reflection(
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
+    host: &Arc<dyn lash_core::HistoryHost>,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -845,8 +845,8 @@ async fn activate_buffered_reflection(
 async fn sync_observe_pending_messages(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: &lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -925,8 +925,8 @@ async fn sync_observe_pending_messages(
 
 async fn sync_reflect_active_memory(
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: &lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -965,7 +965,7 @@ async fn sync_reflect_active_memory(
 
 async fn append_plugin_nodes(
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
+    host: &Arc<dyn lash_core::HistoryHost>,
     graph: &SessionGraph,
     nodes: Vec<(String, serde_json::Value)>,
 ) -> Result<Option<SessionGraph>, PluginError> {
@@ -1093,7 +1093,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
     Message {
         id: id.to_string(),
         role,
-        parts: lash::shared_parts(vec![Part {
+        parts: lash_core::shared_parts(vec![Part {
             id: format!("{id}.p0"),
             kind: PartKind::Prose,
             content,
@@ -1102,7 +1102,7 @@ fn plugin_message(id: &str, role: MessageRole, content: String) -> Message {
             tool_name: None,
             tool_item_id: None,
             tool_signature: None,
-            prune_state: lash::PruneState::Intact,
+            prune_state: lash_core::PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
         }]),
@@ -1304,8 +1304,8 @@ fn truncate_observation_tail(observations: &str, budget_tokens: usize) -> String
 async fn run_observer_batch(
     config: &ObservationalMemoryConfig,
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: lash_core::SessionPolicy,
     active: Option<&ActiveMemoryState>,
     batch: &[impl ObservedMessageNode],
 ) -> Result<ParsedMemoryOutput, PluginError> {
@@ -1335,8 +1335,8 @@ async fn run_observer_batch(
 
 async fn run_reflector(
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: lash_core::SessionPolicy,
     observations: &str,
 ) -> Result<ParsedMemoryOutput, PluginError> {
     let prompt = build_reflector_prompt(observations);
@@ -1353,8 +1353,8 @@ async fn run_reflector(
 
 async fn run_worker_turn(
     session_id: &str,
-    host: &Arc<dyn lash::HistoryHost>,
-    policy: lash::SessionPolicy,
+    host: &Arc<dyn lash_core::HistoryHost>,
+    policy: lash_core::SessionPolicy,
     worker_kind: &str,
     system_prompt: &str,
     prompt: &str,
@@ -1526,7 +1526,7 @@ mod tests {
                     tool_name: None,
                     tool_item_id: None,
                     tool_signature: None,
-                    prune_state: lash::PruneState::Intact,
+                    prune_state: lash_core::PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
                 }]
