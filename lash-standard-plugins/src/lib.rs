@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use lash_core::instructions::InstructionSource;
-use lash_core::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
+use lash_core::plugin::{PluginSpec, StaticPluginFactory};
 use lash_core::{
-    ExecutionMode, FsInstructionSource, PluginHost, StandardContextApproach,
+    ExecutionMode, FsInstructionSource, PluginStack, StandardContextApproach,
     ToolOutputBudgetPluginFactory, ToolProvider,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -71,7 +71,7 @@ impl DefaultToolSurfaceProfile {
 }
 
 #[derive(Default)]
-pub struct DefaultToolPluginOptions {
+pub struct DefaultPluginStackOptions {
     pub execution_mode: ExecutionMode,
     pub standard_context_approach: Option<StandardContextApproach>,
     pub bundles: Vec<DefaultToolBundle>,
@@ -79,7 +79,7 @@ pub struct DefaultToolPluginOptions {
     pub instruction_source: Option<Arc<dyn InstructionSource>>,
 }
 
-pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<dyn PluginFactory>> {
+pub fn default_plugin_stack(mut options: DefaultPluginStackOptions) -> PluginStack {
     if options.bundles.is_empty() {
         options.bundles = DefaultToolSurfaceProfile::for_runtime(
             options.standard_context_approach.as_ref(),
@@ -88,24 +88,24 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
         )
         .bundles;
     }
-    let mut factories: Vec<Arc<dyn PluginFactory>> = Vec::new();
+    let mut stack = PluginStack::new();
     for bundle in options.bundles {
         match bundle {
             DefaultToolBundle::CoreRuntime => {
-                factories.push(Arc::new(ToolDiscoveryPluginFactory::new()));
-                factories.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
+                stack.push(Arc::new(ToolDiscoveryPluginFactory::new()));
+                stack.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
             }
             DefaultToolBundle::RollingHistory => {
-                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
+                stack.push(Arc::new(RollingHistoryPluginFactory::default()));
             }
             DefaultToolBundle::ObservationalMemory => {
-                factories.push(Arc::new(ObservationalMemoryPluginFactory));
+                stack.push(Arc::new(ObservationalMemoryPluginFactory));
             }
             DefaultToolBundle::Shell => {
-                factories.push(Arc::new(StandardShellPluginFactory::new()));
+                stack.push(Arc::new(StandardShellPluginFactory::new()));
             }
             DefaultToolBundle::Editing => {
-                factories.push(Arc::new(StaticPluginFactory::new(
+                stack.push(Arc::new(StaticPluginFactory::new(
                     "apply_patch",
                     PluginSpec::new()
                         .with_tool_provider(Arc::new(ApplyPatchTool) as Arc<dyn ToolProvider>),
@@ -116,20 +116,20 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
                     .instruction_source
                     .clone()
                     .unwrap_or_else(|| Arc::new(FsInstructionSource::new()));
-                factories.push(Arc::new(ReadFilePluginFactory::new(Some(
+                stack.push(Arc::new(ReadFilePluginFactory::new(Some(
                     instruction_source,
                 ))));
-                factories.push(Arc::new(StaticPluginFactory::new(
+                stack.push(Arc::new(StaticPluginFactory::new(
                     "glob",
                     PluginSpec::new().with_tool_provider(Arc::new(Glob) as Arc<dyn ToolProvider>),
                 )));
-                factories.push(Arc::new(StaticPluginFactory::new(
+                stack.push(Arc::new(StaticPluginFactory::new(
                     "ls",
                     PluginSpec::new().with_tool_provider(Arc::new(Ls) as Arc<dyn ToolProvider>),
                 )));
             }
             DefaultToolBundle::Search => {
-                factories.push(Arc::new(StaticPluginFactory::new(
+                stack.push(Arc::new(StaticPluginFactory::new(
                     "grep",
                     PluginSpec::new()
                         .with_tool_provider(Arc::new(Grep::new()) as Arc<dyn ToolProvider>),
@@ -139,13 +139,13 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
             DefaultToolBundle::Web => {
                 if let Some(key) = options.tavily_api_key.clone() {
                     let search_key = key.clone();
-                    factories.push(Arc::new(StaticPluginFactory::new(
+                    stack.push(Arc::new(StaticPluginFactory::new(
                         "search_web",
                         PluginSpec::new().with_tool_provider(
                             Arc::new(WebSearch::new(search_key)) as Arc<dyn ToolProvider>
                         ),
                     )));
-                    factories.push(Arc::new(StaticPluginFactory::new(
+                    stack.push(Arc::new(StaticPluginFactory::new(
                         "fetch_url",
                         PluginSpec::new().with_tool_provider(
                             Arc::new(FetchUrl::new(key)) as Arc<dyn ToolProvider>
@@ -155,56 +155,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
             }
         }
     }
-    factories
-}
-
-pub fn plugin_host_with_bundles(options: DefaultToolPluginOptions) -> PluginHost {
-    PluginHost::new(tool_plugin_factories(options))
-}
-
-pub trait EmbeddedRuntimeBuilderExt {
-    fn with_default_tool_bundles(self, options: DefaultToolPluginOptions) -> Self;
-    fn with_default_tool_surface_profile(
-        self,
-        interactive: bool,
-        web_enabled: bool,
-        tavily_api_key: Option<String>,
-        instruction_source: Option<Arc<dyn InstructionSource>>,
-    ) -> Self;
-}
-
-impl EmbeddedRuntimeBuilderExt for lash_core::EmbeddedRuntimeBuilder {
-    fn with_default_tool_bundles(self, mut options: DefaultToolPluginOptions) -> Self {
-        if options.bundles.is_empty()
-            && let Some(policy) = self.policy()
-        {
-            options.execution_mode = policy.execution_mode.clone();
-            options.standard_context_approach = policy.standard_context_approach.clone();
-        }
-        self.with_plugin_host(plugin_host_with_bundles(options))
-    }
-
-    fn with_default_tool_surface_profile(
-        self,
-        interactive: bool,
-        web_enabled: bool,
-        tavily_api_key: Option<String>,
-        instruction_source: Option<Arc<dyn InstructionSource>>,
-    ) -> Self {
-        let policy = self.policy().cloned().unwrap_or_default();
-        let profile = DefaultToolSurfaceProfile::for_runtime(
-            policy.standard_context_approach.as_ref(),
-            interactive,
-            web_enabled,
-        );
-        self.with_default_tool_bundles(DefaultToolPluginOptions {
-            execution_mode: policy.execution_mode,
-            standard_context_approach: policy.standard_context_approach,
-            bundles: profile.bundles,
-            tavily_api_key,
-            instruction_source,
-        })
-    }
+    stack
 }
 
 #[cfg(test)]
@@ -246,7 +197,7 @@ mod tests {
 
     #[test]
     fn observational_memory_bundle_advertises_om_support() {
-        let host = PluginHost::new(vec![
+        let host = lash_core::PluginHost::new(vec![
             Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash_core::PluginFactory>,
             Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash_core::PluginFactory>,
         ]);

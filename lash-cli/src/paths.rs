@@ -37,16 +37,10 @@ pub fn repo_local_lash_dir() -> PathBuf {
     PathBuf::from(".agents").join("lash")
 }
 
-/// Legacy repo-local directory for lash artifacts.
-pub fn legacy_repo_local_lash_dir() -> PathBuf {
-    PathBuf::from(".lash")
-}
-
 /// Skill search directories, lowest to highest priority.
 pub fn default_skill_dirs() -> Vec<PathBuf> {
     vec![
         lash_home().join("skills"),
-        legacy_repo_local_lash_dir().join("skills"),
         repo_local_lash_dir().join("skills"),
     ]
 }

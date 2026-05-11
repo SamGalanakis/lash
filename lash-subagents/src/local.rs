@@ -682,17 +682,20 @@ impl SubagentHost for LocalSubagentHost {
         if child_depth >= MAX_SUBAGENT_DEPTH {
             hidden_tools.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
         }
-        request.create_request.tool_access = SessionToolAccess {
+        let tool_access = SessionToolAccess {
             tools: request.create_request.tool_access.tools.clone(),
             hidden_tools: hidden_tools.into_iter().collect::<BTreeSet<_>>(),
         };
-        request.create_request.subagent = Some(SubagentSessionAuthority {
-            agent_name: normalized_agent_name.clone(),
-            parent_session_id: parent_session_id.clone(),
-            capability: request.capability.clone(),
-            depth: child_depth,
-            max_depth: MAX_SUBAGENT_DEPTH,
-        });
+        request.create_request = request
+            .create_request
+            .with_tool_access(tool_access)
+            .with_subagent_authority(SubagentSessionAuthority {
+                agent_name: normalized_agent_name.clone(),
+                parent_session_id: parent_session_id.clone(),
+                capability: request.capability.clone(),
+                depth: child_depth,
+                max_depth: MAX_SUBAGENT_DEPTH,
+            });
 
         let session = match context
             .sessions()

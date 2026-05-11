@@ -1,10 +1,10 @@
 use async_trait::async_trait;
+use lash_core::plugin::runtime_host::SessionLifecycleHost;
 use lash_core::session_model::SessionEventRecord;
 use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
-    SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation, SessionSnapshot,
-    SessionStartPoint, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolExecutionMode,
-    ToolProvider, ToolResult,
+    SessionPluginMode, SessionSnapshot, ToolCall, ToolContext, ToolControl, ToolDefinition,
+    ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -123,7 +123,6 @@ pub(crate) async fn create_continue_as_successor(
         .unwrap_or_default();
     let mut policy = current_snapshot.policy.clone();
     policy.execution_mode = lash_core::ExecutionMode::new("rlm");
-    normalize_context_policy(&mut policy);
 
     let mode_extras = ModeExtras::typed(
         lash_core::ExecutionMode::new("rlm"),
@@ -133,54 +132,26 @@ pub(crate) async fn create_continue_as_successor(
         },
     )
     .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
-    let mut request = fresh_successor_request(
-        parent_session_id.to_string(),
+    let request = SessionCreateRequest::handoff(
+        parent_session_id,
         policy,
         mode_extras,
         handoff.relation_reason,
         handoff.metadata,
         handoff.usage_source,
-    );
-    request.plugin_mode = SessionPluginMode::InheritCurrent;
+    )
+    .with_plugin_mode(SessionPluginMode::InheritCurrent)
+    .with_initial_nodes(rlm_seed_initial_nodes(seed.globals))
+    .with_first_turn_input(PluginMessage::text(MessageRole::User, task));
     let successor_session_id = request
         .session_id
         .clone()
         .expect("fresh successor request sets session id");
-    request.initial_nodes = rlm_seed_initial_nodes(seed.globals);
-    request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task));
     sessions
         .create_session(request)
         .await
         .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
     Ok(successor_session_id)
-}
-
-fn fresh_successor_request(
-    parent_session_id: String,
-    policy: SessionPolicy,
-    mode_extras: ModeExtras,
-    relation_reason: String,
-    metadata: serde_json::Map<String, Value>,
-    usage_source: impl Into<String>,
-) -> SessionCreateRequest {
-    SessionCreateRequest {
-        session_id: Some(uuid::Uuid::new_v4().to_string()),
-        relation: SessionRelation::Handoff {
-            parent_session_id,
-            reason: relation_reason,
-            metadata,
-        },
-        start: SessionStartPoint::Empty,
-        policy: Some(policy),
-        plugin_mode: SessionPluginMode::Fresh,
-        initial_nodes: Vec::new(),
-        first_turn_input: None,
-        tool_access: lash_core::SessionToolAccess::default(),
-        subagent: None,
-        context_surface: lash_core::SessionContextSurface::default(),
-        mode_extras,
-        usage_source: Some(usage_source.into()),
-    }
 }
 
 /// Build the `initial_nodes` payload that seeds RLM globals on a new session.
@@ -198,12 +169,6 @@ pub fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<Sessi
             lash_rlm_types::RlmGlobalsPatchPluginBody { set_default: seed },
         )),
     ))]
-}
-
-fn normalize_context_policy(policy: &mut SessionPolicy) {
-    if policy.execution_mode != lash_core::ExecutionMode::standard() {
-        policy.standard_context_approach = None;
-    }
 }
 
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
@@ -232,12 +197,12 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use lash_core::plugin::{
-        DirectCompletionHost, MonitorHost, PluginError, SessionGraphHost, SessionHandle,
-        SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
-        ToolStateHost, TraceHost, TurnHost,
+    use lash_core::plugin::runtime_host::{
+        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
+        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
-    use lash_core::{PersistedSessionState, TurnInput};
+    use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
+    use lash_core::{PersistedSessionState, SessionPolicy, SessionStartPoint, TurnInput};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
     #[derive(Default)]

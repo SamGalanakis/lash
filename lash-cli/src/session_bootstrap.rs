@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use lash::{LashCore, LashSession, ModeId, ModePreset};
+use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
 use lash_core::{
-    PersistedSessionConfig, PersistedSessionState, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionGraph, SessionHead, SessionPolicy, SessionTaskExecutor,
+    AttachmentStore, PersistedSessionConfig, PersistedSessionState, RuntimePersistence,
+    SessionGraph, SessionHead, SessionPolicy, SessionTaskExecutor,
 };
 use lash_sqlite_store::Store;
 
@@ -35,8 +35,11 @@ pub(crate) struct OpenedCliLashSession {
 
 #[derive(Clone)]
 pub(crate) struct CliSessionOpener {
-    plugin_host: PluginHost,
-    core: RuntimeCoreConfig,
+    plugin_stack: PluginStack,
+    prompt_layer: lash_core::PromptLayer,
+    attachment_store: Arc<dyn AttachmentStore>,
+    trace_jsonl_path: Option<PathBuf>,
+    trace_level: lash::tracing::TraceLevel,
     session_task_executor: Arc<dyn SessionTaskExecutor>,
 }
 
@@ -185,13 +188,19 @@ impl SessionBootstrap {
 
 impl CliSessionOpener {
     pub(crate) fn new(
-        plugin_host: PluginHost,
-        core: RuntimeCoreConfig,
+        plugin_stack: PluginStack,
+        prompt_layer: lash_core::PromptLayer,
+        attachment_store: Arc<dyn AttachmentStore>,
+        trace_jsonl_path: Option<PathBuf>,
+        trace_level: lash::tracing::TraceLevel,
         session_task_executor: Arc<dyn SessionTaskExecutor>,
     ) -> Self {
         Self {
-            plugin_host,
-            core,
+            plugin_stack,
+            prompt_layer,
+            attachment_store,
+            trace_jsonl_path,
+            trace_level,
             session_task_executor,
         }
     }
@@ -226,16 +235,17 @@ impl CliSessionOpener {
             .model(policy.model.clone(), policy.model_variant.clone())
             .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
-            )));
+            )))
+            .plugins(self.plugin_stack.clone())
+            .prompt_layer(self.prompt_layer.clone())
+            .attachment_store(Arc::clone(&self.attachment_store))
+            .trace_jsonl_path(self.trace_jsonl_path.clone())
+            .trace_level(self.trace_level)
+            .session_task_executor(Arc::clone(&self.session_task_executor));
         if let Some(max_context_tokens) = policy.max_context_tokens {
             core_builder = core_builder.max_context_tokens(max_context_tokens);
         }
-        let core = core_builder
-            .advanced()
-            .plugin_host(self.plugin_host.clone())
-            .runtime_core_config(self.core.clone())
-            .session_task_executor(Arc::clone(&self.session_task_executor))
-            .build()?;
+        let core = core_builder.build()?;
         let session = core
             .session(session_id)
             .mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))

@@ -34,7 +34,7 @@ use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_sqlite_store::Store;
-use lash_standard_plugins::{DefaultToolBundle, DefaultToolPluginOptions, tool_plugin_factories};
+use lash_standard_plugins::{DefaultPluginStackOptions, DefaultToolBundle, default_plugin_stack};
 use lash_subagents::{
     CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
     TierExecutionMode,
@@ -971,10 +971,10 @@ fn build_plugin_session(
     ));
 
     // Tool bundles only — core/context/mode plugins are registered
-    // above, so we ask `tool_plugin_factories` for just the tool
+    // above, so we ask `default_plugin_stack` for just the tool
     // surfaces (shell, apply_patch, read/ls/grep/glob). No `ask`
     // (autonomous run) and no web tools.
-    let mut tool_factories = tool_plugin_factories(DefaultToolPluginOptions {
+    let mut tool_factories = default_plugin_stack(DefaultPluginStackOptions {
         execution_mode: execution_mode.clone(),
         standard_context_approach: standard_context_approach.clone(),
         bundles: vec![
@@ -985,7 +985,8 @@ fn build_plugin_session(
         ],
         tavily_api_key: None,
         instruction_source: None,
-    });
+    })
+    .into_factories();
     factories.append(&mut tool_factories);
 
     let registry = Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(

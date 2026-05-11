@@ -180,6 +180,13 @@ impl LashCoreBuilder {
         self
     }
 
+    pub fn trace_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.trace_sink = path.map(|path| {
+            Arc::new(lash_core::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        });
+        self
+    }
+
     pub fn trace_level(mut self, trace_level: lash_trace::TraceLevel) -> Self {
         self.trace_level = Some(trace_level);
         self
@@ -307,6 +314,11 @@ impl LashCoreBuilder {
 
     pub fn advanced(self) -> AdvancedLashCoreBuilder {
         AdvancedLashCoreBuilder { builder: self }
+    }
+
+    pub fn session_task_executor(mut self, executor: Arc<dyn SessionTaskExecutor>) -> Self {
+        self.session_task_executor = Some(executor);
+        self
     }
 }
 

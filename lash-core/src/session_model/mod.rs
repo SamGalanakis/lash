@@ -149,6 +149,20 @@ pub struct SessionPolicy {
     pub prompt: crate::PromptLayer,
 }
 
+impl SessionPolicy {
+    /// Drop policy fields that only apply to the standard execution mode.
+    pub fn normalize_for_execution_mode(&mut self) {
+        if self.execution_mode != ExecutionMode::standard() {
+            self.standard_context_approach = None;
+        }
+    }
+
+    pub fn normalized_for_execution_mode(mut self) -> Self {
+        self.normalize_for_execution_mode();
+        self
+    }
+}
+
 /// Reusable session configuration overlay.
 ///
 /// `SessionSpec` is the public configuration shape for callers that want to

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lash_core::plugin::RuntimeSessionHost;
+use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
 use lash_core::{
     ExecutionMode, PersistedSessionState, PluginDirective, PluginHost, PluginSurfaceEvent,

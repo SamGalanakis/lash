@@ -6,17 +6,20 @@ use tokio::sync::Mutex;
 
 use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
+use lash_core::plugin::runtime_host::{
+    RuntimeSessionHost, SessionLifecycleHost, SessionSnapshotHost, ToolCatalogHost, ToolStateHost,
+    TurnHost,
+};
 use lash_core::plugin::{
     PluginDirective, PluginError, SessionPluginMode, SessionStartPoint, ToolCallHookContext,
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
     AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
-    RuntimeSessionHost, SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView,
-    SessionSnapshot, SessionSnapshotHost, SessionStateEnvelope, ToolCatalogHost, ToolDefinition,
-    ToolProvider, ToolRegistry, ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
+    SessionStateEnvelope, ToolDefinition, ToolProvider, ToolRegistry, ToolResult, TurnHookContext,
+    TurnInput, TurnResultHookContext,
 };
-use lash_core::{SessionLifecycleHost, ToolStateHost, TurnHost};
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
 
@@ -62,7 +65,7 @@ trait PlanTestHostCore: Send + Sync {
 macro_rules! impl_plan_test_host {
     ($ty:ty) => {
         #[async_trait::async_trait]
-        impl lash_core::SessionSnapshotHost for $ty {
+        impl lash_core::plugin::runtime_host::SessionSnapshotHost for $ty {
             async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
                 PlanTestHostCore::snapshot_current(self).await
             }
@@ -75,7 +78,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash_core::ToolCatalogHost for $ty {
+        impl lash_core::plugin::runtime_host::ToolCatalogHost for $ty {
             async fn tool_catalog(
                 &self,
                 session_id: &str,
@@ -85,7 +88,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash_core::ToolStateHost for $ty {
+        impl lash_core::plugin::runtime_host::ToolStateHost for $ty {
             async fn tool_state(
                 &self,
                 session_id: &str,
@@ -102,7 +105,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash_core::SessionLifecycleHost for $ty {
+        impl lash_core::plugin::runtime_host::SessionLifecycleHost for $ty {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
@@ -115,7 +118,7 @@ macro_rules! impl_plan_test_host {
         }
 
         #[async_trait::async_trait]
-        impl lash_core::TurnHost for $ty {
+        impl lash_core::plugin::runtime_host::TurnHost for $ty {
             async fn start_turn_stream(
                 &self,
                 session_id: &str,
@@ -141,11 +144,11 @@ macro_rules! impl_plan_test_host {
             }
         }
 
-        impl lash_core::TaskHost for $ty {}
-        impl lash_core::MonitorHost for $ty {}
-        impl lash_core::SessionGraphHost for $ty {}
-        impl lash_core::DirectCompletionHost for $ty {}
-        impl lash_core::TraceHost for $ty {}
+        impl lash_core::plugin::runtime_host::TaskHost for $ty {}
+        impl lash_core::plugin::runtime_host::MonitorHost for $ty {}
+        impl lash_core::plugin::runtime_host::SessionGraphHost for $ty {}
+        impl lash_core::plugin::runtime_host::DirectCompletionHost for $ty {}
+        impl lash_core::plugin::runtime_host::TraceHost for $ty {}
     };
 }
 
@@ -880,9 +883,10 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             })
     );
 
-    let dynamic = lash_core::ToolStateHost::tool_state(manager.as_ref(), "root")
-        .await
-        .expect("tool state");
+    let dynamic =
+        lash_core::plugin::runtime_host::ToolStateHost::tool_state(manager.as_ref(), "root")
+            .await
+            .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
         tool.definition()
             .effective_availability(&lash_core::ExecutionMode::standard())
