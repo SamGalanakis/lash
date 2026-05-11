@@ -51,11 +51,12 @@
         <div class="section" id="add-the-crates">
           <div class="section-header">
             <h2>Add The Crates</h2>
-            <p>The <code>lash</code> crate is the user-facing facade. Pull in a provider crate (or <code>lash-providers-builtin</code> for the bundled set) and a mode preset.</p>
+            <p>The <code>lash</code> crate is the user-facing facade. Pull in the provider crate you use directly. Add <code>lash-providers-builtin</code> only when your host wants registry-driven provider lookup.</p>
           </div>
           <pre><code>[dependencies]
 lash = { path = "path/to/lash" }
-lash-providers-builtin = { path = "path/to/lash-providers-builtin" }
+lash-provider-openai = { path = "path/to/lash-provider-openai" }
+anyhow = "1"
 tokio = { version = "1", features = ["full"] }</code></pre>
           <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>TokioSessionTaskExecutor</code> values.</p>
         </div>
@@ -68,6 +69,10 @@ tokio = { version = "1", features = ["full"] }</code></pre>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
             <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins. One per app, cloned freely.</dd>
+            <dt><code>SessionSpec</code></dt>
+            <dd>Reusable session configuration overlay for provider, model, mode, prompt layer, max context tokens, and max turns. The ergonomic builder methods update the same spec.</dd>
+            <dt><code>PluginStack</code></dt>
+            <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with the runtime defaults; <code>LashCore::builder()</code> is explicit and starts empty.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
             <dt><code>TurnInput</code></dt>
@@ -84,15 +89,11 @@ tokio = { version = "1", features = ["full"] }</code></pre>
             <h2>Hello, Turn</h2>
             <p>The smallest meaningful program: build a core, open a session, run one turn, print the assistant's prose.</p>
           </div>
-          <pre><code>use lash::{LashCore, TurnEvent, TurnInput, provider::ProviderHandle};
+          <pre><code>use lash::{provider::ProviderHandle, LashCore, TurnEvent, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
 async fn main() -&gt; anyhow::Result&lt;()&gt; {
-    // Register the bundled OpenAI/Anthropic/Codex/Google factories with the
-    // global provider registry. Do this once at process start.
-    lash_providers_builtin::register_all();
-
     // Build a provider handle. Substitute your own creds + base URL.
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let provider = ProviderHandle::new(
@@ -100,7 +101,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     );
 
     // One LashCore per app, cloned freely.
-    let core = LashCore::builder()
+    let core = LashCore::standard()
         .provider(provider)
         .model("anthropic/claude-sonnet-4.6", None)
         .max_context_tokens(200_000)
@@ -129,7 +130,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
         <div class="section" id="whats-next">
           <div class="section-header">
             <h2>What's Not Here Yet</h2>
-            <p>The example above has no persistence (the session lives in memory and goes away when the process exits), no host tools, no plugins, no tracing, and no live streaming. Each is a small additional step.</p>
+            <p>The example above has no persistence (the session lives in memory and goes away when the process exits), no host tools, only the default runtime plugin stack, no tracing, and no live streaming. Each is a small additional step.</p>
           </div>
           <div class="module-grid">
             <article class="panel"><h3>Live streaming</h3><p>Use <code>TurnBuilder::stream(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding.html#semantic-events">Lash API guide</a> covers the full event taxonomy.</p></article>

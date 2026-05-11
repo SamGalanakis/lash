@@ -184,7 +184,18 @@ impl ToolContext {
     }
 
     pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
-        self.host.snapshot_session(&self.session_id).await
+        self.snapshot_current_session().await
+    }
+
+    pub async fn snapshot_current_session(&self) -> Result<SessionSnapshot, PluginError> {
+        self.snapshot_session(&self.session_id).await
+    }
+
+    pub async fn snapshot_session(
+        &self,
+        session_id: impl AsRef<str>,
+    ) -> Result<SessionSnapshot, PluginError> {
+        self.host.snapshot_session(session_id.as_ref()).await
     }
 
     pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {

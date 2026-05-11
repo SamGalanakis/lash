@@ -243,7 +243,7 @@ jobs:
 
       - name: Run synthetic runtime performance benchmark
         run: |
-          python3 scripts/profile_runtime.py --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/runtime-perf/ci.json
+          python3 scripts/profile_runtime.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/ci.json
 
       - name: Publish runtime performance summary
         run: |
@@ -258,6 +258,7 @@ jobs:
               "",
               f"- runs: `{report['runs']}`",
               f"- warmups: `{report['warmups']}`",
+              f"- turns: `{report['chat_turns']}`",
               f"- scenarios: `{', '.join(report['scenarios'])}`",
           ]
           for item in report["summary"]:

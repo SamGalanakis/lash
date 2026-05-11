@@ -10,17 +10,19 @@ use anyhow::Context;
 use chrono::Utc;
 use lash::usage::{SessionUsageReport, TokenLedgerEntry};
 use lash_core::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
+use lash_core::provider::ProviderReliability;
 use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash_core::store;
 use lash_core::testing::TestProvider;
 use lash_core::{
     AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
     LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
-    PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RuntimeCommit,
-    RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint, SessionGraph,
-    SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope, SessionStoreCreateRequest,
-    SessionStoreFactory, StandardContextApproach, TokenUsage, TokioSessionTaskExecutor,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnInput, VacuumReport,
+    PluginMessage, PluginSpec, ProviderHandle, ProviderOptions, RollingHistoryConfig,
+    RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint,
+    SessionGraph, SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope,
+    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, TokenUsage,
+    TokioSessionTaskExecutor, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    TurnInput, TurnOutcome, VacuumReport,
 };
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiCompatibleProvider;
@@ -910,6 +912,7 @@ async fn run_once(
                     turn_index + 1
                 )
             })?;
+        validate_runtime_perf_turn(scenario, turn_index, &turn.outcome, &turn.assistant_output)?;
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
         let after_turn_memory = process_memory_sample();
@@ -1058,6 +1061,12 @@ async fn run_once_embed(
                     turn_index + 1
                 )
             })?;
+        validate_runtime_perf_turn(
+            scenario,
+            turn_index,
+            &turn.result.outcome,
+            &turn.result.assistant_output,
+        )?;
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
         let after_turn_memory = process_memory_sample();
@@ -1148,6 +1157,70 @@ async fn run_once_embed(
     })
 }
 
+fn validate_runtime_perf_turn(
+    scenario: RuntimePerfScenario,
+    turn_index: usize,
+    outcome: &TurnOutcome,
+    assistant_output: &lash_core::AssistantOutput,
+) -> anyhow::Result<()> {
+    let expected = "runtime perf benchmark ok";
+    match outcome {
+        TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { text }) => {
+            let valid = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
+                text.contains(expected) || assistant_output.safe_text.contains(expected)
+            } else {
+                text.trim() == expected || assistant_output.safe_text.trim() == expected
+            };
+            if valid {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} produced unexpected assistant text: {:?}",
+                scenario.name(),
+                turn_index + 1,
+                text
+            );
+        }
+        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value }) => {
+            if value.as_str() == Some(expected) {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} submitted unexpected value: {}",
+                scenario.name(),
+                turn_index + 1,
+                value
+            );
+        }
+        TurnOutcome::Finished(lash_core::TurnFinish::ToolValue { tool_name, value }) => {
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} finished with tool value from {}: {}",
+                scenario.name(),
+                turn_index + 1,
+                tool_name,
+                value
+            );
+        }
+        TurnOutcome::Handoff { session_id } => {
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} unexpectedly handed off to {}",
+                scenario.name(),
+                turn_index + 1,
+                session_id
+            );
+        }
+        TurnOutcome::Stopped(stop) => {
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} stopped with {:?}; assistant_output={:?}",
+                scenario.name(),
+                turn_index + 1,
+                stop,
+                assistant_output
+            );
+        }
+    }
+}
+
 fn build_embed_core(
     scenario: RuntimePerfScenario,
     store: Arc<RuntimePerfStore>,
@@ -1181,7 +1254,12 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .unwrap_or_else(|| "https://example.invalid/v1".to_string());
     let provider: ProviderHandle = match scenario {
         RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(
-            OpenAiCompatibleProvider::new("test-key", base_url.clone()).into_components(),
+            OpenAiCompatibleProvider::new("test-key", base_url.clone())
+                .with_options(ProviderOptions {
+                    reliability: ProviderReliability::disabled(),
+                    ..ProviderOptions::default()
+                })
+                .into_components(),
         ),
         _ => benchmark_provider(scenario).into_handle(),
     };
@@ -1437,29 +1515,19 @@ submit first.value
 
 fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
     let mut body = String::new();
-    let message_id = "msg_runtime_perf";
-    body.push_str("data: ");
-    body.push_str(
-        &serde_json::json!({
-            "type": "response.output_item.added",
-            "item": {
-                "type": "message",
-                "id": message_id,
-                "status": "in_progress",
-                "role": "assistant",
-                "content": []
-            }
-        })
-        .to_string(),
-    );
-    body.push_str("\n\n");
     for delta in &profile.deltas {
         body.push_str("data: ");
         body.push_str(
             &serde_json::json!({
-                "type": "response.output_text.delta",
-                "item_id": message_id,
-                "delta": delta,
+                "id": "chatcmpl-runtime-perf",
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "content": delta,
+                    },
+                    "finish_reason": null,
+                }],
             })
             .to_string(),
         );
@@ -1468,18 +1536,13 @@ fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
     body.push_str("data: ");
     body.push_str(
         &serde_json::json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "message",
-                "id": message_id,
-                "status": "completed",
-                "role": "assistant",
-                "content": [{
-                    "type": "output_text",
-                    "text": profile.full_text,
-                    "annotations": []
-                }]
-            }
+            "id": "chatcmpl-runtime-perf",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
         })
         .to_string(),
     );
@@ -1487,32 +1550,19 @@ fn openai_compat_sse_body(profile: &BenchmarkStreamProfile) -> Vec<u8> {
     body.push_str("data: ");
     body.push_str(
         &serde_json::json!({
-            "type": "response.completed",
-            "response": {
-                "id": "resp_runtime_perf",
-                "status": "completed",
-                "output": [{
-                    "type": "message",
-                    "id": message_id,
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": [{
-                        "type": "output_text",
-                        "text": profile.full_text,
-                        "annotations": []
-                    }]
-                }],
-                "usage": {
-                    "input_tokens": 1024,
-                    "output_tokens": 64,
-                    "input_tokens_details": {
-                        "cached_tokens": 512,
-                    },
-                    "output_tokens_details": {
-                        "reasoning_tokens": 48,
-                    }
+            "id": "chatcmpl-runtime-perf",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1024,
+                "completion_tokens": 64,
+                "prompt_tokens_details": {
+                    "cached_tokens": 512,
                 },
-            }
+                "completion_tokens_details": {
+                    "reasoning_tokens": 48,
+                }
+            },
         })
         .to_string(),
     );
@@ -2110,22 +2160,14 @@ mod tests {
     }
 
     #[test]
-    fn openai_compat_stream_fixture_uses_responses_sse_shape() {
+    fn openai_compat_stream_fixture_uses_chat_completions_sse_shape() {
         let profile = benchmark_stream_profile(RuntimePerfScenario::OpenAiCompatStream);
         let body = String::from_utf8(openai_compat_sse_body(&profile)).unwrap();
-        assert!(
-            body.contains(r#""type":"response.output_item.added""#)
-                || body.contains(r#""type": "response.output_item.added""#)
-        );
-        assert!(
-            body.contains(r#""type":"response.output_text.delta""#)
-                || body.contains(r#""type": "response.output_text.delta""#)
-        );
-        assert!(
-            body.contains(r#""type":"response.completed""#)
-                || body.contains(r#""type": "response.completed""#)
-        );
-        assert!(!body.contains(r#""choices""#));
+        assert!(body.contains(r#""object":"chat.completion.chunk""#));
+        assert!(body.contains(r#""choices""#));
+        assert!(body.contains(r#""delta":{"content":"#));
+        assert!(body.contains(r#""usage":{"#));
+        assert!(!body.contains(r#""type":"response.output_text.delta""#));
     }
 }
 

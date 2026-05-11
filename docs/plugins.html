@@ -34,10 +34,12 @@
           <div class="sidebar__label">On this page</div>
           <ol>
             <li><a href="#three-traits">Three Traits, Two Lifetimes</a></li>
+            <li><a href="#default-stack">Default Stack</a></li>
             <li><a href="#worked-example">A Worked Example</a></li>
             <li><a href="#what-you-can-register">What You Can Register</a></li>
             <li><a href="#cheap-build">The Cheap-Build Contract</a></li>
             <li><a href="#toolcall-shape">The ToolCall Shape</a></li>
+            <li><a href="#tool-capabilities">Tool Capabilities</a></li>
             <li><a href="#wiring">Wiring It In</a></li>
             <li><a href="#reference-examples">Reference Examples</a></li>
           </ol>
@@ -47,7 +49,7 @@
       <header class="hero">
         <div class="eyebrow">lash guide</div>
         <h1>writing<span class="slash">/</span>plugins</h1>
-        <p>A plugin is the unit of extension in lash. It can register tools, contribute to prompts, observe turn lifecycle hooks, project tool results, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
+        <p>A plugin is the unit of extension in lash. It can register tools, contribute to prompts, observe turn lifecycle hooks, apply tool-output budgets, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
       </header>
 
       <section class="content" id="content">
@@ -89,6 +91,51 @@
 }</code></pre>
             </article>
           </div>
+        </div>
+
+        <div class="section" id="default-stack">
+          <div class="section-header">
+            <h2>Default Stack</h2>
+            <p><code>PluginStack</code> is the app-facing plugin list. The preset constructors include the runtime defaults; the raw builder stays explicit for hosts that want to own every factory.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Start From Runtime Defaults</h3>
+              <pre><code>use std::sync::Arc;
+use lash::{plugins::PluginFactory, LashCore};
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model("gpt-5.4", None)
+    .max_context_tokens(200_000)
+    .configure_plugins(|plugins| {
+        plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
+    })
+    .build()?;</code></pre>
+            </article>
+            <article class="panel">
+              <h3>Replace Or Remove</h3>
+              <pre><code>use std::sync::Arc;
+use lash::{
+    plugins::ToolOutputBudgetPluginFactory, LashCore, ModeId, ModePreset, PluginStack,
+};
+
+let plugins = PluginStack::runtime().configure(|plugins| {
+    plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
+    plugins.remove("some_optional_plugin");
+});
+
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .provider(provider)
+    .model("gpt-5.4", None)
+    .max_context_tokens(200_000)
+    .plugins(plugins)
+    .build()?;</code></pre>
+            </article>
+          </div>
+          <p>Use <code>.plugin(...)</code> to append one factory, <code>.plugins(...)</code> to replace the full stack, and <code>.configure_plugins(...)</code> to mutate the current stack. <code>PluginStack::runtime()</code> currently installs the built-in <code>ToolOutputBudgetPluginFactory</code>, which budgets oversized tool outputs for state, model context, and history projection.</p>
         </div>
 
         <div class="section" id="worked-example">
@@ -178,7 +225,7 @@ impl ToolProvider for UpdatePlanTool {
                 <tr><td><code>reg.turn()</code></td><td>Before-turn / after-turn / checkpoint hooks.</td></tr>
                 <tr><td><code>reg.tool_calls()</code></td><td>Before-tool / after-tool hooks. Useful for emitting UI events or mutating session state in response to specific tools.</td></tr>
                 <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output and final responses.</td></tr>
-                <tr><td><code>reg.tool_results()</code></td><td>Tool-result projection (truncation, redaction). <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
+                <tr><td><code>reg.tool_results()</code></td><td>Tool-output budgeting and projection. <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
                 <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
                 <tr><td><code>reg.actions()</code></td><td>Plugin actions — typed or raw RPC-shaped APIs the host can invoke without going through tool calls.</td></tr>
                 <tr><td><code>reg.monitors()</code></td><td>Monitor specs (long-running watches that the plugin maintains across turns).</td></tr>
@@ -212,10 +259,57 @@ impl ToolProvider for UpdatePlanTool {
           <pre><code>pub struct ToolCall&lt;'a&gt; {
     pub name: &amp;'a str,                           // Advertised tool name the model called
     pub args: &amp;'a serde_json::Value,             // Deserialized JSON args
-    pub context: &amp;'a ToolContext,                // Session state, turn context, host
+    pub context: &amp;'a ToolContext,                // Explicit session/tool capabilities
     pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
 }</code></pre>
           <p><code>context.plugin_input::&lt;MyPlugin&gt;("plugin_id")</code> reads typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> (see the <a href="./embedding.html">Lash API guide</a>'s "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern).</p>
+        </div>
+
+        <div class="section" id="tool-capabilities">
+          <div class="section-header">
+            <h2>Tool Capabilities</h2>
+            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session control, background-task control, or a direct completion.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Method</th><th>Use it for</th></tr></thead>
+              <tbody>
+                <tr><td><code>context.session_model().await?</code></td><td>Read the active session's concrete <code>model</code> and optional <code>model_variant</code>. Use this before building a <code>DirectRequest</code> that should match the current session.</td></tr>
+                <tr><td><code>context.session_snapshot().await?</code> / <code>context.snapshot_current_session().await?</code></td><td>Read the current session snapshot when a tool truly needs more than model selection.</td></tr>
+                <tr><td><code>context.snapshot_session(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
+                <tr><td><code>context.tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
+                <tr><td><code>context.set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
+                <tr><td><code>context.sessions()</code></td><td>Cloneable child-session and turn control: <code>create_session</code>, <code>close_session</code>, <code>start_turn_stream</code>, <code>await_turn</code>, and <code>cancel_turn</code>.</td></tr>
+                <tr><td><code>context.tasks()</code></td><td>Cloneable background-task registry control for tools that spawn long-lived work visible through task/async-handle surfaces.</td></tr>
+                <tr><td><code>context.direct_completion(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>originating_tool_call_id</code> are filled from the current tool call for tracing and usage attribution.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre><code>use lash::direct::{DirectOutputSpec, DirectRequest};
+
+async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
+    let model = match call.context.session_model().await {
+        Ok(model) =&gt; model,
+        Err(err) =&gt; return ToolResult::err_fmt(format_args!("{err}")),
+    };
+
+    let request = DirectRequest {
+        model: model.model,
+        model_variant: model.model_variant,
+        messages: vec![/* ... */],
+        attachments: Vec::new(),
+        output: DirectOutputSpec::Text,
+        stream_events: None,
+        session_id: None,                 // filled by ToolContext
+        originating_tool_call_id: None,   // filled by ToolContext
+    };
+
+    match call.context.direct_completion(request, "my_tool").await {
+        Ok(completion) =&gt; ToolResult::ok(serde_json::json!({ "text": completion.text })),
+        Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
+    }
+}</code></pre>
+          <p>There is no public <code>ToolContext::host()</code> escape hatch. Runtime bridge traits such as <code>ToolHookHost</code> remain internal <code>lash-core</code> wiring, not plugin-facing API. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
         </div>
 
         <div class="section" id="wiring">

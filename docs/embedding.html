@@ -34,6 +34,7 @@
           <div class="sidebar__label">On this page</div>
           <ol>
             <li><a href="#core-shape">Core Shape</a></li>
+            <li><a href="#session-specs-and-plugins">Session Specs And Plugins</a></li>
             <li><a href="#run-a-turn">Run A Turn</a></li>
             <li><a href="#input-boundary">Input Boundary</a></li>
             <li><a href="#semantic-events">Semantic Events</a></li>
@@ -42,6 +43,7 @@
             <li><a href="#prompt-templates">Prompt Templates</a></li>
             <li><a href="#typed-plugin-input">Typed Plugin Input</a></li>
             <li><a href="#app-storage">App Storage</a></li>
+            <li><a href="#subagents">Subagents</a></li>
             <li><a href="#mcp-servers">MCP Servers</a></li>
             <li><a href="#advanced-runtime">Advanced Runtime</a></li>
             <li><a href="#complete-example">Complete Example</a></li>
@@ -66,7 +68,7 @@
             <div class="diagram-title">lash vs lash-core boundary</div>
             <pre><code>use std::sync::Arc;
 
-use lash::{tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
+use lash::{tools::*, LashCore, ModeId, ModePreset, PluginStack, TurnEvent, TurnInput};
 
 let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new("lash-sessions"));
 
@@ -77,6 +79,7 @@ let core = LashCore::builder()
     .provider(provider)
     .model("anthropic/claude-sonnet-4.6", None)
     .max_context_tokens(200_000)
+    .plugins(PluginStack::runtime())
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
     .build()?;
@@ -94,11 +97,55 @@ println!("{assistant_text}");</code></pre>
             <dd>Cloneable shared configuration: provider, model, installed modes, tool providers, plugin factories, store factory, attachment store, and tracing. Runtime internals such as residency and termination policy live behind <code>.advanced()</code>.</dd>
             <dt><code>ModePreset</code></dt>
             <dd>Installs execution modes. Use <code>ModePreset::standard()</code> for native provider tool calls, <code>ModePreset::rlm()</code> for Lashlang-driven RLM turns, or install both and choose the default with <code>default_mode</code>.</dd>
+            <dt><code>SessionSpec</code></dt>
+            <dd>Reusable public configuration overlay for provider, model/variant, execution mode, max context tokens, max turns, and prompt layer. Root cores use <code>SessionSpec::new()</code>; child sessions and subagents usually use <code>SessionSpec::inherit()</code>.</dd>
+            <dt><code>PluginStack</code></dt>
+            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> include <code>PluginStack::runtime()</code>; a raw <code>LashCore::builder()</code> stays explicit and needs modes and plugins installed by the host.</dd>
             <dt><code>LashSession</code></dt>
             <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
             <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
           </dl>
+        </div>
+
+        <div class="section" id="session-specs-and-plugins">
+          <div class="section-header">
+            <h2>Session Specs And Plugins</h2>
+            <p>The root builder methods are ergonomic wrappers over one <code>SessionSpec</code>. Use <code>.session_spec(...)</code> when a host already has a complete spec object, and use the same type for parent-relative child session configuration.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Root defaults</h3>
+              <pre><code>use lash::{plugins::PluginFactory, LashCore, PluginStack, SessionSpec};
+
+let root_spec = SessionSpec::new()
+    .provider(provider)
+    .model("gpt-5.4", None)
+    .max_context_tokens(200_000);
+
+let core = LashCore::rlm()
+    .session_spec(root_spec)
+    .configure_plugins(|plugins| {
+        plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
+    })
+    .build()?;</code></pre>
+            </article>
+            <article class="panel">
+              <h3>Explicit stacks</h3>
+              <pre><code>let plugins = PluginStack::runtime().configure(|plugins| {
+    plugins.replace(Arc::new(CustomBudgetPlugin) as Arc&lt;dyn PluginFactory&gt;);
+    plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
+});
+
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm())
+    .default_mode(ModeId::rlm())
+    .session_spec(root_spec)
+    .plugins(plugins)
+    .build()?;</code></pre>
+            </article>
+          </div>
+          <p><code>.plugin(...)</code> appends one factory to the current stack, <code>.plugins(...)</code> replaces the full stack, and <code>.configure_plugins(...)</code> mutates the current stack in place. That gives hosts a default runtime set while still allowing precise removal, replacement, or insertion.</p>
         </div>
 
         <div class="section" id="run-a-turn">
@@ -373,7 +420,7 @@ impl lash::PluginBinding for BoardPlugin {
     type SessionConfig = BoardConfig;
     type Input = BoardTurnInput;
 
-    fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::PluginFactory&gt; {
+    fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::plugins::PluginFactory&gt; {
         Arc::new(BoardPluginFactory)
     }
 
@@ -382,10 +429,10 @@ impl lash::PluginBinding for BoardPlugin {
     }
 }
 
-impl lash::SessionPlugin for BoardSessionPlugin {
+impl lash::plugins::SessionPlugin for BoardSessionPlugin {
     fn id(&amp;self) -&gt; &amp;'static str { BoardPlugin::ID }
 
-    fn register(&amp;self, reg: &amp;mut lash::PluginRegistrar) -&gt; Result&lt;(), lash::PluginError&gt; {
+    fn register(&amp;self, reg: &amp;mut lash::plugins::PluginRegistrar) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
                 let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
@@ -457,6 +504,30 @@ let result = session
             <article class="panel"><h3>App state</h3><p>Own chat tables, account ids, frontend board state, request auth, and transport formats. The example app stores chat messages in SQLite and streams newline-delimited JSON to the browser.</p></article>
             <article class="panel"><h3>Runtime state</h3><p>Pass an explicit store factory such as <code>lash_sqlite_store::SqliteSessionStoreFactory::new(...)</code> to <code>LashCoreBuilder::store_factory</code>, or pass a concrete store to <code>SessionBuilder::store</code>, when sessions need durable runtime state across process restarts.</p></article>
           </div>
+        </div>
+
+        <div class="section" id="subagents">
+          <div class="section-header">
+            <h2>Subagents</h2>
+            <p>Subagents are configured with the same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry and host; child policy resolution always starts from the live parent snapshot.</p>
+          </div>
+          <pre><code>use std::sync::Arc;
+use lash::{plugins::PluginFactory, SessionSpec};
+use lash_subagents::{default_registry, SubagentsPluginFactory};
+
+let registry = Arc::new(default_registry(&amp;tier_models));
+let host = Arc::new(AppSubagentHost::new(child_store_factory));
+
+let subagents = SubagentsPluginFactory::new(registry, host)
+    .with_session_spec(SessionSpec::inherit().max_turns(8));
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
+    .build()?;</code></pre>
+          <p>Capability implementations return <code>SessionSpec</code> overlays. <code>StaticCapability</code> is for exact child authority, while <code>TierCapability</code> implements the built-in <code>explore</code> and <code>peer</code> model/mode selection. Tool authors should not construct <code>SessionPolicy</code> for child configuration; it remains the resolved runtime artifact.</p>
         </div>
 
         <div class="section" id="mcp-servers">

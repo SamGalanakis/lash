@@ -10,6 +10,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+PROFILE_DEFAULTS = {
+    "quick": {
+        "runs": 2,
+        "warmups": 0,
+        "turns": 3,
+    },
+    "full": {
+        "runs": 5,
+        "warmups": 1,
+        "turns": 12,
+    },
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -36,8 +49,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use target/release/lash instead of target/debug/lash.",
     )
-    parser.add_argument("--runs", type=int, default=5, help="Measured runs (default: 5).")
-    parser.add_argument("--warmups", type=int, default=1, help="Warm-up runs (default: 1).")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILE_DEFAULTS),
+        default="full",
+        help="Benchmark size preset: quick for push CI, full for manual/nightly runs.",
+    )
+    parser.add_argument("--runs", type=int, help="Measured runs. Defaults from --profile.")
+    parser.add_argument("--warmups", type=int, help="Warm-up runs. Defaults from --profile.")
     parser.add_argument(
         "--scenario",
         action="append",
@@ -51,8 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--turns",
         type=int,
-        default=12,
-        help="Committed turns per measured runtime session (default: 12).",
+        help="Committed turns per measured runtime session. Defaults from --profile.",
     )
     parser.add_argument(
         "--out",
@@ -127,6 +145,10 @@ def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     binary = resolve_binary(args, repo_root)
+    profile_defaults = PROFILE_DEFAULTS[args.profile]
+    runs = args.runs if args.runs is not None else profile_defaults["runs"]
+    warmups = args.warmups if args.warmups is not None else profile_defaults["warmups"]
+    turns = args.turns if args.turns is not None else profile_defaults["turns"]
     maybe_build(
         binary,
         args.release,
@@ -141,9 +163,9 @@ def main() -> int:
     cmd = [
         str(binary),
         "--runtime-perf-benchmark",
-        f"--runtime-perf-runs={max(args.runs, 1)}",
-        f"--runtime-perf-warmups={max(args.warmups, 0)}",
-        f"--runtime-perf-turns={max(args.turns, 1)}",
+        f"--runtime-perf-runs={max(runs, 1)}",
+        f"--runtime-perf-warmups={max(warmups, 0)}",
+        f"--runtime-perf-turns={max(turns, 1)}",
     ]
     if args.out:
         cmd.append(f"--runtime-perf-out={args.out}")
