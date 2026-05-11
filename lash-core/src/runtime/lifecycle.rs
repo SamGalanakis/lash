@@ -167,7 +167,14 @@ impl LashRuntime {
                 state.plugin_snapshot.as_ref(),
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let core = env.to_runtime_core_config();
+        let core = RuntimeCoreConfig {
+            attachment_store: Arc::clone(&env.attachment_store),
+            prompt: env.prompt.clone(),
+            trace_sink: env.trace_sink.clone(),
+            trace_level: env.trace_level,
+            trace_context: env.trace_context.clone(),
+            termination: env.termination.clone(),
+        };
         let mut embedded = EmbeddedRuntimeHost::new(core);
         if let Some(factory) = env.session_store_factory.as_ref() {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));

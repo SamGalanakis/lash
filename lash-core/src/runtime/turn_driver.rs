@@ -185,9 +185,10 @@ async fn emit_semantic_response_parts(
                 )
                 .await;
             }
-            LlmOutputPart::Reasoning { text, item_id, .. } if !text.is_empty() => {
-                let correlation_id = item_id
-                    .clone()
+            LlmOutputPart::Reasoning { text, replay } if !text.is_empty() => {
+                let correlation_id = replay
+                    .as_ref()
+                    .and_then(|meta| meta.item_id.clone())
                     .map(TurnActivityId::new)
                     .unwrap_or_else(TurnActivityId::fresh);
                 send_turn_activity(

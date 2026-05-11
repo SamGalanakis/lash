@@ -6,7 +6,7 @@ use crossterm::event::{
 };
 use lash::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, InjectedTurnInput, RunMode, ToolState};
+use lash_core::{CachedModelCatalog, InjectedTurnInput, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -304,15 +304,7 @@ pub(super) async fn process_pending_monitor_wakes(
     }
 
     let prepared_turn = PreparedTurn::prepare(String::new(), Vec::new(), &app.skills);
-    let turn_input = TurnInput {
-        items: Vec::new(),
-        image_blobs: Default::default(),
-        mode: Some(RunMode::Normal),
-        mode_turn_options: None,
-        trace_turn_id: None,
-        mode_extension: None,
-        turn_context: lash_core::TurnContext::default(),
-    };
+    let turn_input = TurnInput::empty();
     send_user_message(
         prepared_turn,
         turn_input,

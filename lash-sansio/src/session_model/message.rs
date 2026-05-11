@@ -1,5 +1,8 @@
 use crate::AttachmentRef;
-use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ResponseTextMeta};
+use crate::llm::types::{
+    LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, ProviderReasoningReplay,
+    ProviderReplayMeta, ResponseTextMeta,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
@@ -58,51 +61,22 @@ pub struct Part {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    /// Provider-specific item-id for a `ToolCall` part (e.g. Codex
-    /// Responses API `fc_...`). Preserved across turns so the Codex
-    /// adapter can re-emit it on the next request body. `None` for
-    /// providers that don't surface a distinct item-id.
+    /// Opaque provider replay state attached to a `ToolCall` part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_item_id: Option<String>,
-    /// Opaque signature or reasoning payload attached to a `ToolCall`
-    /// part. Gemini puts `thoughtSignature` here — required on every
-    /// function_call when Gemini 3 thinking mode is active. OpenRouter
-    /// stores a JSON-encoded `reasoning_details` entry so the Claude/
-    /// GPT variant routed through OR can round-trip its encrypted CoT.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_signature: Option<String>,
+    pub tool_replay: Option<ProviderReplayMeta>,
     pub prune_state: PruneState,
-    /// Populated only for `PartKind::Reasoning` parts. Carries the raw Codex
-    /// reasoning-item fields (`id`, `summary[]`, `encrypted_content`) so the
-    /// adapter can re-emit the exact same item on subsequent turns, letting
-    /// the model reuse its encrypted chain-of-thought instead of redoing it.
+    /// Populated only for `PartKind::Reasoning` parts. Carries opaque
+    /// provider replay metadata so the adapter can re-emit the exact same
+    /// reasoning item on subsequent turns.
     /// `#[serde(default, skip_serializing_if)]` so older snapshots that
     /// predate this field round-trip unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_meta: Option<ReasoningMeta>,
-    /// Responses API message metadata for assistant text parts. Legacy
-    /// snapshots omit it; adapters synthesize deterministic ids when replaying
-    /// older assistant text.
+    pub reasoning_meta: Option<ProviderReasoningReplay>,
+    /// Provider message metadata for assistant text parts. Legacy snapshots
+    /// omit it; adapters synthesize deterministic ids when replaying older
+    /// assistant text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_meta: Option<ResponseTextMeta>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub struct ReasoningMeta {
-    /// Provider-native item id (e.g. Codex `rs_...`). Empty when the item
-    /// was only observed as streaming summary text without a final
-    /// `response.output_item.done` event.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub id: String,
-    /// Individual `summary[*].text` entries as returned by the provider.
-    /// Preserved verbatim so re-emission on the next turn matches the
-    /// original shape the provider minted (Codex is sensitive to this).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub summary: Vec<String>,
-    /// Encrypted chain-of-thought blob. Required for Codex re-feeding —
-    /// parts without it are display-only and must NOT be re-emitted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_content: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -121,8 +95,8 @@ pub enum PartKind {
     /// to re-feed the model on the next turn (fix 1.3b) live in
     /// `reasoning_meta`. Reasoning parts are preserved across snapshots so
     /// next-turn re-feeding survives session resume; they are never rendered
-    /// into the flat chat prompt — Codex re-emission goes through its own
-    /// channel, other providers drop reasoning parts entirely.
+    /// into the flat chat prompt. Provider adapters decide whether and how
+    /// to re-emit them through their native channel.
     Reasoning,
 }
 
@@ -148,8 +122,8 @@ pub enum PruneState {
 impl Part {
     pub fn prompt_char_count(&self) -> usize {
         // Reasoning parts are not user-visible text and aren't sent to the
-        // model as flat prompt content (the Codex adapter re-emits them
-        // via a structured channel instead). Excluding them from the
+        // model as flat prompt content. Provider adapters may re-emit them
+        // via structured replay metadata instead. Excluding them from the
         // accounting keeps the rolling-history plugin's prune decisions
         // driven by real conversation content.
         if matches!(self.kind, PartKind::Reasoning) {
@@ -252,9 +226,8 @@ fn render_message_for_transcript(msg: &Message, attachments: &mut Vec<LlmAttachm
     let mut out = Vec::new();
     for part in msg.parts.iter() {
         // Reasoning items are display-only from the transcript's point of
-        // view — they are never replayed as flat text. The Codex adapter has
-        // its own wire channel that re-emits the raw reasoning item on the
-        // next turn (fix 1.3b); other providers drop reasoning entirely.
+        // view — they are never replayed as flat text. Provider adapters use
+        // structured replay metadata when they can re-emit reasoning.
         if matches!(part.kind, PartKind::Reasoning) {
             continue;
         }
@@ -670,42 +643,15 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
         for part in msg.parts.iter() {
             match part.kind {
                 PartKind::Reasoning => {
-                    // Reasoning parts carry two distinct replay payloads:
-                    //  - Codex: `reasoning_meta.encrypted_content` (opaque
-                    //    CoT blob) paired with `reasoning_meta.id` and
-                    //    `summary[*].text` entries.
-                    //  - Anthropic: `reasoning_meta.encrypted_content` is
-                    //    reused to carry the `thinking` signature (base64).
-                    //    The flat signature lives there because lash doesn't
-                    //    need to distinguish between the two until the
-                    //    adapter picks it up.
-                    //
-                    // Parts without a signature/encrypted_content are
-                    // display-only (partial streaming summaries before the
-                    // server's `output_item.done`) and MUST NOT be replayed.
                     let Some(meta) = part.reasoning_meta.as_ref() else {
                         continue;
                     };
-                    let Some(blob) = meta.encrypted_content.clone() else {
+                    if meta.is_empty() {
                         continue;
-                    };
+                    }
                     blocks.push(LlmContentBlock::Reasoning {
                         text: part.content.clone(),
-                        // lash persists one opaque string per reasoning
-                        // item. Adapters read the one they understand:
-                        // Codex reads `encrypted_content`, Anthropic reads
-                        // `signature`. Keep both fields populated with the
-                        // same payload so either adapter works without a
-                        // round-trip discriminator.
-                        signature: Some(blob.clone()),
-                        redacted: false,
-                        item_id: if meta.id.is_empty() {
-                            None
-                        } else {
-                            Some(meta.id.clone())
-                        },
-                        encrypted_content: Some(blob),
-                        summary: meta.summary.clone(),
+                        replay: Some(meta.clone()),
                     });
                 }
                 PartKind::ToolCall => {
@@ -715,8 +661,7 @@ fn append_structured_prompt(rendered: &mut RenderedPrompt, msgs: &[Message]) {
                         call_id,
                         tool_name,
                         input_json: part.content.clone(),
-                        item_id: part.tool_item_id.clone(),
-                        signature: part.tool_signature.clone(),
+                        replay: part.tool_replay.clone(),
                     });
                 }
                 PartKind::ToolResult => {
@@ -788,8 +733,7 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -817,8 +761,7 @@ mod tests {
             }),
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -924,8 +867,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -943,8 +885,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -992,8 +933,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1011,8 +951,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("ask_1".to_string()),
                     tool_name: Some("ask".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1108,8 +1047,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("exec_command".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1152,8 +1090,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1171,8 +1108,7 @@ mod tests {
                     attachment: None,
                     tool_call_id: Some("tc1".to_string()),
                     tool_name: Some("read_file".to_string()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1194,8 +1130,7 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -1265,8 +1200,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: Some("tc1".to_string()),
                 tool_name: Some("read_file".to_string()),
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -1280,10 +1214,10 @@ mod tests {
 
     // ─── Reasoning-part roundtrip (fix 1.3b) ──────────────────────────
     //
-    // Codex reasoning items carry an encrypted chain-of-thought blob
-    // that the adapter re-emits on the next turn. The session-model
-    // layer stores these parts so they survive resume/snapshot and
-    // flows them through as `kind == "reasoning"` LlmMessages.
+    // Provider reasoning items can carry replay metadata that the adapter
+    // re-emits on the next turn. The session-model layer stores these parts
+    // so they survive resume/snapshot and flows them through as
+    // `kind == "reasoning"` LlmMessages.
 
     fn reasoning_part_fixture(encrypted: Option<&str>) -> Part {
         Part {
@@ -1293,13 +1227,14 @@ mod tests {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
-            reasoning_meta: Some(ReasoningMeta {
-                id: "rs_xyz".to_string(),
+            reasoning_meta: encrypted.map(|encrypted| ProviderReasoningReplay {
+                item_id: Some("rs_xyz".to_string()),
                 summary: vec!["Thinking.".to_string()],
-                encrypted_content: encrypted.map(str::to_string),
+                encrypted_content: Some(encrypted.to_string()),
+                signature: None,
+                redacted: false,
             }),
             response_meta: None,
         }
@@ -1319,7 +1254,7 @@ mod tests {
         let part = &deserialized[0].parts[0];
         assert!(matches!(part.kind, PartKind::Reasoning));
         let meta = part.reasoning_meta.as_ref().expect("meta survives");
-        assert_eq!(meta.id, "rs_xyz");
+        assert_eq!(meta.item_id.as_deref(), Some("rs_xyz"));
         assert_eq!(meta.summary, vec!["Thinking.".to_string()]);
         assert_eq!(meta.encrypted_content.as_deref(), Some("CIPHER=="));
     }
@@ -1369,17 +1304,11 @@ mod tests {
         let rendered = render_structured_prompt(&replayable);
         assert_eq!(rendered.messages.len(), 1);
         match &rendered.messages[0].blocks[0] {
-            LlmContentBlock::Reasoning {
-                encrypted_content,
-                signature,
-                item_id,
-                summary,
-                ..
-            } => {
-                assert_eq!(encrypted_content.as_deref(), Some("CIPHER=="));
-                assert_eq!(signature.as_deref(), Some("CIPHER=="));
-                assert_eq!(item_id.as_deref(), Some("rs_xyz"));
-                assert_eq!(summary, &vec!["Thinking.".to_string()]);
+            LlmContentBlock::Reasoning { replay, .. } => {
+                let replay = replay.as_ref().expect("reasoning replay");
+                assert_eq!(replay.encrypted_content.as_deref(), Some("CIPHER=="));
+                assert_eq!(replay.item_id.as_deref(), Some("rs_xyz"));
+                assert_eq!(replay.summary, vec!["Thinking.".to_string()]);
             }
             other => panic!("expected Reasoning block, got {other:?}"),
         }

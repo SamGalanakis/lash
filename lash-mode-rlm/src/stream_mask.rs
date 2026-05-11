@@ -194,8 +194,8 @@ impl FenceDetector {
                 if has_closing_fence(&self.fence_body, self.opener_len) {
                     self.fence_closed = true;
                     return AssistantStreamTransform {
-                        chunk: prose_before,
-                        reasoning_deltas: Vec::new(),
+                        chunk: String::new(),
+                        reasoning_deltas: non_empty_reasoning_delta(prose_before),
                         events,
                         abort_stream: true,
                     };
@@ -203,8 +203,8 @@ impl FenceDetector {
             }
 
             return AssistantStreamTransform {
-                chunk: prose_before,
-                reasoning_deltas: Vec::new(),
+                chunk: String::new(),
+                reasoning_deltas: non_empty_reasoning_delta(prose_before),
                 events,
                 abort_stream: false,
             };
@@ -228,11 +228,19 @@ impl FenceDetector {
         let flushed = self.pending[..safe_len].to_string();
         self.pending = self.pending[safe_len..].to_string();
         AssistantStreamTransform {
-            chunk: flushed,
-            reasoning_deltas: Vec::new(),
+            chunk: String::new(),
+            reasoning_deltas: non_empty_reasoning_delta(flushed),
             events: Vec::new(),
             abort_stream: false,
         }
+    }
+}
+
+fn non_empty_reasoning_delta(text: String) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![text]
     }
 }
 
@@ -338,11 +346,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prose_streams_through_before_fence() {
+    fn prose_streams_as_reasoning_before_fence() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Hello, here's my plan.\n\n");
-        assert_eq!(t.chunk, "Hello, here's my plan.\n\n");
-        assert!(t.reasoning_deltas.is_empty());
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Hello, here's my plan.\n\n"]);
         assert!(t.events.is_empty());
     }
 
@@ -350,8 +358,8 @@ mod tests {
     fn short_prose_without_newline_streams_immediately() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Hi - what can I help with?");
-        assert_eq!(t.chunk, "Hi - what can I help with?");
-        assert!(t.reasoning_deltas.is_empty());
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Hi - what can I help with?"]);
         assert!(d.pending.is_empty());
         assert!(t.events.is_empty());
     }
@@ -360,7 +368,8 @@ mod tests {
     fn only_possible_fence_suffix_is_held() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Plan. ```la");
-        assert_eq!(t.chunk, "Plan. ");
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Plan. "]);
         assert_eq!(d.pending, "```la");
 
         let t = d.process_chunk("shlang\n");
@@ -374,11 +383,13 @@ mod tests {
     fn non_lashlang_fence_flushes_after_it_stops_matching() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Example: ``");
-        assert_eq!(t.chunk, "Example: ");
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Example: "]);
         assert_eq!(d.pending, "``");
 
         let t = d.process_chunk("`python\n");
-        assert_eq!(t.chunk, "```python\n");
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["```python\n"]);
         assert!(!d.inside_fence);
         assert!(d.pending.is_empty());
     }
@@ -387,8 +398,8 @@ mod tests {
     fn fence_in_single_chunk() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Thinking...\n\n```lashlang\ncode\n```\n");
-        assert_eq!(t.chunk, "Thinking...\n\n");
-        assert!(t.reasoning_deltas.is_empty());
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Thinking...\n\n"]);
         assert_eq!(t.events.len(), 1);
         assert!(matches!(
             &t.events[0],
@@ -400,7 +411,8 @@ mod tests {
     fn fence_split_across_chunks() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Plan.\n\n");
-        assert_eq!(t.chunk, "Plan.\n\n");
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Plan.\n\n"]);
         // ``` arrives alone — held as pending
         assert_eq!(d.process_chunk("```").chunk, "");
         // language tag arrives — now the opener is complete
@@ -436,11 +448,11 @@ mod tests {
     }
 
     #[test]
-    fn non_lashlang_fence_streams_through() {
+    fn non_lashlang_fence_streams_as_reasoning_without_masking() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Example:\n\n```python\nprint('hi')\n```\n");
-        assert!(!t.chunk.is_empty());
-        assert!(t.reasoning_deltas.is_empty());
+        assert!(t.chunk.is_empty());
+        assert!(!t.reasoning_deltas.is_empty());
         assert!(t.events.is_empty());
     }
 
@@ -451,7 +463,8 @@ mod tests {
         // exactly one opener.
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Check:\n\n```rlm\nprint x\n```\n");
-        assert!(t.chunk.contains("```rlm"));
+        assert!(t.chunk.is_empty());
+        assert!(t.reasoning_deltas.join("").contains("```rlm"));
         assert!(t.events.is_empty());
     }
 
@@ -459,7 +472,8 @@ mod tests {
     fn inline_backticks_do_not_trigger() {
         let mut d = FenceDetector::new();
         let t = d.process_chunk("Use ```lashlang in your code.\n");
-        assert!(t.chunk.contains("lashlang"));
+        assert!(t.chunk.is_empty());
+        assert!(t.reasoning_deltas.join("").contains("lashlang"));
         assert!(t.events.is_empty());
     }
 
@@ -471,8 +485,10 @@ mod tests {
         d.reset();
 
         let t = d.process_chunk("New response.\n\n```lashlang\ncode\n```\n");
-        assert!(t.chunk.starts_with("New response."));
-        assert!(!t.chunk.contains("How can I help"));
+        assert_eq!(t.chunk, "");
+        let reasoning = t.reasoning_deltas.join("");
+        assert!(reasoning.starts_with("New response."));
+        assert!(!reasoning.contains("How can I help"));
     }
 
     #[test]
@@ -510,7 +526,7 @@ mod tests {
         assert!(d.pending.is_empty());
 
         let t = d.process_chunk("Result.\n");
-        assert_eq!(t.chunk, "Result.\n");
-        assert!(t.reasoning_deltas.is_empty());
+        assert_eq!(t.chunk, "");
+        assert_eq!(t.reasoning_deltas, vec!["Result.\n"]);
     }
 }

@@ -677,14 +677,18 @@ mod tests {
         async fn snapshot_current(
             &self,
         ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
-            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
+            Err(lash_core::plugin::PluginError::Session(
+                "not used".to_string(),
+            ))
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
         ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
-            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
+            Err(lash_core::plugin::PluginError::Session(
+                "not used".to_string(),
+            ))
         }
     }
 
@@ -788,10 +792,15 @@ mod tests {
             &self,
             _request: lash_core::SessionCreateRequest,
         ) -> Result<lash_core::SessionHandle, lash_core::plugin::PluginError> {
-            Err(lash_core::plugin::PluginError::Session("not used".to_string()))
+            Err(lash_core::plugin::PluginError::Session(
+                "not used".to_string(),
+            ))
         }
 
-        async fn close_session(&self, _session_id: &str) -> Result<(), lash_core::plugin::PluginError> {
+        async fn close_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<(), lash_core::plugin::PluginError> {
             Ok(())
         }
     }

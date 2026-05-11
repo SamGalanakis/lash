@@ -256,7 +256,7 @@ pub(super) async fn handle_change_provider(
 
     match setup_result {
         Ok(new_cfg) => {
-            let new_provider = match new_cfg.build_active_provider() {
+            let mut new_provider = match new_cfg.build_active_provider() {
                 Ok(p) => p,
                 Err(err) => {
                     push_system_message(
@@ -284,6 +284,7 @@ pub(super) async fn handle_change_provider(
                     format!("Provider updated, but saving config failed: {}", e),
                 );
             }
+            crate::expose_provider_thinking(&mut new_provider);
             *provider = new_provider;
             if let Err(err) = model_catalog
                 .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)

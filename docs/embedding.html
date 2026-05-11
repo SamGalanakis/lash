@@ -3,11 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Embedding API - lash Docs</title>
+<title>Lash API - lash Docs</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="./architecture/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#content">Skip to content</a>
   <main class="page">
     <div class="frame">
       <aside class="sidebar" aria-label="Documentation navigation">
@@ -15,30 +16,54 @@
         <details class="sidebar__disclosure" open>
           <summary>
             <span class="sidebar__label">Guide</span>
-            <span class="sidebar__current">Embedding API</span>
+            <span class="sidebar__current">Lash API</span>
           </summary>
           <ol class="sidebar__chapters">
-            <li><a class="active" href="./embedding.html">Embedding API</a></li>
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a class="active" href="./embedding.html">Lash API</a></li>
+            <li><a href="./example-agent-service.html">Agent Service</a></li>
+            <li><a href="./cli.html">CLI</a></li>
+            <li><a href="./plugins.html">Plugins</a></li>
+            <li><a href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
             <li><a href="./architecture/">Architecture</a></li>
             <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#core-shape">Core Shape</a></li>
+            <li><a href="#run-a-turn">Run A Turn</a></li>
+            <li><a href="#input-boundary">Input Boundary</a></li>
+            <li><a href="#semantic-events">Semantic Events</a></li>
+            <li><a href="#token-usage">Token Usage</a></li>
+            <li><a href="#rlm-and-submit">RLM And Submit</a></li>
+            <li><a href="#prompt-templates">Prompt Templates</a></li>
+            <li><a href="#typed-plugin-input">Typed Plugin Input</a></li>
+            <li><a href="#app-storage">App Storage</a></li>
+            <li><a href="#mcp-servers">MCP Servers</a></li>
+            <li><a href="#advanced-runtime">Advanced Runtime</a></li>
+            <li><a href="#complete-example">Complete Example</a></li>
+            <li><a href="#related-guides">Related Guides</a></li>
+          </ol>
+        </nav>
       </aside>
 
       <header class="hero">
         <div class="eyebrow">lash guide</div>
-        <h1>embedding<span class="slash">/</span>api</h1>
-        <p><code>lash</code> is the app-facing layer for building Lash into a web service, desktop app, benchmark harness, or product workflow. Your app owns storage, auth, HTTP, frontend protocols, and product state; Lash owns model turns, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
+        <h1>lash<span class="slash">/</span>api</h1>
+        <p><code>lash</code> is the app-facing layer for building Lash into a web service, desktop app, benchmark harness, or product workflow. Your app owns the boundaries — storage, auth, transport, and product state. Lash owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
       </header>
 
-      <section class="content">
-        <div class="section">
+      <section class="content" id="content">
+        <div class="section" id="core-shape">
           <div class="section-header">
             <h2>Core Shape</h2>
             <p>Build one shared <code>LashCore</code> for app-wide configuration, then open one <code>LashSession</code> per app conversation or task.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">Embed host boundary</div>
+            <div class="diagram-title">lash vs lash-core boundary</div>
             <pre><code>use std::sync::Arc;
 
 use lash::{tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
@@ -76,7 +101,7 @@ println!("{assistant_text}");</code></pre>
           </dl>
         </div>
 
-        <div class="section">
+        <div class="section" id="run-a-turn">
           <div class="section-header">
             <h2>Run A Turn</h2>
             <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>TurnOutput</code> with the terminal <code>TurnResult</code> and the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
@@ -110,10 +135,10 @@ let turn = session
 persist(app_turn_state.assistant_text(), turn.total_usage())?;</code></pre>
             </article>
           </div>
-          <p>Apps own their projection policy. Fold <code>TurnActivity</code> directly when persisting assistant prose, terminal values, tool summaries, or timelines.</p>
+          <p>Apps own their projection policy. Fold <code>TurnActivity</code> directly when persisting assistant prose, terminal values, tool summaries, or timelines. Treat <code>TurnActivity.correlation_id</code> as the stable identity for multi-phase UI rows: start events insert rows, completion events update those same rows.</p>
         </div>
 
-        <div class="section">
+        <div class="section" id="input-boundary">
           <div class="section-header">
             <h2>Input Boundary</h2>
             <p><code>TurnInput</code> is semantic core input: text plus image references backed by the attachment store. Filesystem syntax is a host concern.</p>
@@ -124,33 +149,60 @@ persist(app_turn_state.assistant_text(), turn.total_usage())?;</code></pre>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="semantic-events">
           <div class="section-header">
             <h2>Semantic Events</h2>
-            <p>The app stream is additive. Assistant prose arrives as deltas, tool and code activity arrive as structured events, and terminal values authored by <code>submit</code> or tool controls arrive as <code>SubmittedValue</code> or <code>ToolValue</code>.</p>
+            <p>The app stream is semantic and identity-bearing. Assistant prose arrives as deltas, reasoning arrives as deltas, multi-phase tool/code activity carries a correlation id, and terminal values authored by <code>submit</code> or tool controls arrive as <code>SubmittedValue</code> or <code>ToolValue</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
             <pre><code>use async_trait::async_trait;
 use lash::{TurnActivity, TurnActivitySink, TurnEvent};
 
-struct AppEvents;
+struct AppEvents {
+    tx: AppUiTx,
+    turn_state: std::sync::Mutex&lt;TurnUiState&gt;,
+}
+
+#[derive(Default)]
+struct TurnUiState {
+    reasoning: Option&lt;UiRowId&gt;,
+    tools: std::collections::HashMap&lt;String, UiRowId&gt;,
+    code: Option&lt;UiRowId&gt;,
+}
 
 #[async_trait]
 impl TurnActivitySink for AppEvents {
     async fn emit(&amp;self, activity: TurnActivity) {
+        let correlation_id = activity.correlation_id.0.clone();
         match activity.event {
             TurnEvent::AssistantProseDelta { text } =&gt; {
                 append_live_text(text).await;
             }
+            TurnEvent::ReasoningDelta { text } =&gt; {
+                let row = self.turn_state.lock().unwrap().reasoning.clone();
+                let row = upsert_reasoning_row(row, text).await;
+                self.turn_state.lock().unwrap().reasoning = Some(row);
+            }
             TurnEvent::ToolCallStarted { name, args, .. } =&gt; {
-                show_tool_started(name, args).await;
+                let row = insert_tool_row(name, args).await;
+                self.turn_state
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .insert(correlation_id, row);
             }
             TurnEvent::ToolCallCompleted { name, result, success, .. } =&gt; {
-                show_tool_result(name, result.raw, success).await;
+                let row = self.turn_state.lock().unwrap().tools.remove(&amp;correlation_id);
+                update_or_insert_tool_row(row, name, result, success).await;
             }
             TurnEvent::CodeBlockStarted { language, code } =&gt; {
-                show_code_block(language, code).await;
+                let row = insert_code_row(language, code).await;
+                self.turn_state.lock().unwrap().code = Some(row);
+            }
+            TurnEvent::CodeBlockCompleted { language, output, error, success, .. } =&gt; {
+                let row = self.turn_state.lock().unwrap().code.take();
+                update_or_insert_code_row(row, language, output, error, success).await;
             }
             TurnEvent::SubmittedValue { value } =&gt; {
                 append_live_text(render_terminal_value(&amp;value)).await;
@@ -165,9 +217,7 @@ impl TurnActivitySink for AppEvents {
             TurnEvent::ChildUsage { source, usage, cumulative, .. } =&gt; {
                 update_child_usage(source, usage, cumulative).await;
             }
-            TurnEvent::ReasoningDelta { .. }
-            | TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::Error { .. }
+            TurnEvent::Error { .. }
             | _ =&gt; {}
         }
     }
@@ -182,12 +232,12 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
 }</code></pre>
           </div>
           <div class="callout">
-            <strong>Do not synthesize a second final answer.</strong>
-            <p><code>TurnEvent::SubmittedValue</code> and <code>TurnEvent::ToolValue</code> mean “a new terminal value was authored by a control path.” They are not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code>.</p>
+            <strong>Use event identity, not duplicate detection.</strong>
+            <p><code>ToolCallStarted</code> and <code>ToolCallCompleted</code> describe the same logical row when their <code>correlation_id</code> matches; code-block events work the same way. <code>TurnEvent::SubmittedValue</code> and <code>TurnEvent::ToolValue</code> mean “a new terminal value was authored by a control path.” They are not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code>.</p>
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="token-usage">
           <div class="section-header">
             <h2>Token Usage</h2>
             <p>Four channels surface token usage, finest granularity to coarsest. Pick the one that matches what you want to display or persist.</p>
@@ -205,7 +255,7 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
           <p>The full re-export and well-known <code>source</code> label constants live in <code>lash::usage</code>.</p>
         </div>
 
-        <div class="section">
+        <div class="section" id="rlm-and-submit">
           <div class="section-header">
             <h2>RLM And Submit</h2>
             <p>RLM turns can require <code>submit</code> or allow direct prose. With <code>SubmitRequired</code>, a <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::SubmittedValue</code>, and emits a <code>SubmittedValue</code> semantic event. With <code>ProseOrSubmit</code>, a no-code prose answer finishes as <code>TurnFinish::AssistantMessage</code> and emits no terminal-value event.</p>
@@ -243,7 +293,7 @@ let prose_or_submit = session
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="prompt-templates">
           <div class="section-header">
             <h2>Prompt Templates And Slots</h2>
             <p><code>lash</code> exposes the same prompt model as the runtime: one effective template chooses the layout, while slot contributions supply app, session, and turn-specific content. Core, session, and turn layers inherit by default; a lower layer can replace or clear one slot without rebuilding the whole template.</p>
@@ -300,7 +350,7 @@ let result = session
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="typed-plugin-input">
           <div class="section-header">
             <h2>Typed Plugin Input</h2>
             <p>Plugin bindings let an app provide strongly typed session configuration and per-turn input. The binding activates an ordinary core plugin factory for that session; the resulting session plugin registers prompt contributions, tools, and other capabilities through <code>PluginRegistrar</code>.</p>
@@ -365,7 +415,7 @@ impl lash::tools::ToolProvider for BoardTools {
     }
 }</code></pre>
           </div>
-          <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. Embed streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
+          <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. App streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
           <p>Plugin crates should export a domain extension trait that wraps the generic input primitive:</p>
           <pre><code>trait BoardTurnExt {
     fn with_board(self, board: BoardState) -&gt; Self;
@@ -398,7 +448,7 @@ let result = session
     .await?;</code></pre>
         </div>
 
-        <div class="section">
+        <div class="section" id="app-storage">
           <div class="section-header">
             <h2>App Storage</h2>
             <p>Keep product storage separate from runtime storage. Your app database can store chats, users, messages, and UI state; Lash session persistence stores the runtime graph and checkpoints through a <code>SessionStoreFactory</code>.</p>
@@ -409,7 +459,36 @@ let result = session
           </div>
         </div>
 
-        <div class="section">
+        <div class="section" id="mcp-servers">
+          <div class="section-header">
+            <h2>MCP Servers</h2>
+            <p>MCP (Model Context Protocol) servers attach via the <code>lash-plugin-mcp</code> crate, which wraps the official <code>rmcp</code> SDK and supports the three standard transports — <code>stdio</code> (child process), <code>streamable_http</code>, and <code>sse</code>. The plugin owns a shared connection pool: every session built from the same <code>LashCore</code> reuses the same client per server, so stdio servers spawn once per process instead of per session.</p>
+          </div>
+          <pre><code>use std::collections::BTreeMap;
+use lash_plugin_mcp::{McpPluginFactory, McpServerConfig};
+
+let mut servers = BTreeMap::new();
+servers.insert(
+    "docs".to_string(),
+    McpServerConfig::stdio("uvx", vec!["mcp-server-docs".into()]),
+);
+servers.insert(
+    "web".to_string(),
+    McpServerConfig::streamable_http("https://mcp.example.com/rpc"),
+);
+
+let mcp = McpPluginFactory::new(servers).await?;
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .plugin(std::sync::Arc::new(mcp))
+    .build()?;</code></pre>
+          <p>Tools are surfaced under <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> names with their original input and output schemas preserved. The factory's <code>attach_server</code> / <code>detach_server</code> methods let hosts add or remove servers at runtime without rebuilding the core.</p>
+        </div>
+
+        <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
             <p>The normal builder exposes app-facing setup. Use <code>.advanced()</code> only for runtime-host concerns such as custom plugin hosts, shared task executors, residency policy, imported <code>RuntimeCoreConfig</code>, and termination policy.</p>
@@ -422,21 +501,37 @@ let result = session
     .advanced()
     .residency(Residency::ActivePathOnly)
     .build()?;</code></pre>
-          <p>Turn streaming is semantic by default: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> items and resolves with a rich <code>TurnResult</code>. Raw runtime telemetry belongs in tracing and lower-level runtime debugging, not the normal embed surface.</p>
+          <p>Turn streaming is semantic by default: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> items and resolves with a rich <code>TurnResult</code>. Raw runtime telemetry belongs in tracing and lower-level runtime debugging, not the normal <code>lash</code> API surface.</p>
         </div>
 
-        <div class="section">
+        <div class="section" id="complete-example">
           <div class="section-header">
             <h2>Complete Example</h2>
             <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>
-          <p>Source: <code>examples/agent-service</code>.</p>
+          <p>Source: <code>examples/agent-service</code>. The dedicated walkthrough is <a href="./example-agent-service.html">Agent Service</a>.</p>
+        </div>
+
+        <div class="section" id="related-guides">
+          <div class="section-header">
+            <h2>Related Guides</h2>
+            <p>Focused walkthroughs for the topics above.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><a href="./quickstart.html">Quickstart</a></h3><p>The one-screen hello-world: minimal builder, one turn, prose extraction. Skip the boilerplate, start here.</p></article>
+            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>The complete browser example: OpenRouter, RLM submit, typed plugin input, app tools, semantic streaming, per-chat model selection, and SQLite persistence.</p></article>
+            <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p>Writing a plugin: <code>PluginFactory</code>, <code>SessionPlugin</code>, registering tools and hooks, the cheap-build contract, four reference plugins in the workspace.</p></article>
+            <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p>Wiring up <code>lash-sqlite-store</code>, what gets persisted, in-memory mode, GC and vacuum operations.</p></article>
+            <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p>Enabling traces, the <code>TraceSink</code> trait, JSONL schema v2, fan-out sinks, the <code>lash-trace-viewer</code> binary, and OTel export.</p></article>
+            <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>If you're building on top of the shipping <code>lash</code> binary: slash commands, keyboard shortcuts, config schema, env vars, resume/fork flow.</p></article>
+            <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, runtime residency, session graph, plugin host traits, providers, Lashlang internals — everything one layer deeper than the app-facing <code>lash</code> API.</p></article>
+          </div>
         </div>
       </section>
 
-      <footer class="footer">Embedding anchors: <code>lash/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash/src/runtime/*</code>.</footer>
+      <footer class="footer">Lash API anchors: <code>lash/src/lib.rs</code>, <code>lash/src/core.rs</code>, <code>lash/src/session.rs</code>, <code>lash-plugin-mcp/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash-core/src/runtime/*</code>.</footer>
     </div>
   </main>
 </body>

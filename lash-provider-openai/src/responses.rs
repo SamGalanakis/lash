@@ -1,4 +1,5 @@
 use crate::support::*;
+use lash_core::llm::types::{ProviderReasoningReplay, ProviderReplayMeta};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResponsesStreamingToolCall {
@@ -97,11 +98,7 @@ impl ResponsesStreamState {
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Reasoning {
             text: String::new(),
-            signature: None,
-            redacted: false,
-            item_id: None,
-            encrypted_content: None,
-            summary: Vec::new(),
+            replay: None,
         });
         self.current_reasoning_part = Some(index);
     }
@@ -145,20 +142,15 @@ impl ResponsesStreamState {
         else {
             return;
         };
-        let LlmOutputPart::Reasoning {
-            item_id,
-            encrypted_content,
-            summary,
-            ..
-        } = part
-        else {
+        let LlmOutputPart::Reasoning { replay, .. } = part else {
             return;
         };
+        let meta = replay.get_or_insert_with(ProviderReasoningReplay::default);
         if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-            *item_id = Some(id.to_string());
+            meta.item_id = Some(id.to_string());
         }
         if let Some(blob) = item.get("encrypted_content").and_then(|v| v.as_str()) {
-            *encrypted_content = Some(blob.to_string());
+            meta.encrypted_content = Some(blob.to_string());
         }
         if let Some(arr) = item.get("summary").and_then(|v| v.as_array()) {
             let texts = arr
@@ -166,7 +158,7 @@ impl ResponsesStreamState {
                 .filter_map(|entry| entry.get("text").and_then(|v| v.as_str()).map(String::from))
                 .collect::<Vec<_>>();
             if !texts.is_empty() {
-                *summary = texts;
+                meta.summary = texts;
             }
         }
     }
@@ -226,8 +218,10 @@ impl ResponsesStreamState {
             call_id: tool_call.call_id,
             tool_name: tool_call.tool_name,
             input_json: tool_call.input_json,
-            item_id: (!tool_call.item_id.is_empty()).then_some(tool_call.item_id),
-            signature: None,
+            replay: (!tool_call.item_id.is_empty()).then_some(ProviderReplayMeta {
+                item_id: Some(tool_call.item_id),
+                opaque: None,
+            }),
         };
         self.parts.push(part.clone());
         Some(part)

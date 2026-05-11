@@ -12,6 +12,12 @@ use std::sync::Arc;
 
 use lash_core::{ExecutionMode, ProviderHandle, SessionPolicy};
 
+pub const DEFAULT_EXPLORE_EXECUTION_MODE: &str = "rlm";
+
+pub fn default_explore_execution_mode() -> ExecutionMode {
+    ExecutionMode::new(DEFAULT_EXPLORE_EXECUTION_MODE)
+}
+
 /// State the registry exposes to a `Capability` while it resolves a spawn.
 pub struct CapabilityContext<'a> {
     pub parent_policy: &'a SessionPolicy,
@@ -212,9 +218,8 @@ impl CapabilityRegistry {
 /// Build the default `explore` / `peer` registry. `tier_models` supplies
 /// optional explicit model overrides keyed by tier name; absent tiers fall
 /// back to the provider's default agent model and then to the parent
-/// session's model. `explore_tier_execution_mode` pins the spawn mode for
-/// the `explore` tier (used to coerce read-only subagents to Standard mode
-/// while leaving `peer` to inherit).
+/// session's model. The built-in `explore` tier uses
+/// [`default_explore_execution_mode`] while `peer` inherits the parent mode.
 ///
 /// The `explore` tier is read-only and cannot recurse: investigative
 /// subagents that scan, summarise, or verify without mutating state. The
@@ -222,16 +227,13 @@ impl CapabilityRegistry {
 /// edits, recursion, anything the parent can do, in a fresh window.
 /// Interactive-only tools (`ask`, `showcase`, `plan_exit`) are stripped from every subagent surface regardless of
 /// capability — see `subagent_surface_contribution`.
-pub fn default_registry(
-    tier_models: &BTreeMap<String, String>,
-    explore_tier_execution_mode: ExecutionMode,
-) -> CapabilityRegistry {
+pub fn default_registry(tier_models: &BTreeMap<String, String>) -> CapabilityRegistry {
     let model_for = |name: &str| tier_models.get(name).cloned();
     let mut registry = CapabilityRegistry::new();
     registry.add(Arc::new(TierCapability::new(
         "explore",
         model_for("explore"),
-        TierExecutionMode::Explicit(explore_tier_execution_mode),
+        TierExecutionMode::Explicit(default_explore_execution_mode()),
     )));
     registry.add(Arc::new(TierCapability::new(
         "peer",

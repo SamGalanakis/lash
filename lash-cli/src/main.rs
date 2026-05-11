@@ -55,9 +55,7 @@ use dhat::Alloc as DhatAlloc;
 use lash::plugins::PluginSurfaceEvent;
 use lash::tracing::TraceLevel;
 #[cfg(test)]
-use lash::{TurnActivity, TurnEvent};
-#[cfg(test)]
-use lash_core::InputItem;
+use lash::{InputItem, TurnActivity, TurnEvent};
 #[cfg(not(feature = "dhat-heap"))]
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 #[cfg(not(feature = "dhat-heap"))]

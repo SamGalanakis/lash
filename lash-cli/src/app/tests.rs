@@ -24,8 +24,7 @@ fn part(id: &str, kind: PartKind, content: &str) -> Part {
         attachment: None,
         tool_call_id: None,
         tool_name: None,
-        tool_item_id: None,
-        tool_signature: None,
+        tool_replay: None,
         prune_state: PruneState::Intact,
         reasoning_meta: None,
         response_meta: None,
@@ -770,7 +769,7 @@ fn rlm_trajectory_reasoning_projects_as_assistant_reasoning() {
 }
 
 #[test]
-fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversation() {
+fn rlm_trajectory_final_output_projects_as_assistant_text() {
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
         mode_iteration: 0,
@@ -789,7 +788,15 @@ fn rlm_trajectory_final_output_does_not_project_visible_answer_without_conversat
     let blocks =
         timeline_items_from_test_read_view(&events, &[], &[], &UiProjectionState::default());
     let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
-    assert_eq!(variants, vec!["AssistantReasoning", "LashlangCode"]);
+    assert_eq!(
+        variants,
+        vec!["AssistantReasoning", "LashlangCode", "AssistantText"]
+    );
+    let answer = blocks.iter().find_map(|block| match block {
+        UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(answer, Some("Hi!"));
 }
 
 #[test]
@@ -830,8 +837,22 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
             "AssistantReasoning",
             "LashlangCode",
             "AssistantText",
+            "AssistantText",
         ]
     );
+}
+
+#[test]
+fn submitted_value_turn_event_projects_as_assistant_text() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+        value: serde_json::json!("**done**"),
+    }));
+
+    assert!(matches!(
+        app.timeline.last(),
+        Some(UiTimelineItem::AssistantText(text)) if text == "**done**"
+    ));
 }
 
 #[test]
@@ -873,6 +894,56 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
         blocks.get(2),
         Some(UiTimelineItem::Activity(activity)) if activity.call.tool_name == "exec_command"
     ));
+}
+
+#[test]
+fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
+    let record = ToolCallRecord {
+        call_id: Some("call-date".to_string()),
+        tool: "exec_command".to_string(),
+        args: serde_json::json!({ "cmd": "date" }),
+        result: serde_json::json!({
+            "output": "Mon May 11 01:51:25 PM CEST 2026\n",
+            "exit_code": 0
+        }),
+        success: true,
+        duration_ms: 5,
+        control: None,
+    };
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        mode_iteration: 0,
+        reasoning: "I'll check the system time.".to_string(),
+        code: "now = (call exec_command { cmd: \"date\" })?\nsubmit trim(now.output)".to_string(),
+        output: Vec::new(),
+        tool_calls: vec![record.clone()],
+        images: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!("Mon May 11 01:51:25 PM CEST 2026")),
+    };
+    let events = vec![lash_core::SessionEventRecord::Mode(
+        lash_mode_rlm::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)),
+    )];
+
+    let blocks =
+        timeline_items_from_test_read_view(&events, &[], &[record], &UiProjectionState::default());
+    let variants: Vec<&str> = blocks.iter().map(other_variant_name).collect();
+    assert_eq!(
+        variants,
+        vec![
+            "AssistantReasoning",
+            "LashlangCode",
+            "Activity",
+            "AssistantText"
+        ]
+    );
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| matches!(block, UiTimelineItem::Activity(_)))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1507,8 +1578,7 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
             attachment: None,
             tool_call_id: Some("rlm_exec_0".to_string()),
             tool_name: Some("execute_lashlang".to_string()),
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,

@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lash_core::{ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
 use serde_json::Value;
 
 use crate::SubagentSessionConfigurator;

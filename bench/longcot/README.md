@@ -13,7 +13,7 @@ All runtime artifacts live under ignored `.benchmarks/longcot/`.
 | Model | `openai/gpt-5.2` | matches upstream `src/configs/oai_gpt52.yaml` — change with `--model` |
 | Provider | `openai-compatible` (OpenRouter OAI-compat endpoint) | `--provider-id` |
 | Max turns | 50 | matches the reference RLM iteration cap |
-| Max output tokens | 125,000 | matches upstream `oai_gpt52.yaml: max_output_tokens=125000`; plumbed via `LASH_MAX_OUTPUT_TOKENS` |
+| Max output tokens | 125,000 | matches upstream `oai_gpt52.yaml: max_output_tokens=125000`; merged into shared `ProviderOptions` |
 | Reasoning variant | `high` | matches upstream `oai_gpt52.yaml: reasoning.effort=high` |
 | Max context tokens | 1,000,000 | — |
 | Execution mode | `rlm` (lashlang DSL, fixed) | the intentional delta vs the upstream raw-LLM harness |

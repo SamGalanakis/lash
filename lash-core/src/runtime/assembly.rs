@@ -11,7 +11,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 use crate::ToolCallRecord;
-use crate::llm::types::{LlmOutputPart, LlmResponse, LlmUsage};
+use crate::llm::types::{
+    LlmOutputPart, LlmResponse, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
+};
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
 
@@ -170,15 +172,13 @@ impl StandardStreamAccumulator {
         call_id: String,
         tool_name: String,
         input_json: String,
-        item_id: Option<String>,
-        signature: Option<String>,
+        replay: Option<ProviderReplayMeta>,
     ) {
         self.parts.push(LlmOutputPart::ToolCall {
             call_id,
             tool_name,
             input_json,
-            item_id,
-            signature,
+            replay,
         });
     }
 
@@ -190,78 +190,67 @@ impl StandardStreamAccumulator {
         encrypted_content: Option<String>,
     ) {
         let has_roundtrip_payload = encrypted_content.is_some();
-        if let Some(LlmOutputPart::Reasoning {
-            text: existing,
+        let replay = ProviderReasoningReplay {
+            item_id,
+            encrypted_content,
             signature: None,
             redacted: false,
-            item_id: existing_item_id,
-            encrypted_content: existing_encrypted_content,
-            summary: existing_summary,
+            summary,
+        };
+        if let Some(LlmOutputPart::Reasoning {
+            text: existing,
+            replay: existing_replay,
         }) = self.parts.last_mut()
-            && existing_item_id.is_none()
-            && existing_encrypted_content.is_none()
-            && existing_summary.is_empty()
-            && item_id.is_none()
-            && encrypted_content.is_none()
-            && summary.is_empty()
+            && existing_replay
+                .as_ref()
+                .is_none_or(ProviderReasoningReplay::is_empty)
+            && replay.is_empty()
         {
             append_stream_piece(existing, &text);
             return;
         }
         if let Some(LlmOutputPart::Reasoning {
             text: existing,
-            signature: existing_signature,
-            redacted: existing_redacted,
-            item_id: existing_item_id,
-            encrypted_content: existing_encrypted_content,
-            summary: existing_summary,
+            replay: existing_replay,
         }) = self.parts.last_mut()
             && has_roundtrip_payload
-            && existing_encrypted_content.is_none()
+            && existing_replay
+                .as_ref()
+                .is_none_or(|meta| meta.encrypted_content.is_none())
             && !existing.trim().is_empty()
             && (text.trim().is_empty() || text.contains(existing.as_str()))
         {
             if !text.trim().is_empty() && text != *existing {
                 *existing = text;
             }
-            *existing_signature = None;
-            *existing_redacted = false;
-            *existing_item_id = item_id;
-            *existing_encrypted_content = encrypted_content;
-            *existing_summary = summary;
+            *existing_replay = Some(replay);
             return;
         }
         if let Some(LlmOutputPart::Reasoning {
             text: existing,
-            signature: existing_signature,
-            redacted: existing_redacted,
-            item_id: existing_item_id,
-            encrypted_content: existing_encrypted_content,
-            summary: existing_summary,
+            replay: existing_replay,
         }) = self.parts.last_mut()
             && !has_roundtrip_payload
-            && existing_encrypted_content.is_some()
+            && existing_replay
+                .as_ref()
+                .is_some_and(|meta| meta.encrypted_content.is_some())
             && !text.trim().is_empty()
             && existing.trim().is_empty()
         {
             append_stream_piece(existing, &text);
-            *existing_signature = None;
-            *existing_redacted = false;
-            if existing_item_id.is_none() {
-                *existing_item_id = item_id;
-            }
-            if existing_summary.is_empty() {
-                *existing_summary = summary;
+            if let Some(meta) = existing_replay.as_mut() {
+                if meta.item_id.is_none() {
+                    meta.item_id = replay.item_id;
+                }
+                if meta.summary.is_empty() {
+                    meta.summary = replay.summary;
+                }
             }
             return;
         }
         self.parts.push(LlmOutputPart::Reasoning {
             text,
-            signature: None,
-            redacted: false,
-            item_id,
-            encrypted_content,
-            summary,
+            replay: (!replay.is_empty()).then_some(replay),
         });
     }
 
@@ -325,14 +314,18 @@ fn response_contains_part(response: &LlmResponse, part: &LlmOutputPart) -> bool 
                     matches!(candidate, LlmOutputPart::Text { text: candidate, .. } if candidate.contains(text))
                 })
         }
-        LlmOutputPart::Reasoning { text, item_id, .. } => {
+        LlmOutputPart::Reasoning { text, replay } => {
             text.trim().is_empty()
                 || response.parts.iter().any(|candidate| match candidate {
                     LlmOutputPart::Reasoning {
                         text: candidate,
-                        item_id: candidate_id,
+                        replay: candidate_replay,
                         ..
                     } => {
+                        let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_ref());
+                        let candidate_id = candidate_replay
+                            .as_ref()
+                            .and_then(|meta| meta.item_id.as_ref());
                         candidate.contains(text)
                             || (item_id.is_some()
                                 && candidate_id.is_some()
@@ -343,13 +336,17 @@ fn response_contains_part(response: &LlmResponse, part: &LlmOutputPart) -> bool 
                 })
         }
         LlmOutputPart::ToolCall {
-            call_id, item_id, ..
+            call_id, replay, ..
         } => response.parts.iter().any(|candidate| match candidate {
             LlmOutputPart::ToolCall {
                 call_id: candidate_call_id,
-                item_id: candidate_item_id,
+                replay: candidate_replay,
                 ..
             } => {
+                let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_ref());
+                let candidate_item_id = candidate_replay
+                    .as_ref()
+                    .and_then(|meta| meta.item_id.as_ref());
                 candidate_call_id == call_id
                     || (item_id.is_some() && candidate_item_id.is_some() && item_id == candidate_item_id)
             }
@@ -397,12 +394,9 @@ fn reconcile_accumulated_parts(
 fn part_has_visible_or_tool_content(part: &LlmOutputPart) -> bool {
     match part {
         LlmOutputPart::Text { text, .. } => !text.trim().is_empty(),
-        LlmOutputPart::Reasoning {
-            text,
-            encrypted_content,
-            signature,
-            ..
-        } => !text.trim().is_empty() || encrypted_content.is_some() || signature.is_some(),
+        LlmOutputPart::Reasoning { text, replay, .. } => {
+            !text.trim().is_empty() || replay.as_ref().is_some_and(|meta| !meta.is_empty())
+        }
         LlmOutputPart::ToolCall { .. } => true,
     }
 }
@@ -411,14 +405,18 @@ fn tool_calls_match(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> bool
     match (candidate, expected) {
         (
             LlmOutputPart::ToolCall {
-                call_id, item_id, ..
+                call_id, replay, ..
             },
             LlmOutputPart::ToolCall {
                 call_id: expected_call_id,
-                item_id: expected_item_id,
+                replay: expected_replay,
                 ..
             },
         ) => {
+            let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_ref());
+            let expected_item_id = expected_replay
+                .as_ref()
+                .and_then(|meta| meta.item_id.as_ref());
             call_id == expected_call_id
                 || (item_id.is_some() && expected_item_id.is_some() && item_id == expected_item_id)
         }
@@ -429,19 +427,23 @@ fn tool_calls_match(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> bool
 fn reasoning_matches(candidate: &LlmOutputPart, expected: &LlmOutputPart) -> bool {
     match (candidate, expected) {
         (
-            LlmOutputPart::Reasoning {
-                text,
-                item_id,
-                encrypted_content,
-                ..
-            },
+            LlmOutputPart::Reasoning { text, replay, .. },
             LlmOutputPart::Reasoning {
                 text: expected_text,
-                item_id: expected_item_id,
-                encrypted_content: expected_encrypted_content,
+                replay: expected_replay,
                 ..
             },
         ) => {
+            let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_ref());
+            let expected_item_id = expected_replay
+                .as_ref()
+                .and_then(|meta| meta.item_id.as_ref());
+            let encrypted_content = replay
+                .as_ref()
+                .and_then(|meta| meta.encrypted_content.as_ref());
+            let expected_encrypted_content = expected_replay
+                .as_ref()
+                .and_then(|meta| meta.encrypted_content.as_ref());
             (!text.trim().is_empty()
                 && !expected_text.trim().is_empty()
                 && (text.contains(expected_text) || expected_text.contains(text)))

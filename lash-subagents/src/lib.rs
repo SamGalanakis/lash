@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 pub use capability::{
     Capability, CapabilityContext, CapabilityField, CapabilityOptionalField, CapabilityRegistry,
-    CapabilitySpec, StaticCapability, TierCapability, TierExecutionMode, default_registry,
+    CapabilitySpec, DEFAULT_EXPLORE_EXECUTION_MODE, StaticCapability, TierCapability,
+    TierExecutionMode, default_explore_execution_mode, default_registry,
 };
 
 use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
@@ -174,7 +175,7 @@ mod tests {
 
     #[test]
     fn rlm_definitions_expose_spawn_without_mini_api() {
-        let registry = default_registry(&BTreeMap::new(), lash_core::ExecutionMode::standard());
+        let registry = default_registry(&BTreeMap::new());
         let rlm_defs = rlm::rlm_subagent_tool_definitions(&registry.names());
 
         assert!(rlm_defs.iter().any(|tool| tool.name == "spawn_agent"));
@@ -258,7 +259,10 @@ mod tests {
                 Err(PluginError::Session("not used in test".to_string()))
             }
 
-            async fn await_turn(&self, _turn_id: &str) -> Result<lash_core::AssembledTurn, PluginError> {
+            async fn await_turn(
+                &self,
+                _turn_id: &str,
+            ) -> Result<lash_core::AssembledTurn, PluginError> {
                 Err(PluginError::Session("not used in test".to_string()))
             }
 
@@ -311,10 +315,7 @@ mod tests {
             max_context_tokens: Some(1234),
             ..SessionPolicy::default()
         };
-        let registry = Arc::new(default_registry(
-            &BTreeMap::new(),
-            lash_core::ExecutionMode::new("rlm"),
-        ));
+        let registry = Arc::new(default_registry(&BTreeMap::new()));
         let context = lash_core::testing::mock_tool_context_with_host(Arc::new(SnapshotManager {
             snapshot: PersistedSessionState {
                 policy: live_policy.clone(),
@@ -378,10 +379,7 @@ mod tests {
     async fn standard_provider_does_not_expose_subagent_tools() {
         let factory = SubagentsPluginFactory::new(
             SessionPolicy::default(),
-            Arc::new(default_registry(
-                &BTreeMap::new(),
-                lash_core::ExecutionMode::standard(),
-            )),
+            Arc::new(default_registry(&BTreeMap::new())),
             Arc::new(LocalSubagentHost::default()),
         );
         let ctx = PluginSessionContext {
@@ -401,10 +399,7 @@ mod tests {
     async fn rlm_provider_requires_background_task_support() {
         let factory = SubagentsPluginFactory::new(
             SessionPolicy::default(),
-            Arc::new(default_registry(
-                &BTreeMap::new(),
-                lash_core::ExecutionMode::new("rlm"),
-            )),
+            Arc::new(default_registry(&BTreeMap::new())),
             Arc::new(LocalSubagentHost::default()),
         );
         let ctx = PluginSessionContext {

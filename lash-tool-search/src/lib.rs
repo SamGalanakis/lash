@@ -1470,7 +1470,8 @@ mod tests {
         std::fs::write(dir.path().join("alpha.rs"), "ctx\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
+        let result =
+            lash_core::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
         assert!(result.success);
         assert_eq!(result.result["matches"].as_array().unwrap().len(), 0);
         assert!(result.result["broadened_from"].is_null());
@@ -1523,9 +1524,12 @@ mod tests {
         std::fs::write(dir.path().join("inner/inner.txt"), "banana in inner\n").unwrap();
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
-        let result =
-            lash_core::testing::run_tool(&tool, "grep", &json!({"query": "banana", "path": "inner"}))
-                .await;
+        let result = lash_core::testing::run_tool(
+            &tool,
+            "grep",
+            &json!({"query": "banana", "path": "inner"}),
+        )
+        .await;
         assert!(result.success);
         assert!(
             result.result["matches"]

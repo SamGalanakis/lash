@@ -421,7 +421,9 @@ fn decode_msgpack<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     rmp_serde::from_slice(bytes).ok()
 }
 
-fn merge_token_ledger_entries(entries: Vec<lash_core::TokenLedgerEntry>) -> Vec<lash_core::TokenLedgerEntry> {
+fn merge_token_ledger_entries(
+    entries: Vec<lash_core::TokenLedgerEntry>,
+) -> Vec<lash_core::TokenLedgerEntry> {
     let mut merged: Vec<lash_core::TokenLedgerEntry> = Vec::new();
     for entry in entries {
         if entry.usage.total() == 0 {
@@ -516,7 +518,10 @@ impl Store {
                 nodes.push(node);
             }
         }
-        Ok(lash_core::SessionGraph::from_nodes(nodes, Some(leaf_node_id)))
+        Ok(lash_core::SessionGraph::from_nodes(
+            nodes,
+            Some(leaf_node_id),
+        ))
     }
 
     fn insert_artifact_blob_conn(

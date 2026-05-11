@@ -34,10 +34,11 @@ pub(super) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_p
         &accumulator.parts[0],
         LlmOutputPart::Reasoning {
             text,
-            item_id: Some(item_id),
-            encrypted_content: Some(encrypted),
+            replay: Some(replay),
             ..
-        } if text == "I'll check the time." && item_id == "rs_1" && encrypted == "encrypted"
+        } if text == "I'll check the time."
+            && replay.item_id.as_deref() == Some("rs_1")
+            && replay.encrypted_content.as_deref() == Some("encrypted")
     ));
 }
 
@@ -49,8 +50,10 @@ pub(super) fn stream_accumulator_preserves_reasoning_when_final_response_has_too
         "call_1".to_string(),
         "exec_command".to_string(),
         "{\"cmd\":\"date\"}".to_string(),
-        Some("item_1".to_string()),
-        Some("sig".to_string()),
+        Some(lash_sansio::llm::types::ProviderReplayMeta {
+            item_id: Some("item_1".to_string()),
+            opaque: Some("sig".to_string()),
+        }),
     );
 
     let mut response = LlmResponse {
@@ -59,8 +62,10 @@ pub(super) fn stream_accumulator_preserves_reasoning_when_final_response_has_too
             call_id: "call_1".to_string(),
             tool_name: "exec_command".to_string(),
             input_json: "{\"cmd\":\"date\"}".to_string(),
-            item_id: Some("item_1".to_string()),
-            signature: Some("sig".to_string()),
+            replay: Some(lash_sansio::llm::types::ProviderReplayMeta {
+                item_id: Some("item_1".to_string()),
+                opaque: Some("sig".to_string()),
+            }),
         }],
         ..Default::default()
     };
@@ -89,11 +94,7 @@ pub(super) fn stream_accumulator_does_not_duplicate_complete_final_response() {
         parts: vec![
             LlmOutputPart::Reasoning {
                 text: "I'll answer.".to_string(),
-                signature: None,
-                redacted: false,
-                item_id: None,
-                encrypted_content: None,
-                summary: Vec::new(),
+                replay: None,
             },
             LlmOutputPart::Text {
                 text: "Done.".to_string(),
@@ -758,7 +759,6 @@ impl crate::ToolProvider for ChildSessionTool {
                         text: "child turn".to_string(),
                     }],
                     image_blobs: HashMap::new(),
-                    mode: None,
                     mode_turn_options: None,
                     trace_turn_id: None,
                     mode_extension: None,

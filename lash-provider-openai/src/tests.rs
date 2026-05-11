@@ -1,6 +1,7 @@
 use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
+use lash_core::provider::CacheRetention;
 use std::sync::Arc;
 
 fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -305,7 +306,10 @@ fn cache_retention_none_removes_chat_cache_markers() {
     req.model = "anthropic/claude-sonnet-4.6".to_string();
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
-        .with_cache_retention(OpenAiCacheRetention::None)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::None,
+            ..ProviderOptions::default()
+        })
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -323,7 +327,10 @@ fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
     req.model = "anthropic/claude-sonnet-4.6".to_string();
 
     let body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
-        .with_cache_retention(OpenAiCacheRetention::Long)
+        .with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        })
         .build_chat_request_body(&req, true)
         .unwrap();
 
@@ -335,7 +342,10 @@ fn cache_retention_long_uses_anthropic_ttl_on_chat_cache_markers() {
 
 #[test]
 fn responses_long_cache_retention_emits_openai_retention() {
-    let provider = OpenAiProvider::new("key").with_cache_retention(OpenAiCacheRetention::Long);
+    let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
+        cache_retention: CacheRetention::Long,
+        ..ProviderOptions::default()
+    });
     let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
 
     let body = provider.build_responses_request_body(&req, true).unwrap();
@@ -343,6 +353,43 @@ fn responses_long_cache_retention_emits_openai_retention() {
     assert_eq!(body["prompt_cache_key"], "session-1");
     assert_eq!(body["prompt_cache_retention"], "24h");
     assert!(body.get("cache_control").is_none());
+}
+
+#[test]
+fn responses_none_cache_retention_omits_prompt_cache_fields() {
+    let provider = OpenAiProvider::new("key").with_options(ProviderOptions {
+        cache_retention: CacheRetention::None,
+        ..ProviderOptions::default()
+    });
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let body = provider.build_responses_request_body(&req, true).unwrap();
+
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(body.get("prompt_cache_retention").is_none());
+}
+
+#[test]
+fn max_output_tokens_uses_shared_options() {
+    let options = ProviderOptions {
+        max_output_tokens: Some(2048),
+        ..ProviderOptions::default()
+    };
+    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+    let responses_body = OpenAiProvider::new("key")
+        .with_options(options.clone())
+        .build_responses_request_body(&req, true)
+        .unwrap();
+    assert_eq!(responses_body["max_output_tokens"], 2048);
+
+    let mut chat_req = req;
+    chat_req.model = "anthropic/claude-sonnet-4.6".to_string();
+    let chat_body = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL)
+        .with_options(options)
+        .build_chat_request_body(&chat_req, true)
+        .unwrap();
+    assert_eq!(chat_body["max_tokens"], 2048);
 }
 
 #[test]
@@ -423,15 +470,17 @@ fn chat_body_replays_openrouter_reasoning_details_on_tool_calls() {
             call_id: "call_1".to_string(),
             tool_name: "lookup".to_string(),
             input_json: "{\"q\":\"x\"}".to_string(),
-            item_id: None,
-            signature: Some(
-                json!({
-                    "type": "reasoning.encrypted",
-                    "id": "call_1",
-                    "data": "encrypted"
-                })
-                .to_string(),
-            ),
+            replay: Some(ProviderReplayMeta {
+                item_id: None,
+                opaque: Some(
+                    json!({
+                        "type": "reasoning.encrypted",
+                        "id": "call_1",
+                        "data": "encrypted"
+                    })
+                    .to_string(),
+                ),
+            }),
         }],
     )]);
 
@@ -490,12 +539,15 @@ fn non_streaming_chat_parser_captures_text_tool_and_usage() {
             call_id,
             tool_name,
             input_json,
-            signature,
+            replay,
             ..
         } if call_id == "call_1"
             && tool_name == "lookup"
             && input_json == "{\"q\":\"x\"}"
-            && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+            && replay
+                .as_ref()
+                .and_then(|meta| meta.opaque.as_deref())
+                .is_some_and(|value| value.contains("encrypted"))
     ));
     assert_eq!(usage.input_tokens, 13);
     assert_eq!(usage.output_tokens, 17);
@@ -548,12 +600,15 @@ fn chat_stream_parser_captures_text_tool_done_and_usage() {
             call_id,
             tool_name,
             input_json,
-            signature,
+            replay,
             ..
         } if call_id == "call_1"
             && tool_name == "lookup"
             && input_json == "{\"q\":\"x\"}"
-            && signature.as_deref().is_some_and(|value| value.contains("encrypted"))
+            && replay
+                .as_ref()
+                .and_then(|meta| meta.opaque.as_deref())
+                .is_some_and(|value| value.contains("encrypted"))
     ));
     assert_eq!(state.usage.input_tokens, 11);
     assert_eq!(state.usage.output_tokens, 5);
@@ -628,11 +683,9 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
     let parts = state.response_parts();
     assert!(matches!(
         &parts[0],
-        LlmOutputPart::Reasoning {
-            item_id: Some(id),
-            encrypted_content: Some(blob),
-            ..
-        } if id == "rs_1" && blob == "enc"
+        LlmOutputPart::Reasoning { replay: Some(replay), .. }
+            if replay.item_id.as_deref() == Some("rs_1")
+                && replay.encrypted_content.as_deref() == Some("enc")
     ));
     assert!(matches!(
         &parts[1],
@@ -647,10 +700,10 @@ fn stream_parser_captures_text_reasoning_tool_and_phase() {
     assert!(matches!(
         &parts[2],
         LlmOutputPart::ToolCall {
-            item_id: Some(id),
+            replay: Some(replay),
             input_json,
             ..
-        } if id == "fc_1" && input_json == "{\"x\":1}"
+        } if replay.item_id.as_deref() == Some("fc_1") && input_json == "{\"x\":1}"
     ));
 }
 

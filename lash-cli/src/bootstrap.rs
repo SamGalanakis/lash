@@ -85,15 +85,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
     } = input;
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
 
-    let explore_tier_execution_mode = lash_config
-        .runtime
-        .explore_tier_subagent_execution_mode
-        .clone()
-        .unwrap_or(ExecutionMode::new("rlm"));
-    let capability_registry = Arc::new(default_registry(
-        &lash_config.agent_models,
-        explore_tier_execution_mode,
-    ));
+    let capability_registry = Arc::new(default_registry(&lash_config.agent_models));
 
     let profile = DefaultToolSurfaceProfile::for_runtime(
         session_policy.standard_context_approach.as_ref(),
@@ -383,7 +375,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     }
     let interactive_startup = !args.info && args.print_prompt.is_none();
     let startup_system_message: Option<String> = None;
-    let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
+    let (mut lash_config, mut active_provider) = if args.provider || existing_config.is_none() {
         if let Some(ref key) = shortcut_api_key {
             let provider = openai_shortcut_provider(key.clone(), &args.base_url);
             let mut cfg = existing_config
@@ -415,6 +407,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         lash_config.set_tavily_api_key(Some(key.clone()));
     }
     if args.print_prompt.is_none() {
+        crate::expose_provider_thinking(&mut active_provider);
         lash_config.save(&crate::paths::config_file())?;
     }
     let host_docs = if interactive_startup {

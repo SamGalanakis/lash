@@ -104,6 +104,30 @@ impl<'de> Deserialize<'de> for RequestTimeout {
     }
 }
 
+/// Prompt-cache lifetime hint. Providers translate this into their own
+/// wire dialect (Anthropic `cache_control` TTL, OpenRouter-Claude
+/// `cache_control` markers via Chat Completions, OpenAI Responses
+/// `prompt_cache_key` / `prompt_cache_retention`). Providers without a
+/// cache-control concept (Google, Codex) read the value but emit nothing
+/// for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheRetention {
+    /// Do not emit any cache_control markers.
+    None,
+    /// Default Anthropic ephemeral window (5 minutes).
+    #[default]
+    Short,
+    /// Extend to a 1-hour TTL where the API supports it.
+    Long,
+}
+
+impl CacheRetention {
+    pub fn is_default(&self) -> bool {
+        matches!(self, CacheRetention::Short)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderOptions {
@@ -111,12 +135,22 @@ pub struct ProviderOptions {
     pub reliability: ProviderReliability,
     #[serde(default, skip_serializing_if = "ProviderThinkingPolicy::is_default")]
     pub thinking: ProviderThinkingPolicy,
+    /// Per-request output-token cap. `None` lets each provider apply its
+    /// own default. Providers translate to their wire-specific field
+    /// (`max_tokens`, `max_output_tokens`, `maxOutputTokens`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    /// Prompt-cache lifetime hint; see [`CacheRetention`].
+    #[serde(default, skip_serializing_if = "CacheRetention::is_default")]
+    pub cache_retention: CacheRetention,
 }
 
 impl ProviderOptions {
     pub fn is_default(&self) -> bool {
         self.reliability == ProviderReliability::default_llm()
             && self.thinking == ProviderThinkingPolicy::default()
+            && self.max_output_tokens.is_none()
+            && self.cache_retention.is_default()
     }
 
     pub fn llm_timeouts(&self) -> LlmTimeouts {

@@ -13,12 +13,6 @@ use bench_tools::{BenchmarkQuestionContext, LongMemEvalSessionTools};
 use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
-use lash_core::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
-};
 use lash::{
     TurnInput,
     advanced::{
@@ -28,6 +22,12 @@ use lash::{
     prompt::{PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection},
     provider::ProviderHandle,
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
+};
+use lash_core::{
+    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -649,7 +649,6 @@ async fn run_question(
             (TurnInput {
                 items: vec![InputItem::Text { text: prompt }],
                 image_blobs: Default::default(),
-                mode: None,
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
@@ -764,10 +763,7 @@ fn build_plugin_session(
     let mut subagent_models = std::collections::BTreeMap::new();
     subagent_models.insert("explore".to_string(), session_policy.model.clone());
     subagent_models.insert("peer".to_string(), session_policy.model.clone());
-    let registry = std::sync::Arc::new(lash_subagents::default_registry(
-        &subagent_models,
-        ExecutionMode::standard(),
-    ));
+    let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(LlmToolsPluginFactory));
     factories.push(Arc::new(SubagentsPluginFactory::new(

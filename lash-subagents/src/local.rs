@@ -533,7 +533,9 @@ impl LocalSubagentHost {
     }
 }
 
-fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash_core::PluginError>) -> ManagedRunState {
+fn subagent_terminal_state(
+    outcome: &Result<AssembledTurn, lash_core::PluginError>,
+) -> ManagedRunState {
     let Ok(turn) = outcome else {
         return ManagedRunState::Failed;
     };
@@ -541,7 +543,9 @@ fn subagent_terminal_state(outcome: &Result<AssembledTurn, lash_core::PluginErro
         lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::Handoff { .. } => {
             ManagedRunState::Completed
         }
-        lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled) => ManagedRunState::Cancelled,
+        lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled) => {
+            ManagedRunState::Cancelled
+        }
         lash_core::TurnOutcome::Stopped(_) => ManagedRunState::Failed,
     }
 }

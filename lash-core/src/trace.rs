@@ -142,15 +142,14 @@ fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
             call_id,
             tool_name,
             input_json,
-            item_id,
-            signature,
+            replay,
         } => TraceContentBlock::ToolCall {
             call_id: Some(call_id.clone()),
             tool_name: tool_name.clone(),
             input_json: serde_json::from_str(input_json)
                 .unwrap_or_else(|_| serde_json::Value::String(input_json.clone())),
-            item_id: item_id.clone(),
-            has_signature: signature.is_some(),
+            item_id: replay.as_ref().and_then(|meta| meta.item_id.clone()),
+            has_signature: replay.as_ref().is_some_and(|meta| meta.opaque.is_some()),
         },
         LlmContentBlock::ToolResult {
             call_id,
@@ -161,19 +160,17 @@ fn trace_content_block(block: &LlmContentBlock) -> TraceContentBlock {
             tool_name: tool_name.clone(),
             content: content.clone(),
         },
-        LlmContentBlock::Reasoning {
-            text,
-            signature,
-            redacted,
-            item_id,
-            encrypted_content,
-            summary,
-        } => TraceContentBlock::Reasoning {
+        LlmContentBlock::Reasoning { text, replay } => TraceContentBlock::Reasoning {
             text: text.clone(),
-            item_id: item_id.clone(),
-            summary: summary.clone(),
-            has_encrypted: encrypted_content.is_some() || signature.is_some(),
-            redacted: *redacted,
+            item_id: replay.as_ref().and_then(|meta| meta.item_id.clone()),
+            summary: replay
+                .as_ref()
+                .map(|meta| meta.summary.clone())
+                .unwrap_or_default(),
+            has_encrypted: replay
+                .as_ref()
+                .is_some_and(|meta| meta.encrypted_content.is_some() || meta.signature.is_some()),
+            redacted: replay.as_ref().is_some_and(|meta| meta.redacted),
         },
     }
 }
@@ -237,34 +234,26 @@ pub(crate) fn trace_output_parts(parts: &[LlmOutputPart]) -> Option<serde_json::
                 "type": "text",
                 "text": text,
             }),
-            LlmOutputPart::Reasoning {
-                text,
-                item_id,
-                summary,
-                encrypted_content,
-                signature,
-                redacted,
-            } => serde_json::json!({
+            LlmOutputPart::Reasoning { text, replay } => serde_json::json!({
                 "type": "reasoning",
-                "id": item_id,
-                "summary": summary,
+                "id": replay.as_ref().and_then(|meta| meta.item_id.as_ref()),
+                "summary": replay.as_ref().map(|meta| &meta.summary),
                 "text": text,
-                "has_encrypted": encrypted_content.is_some() || signature.is_some(),
-                "redacted": redacted,
+                "has_encrypted": replay.as_ref().is_some_and(|meta| meta.encrypted_content.is_some() || meta.signature.is_some()),
+                "redacted": replay.as_ref().is_some_and(|meta| meta.redacted),
             }),
             LlmOutputPart::ToolCall {
                 call_id,
                 tool_name,
                 input_json,
-                item_id,
-                signature,
+                replay,
             } => serde_json::json!({
                 "type": "tool_call",
                 "call_id": call_id,
                 "tool_name": tool_name,
                 "input_json": input_json,
-                "id": item_id,
-                "has_signature": signature.is_some(),
+                "id": replay.as_ref().and_then(|meta| meta.item_id.as_ref()),
+                "has_opaque": replay.as_ref().is_some_and(|meta| meta.opaque.is_some()),
             }),
         })
         .collect::<Vec<_>>();

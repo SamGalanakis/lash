@@ -1,8 +1,8 @@
 use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
 use lash_core::{
-    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, RunMode,
-    SessionStateEnvelope, TokenUsage, TurnContext, TurnIssue, TurnOutcome, TurnStop,
+    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, SessionStateEnvelope,
+    TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
 #[cfg(test)]
 use lash_sqlite_store::Store;
@@ -21,15 +21,7 @@ pub(crate) struct RuntimeRunResult {
 pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-    TurnInput {
-        items,
-        image_blobs,
-        mode: Some(RunMode::Normal),
-        mode_turn_options: None,
-        trace_turn_id: None,
-        mode_extension: None,
-        turn_context: TurnContext::default(),
-    }
+    TurnInput::items(items).with_image_blobs(image_blobs)
 }
 
 pub(crate) fn spawn_session_turn<S>(
@@ -127,8 +119,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,

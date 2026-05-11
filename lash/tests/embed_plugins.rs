@@ -146,8 +146,7 @@ fn response_tool_call() -> LlmResponse {
             call_id: "tool-1".to_string(),
             tool_name: "typed_probe".to_string(),
             input_json: "{}".to_string(),
-            item_id: None,
-            signature: None,
+            replay: None,
         }],
         ..LlmResponse::default()
     }

@@ -23,7 +23,7 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["full", "testing"] }
+lash-core = { path = "../lash-core", default-features = false, features = ["full"] }
 lash = { path = "../lash" }
 lash-plugin-mcp = { path = "../lash-plugin-mcp" }
 lash-sqlite-store = { path = "../lash-sqlite-store" }
@@ -72,6 +72,7 @@ stats_alloc = "0.1"
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
+lash-core = { path = "../lash-core", default-features = false, features = ["full", "testing"] }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

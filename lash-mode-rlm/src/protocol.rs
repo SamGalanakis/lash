@@ -319,9 +319,12 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
                 LlmOutputPart::Text { text, .. } => {
                     append_assistant_text_part(&mut assistant_text, &text);
                 }
-                LlmOutputPart::Reasoning { text, summary, .. } => {
+                LlmOutputPart::Reasoning { text, replay } => {
                     let reasoning = if text.trim().is_empty() {
-                        summary.join("\n\n")
+                        replay
+                            .as_ref()
+                            .map(|meta| meta.summary.join("\n\n"))
+                            .unwrap_or_default()
                     } else {
                         text
                     };
@@ -590,10 +593,12 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
                 session_id: session_id.clone(),
             })
         }
-        lash_core::ToolControl::Finish { value } => Some(TurnOutcome::Finished(TurnFinish::ToolValue {
-            tool_name: record.tool.clone(),
-            value: value.clone(),
-        })),
+        lash_core::ToolControl::Finish { value } => {
+            Some(TurnOutcome::Finished(TurnFinish::ToolValue {
+                tool_name: record.tool.clone(),
+                value: value.clone(),
+            }))
+        }
         lash_core::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::ToolError {
             tool_name: record.tool.clone(),
             value: value.clone(),
@@ -781,8 +786,7 @@ fn prose_message(content: String, origin: Option<lash_core::MessageOrigin>) -> M
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -808,8 +812,7 @@ fn submit_required_reminder_message(requires_schema: bool) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -835,8 +838,7 @@ fn submit_schema_mismatch_message(error_text: &str) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,

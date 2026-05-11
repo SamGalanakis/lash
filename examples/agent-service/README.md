@@ -21,6 +21,11 @@ AGENT_SERVICE_TRACE=.agent-service/trace.jsonl
 
 Then open `http://127.0.0.1:3000`.
 
+The model and reasoning variant are also editable in the browser. The
+environment values are just the defaults for new chats; each chat persists its
+own OpenRouter model id and variant, and each turn applies that selection with
+the public `TurnBuilder::model(...)` API.
+
 The example opts into provider-level thinking exposure for demonstration,
 attaches a trace sink to `LashCore`, and writes JSONL trace records to stderr
 and `AGENT_SERVICE_TRACE` so provider payloads, RLM response, extracted
@@ -46,8 +51,15 @@ The plugin demonstrates:
   `TurnEvent::ReasoningDelta`, assistant prose as
   `TurnEvent::AssistantProseDelta`, code/tool activity as structured cards, and
   RLM `submit` as `TurnEvent::SubmittedValue`.
-- Final persistence is app-owned: the stream sink accumulates assistant prose
-  while rendering the same semantic activities live in the browser.
+- Runtime persistence is handled by `SqliteSessionStoreFactory`; each request
+  opens the Lash session from the chat id and store instead of keeping runtime
+  sessions in a process-global map.
+- Product persistence is app-owned: chat rows, board snapshots, reasoning, code
+  blocks, tool cards, and titles stay in the app database. The final assistant
+  row is derived from `TurnOutput` terminal semantics, preferring `submit` /
+  tool terminal values over streamed prose.
+- The app database uses `rusqlite` on `tokio::task::spawn_blocking`, keeping the
+  example dependency-light without blocking Axum worker tasks on SQLite calls.
 
 This example opts into `.require_submit()`, so the assistant's final user-facing
 text should be placed in `submit`. RLM also supports `.allow_prose_or_submit()`

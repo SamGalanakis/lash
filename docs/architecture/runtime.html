@@ -28,13 +28,14 @@
             <li><a href="./deps.html">Dependencies</a></li>
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
           </ol>
         </details>
       </aside>
       <header class="hero">
         <div class="eyebrow">Architecture chapter 05</div>
         <h1>runtime<span class="slash">/</span>host</h1>
-        <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and app embedding outside the core session model.</p>
+        <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and the app-facing <code>lash</code> API outside the core session model.</p>
       </header>
 
       <section class="content">
@@ -66,12 +67,12 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Residency And Sessions</h2>
-            <p>The runtime can be interactive, embedded, or benchmark-owned. The same session machinery supports active sessions, managed child sessions, parked runtimes, and resumable app hosts.</p>
+            <p>The runtime can be interactive, app-owned, or benchmark-owned. The same session machinery supports active sessions, managed child sessions, parked runtimes, and resumable app hosts.</p>
           </div>
           <div class="mode-grid">
             <article class="panel"><small>interactive</small><h3>CLI-owned runtime</h3><p><code>lash-cli</code> composes providers, plugins, MCP servers, traces, and terminal rendering around a live <code>LashRuntime</code>.</p></article>
-            <article class="panel"><small>embedded</small><h3>App-owned runtime</h3><p><code>lash</code> exposes <code>LashCore</code>/<code>LashSession</code> for long-lived host applications, layered on <code>LashRuntime::park()</code>/<code>resume()</code>.</p></article>
-            <article class="panel"><small>evaluated</small><h3>Benchmark-owned runtime</h3><p>Benchmark runners embed the same runtime with controlled plugins, store paths, trace capture, and task-specific validation.</p></article>
+            <article class="panel"><small>app</small><h3>App-owned sessions</h3><p><code>lash</code> exposes <code>LashCore</code>/<code>LashSession</code> for long-lived host applications. Hosts open sessions from ids and stores; parking/resume remains runtime plumbing behind the facade.</p></article>
+            <article class="panel"><small>evaluated</small><h3>Benchmark-owned runtime</h3><p>Benchmark runners use the same runtime with controlled plugins, store paths, trace capture, and task-specific validation.</p></article>
           </div>
         </div>
 
@@ -99,15 +100,15 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Turn Outcomes And Handoffs</h2>
-            <p>A turn finishes as one of three outcomes. Hosts that just want the final answer call <code>stream_turn_following_handoffs</code> and read <code>FollowedTurn::final_turn()</code>; hosts that need the full intermediate trajectory call <code>stream_turn</code> and observe each <code>TurnOutcome</code>.</p>
+            <p>A turn finishes as one of three outcomes. App hosts usually call <code>session.turn(input).stream(&amp;sink)</code>, <code>.run()</code>, or <code>.collect_with(&amp;sink)</code>; those facade calls follow handoffs and return the final <code>TurnResult</code>. Raw <code>stream_turn</code> and <code>stream_turn_following_handoffs</code> are runtime internals for lower-level hosts.</p>
           </div>
           <div class="table">
             <table>
               <thead><tr><th>Outcome</th><th>Shape</th><th>Meaning</th></tr></thead>
               <tbody>
-                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code> or <code>TurnFinish::Value { source, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed terminal value.</td></tr>
+                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code>, <code>TurnFinish::SubmittedValue { value }</code>, or <code>TurnFinish::ToolValue { tool_name, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed terminal value authored by RLM <code>submit</code> or a terminal tool control.</td></tr>
                 <tr><td><code>TurnOutcome::Handoff</code></td><td><code>{ session_id }</code></td><td>RLM <code>continue_as</code> opened a successor session with a fresh window. The runtime queues the packed <code>{ task, seed }</code> as that session's first turn input.</td></tr>
-                <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, TerminalError{...}}</code></td><td>The turn ended without a clean answer. <code>TerminalError</code> carries the terminal value authored by a failing control path, such as <code>submit_error</code>, so hosts can surface it.</td></tr>
+                <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, SubmittedError{...}, ToolError{...}}</code></td><td>The turn ended without a clean answer. <code>SubmittedError</code> and <code>ToolError</code> carry terminal errors authored by failing control paths, such as <code>submit_error</code>, so hosts can surface them.</td></tr>
               </tbody>
             </table>
           </div>
@@ -160,7 +161,7 @@ flowchart LR
         </div>
       </section>
 
-      <footer class="footer">Runtime anchors: <code>lash/src/runtime/*</code>, <code>lash/src/session.rs</code>, <code>lash/src/plugin/mod.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>lash/src/lib.rs</code>.</footer>
+      <footer class="footer">Runtime anchors: <code>lash-core/src/runtime/*</code>, <code>lash-core/src/session.rs</code>, <code>lash-core/src/plugin/mod.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>lash-core/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

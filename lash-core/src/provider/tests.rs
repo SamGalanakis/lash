@@ -207,6 +207,34 @@ fn provider_options_serialize_only_reliability_shape() {
 }
 
 #[test]
+fn provider_options_roundtrip_output_limit_and_cache_retention() {
+    let options = ProviderOptions {
+        max_output_tokens: Some(16_384),
+        cache_retention: CacheRetention::Long,
+        ..ProviderOptions::default()
+    };
+
+    let value = serde_json::to_value(&options).expect("serialize");
+    assert_eq!(value["max_output_tokens"], serde_json::json!(16_384));
+    assert_eq!(value["cache_retention"], serde_json::json!("long"));
+
+    let roundtripped: ProviderOptions = serde_json::from_value(value).expect("deserialize");
+    assert_eq!(roundtripped, options);
+}
+
+#[test]
+fn provider_options_default_omits_and_restores_shared_output_fields() {
+    let value = serde_json::to_value(ProviderOptions::default()).expect("serialize");
+    assert!(value.get("max_output_tokens").is_none());
+    assert!(value.get("cache_retention").is_none());
+
+    let restored: ProviderOptions = serde_json::from_value(serde_json::json!({})).expect("default");
+    assert_eq!(restored.max_output_tokens, None);
+    assert_eq!(restored.cache_retention, CacheRetention::Short);
+    assert!(restored.is_default());
+}
+
+#[test]
 fn provider_handle_delegates_model_policy_resolution() {
     static VARIANTS: &[&str] = &["low", "high"];
     let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(

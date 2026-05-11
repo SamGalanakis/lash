@@ -91,11 +91,7 @@ impl ChatStreamState {
         if !self.reasoning_text.trim().is_empty() {
             parts.push(LlmOutputPart::Reasoning {
                 text: self.reasoning_text.clone(),
-                signature: None,
-                redacted: false,
-                item_id: None,
-                encrypted_content: None,
-                summary: Vec::new(),
+                replay: None,
             });
         }
         if !self.full_text.is_empty() {
@@ -122,8 +118,13 @@ impl ChatStreamState {
                 } else {
                     tool_call.input_json.clone()
                 },
-                item_id: None,
-                signature: tool_call.signature.clone(),
+                replay: tool_call
+                    .signature
+                    .clone()
+                    .map(|opaque| ProviderReplayMeta {
+                        item_id: None,
+                        opaque: Some(opaque),
+                    }),
             });
         }
         if parts.is_empty()

@@ -303,7 +303,7 @@ impl ModeExecutionContext {
         name: String,
         args: serde_json::Value,
         index: usize,
-        item_id: Option<String>,
+        replay: Option<crate::llm::types::ProviderReplayMeta>,
     ) -> CompletedModeToolCall {
         let _ = self
             .dispatch
@@ -414,7 +414,7 @@ impl ModeExecutionContext {
                 result,
                 model_result,
                 duration_ms: outcome.record.duration_ms,
-                item_id,
+                replay,
             },
             record,
         }

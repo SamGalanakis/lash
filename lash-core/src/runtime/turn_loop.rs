@@ -374,31 +374,6 @@ impl LashRuntime {
         let base_messages = base_read_model.messages;
         let base_render_cache = base_read_model.prompt_render_cache;
         let mut turn_delta = Vec::new();
-        let mode = input.mode.clone().unwrap_or(RunMode::Normal);
-        let mode_msg = match mode {
-            RunMode::Normal => None,
-        };
-        if let Some(content) = mode_msg {
-            let sys_id = fresh_message_id();
-            turn_delta.push(Message {
-                id: sys_id.clone(),
-                role: MessageRole::System,
-                parts: shared_parts(vec![Part {
-                    id: format!("{}.p0", sys_id),
-                    kind: PartKind::Text,
-                    content,
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                }]),
-                origin: None,
-            });
-        }
 
         let user_id = fresh_message_id();
         let mut user_parts: Vec<Part> = Vec::new();
@@ -415,8 +390,7 @@ impl LashRuntime {
                         attachment: None,
                         tool_call_id: None,
                         tool_name: None,
-                        tool_item_id: None,
-                        tool_signature: None,
+                        tool_replay: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
                         response_meta: None,
@@ -432,8 +406,7 @@ impl LashRuntime {
                         }),
                         tool_call_id: None,
                         tool_name: None,
-                        tool_item_id: None,
-                        tool_signature: None,
+                        tool_replay: None,
                         prune_state: PruneState::Intact,
                         reasoning_meta: None,
                         response_meta: None,
@@ -449,8 +422,7 @@ impl LashRuntime {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -973,7 +945,6 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
     TurnInput {
         items,
         image_blobs,
-        mode: None,
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,

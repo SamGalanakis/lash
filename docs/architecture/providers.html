@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Providers - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles.css">
+<script src="./mermaid.js" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">Providers</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a class="active" href="./providers.html">Providers</a></li>
+          </ol>
+        </details>
+      </aside>
+      <header class="hero">
+        <div class="eyebrow">Architecture chapter 10</div>
+        <h1>providers<span class="slash">/</span>transports</h1>
+        <p>Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate owns the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
+      </header>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>Provider Boundary</h2>
+            <p>The runtime hands every turn's <code>LlmRequest</code> to whichever <code>ProviderHandle</code> the session was opened with and expects back a normalized <code>LlmResponse</code> stream. Anything wire-specific stays inside the provider crate.</p>
+          </div>
+          <ul class="bullets">
+            <li>Schema normalization (Anthropic message blocks → unified content shape, OpenAI tool-call ids → canonical record).</li>
+            <li>Reasoning-detail replay (OpenAI Responses reasoning items, Anthropic thinking blocks).</li>
+            <li>Cache-marker placement (Anthropic <code>cache_control</code>, OpenAI <code>prompt_cache_key</code>).</li>
+            <li>Token-field interpretation (cached-read vs cache-write deltas, reasoning tokens, audio tokens).</li>
+            <li>Auth flow (API key, OAuth PKCE, device code).</li>
+            <li>Model policy (variant aliases, structured-output capability detection, thinking exposure).</li>
+          </ul>
+          <p>Modes (<code>standard</code>, <code>rlm</code>) and canonical tool definitions never see provider-specific JSON. They operate on <code>LlmRequest</code>, <code>LlmResponse</code>, and <code>ToolDefinition</code> only.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>First-Party Providers</h2>
+            <p>Five provider crates ship with the workspace. The CLI registers all of them at boot via <code>lash-providers-builtin</code>; app hosts pick the ones they need.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Provider</th><th>Kind</th><th>Transport / Auth</th></tr></thead>
+              <tbody>
+                <tr><td>OpenAI API (direct)</td><td><code>openai</code></td><td>Bearer API-key auth against <code>https://api.openai.com/v1/responses</code>. Responses-only path; owns Responses reasoning replay and prompt-cache fields.</td></tr>
+                <tr><td>OpenAI-compatible</td><td><code>openai-compatible</code></td><td>Bearer API-key auth against a caller-supplied <code>base_url</code>; posts Chat Completions to <code>{base_url}/chat/completions</code>. Used for OpenRouter, Together, vLLM, etc.</td></tr>
+                <tr><td>Codex subscription</td><td><code>codex</code></td><td>OAuth device-code flow against ChatGPT Codex Responses backend with Codex-specific headers.</td></tr>
+                <tr><td>Anthropic</td><td><code>anthropic</code></td><td>API-key auth against <code>/v1/messages</code> with Anthropic version header and beta flags.</td></tr>
+                <tr><td>Google Gemini / Code Assist</td><td><code>google_oauth</code></td><td>Google OAuth PKCE / manual-code flow against Code Assist <code>generateContent</code> / <code>streamGenerateContent</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p><code>lash_providers_builtin::register_all()</code> is the one-call aggregator the CLI and app hosts use to register all five factories with the global provider registry at process start.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>OpenAI Provider Split</h2>
+            <p>OpenAI ships as two distinct provider kinds because the Responses API and the Chat Completions API are different enough to deserve different code paths.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>openai</code></h3>
+              <p>Direct OpenAI Responses. Posts to <code>https://api.openai.com/v1/responses</code>, keeps Responses reasoning replay, and maps shared <code>ProviderOptions.cache_retention</code> to <code>prompt_cache_key</code> derived from the Lash session id. Long retention adds <code>prompt_cache_retention</code> where the API supports it. No <code>base_url</code> accepted.</p>
+            </article>
+            <article class="panel">
+              <h3><code>openai-compatible</code></h3>
+              <p>Generic Chat Completions. Requires <code>base_url</code>. Converts <code>LlmRequest</code> to a <code>messages</code> array, emits Chat Completions <code>tools</code>, maps structured output to <code>response_format</code>, and preserves OpenRouter reasoning effort through the <code>reasoning.effort</code> request field. Used for OpenRouter, vLLM, Together, Groq, etc.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Claude Cache Markers</h2>
+            <p>For Anthropic and OpenRouter Claude on Chat Completions, shared <code>ProviderOptions.cache_retention</code> controls Anthropic-style <code>cache_control</code> markers in the request:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel"><h3><code>none</code></h3><p>No markers emitted. Each request is treated as fresh.</p></article>
+            <article class="panel"><h3><code>short</code></h3><p>Emits <code>{"type":"ephemeral"}</code> at the canonical breakpoints. Default 5-minute cache lifetime per Anthropic semantics.</p></article>
+            <article class="panel"><h3><code>long</code></h3><p>Adds <code>"ttl":"1h"</code> to the ephemeral marker for longer-lived caching.</p></article>
+          </div>
+          <p>Breakpoints are placed at:</p>
+          <ol class="bullets">
+            <li>The first system/developer text message.</li>
+            <li>The last tool definition in the request.</li>
+            <li>Any explicit <code>LlmContentBlock::Text.cache_breakpoint</code> the runtime asks for.</li>
+          </ol>
+          <p>When no explicit breakpoint is set, the provider falls back to the last user/assistant text content so prompt caching still works for sessions without explicit cache instrumentation.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>RLM Prompt Caching</h2>
+            <p>RLM projects chronological history as append-only chat-shaped messages: user inputs remain user messages, prior RLM steps become assistant messages, tool observations become user messages, and the mutable current-iteration/finalization prompt stays as the final user message. The rolling <code>cache_breakpoint</code> is placed on the last <em>stable</em> history text block, so OpenRouter Claude caches a real prefix instead of a rewritten history blob each turn.</p>
+          </div>
+          <p>The result: long RLM sessions get the same cache-hit rate as native multi-turn chats, even though Lashlang-driven reasoning regenerates a fresh prompt on every iteration.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Usage And Cost Inputs</h2>
+            <p>Every provider returns a normalized <code>LlmUsage</code> to the runtime usage ledger after each completion. Chat-parsing handles both streaming and non-streaming usage chunks, including OpenRouter cache fields. Cache-write tokens are <strong>not</strong> counted as cached reads, so downstream cost/export code doesn't overstate cache hits.</p>
+          </div>
+          <pre><code>pub struct LlmUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,  // Reads from cache
+    pub reasoning_tokens: u64,
+    // …provider-specific extras flow through the extended trace
+}</code></pre>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Adding A Provider</h2>
+            <p>New providers implement five focused components and a factory:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel"><h3>State</h3><p>Per-handle config: API key, base URL, default model, options like <code>thinking</code> exposure.</p></article>
+            <article class="panel"><h3>Auth</h3><p>Bearer header, OAuth refresh, device-code flow — whatever the vendor requires. Auth state is opaque to the runtime.</p></article>
+            <article class="panel"><h3>Readiness</h3><p>Optional pre-flight check (token refresh, capability probe) that runs once per session.</p></article>
+            <article class="panel"><h3>Transport</h3><p>The actual HTTP call. Translates <code>LlmRequest</code> to the wire format, streams the response, normalizes back to <code>LlmResponse</code> chunks.</p></article>
+            <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to provider-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
+            <article class="panel"><h3>Factory</h3><p>Registers with the global provider registry at process start; <code>ProviderHandle::new(components)</code> assembles the five pieces into a handle the runtime can use.</p></article>
+          </div>
+          <p>See <code>lash-provider-openai/src/lib.rs</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
+        </div>
+
+        <div class="section-nav">
+          <a href="./html-exporter.html"><span>Previous</span><strong>09 · HTML Exporter</strong></a>
+          <a href="./index.html"><span>Next</span><strong>Index</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Provider anchors: <code>lash-core/src/provider/mod.rs</code>, <code>lash-provider-openai/src</code>, <code>lash-provider-anthropic/src</code>, <code>lash-provider-codex/src</code>, <code>lash-provider-google/src</code>, <code>lash-providers-builtin/src/lib.rs</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

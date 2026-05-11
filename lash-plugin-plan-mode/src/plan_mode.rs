@@ -107,7 +107,10 @@ fn resolve_plan_path(run_session_id: &str) -> Result<PathBuf, String> {
         .join(format!("{run_session_id}.md")))
 }
 
-fn effective_run_session_id<'a>(session_id: &'a str, policy: &'a lash_core::SessionPolicy) -> &'a str {
+fn effective_run_session_id<'a>(
+    session_id: &'a str,
+    policy: &'a lash_core::SessionPolicy,
+) -> &'a str {
     policy.session_id.as_deref().unwrap_or(session_id)
 }
 

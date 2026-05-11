@@ -197,11 +197,11 @@ impl RuntimeTurnDriver {
                         // A plugin stream hook asked us to end the LLM
                         // call now (e.g. RLM mask saw a closed fence).
                         // Drain events already sitting in the buffer, then
-                        // wait briefly for the provider's final
-                        // `response.completed` SSE event. Codex attaches
-                        // usage there, and the next prompt's budget
-                        // contribution depends on the driver seeing that
-                        // accounting before the next mode_iteration starts.
+                        // wait briefly for the provider's final completion
+                        // event. Some providers attach usage there, and the
+                        // next prompt's budget contribution depends on the
+                        // driver seeing that accounting before the next
+                        // mode_iteration starts.
                         if let Err(err) = self
                             .drain_standard_stream_queue(event_tx, &mut llm_stream_rx, &mut stream_state)
                             .await
@@ -687,9 +687,9 @@ impl RuntimeTurnDriver {
                 call_id,
                 tool_name,
                 input_json,
-                item_id,
-                signature,
+                replay,
             }) => {
+                let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_deref());
                 self.log_llm_stream_event(
                     state.debug,
                     LlmStreamEventLog {
@@ -699,7 +699,7 @@ impl RuntimeTurnDriver {
                             raw: None,
                             visible: None,
                         },
-                        item_id: item_id.as_deref(),
+                        item_id,
                         usage: None,
                         tool_call: Some(LlmDebugToolCall {
                             call_id: &call_id,
@@ -710,16 +710,10 @@ impl RuntimeTurnDriver {
                 );
                 state
                     .stream_accumulator
-                    .push_tool_call(call_id, tool_name, input_json, item_id, signature);
+                    .push_tool_call(call_id, tool_name, input_json, replay);
             }
-            LlmStreamEvent::Part(LlmOutputPart::Reasoning {
-                text,
-                signature: _,
-                redacted: _,
-                item_id,
-                encrypted_content,
-                summary,
-            }) => {
+            LlmStreamEvent::Part(LlmOutputPart::Reasoning { text, replay }) => {
+                let item_id = replay.as_ref().and_then(|meta| meta.item_id.as_deref());
                 if !text.is_empty() {
                     self.log_llm_stream_event(
                         state.debug,
@@ -730,7 +724,7 @@ impl RuntimeTurnDriver {
                                 raw: None,
                                 visible: Some(&text),
                             },
-                            item_id: item_id.as_deref(),
+                            item_id,
                             usage: None,
                             tool_call: None,
                         },
@@ -743,7 +737,7 @@ impl RuntimeTurnDriver {
                     )
                     .await;
                     let correlation_id =
-                        stream_correlation_id(state.reasoning_correlation, item_id.as_deref());
+                        stream_correlation_id(state.reasoning_correlation, item_id);
                     send_turn_activity(
                         event_tx,
                         correlation_id,
@@ -751,9 +745,17 @@ impl RuntimeTurnDriver {
                     )
                     .await;
                 }
-                state
-                    .stream_accumulator
-                    .push_reasoning(text, item_id, summary, encrypted_content);
+                state.stream_accumulator.push_reasoning(
+                    text,
+                    replay.as_ref().and_then(|meta| meta.item_id.clone()),
+                    replay
+                        .as_ref()
+                        .map(|meta| meta.summary.clone())
+                        .unwrap_or_default(),
+                    replay
+                        .as_ref()
+                        .and_then(|meta| meta.encrypted_content.clone()),
+                );
             }
             LlmStreamEvent::Usage(usage) => {
                 self.log_llm_stream_event(

@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
-use lash_core::TurnInput;
-use lash_cli::config::LashConfig;
 use lash::advanced::ModeTurnOptions;
 use lash::{LashCore, TurnActivity, TurnEvent};
+use lash_cli::config::LashConfig;
+use lash_core::TurnInput;
 use lash_harness_opt::clbench::{ClbenchConfig, ClbenchProject};
 use lash_harness_opt::strategies::gepa::{
     ReflectiveGepaStrategy, ReflectiveProposalRequest, ReflectiveProposer,
@@ -445,7 +445,9 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         let assistant_prose = assistant_prose(&turn.activities);
         match turn.result.outcome {
             lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value })
-            | lash_core::TurnOutcome::Finished(lash_core::TurnFinish::ToolValue { value, .. }) => {
+            | lash_core::TurnOutcome::Finished(lash_core::TurnFinish::ToolValue {
+                value, ..
+            }) => {
                 let output_path = request.artifact_dir.join("output.json");
                 tokio::fs::write(
                     &output_path,

@@ -3,8 +3,8 @@ pub mod prompt;
 
 pub use message::{
     BaseRenderCache, Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind,
-    PruneState, ReasoningMeta, RenderedPrompt, append_rendered_prompt,
-    messages_are_prompt_resume_safe, render_prompt, render_transcript_prompt, shared_parts,
+    PruneState, RenderedPrompt, append_rendered_prompt, messages_are_prompt_resume_safe,
+    render_prompt, render_transcript_prompt, shared_parts,
 };
 pub use prompt::{
     CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptLayer, PromptSlot,
@@ -421,8 +421,7 @@ impl TurnTerminationPolicyState {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,

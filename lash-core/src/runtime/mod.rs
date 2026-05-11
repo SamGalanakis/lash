@@ -102,12 +102,6 @@ pub trait RuntimeTurnPhaseProbe: Send + Sync {
     fn end(&self, phase: RuntimeTurnPhase);
 }
 
-/// Runtime execution mode for a turn.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum RunMode {
-    Normal,
-}
-
 /// Host-provided per-turn input.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -132,8 +126,6 @@ pub struct TurnInput {
     pub items: Vec<InputItem>,
     #[serde(default)]
     pub image_blobs: HashMap<String, Vec<u8>>,
-    #[serde(default)]
-    pub mode: Option<RunMode>,
     /// Per-turn override for mode-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_turn_options: Option<crate::ModeTurnOptions>,
@@ -148,6 +140,10 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
+    pub fn empty() -> Self {
+        Self::items(std::iter::empty())
+    }
+
     pub fn text(text: impl Into<String>) -> Self {
         Self::items([InputItem::text(text)])
     }
@@ -156,7 +152,6 @@ impl TurnInput {
         Self {
             items: items.into_iter().collect(),
             image_blobs: HashMap::new(),
-            mode: None,
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,
@@ -169,15 +164,23 @@ impl TurnInput {
         self
     }
 
+    pub fn with_image_blobs<I, K>(mut self, image_blobs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Vec<u8>)>,
+        K: Into<String>,
+    {
+        self.image_blobs.extend(
+            image_blobs
+                .into_iter()
+                .map(|(id, bytes)| (id.into(), bytes)),
+        );
+        self
+    }
+
     pub fn with_image_ref(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
         let id = id.into();
         self.items.push(InputItem::image_ref(id.clone()));
         self.image_blobs.insert(id, bytes);
-        self
-    }
-
-    pub fn with_mode(mut self, mode: RunMode) -> Self {
-        self.mode = Some(mode);
         self
     }
 

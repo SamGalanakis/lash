@@ -6,18 +6,12 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             options: ProviderOptions::default(),
-            cache_retention: OpenAiCacheRetention::Short,
             client: DEFAULT_HTTP_CLIENT.clone(),
         }
     }
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
-        self
-    }
-
-    pub fn with_cache_retention(mut self, retention: OpenAiCacheRetention) -> Self {
-        self.cache_retention = retention;
         self
     }
 
@@ -184,14 +178,7 @@ impl OpenAiCompatibleProvider {
                             pending_content.push(Self::input_image_part(att));
                         }
                     }
-                    LlmContentBlock::Reasoning {
-                        text,
-                        encrypted_content,
-                        signature,
-                        item_id,
-                        summary,
-                        ..
-                    } => {
+                    LlmContentBlock::Reasoning { text, replay, .. } => {
                         Self::flush_pending_content(
                             &mut pending_content,
                             &mut input,
@@ -201,10 +188,16 @@ impl OpenAiCompatibleProvider {
                             message_index,
                             pending_part_index,
                         );
-                        let Some(blob) = encrypted_content.as_deref().or(signature.as_deref())
+                        let Some(blob) = replay
+                            .as_ref()
+                            .and_then(|meta| meta.encrypted_content.as_deref())
                         else {
                             continue;
                         };
+                        let summary = replay
+                            .as_ref()
+                            .map(|meta| meta.summary.as_slice())
+                            .unwrap_or_default();
                         let summary_items = if summary.is_empty() {
                             if text.is_empty() {
                                 Vec::new()
@@ -222,7 +215,7 @@ impl OpenAiCompatibleProvider {
                             "summary": summary_items,
                             "encrypted_content": blob,
                         });
-                        if let Some(id) = item_id
+                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref())
                             && !id.is_empty()
                         {
                             item["id"] = json!(id);
@@ -233,7 +226,7 @@ impl OpenAiCompatibleProvider {
                         call_id,
                         tool_name,
                         input_json,
-                        item_id,
+                        replay,
                         ..
                     } => {
                         Self::flush_pending_content(
@@ -251,7 +244,7 @@ impl OpenAiCompatibleProvider {
                             "name": tool_name,
                             "arguments": input_json,
                         });
-                        if let Some(id) = item_id {
+                        if let Some(id) = replay.as_ref().and_then(|meta| meta.item_id.as_deref()) {
                             item["id"] = json!(id);
                         }
                         input.push(item);
@@ -370,12 +363,11 @@ impl OpenAiCompatibleProvider {
         !Self::local_style_base_url(base_url)
     }
 
-    fn max_output_tokens() -> u64 {
-        std::env::var("LASH_MAX_OUTPUT_TOKENS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|v: &u64| *v > 0)
-            .unwrap_or(32768)
+    fn output_token_cap(&self) -> u64 {
+        self.options
+            .max_output_tokens
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
     }
 
     fn model_is_anthropic_claude(model: &str) -> bool {
@@ -388,10 +380,10 @@ impl OpenAiCompatibleProvider {
     }
 
     fn chat_cache_control_value(&self) -> Option<Value> {
-        match self.cache_retention {
-            OpenAiCacheRetention::None => None,
-            OpenAiCacheRetention::Short => Some(json!({ "type": "ephemeral" })),
-            OpenAiCacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
+        match self.options.cache_retention {
+            CacheRetention::None => None,
+            CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
+            CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
         }
     }
 
@@ -418,7 +410,7 @@ impl OpenAiCompatibleProvider {
             "input": input,
             "tools": tools,
             "stream": stream,
-            "max_output_tokens": Self::max_output_tokens(),
+            "max_output_tokens": self.output_token_cap(),
         });
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
@@ -464,12 +456,12 @@ impl OpenAiCompatibleProvider {
             }
             body["text"]["format"] = format;
         }
-        if self.cache_retention != OpenAiCacheRetention::None
+        if self.options.cache_retention != CacheRetention::None
             && let Some(session_id) = req.session_id.as_deref()
         {
             body["prompt_cache_key"] = json!(session_id);
         }
-        if self.cache_retention == OpenAiCacheRetention::Long
+        if self.options.cache_retention == CacheRetention::Long
             && Self::supports_openai_request_fields(&self.base_url)
         {
             body["prompt_cache_retention"] = json!("24h");
@@ -532,7 +524,7 @@ impl OpenAiCompatibleProvider {
                         call_id,
                         tool_name,
                         input_json,
-                        signature,
+                        replay,
                         ..
                     } if matches!(msg.role, LlmRole::Assistant) => {
                         tool_calls.push(json!({
@@ -543,8 +535,9 @@ impl OpenAiCompatibleProvider {
                                 "arguments": input_json,
                             },
                         }));
-                        if let Some(signature) = signature.as_deref()
-                            && let Ok(detail) = serde_json::from_str::<Value>(signature)
+                        if let Some(opaque) =
+                            replay.as_ref().and_then(|meta| meta.opaque.as_deref())
+                            && let Ok(detail) = serde_json::from_str::<Value>(opaque)
                             && detail.get("type").and_then(Value::as_str)
                                 == Some("reasoning.encrypted")
                         {
@@ -742,7 +735,7 @@ impl OpenAiCompatibleProvider {
             "model": req.model,
             "messages": messages,
             "stream": stream,
-            "max_tokens": Self::max_output_tokens(),
+            "max_tokens": self.output_token_cap(),
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
@@ -884,14 +877,19 @@ impl OpenAiCompatibleProvider {
                         let text = summary.join("\n\n");
                         parts.push(LlmOutputPart::Reasoning {
                             text,
-                            signature: None,
-                            redacted: false,
-                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                            encrypted_content: item
-                                .get("encrypted_content")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
-                            summary,
+                            replay: Some(ProviderReasoningReplay {
+                                item_id: item
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string),
+                                encrypted_content: item
+                                    .get("encrypted_content")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string),
+                                signature: None,
+                                redacted: false,
+                                summary,
+                            }),
                         });
                     }
                     "message" => {
@@ -922,8 +920,12 @@ impl OpenAiCompatibleProvider {
                                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                             tool_name: name.to_string(),
                             input_json: arguments,
-                            item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                            signature: None,
+                            replay: item.get("id").and_then(|v| v.as_str()).map(|id| {
+                                ProviderReplayMeta {
+                                    item_id: Some(id.to_string()),
+                                    opaque: None,
+                                }
+                            }),
                         });
                     }
                     _ => {}
@@ -974,11 +976,7 @@ impl OpenAiCompatibleProvider {
             {
                 parts.push(LlmOutputPart::Reasoning {
                     text: reasoning.to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
+                    replay: None,
                 });
                 break;
             }
@@ -1030,13 +1028,16 @@ impl OpenAiCompatibleProvider {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    signature: tool_call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .and_then(|id| reasoning_details.get(id).cloned()),
                     tool_name: name.to_string(),
                     input_json: arguments,
-                    item_id: None,
+                    replay: tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| reasoning_details.get(id).cloned())
+                        .map(|opaque| ProviderReplayMeta {
+                            item_id: None,
+                            opaque: Some(opaque),
+                        }),
                 });
             }
         }
@@ -1765,11 +1766,6 @@ impl OpenAiProvider {
         self
     }
 
-    pub fn with_cache_retention(mut self, retention: OpenAiCacheRetention) -> Self {
-        self.inner.cache_retention = retention;
-        self
-    }
-
     pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
         self.inner.client = (*client).clone();
         self
@@ -1822,12 +1818,6 @@ impl ProviderState for OpenAiCompatibleProvider {
                 serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
             );
         }
-        if self.cache_retention != OpenAiCacheRetention::Short {
-            map.insert(
-                "cache_retention".to_string(),
-                serde_json::to_value(self.cache_retention).unwrap_or(serde_json::Value::Null),
-            );
-        }
         serde_json::Value::Object(map)
     }
 
@@ -1859,12 +1849,6 @@ impl ProviderState for OpenAiProvider {
             map.insert(
                 "options".to_string(),
                 serde_json::to_value(&self.inner.options).unwrap_or(serde_json::Value::Null),
-            );
-        }
-        if self.inner.cache_retention != OpenAiCacheRetention::Short {
-            map.insert(
-                "cache_retention".to_string(),
-                serde_json::to_value(self.inner.cache_retention).unwrap_or(serde_json::Value::Null),
             );
         }
         serde_json::Value::Object(map)
@@ -2018,8 +2002,6 @@ struct OpenAiCompatibleProviderConfig {
     base_url: String,
     #[serde(default)]
     options: ProviderOptions,
-    #[serde(default)]
-    cache_retention: OpenAiCacheRetention,
 }
 
 #[derive(Deserialize)]
@@ -2028,8 +2010,6 @@ struct OpenAiProviderConfig {
     api_key: String,
     #[serde(default)]
     options: ProviderOptions,
-    #[serde(default)]
-    cache_retention: OpenAiCacheRetention,
 }
 
 pub struct OpenAiCompatibleProviderFactory;
@@ -2060,7 +2040,6 @@ impl ProviderFactory for OpenAiProviderFactory {
                 api_key: cfg.api_key,
                 base_url: OPENAI_BASE_URL.to_string(),
                 options: cfg.options,
-                cache_retention: cfg.cache_retention,
                 client: build_http_client(),
             },
         }
@@ -2079,7 +2058,6 @@ impl ProviderFactory for OpenAiCompatibleProviderFactory {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
-            cache_retention: cfg.cache_retention,
             client: build_http_client(),
         }
         .into_components())

@@ -28,7 +28,7 @@ use std::sync::Arc;
 use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
 
 use super::TerminationPolicy;
-use super::host::{RuntimeCoreConfig, SessionTaskExecutor};
+use super::host::SessionTaskExecutor;
 
 /// Where session nodes live at runtime.
 ///
@@ -109,20 +109,6 @@ impl Default for RuntimeEnvironment {
 impl RuntimeEnvironment {
     pub fn builder() -> RuntimeEnvironmentBuilder {
         RuntimeEnvironmentBuilder::default()
-    }
-
-    /// Materialize the legacy `RuntimeCoreConfig` view of this
-    /// environment. Used by the existing `from_persistent_*_state` code
-    /// paths during the migration to `from_environment`.
-    pub fn to_runtime_core_config(&self) -> RuntimeCoreConfig {
-        RuntimeCoreConfig {
-            attachment_store: Arc::clone(&self.attachment_store),
-            prompt: self.prompt.clone(),
-            trace_sink: self.trace_sink.clone(),
-            trace_level: self.trace_level,
-            trace_context: self.trace_context.clone(),
-            termination: self.termination.clone(),
-        }
     }
 }
 
@@ -240,17 +226,5 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn build(self) -> RuntimeEnvironment {
         self.env
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn env_default_matches_legacy_core_config() {
-        let env = RuntimeEnvironment::default();
-        let cfg = env.to_runtime_core_config();
-        assert!(Arc::ptr_eq(&cfg.attachment_store, &env.attachment_store));
     }
 }

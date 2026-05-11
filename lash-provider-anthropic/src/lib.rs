@@ -9,10 +9,11 @@ use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
+    ProviderReasoningReplay,
 };
 use lash_core::provider::{
-    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
-    ProviderState, ProviderTransport, VariantRequestConfig,
+    AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
+    ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
 };
 use lash_llm_transport::streaming::drive_sse_response;
 use lash_llm_transport::timeouts::{
@@ -23,6 +24,7 @@ use lash_llm_transport::timeouts::{
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
 fn emit_provider_trace(
     tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
@@ -187,24 +189,19 @@ impl AnthropicProvider {
                 "tool_use_id": normalize_tool_call_id(call_id),
                 "content": content.clone(),
             })),
-            LlmContentBlock::Reasoning {
-                text,
-                signature,
-                redacted,
-                ..
-            } => {
+            LlmContentBlock::Reasoning { text, replay, .. } => {
                 // Anthropic requires a signature to replay a thinking
                 // block. If we don't have one (e.g. aborted stream, or
                 // reasoning captured from a non-Anthropic provider that
                 // stored its payload in `encrypted_content` only), fall
                 // back to plain text so the turn still validates.
-                let Some(sig) = signature.as_deref() else {
+                let Some(sig) = replay.as_ref().and_then(|meta| meta.signature.as_deref()) else {
                     if text.trim().is_empty() {
                         return None;
                     }
                     return Some(Self::text_block_value(text, false));
                 };
-                if *redacted {
+                if replay.as_ref().is_some_and(|meta| meta.redacted) {
                     return Some(json!({
                         "type": "redacted_thinking",
                         "data": sig,
@@ -295,28 +292,32 @@ impl AnthropicProvider {
             .collect()
     }
 
-    /// Build the `cache_control` value. Honors `LASH_CACHE_RETENTION`:
-    /// `long` attaches a 1-hour TTL (matching pi-mono's `long` retention
-    /// on `api.anthropic.com`), any other value stays on the default
-    /// 5-minute ephemeral window.
-    fn cache_control_value() -> Value {
-        let retention = std::env::var("LASH_CACHE_RETENTION")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .unwrap_or_default();
-        if retention == "long" {
-            json!({ "type": "ephemeral", "ttl": "1h" })
-        } else {
-            json!({ "type": "ephemeral" })
+    fn cache_control_value(&self) -> Option<Value> {
+        match self.options.cache_retention {
+            CacheRetention::None => None,
+            CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
+            CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
         }
     }
 
     fn apply_cache_control(
+        &self,
         system: &mut Option<Value>,
         messages: &mut [Value],
         tools: &mut [Value],
     ) {
-        let ctrl = Self::cache_control_value();
+        let Some(ctrl) = self.cache_control_value() else {
+            for msg in messages {
+                if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    for block in content {
+                        block
+                            .as_object_mut()
+                            .map(|obj| obj.remove("__lash_cache_breakpoint"));
+                    }
+                }
+            }
+            return;
+        };
 
         if let Some(sys) = system
             && let Some(arr) = sys.as_array_mut()
@@ -387,11 +388,11 @@ impl AnthropicProvider {
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
-        let max_output_tokens: u64 = std::env::var("LASH_MAX_OUTPUT_TOKENS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|v: &u64| *v > 0)
-            .unwrap_or(32768);
+        let max_output_tokens = self
+            .options
+            .max_output_tokens
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
         let mut system_value: Option<Value> = system_text.map(|text| {
             json!([{
@@ -403,7 +404,7 @@ impl AnthropicProvider {
         // Cache control: mark system, last user message, and last tool as
         // ephemeral to benefit from prompt caching. Applied before the body
         // is assembled so we only serialize the final state once.
-        Self::apply_cache_control(&mut system_value, &mut messages, &mut tools);
+        self.apply_cache_control(&mut system_value, &mut messages, &mut tools);
 
         let mut body = json!({
             "model": req.model,
@@ -828,16 +829,13 @@ impl AnthropicProvider {
                     };
                     parts.push(LlmOutputPart::Reasoning {
                         text: block.text,
-                        // Anthropic's thinking signature lives in the shared
-                        // `signature` slot. `encrypted_content` mirrors it
-                        // so session persistence (which stores one opaque
-                        // blob per reasoning item) can round-trip without
-                        // knowing which provider produced it.
-                        signature: sig.clone(),
-                        redacted: block.redacted,
-                        item_id: None,
-                        encrypted_content: sig,
-                        summary: Vec::new(),
+                        replay: sig.map(|signature| ProviderReasoningReplay {
+                            item_id: None,
+                            encrypted_content: None,
+                            signature: Some(signature),
+                            redacted: block.redacted,
+                            summary: Vec::new(),
+                        }),
                     });
                 }
                 BlockKind::ToolUse => {
@@ -856,8 +854,7 @@ impl AnthropicProvider {
                         call_id: block.tool_call_id,
                         tool_name: block.tool_name,
                         input_json,
-                        item_id: None,
-                        signature: None,
+                        replay: None,
                     });
                 }
                 BlockKind::Unknown => {}
@@ -1318,5 +1315,62 @@ mod tests {
                 .get("__lash_cache_breakpoint")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cache_retention_none_removes_cache_control() {
+        let provider = AnthropicProvider::new("key").with_options(ProviderOptions {
+            cache_retention: CacheRetention::None,
+            ..ProviderOptions::default()
+        });
+        let req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::text(LlmRole::User, "dynamic tail"),
+        ]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert!(body["system"][0].get("cache_control").is_none());
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_retention_long_emits_ttl() {
+        let provider = AnthropicProvider::new("key").with_options(ProviderOptions {
+            cache_retention: CacheRetention::Long,
+            ..ProviderOptions::default()
+        });
+        let req = request(vec![
+            LlmMessage::text(LlmRole::System, "stable system prompt"),
+            LlmMessage::text(LlmRole::User, "dynamic tail"),
+        ]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"],
+            json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+    }
+
+    #[test]
+    fn max_tokens_uses_shared_options() {
+        let provider = AnthropicProvider::new("key").with_options(ProviderOptions {
+            max_output_tokens: Some(2048),
+            ..ProviderOptions::default()
+        });
+        let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        assert_eq!(body["max_tokens"], 2048);
     }
 }

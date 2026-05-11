@@ -30,12 +30,14 @@ pub use crate::session::{
 pub use crate::turn::{
     TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
-pub use lash_core::{TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
+pub use lash_core::{
+    InputItem, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+};
 
 pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError, Handoffs,
-        LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
+        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
         PluginActions, PluginBinding, Result, SessionBuilder, ToolsControl, TurnActivity,
         TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };

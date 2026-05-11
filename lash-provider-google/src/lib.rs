@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage,
+    LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
+    ProviderReplayMeta,
 };
 use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
@@ -200,7 +201,7 @@ impl GoogleOAuthProvider {
                         call_id,
                         tool_name,
                         input_json,
-                        signature,
+                        replay,
                         ..
                     } => {
                         let mut part = json!({
@@ -216,8 +217,9 @@ impl GoogleOAuthProvider {
                         // its original thoughtSignature. When we don't
                         // have the real signature (cross-model hop, older
                         // session), drop in the pi sentinel.
-                        let effective = signature
-                            .clone()
+                        let effective = replay
+                            .as_ref()
+                            .and_then(|meta| meta.opaque.clone())
                             .or_else(|| is_gemini_3.then(|| SKIP_THOUGHT_SIGNATURE.to_string()));
                         if let Some(sig) = effective {
                             part["thoughtSignature"] = Value::String(sig);
@@ -237,15 +239,10 @@ impl GoogleOAuthProvider {
                             }
                         }));
                     }
-                    LlmContentBlock::Reasoning {
-                        text,
-                        signature,
-                        encrypted_content,
-                        ..
-                    } => {
+                    LlmContentBlock::Reasoning { text, replay, .. } => {
                         // Gemini replays reasoning as a `thought:true`
                         // text part carrying the thoughtSignature.
-                        let sig = signature.clone().or_else(|| encrypted_content.clone());
+                        let sig = replay.as_ref().and_then(|meta| meta.signature.clone());
                         if sig.is_none() && text.trim().is_empty() {
                             continue;
                         }
@@ -434,8 +431,10 @@ impl GoogleOAuthProvider {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
-                        item_id: None,
-                        signature,
+                        replay: signature.map(|opaque| ProviderReplayMeta {
+                            item_id: None,
+                            opaque: Some(opaque),
+                        }),
                     });
                 }
             }
@@ -522,11 +521,13 @@ impl GoogleOAuthProvider {
                         // lives on the same part.
                         parts.push(LlmOutputPart::Reasoning {
                             text: text.to_string(),
-                            signature: signature.clone(),
-                            redacted: false,
-                            item_id: None,
-                            encrypted_content: signature.clone(),
-                            summary: Vec::new(),
+                            replay: signature.clone().map(|signature| ProviderReasoningReplay {
+                                item_id: None,
+                                encrypted_content: None,
+                                signature: Some(signature),
+                                redacted: false,
+                                summary: Vec::new(),
+                            }),
                         });
                     } else {
                         parts.push(LlmOutputPart::Text {
@@ -551,8 +552,10 @@ impl GoogleOAuthProvider {
                             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                         tool_name: name.to_string(),
                         input_json,
-                        item_id: None,
-                        signature: signature.clone(),
+                        replay: signature.clone().map(|opaque| ProviderReplayMeta {
+                            item_id: None,
+                            opaque: Some(opaque),
+                        }),
                     });
                 }
             }
@@ -808,6 +811,11 @@ impl GoogleOAuthProvider {
         contents: Vec<Value>,
         project_id: Option<&str>,
     ) -> Value {
+        let max_output_tokens = provider
+            .options
+            .max_output_tokens
+            .filter(|v| *v > 0)
+            .unwrap_or(32_768);
         let mut request = json!({
             "model": req.model,
             "user_prompt_id": uuid::Uuid::new_v4().to_string(),
@@ -815,7 +823,7 @@ impl GoogleOAuthProvider {
                 "contents": contents,
                 "generationConfig": {
                     "temperature": 0,
-                    "maxOutputTokens": 32768,
+                    "maxOutputTokens": max_output_tokens,
                 }
             }
         });
@@ -1383,5 +1391,18 @@ mod tests {
             exposed["request"]["generationConfig"]["thinkingConfig"]["includeThoughts"],
             true
         );
+    }
+
+    #[test]
+    fn max_output_tokens_uses_shared_options() {
+        let provider =
+            GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
+                max_output_tokens: Some(4096),
+                ..ProviderOptions::default()
+            });
+
+        let body = GoogleOAuthProvider::build_request(&provider, &request(None), Vec::new(), None);
+
+        assert_eq!(body["request"]["generationConfig"]["maxOutputTokens"], 4096);
     }
 }

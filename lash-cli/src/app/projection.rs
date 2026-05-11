@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const TEXT_PREVIEW_MAX_HEAD_LINES: usize = 8;
 const TEXT_PREVIEW_MAX_TAIL_LINES: usize = 3;
@@ -146,14 +146,16 @@ pub(crate) fn interrupted_blocks_from_read_view(
 fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) -> UiTimeline {
     let mut timeline = UiTimeline::new();
     let mut activity_state = ActivityState::default();
+    let rlm_owned_tool_call_ids = rlm_owned_tool_call_ids(projection);
     let tool_call_map = projection
         .entries()
         .iter()
         .filter_map(|entry| match &entry.payload {
-            lash_core::ChronologicalPayload::ToolCall(record) => record
-                .call_id
-                .as_deref()
-                .map(|call_id| (call_id, record.clone())),
+            lash_core::ChronologicalPayload::ToolCall(record) => {
+                record.call_id.as_deref().and_then(|call_id| {
+                    (!rlm_owned_tool_call_ids.contains(call_id)).then(|| (call_id, record.clone()))
+                })
+            }
             lash_core::ChronologicalPayload::Message(_)
             | lash_core::ChronologicalPayload::ModeEvent(_) => None,
         })
@@ -171,7 +173,13 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                 );
             }
             lash_core::ChronologicalPayload::ToolCall(record) => {
-                append_tool_call_record_items(&mut timeline, record, &mut activity_state);
+                if !record
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
+                {
+                    append_tool_call_record_items(&mut timeline, record, &mut activity_state);
+                }
             }
             lash_core::ChronologicalPayload::ModeEvent(event) => {
                 if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
@@ -186,6 +194,29 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
     timeline
 }
 
+fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> HashSet<String> {
+    projection
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            lash_core::ChronologicalPayload::ModeEvent(event) => {
+                lash_mode_rlm::decode_rlm_mode_event(event)
+            }
+            lash_core::ChronologicalPayload::Message(_)
+            | lash_core::ChronologicalPayload::ToolCall(_) => None,
+        })
+        .flat_map(|event| match event {
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry
+                .tool_calls
+                .into_iter()
+                .filter_map(|record| record.call_id)
+                .collect::<Vec<_>>(),
+            lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_)
+            | lash_rlm_types::RlmModeEvent::RlmDiagnostic(_) => Vec::new(),
+        })
+        .collect()
+}
+
 fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
@@ -197,6 +228,9 @@ fn append_rlm_trajectory_items(
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
     for record in &entry.tool_calls {
         append_tool_call_record_items(timeline, record, activity_state);
+    }
+    if let Some(final_output) = &entry.final_output {
+        let _ = push_assistant_text_item(timeline, &render_submitted_value(final_output));
     }
 }
 
@@ -586,6 +620,14 @@ fn push_assistant_text_item(timeline: &mut UiTimeline, text: &str) -> bool {
     }
     timeline.push(UiTimelineItem::AssistantText(cleaned));
     true
+}
+
+pub(crate) fn render_submitted_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
 }
 
 fn push_assistant_reasoning_item(timeline: &mut UiTimeline, text: &str) -> bool {

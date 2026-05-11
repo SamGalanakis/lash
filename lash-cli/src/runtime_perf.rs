@@ -16,7 +16,7 @@ use lash_core::testing::TestProvider;
 use lash_core::{
     AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
     LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
-    PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RunMode, RuntimeCommit,
+    PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RuntimeCommit,
     RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint, SessionGraph,
     SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope, SessionStoreCreateRequest,
     SessionStoreFactory, StandardContextApproach, TokenUsage, TokioSessionTaskExecutor,
@@ -891,7 +891,6 @@ async fn run_once(
                 text: benchmark_prompt(scenario, turn_index),
             }],
             image_blobs: Default::default(),
-            mode: Some(RunMode::Normal),
             mode_turn_options: None,
             trace_turn_id: None,
             mode_extension: None,

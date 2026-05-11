@@ -172,9 +172,9 @@ pub use plugin::{
     plugin_action_def,
 };
 pub use provider::{
-    AgentModelSelection, LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle,
-    ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
-    ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
+    AgentModelSelection, CacheRetention, LlmTimeouts, ProviderComponents, ProviderFactory,
+    ProviderHandle, ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec,
+    ProviderState, ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
     VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
 pub use runtime::{
@@ -183,7 +183,7 @@ pub use runtime::{
     InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
     ManagedTaskStatus, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
     ModeTurnExtensionHandle, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
-    PersistedSessionState, PromptUsage, Residency, RunMode, RuntimeCoreConfig, RuntimeEnvironment,
+    PersistedSessionState, PromptUsage, Residency, RuntimeCoreConfig, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
     SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor,

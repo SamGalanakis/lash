@@ -86,7 +86,10 @@ macro_rules! impl_plan_test_host {
 
         #[async_trait::async_trait]
         impl lash_core::ToolStateHost for $ty {
-            async fn tool_state(&self, session_id: &str) -> Result<lash_core::ToolState, PluginError> {
+            async fn tool_state(
+                &self,
+                session_id: &str,
+            ) -> Result<lash_core::ToolState, PluginError> {
                 PlanTestHostCore::tool_state(self, session_id).await
             }
             async fn apply_tool_state(
@@ -630,7 +633,9 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn("root"))),
+            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager,
         })
         .await
@@ -669,7 +674,9 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     session
         .after_turn(TurnResultHookContext {
             session_id: "root".to_string(),
-            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn("root"))),
+            turn: Arc::new(lash_core::TurnResultSummary::from_assembled(&empty_turn(
+                "root",
+            ))),
             host: manager.clone(),
         })
         .await

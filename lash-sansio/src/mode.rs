@@ -12,11 +12,10 @@
 
 use std::sync::Arc;
 
-use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec};
+use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoningReplay};
 use crate::sansio::{
     ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
 };
-use crate::session_model::message::ReasoningMeta;
 use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState, shared_parts};
 use crate::{ExecutionMode, PromptContribution, ToolSurface};
 
@@ -70,13 +69,13 @@ pub fn normalized_response_parts(llm_response: &LlmResponse) -> Vec<LlmOutputPar
 }
 
 /// Build a Reasoning `Part` from a reasoning item. `meta` is Some when
-/// the item carries encrypted content for Codex re-feeding; None for
-/// display-only summaries.
+/// the item carries provider replay metadata; None for display-only
+/// summaries.
 pub fn reasoning_part(
     asst_id: &str,
     index: usize,
     text: String,
-    meta: Option<ReasoningMeta>,
+    meta: Option<ProviderReasoningReplay>,
 ) -> Part {
     Part {
         id: format!("{asst_id}.p{index}"),
@@ -85,8 +84,7 @@ pub fn reasoning_part(
         attachment: None,
         tool_call_id: None,
         tool_name: None,
-        tool_item_id: None,
-        tool_signature: None,
+        tool_replay: None,
         prune_state: PruneState::Intact,
         reasoning_meta: meta,
         response_meta: None,
@@ -126,8 +124,7 @@ pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,

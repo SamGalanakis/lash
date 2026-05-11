@@ -1451,6 +1451,19 @@ impl App {
                 }
                 self.scroll_to_bottom();
             }
+            TurnEvent::SubmittedValue { value } => {
+                self.finalize_live_markdown();
+                let text = self::projection::render_submitted_value(&value);
+                if push_assistant_text_block(&mut self.timeline, &text) {
+                    self.mark_first_token_arrived();
+                    self.live_output_chars_estimate += text.chars().count() as i64;
+                    self.live_output_tokens_estimate =
+                        estimate_tokens_from_char_count(self.live_output_chars_estimate);
+                    self.mark_visible_output();
+                    self.invalidate_height_cache();
+                    self.scroll_to_bottom();
+                }
+            }
             TurnEvent::ToolCallCompleted {
                 name,
                 args,
@@ -1640,9 +1653,7 @@ impl App {
             TurnEvent::QueuedMessagesCommitted { messages, .. } => {
                 self.commit_injected_messages(&messages);
             }
-            TurnEvent::CodeBlockCompleted { .. }
-            | TurnEvent::SubmittedValue { .. }
-            | TurnEvent::ToolValue { .. } => {}
+            TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
         }
     }
 

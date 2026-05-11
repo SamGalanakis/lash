@@ -927,7 +927,12 @@ mod test_mode_fakes {
 
             let parts = crate::normalized_response_parts(&llm_response);
             let mut assistant_text = String::new();
-            let mut tool_calls: Vec<(String, String, String, Option<String>)> = Vec::new();
+            let mut tool_calls: Vec<(
+                String,
+                String,
+                String,
+                Option<lash_sansio::llm::types::ProviderReplayMeta>,
+            )> = Vec::new();
             let mut actions = Vec::new();
 
             for part in parts {
@@ -948,10 +953,9 @@ mod test_mode_fakes {
                         call_id,
                         tool_name,
                         input_json,
-                        item_id,
-                        signature: _,
+                        replay,
                     } => {
-                        tool_calls.push((call_id, tool_name, input_json, item_id));
+                        tool_calls.push((call_id, tool_name, input_json, replay));
                     }
                 }
             }
@@ -984,8 +988,7 @@ mod test_mode_fakes {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1017,15 +1020,14 @@ mod test_mode_fakes {
                     attachment: None,
                     tool_call_id: None,
                     tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
                 });
             }
             let mut calls = Vec::new();
-            for (call_id, tool_name, input_json, item_id) in tool_calls {
+            for (call_id, tool_name, input_json, replay) in tool_calls {
                 assistant_parts.push(Part {
                     id: format!("{}.p{}", asst_id, assistant_parts.len()),
                     kind: PartKind::ToolCall,
@@ -1033,8 +1035,7 @@ mod test_mode_fakes {
                     attachment: None,
                     tool_call_id: Some(call_id.clone()),
                     tool_name: Some(tool_name.clone()),
-                    tool_item_id: item_id.clone(),
-                    tool_signature: None,
+                    tool_replay: replay.clone(),
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,
@@ -1045,7 +1046,7 @@ mod test_mode_fakes {
                     call_id,
                     tool_name,
                     args,
-                    item_id,
+                    replay,
                 });
             }
             if !assistant_parts.is_empty() {
@@ -1112,8 +1113,7 @@ mod test_mode_fakes {
                     attachment: None,
                     tool_call_id: Some(outcome.call_id.clone()),
                     tool_name: Some(outcome.tool_name.clone()),
-                    tool_item_id: None,
-                    tool_signature: None,
+                    tool_replay: None,
                     prune_state: PruneState::Intact,
                     reasoning_meta: None,
                     response_meta: None,

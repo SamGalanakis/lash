@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::app::App;
 use crate::editor::PendingImage;
-use lash_core::InputItem;
+use lash::InputItem;
 
 /// Build structured turn items from editor input:
 /// - `@path` becomes a host-prepared text marker when resolvable
@@ -39,7 +39,7 @@ pub fn build_items_from_editor_input(
             image_blobs
                 .entry(id.clone())
                 .or_insert_with(|| bytes.clone());
-            items.push(InputItem::ImageRef { id });
+            items.push(InputItem::image_ref(id));
             i = next_i;
             continue;
         }
@@ -95,9 +95,7 @@ fn push_text_item(items: &mut Vec<InputItem>, text: &mut String) {
         text.clear();
         return;
     }
-    items.push(InputItem::Text {
-        text: std::mem::take(text),
-    });
+    items.push(InputItem::text(std::mem::take(text)));
 }
 
 pub(crate) fn parse_image_marker_at(input: &str, start: usize) -> Option<(usize, usize)> {

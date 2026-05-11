@@ -406,7 +406,10 @@ mod tests {
             Err(PluginError::Session("not used".to_string()))
         }
 
-        async fn await_turn(&self, _turn_id: &str) -> Result<lash_core::AssembledTurn, PluginError> {
+        async fn await_turn(
+            &self,
+            _turn_id: &str,
+        ) -> Result<lash_core::AssembledTurn, PluginError> {
             Err(PluginError::Session("not used".to_string()))
         }
 

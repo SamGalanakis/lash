@@ -28,13 +28,14 @@
             <li><a href="./deps.html">Dependencies</a></li>
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
           </ol>
         </details>
       </aside>
       <header class="hero">
         <div class="eyebrow">Architecture chapter 01</div>
         <h1>overview<span class="slash">/</span>map</h1>
-        <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The CLI and embedding facade compose first-party providers, mode plugins, default tools, subagents, LLM helper tools, MCP tools, UI extensions, persistence, tracing, and the TUI.</p>
+        <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, mode plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
       </header>
 
       <section class="content">
@@ -48,19 +49,19 @@
             <div class="mermaid">
 flowchart TD
   subgraph Host["Host applications"]
-    CLI["lash-cli<br/>TUI, setup, resume/fork, --print"]
-    Embed["lash<br/>app-facing core/session/turn API"]
+    CLI["lash-cli<br/>TUI, setup, resume/fork, --print<br/>(bin + lib half hosting LashConfig)"]
+    Facade["lash (facade)<br/>app-facing core/session/turn API"]
     Export["lash-export<br/>multi-session tree &rarr; HTML / JSON"]
     TraceViewer["lash-trace-viewer<br/>JSONL trace browser"]
     Bench["benchmark runners<br/>CLBench, SWE-bench, LongCoT, LongMemEval"]
   end
 
   subgraph Runtime["Async host runtime"]
-    L["lash<br/>LashRuntime, Session, Store, PluginHost"]
-    Env["RuntimeEnvironment<br/>shared embedder infrastructure"]
+    L["lash-core<br/>LashRuntime, Session, Store, PluginHost"]
+    Env["RuntimeEnvironment<br/>shared runtime infrastructure"]
     Graph["SessionGraph<br/>durable event graph"]
     Read["SessionReadView<br/>public read seam"]
-    Tools["Tool dispatch<br/>dynamic tools, MCP, built-ins"]
+    Tools["Tool dispatch<br/>dynamic tools, built-ins"]
     Sqlite["lash-sqlite-store<br/>concrete SQLite persistence"]
     Trace["lash-trace<br/>JSONL trace records"]
   end
@@ -74,12 +75,14 @@ flowchart TD
     Modes["mode plugins<br/>standard + rlm"]
     Providers["provider crates<br/>OpenAI, Codex, Anthropic, Google"]
     Plugins["tool/plugin crates<br/>llm_query, plan, memory, context, UI activity"]
+    Mcp["lash-plugin-mcp<br/>rmcp-based MCP plugin<br/>stdio / streamable-http / sse"]
     Subagents["lash-subagents<br/>spawn_agent host + RLM bridge"]
   end
 
+  CLI --> Facade
   CLI --> L
-  Embed --> L
-  Bench --> L
+  Facade --> L
+  Bench --> Facade
   Export --> Read
   TraceViewer --> Trace
   L --> Env
@@ -93,6 +96,7 @@ flowchart TD
   Modes --> L
   Providers --> L
   Plugins --> L
+  Mcp --> L
   Subagents --> L
             </div>
           </div>
@@ -104,9 +108,9 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">37</span><span class="stat-note">Runtime, embed API, CLI/TUI, providers, plugins, language, export, tracing, file-index, harness optimizer, examples, and benchmark crates.</span></article>
-            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~174k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">300</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">46</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language, export, tracing, file-index, harness optimizer, examples, and benchmark crates.</span></article>
+            <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~200k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">357</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can hand off to a successor session via <code>continue_as</code>.</span></article>
           </div>
         </div>
@@ -144,7 +148,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Handoffs are runtime continuations.</h3>
-                <p>A turn can finish as <code>TurnOutcome::Handoff { session_id }</code>, which transparently activates an RLM successor with a fresh window. Hosts that just want a final answer call <code>stream_turn_following_handoffs</code> and read <code>FollowedTurn::final_turn()</code>.</p>
+                <p>A turn can finish as <code>TurnOutcome::Handoff { session_id }</code>, which transparently activates an RLM successor with a fresh window. App hosts that use <code>TurnBuilder::stream</code>, <code>run</code>, or <code>collect_with</code> get the final handoff-followed <code>TurnResult</code>; lower-level runtime hosts can still inspect the underlying handoff chain.</p>
               </div>
             </li>
             <li>
@@ -162,7 +166,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Source anchors: <code>Cargo.toml</code>, <code>README.md</code>, <code>lash/src/runtime</code>, <code>lash-sansio/src</code>.</footer>
+      <footer class="footer">Source anchors: <code>Cargo.toml</code>, <code>lash-core/src/runtime</code>, <code>lash/src/lib.rs</code>, <code>lash-sansio/src</code>.</footer>
     </main>
   </div>
 </body>

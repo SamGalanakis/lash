@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Using the CLI - lash Docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./architecture/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <main class="page">
+    <div class="frame">
+      <aside class="sidebar" aria-label="Documentation navigation">
+        <a class="sidebar__exit" href="./index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Guide</span>
+            <span class="sidebar__current">Using the CLI</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./quickstart.html">Quickstart</a></li>
+            <li><a href="./embedding.html">Lash API</a></li>
+            <li><a href="./example-agent-service.html">Agent Service</a></li>
+            <li><a class="active" href="./cli.html">CLI</a></li>
+            <li><a href="./plugins.html">Plugins</a></li>
+            <li><a href="./persistence.html">Persistence</a></li>
+            <li><a href="./tracing.html">Tracing</a></li>
+            <li><a href="./architecture/">Architecture</a></li>
+            <li><a href="./design-language.html">Design Language</a></li>
+          </ol>
+        </details>
+        <nav class="sidebar__toc" aria-label="On this page">
+          <div class="sidebar__label">On this page</div>
+          <ol>
+            <li><a href="#first-run">First Run</a></li>
+            <li><a href="#slash-commands">Slash Commands</a></li>
+            <li><a href="#keyboard-shortcuts">Keyboard Shortcuts</a></li>
+            <li><a href="#cli-flags">CLI Flags</a></li>
+            <li><a href="#print-mode">Print Mode</a></li>
+            <li><a href="#config-file">Config File</a></li>
+            <li><a href="#environment-variables">Environment Variables</a></li>
+            <li><a href="#resume-fork">Resume &amp; Fork</a></li>
+          </ol>
+        </nav>
+      </aside>
+
+      <header class="hero">
+        <div class="eyebrow">lash guide</div>
+        <h1>using<span class="slash">/</span>cli</h1>
+        <p>The <code>lash</code> binary is shipped by the <code>lash-cli</code> crate. It runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and a handful of administrative flows like <code>--export</code> and <code>--reset</code>. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
+      </header>
+
+      <section class="content" id="content">
+        <div class="section" id="first-run">
+          <div class="section-header">
+            <h2>First Run</h2>
+            <p>If <code>~/.lash/config.json</code> does not exist, <code>lash</code> launches the setup wizard. The wizard provisions an active provider, collects credentials, and writes the config file before dropping you into the TUI.</p>
+          </div>
+          <pre><code>$ lash
+# Setup wizard:
+# 1. Choose a provider (Anthropic, OpenAI, OpenAI-compatible, Codex, Google OAuth)
+# 2. Paste API key (or run OAuth / device-code flow)
+# 3. Optionally paste a Tavily API key for the built-in web-search tool
+# 4. Drop into the interactive TUI</code></pre>
+          <p>Re-run the wizard at any time with <code>lash --provider</code>. Use <code>/provider</code> from inside a session to switch providers without restarting.</p>
+        </div>
+
+        <div class="section" id="slash-commands">
+          <div class="section-header">
+            <h2>Slash Commands</h2>
+            <p>Type a <code>/</code> at the start of the prompt to invoke a command. Tab-completion is available. Skill names registered in <code>~/.lash/skills/</code> or <code>.agents/lash/skills/</code> appear as additional <code>/&lt;skill&gt;</code> commands.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Command</th><th>Aliases</th><th>Usage</th><th>Description</th></tr></thead>
+              <tbody>
+                <tr><td><code>/clear</code></td><td><code>/new</code></td><td><code>/clear</code></td><td>Reset conversation</td></tr>
+                <tr><td><code>/compact</code></td><td>—</td><td><code>/compact [focus instructions]</code></td><td>Summarize older messages to free up context</td></tr>
+                <tr><td><code>/controls</code></td><td>—</td><td><code>/controls</code></td><td>Show keyboard shortcuts</td></tr>
+                <tr><td><code>/fork</code></td><td>—</td><td><code>/fork</code></td><td>Open a forked session in a new terminal</td></tr>
+                <tr><td><code>/tree</code></td><td>—</td><td><code>/tree</code></td><td>Browse and switch branches in the current session</td></tr>
+                <tr><td><code>/version</code></td><td>—</td><td><code>/version</code></td><td>Show <code>lash-cli</code> and <code>lash-sansio</code> versions</td></tr>
+                <tr><td><code>/info</code></td><td>—</td><td><code>/info</code></td><td>Show current session/runtime info</td></tr>
+                <tr><td><code>/model</code></td><td>—</td><td><code>/model [name]</code></td><td>Show or switch the LLM model</td></tr>
+                <tr><td><code>/variant</code></td><td>—</td><td><code>/variant [name]</code></td><td>Show or switch the model variant (e.g. <code>high</code>, <code>max</code>)</td></tr>
+                <tr><td><code>/mode</code></td><td>—</td><td><code>/mode [name]</code></td><td>Show or switch execution mode (<code>standard</code> / <code>rlm</code>)</td></tr>
+                <tr><td><code>/provider</code></td><td><code>/login</code></td><td><code>/provider</code></td><td>Switch, add, or re-authenticate providers</td></tr>
+                <tr><td><code>/logout</code></td><td>—</td><td><code>/logout</code></td><td>Remove stored credentials for active provider</td></tr>
+                <tr><td><code>/retry</code></td><td>—</td><td><code>/retry</code></td><td>Replay the previous turn payload</td></tr>
+                <tr><td><code>/resume</code></td><td><code>/continue</code></td><td><code>/resume [name]</code></td><td>Browse or load a previous session (interactive picker if no arg)</td></tr>
+                <tr><td><code>/skills</code></td><td>—</td><td><code>/skills</code></td><td>Browse loaded skills</td></tr>
+                <tr><td><code>/tools</code></td><td>—</td><td><code>/tools ...</code></td><td>Inspect or edit the tool registry</td></tr>
+                <tr><td><code>/reconfigure</code></td><td>—</td><td><code>/reconfigure ...</code></td><td>Apply or inspect pending runtime reconfigure</td></tr>
+                <tr><td><code>/help</code></td><td><code>/?</code></td><td><code>/help</code></td><td>Show commands and shortcuts</td></tr>
+                <tr><td><code>/exit</code></td><td><code>/quit</code></td><td><code>/exit</code></td><td>Quit</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="keyboard-shortcuts">
+          <div class="section-header">
+            <h2>Keyboard Shortcuts</h2>
+            <p>The TUI uses a small, consistent set of shortcuts. The full list is also available in-session via <code>/controls</code>.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>History navigation</h3>
+              <dl class="def-list">
+                <dt><kbd>Ctrl+U</kbd> / <kbd>Ctrl+D</kbd></dt><dd>Scroll history up / down half a page.</dd>
+                <dt><kbd>PageUp</kbd> / <kbd>PageDown</kbd></dt><dd>Scroll history a full page.</dd>
+                <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Single-line scroll when not editing the prompt.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Prompt editing</h3>
+              <dl class="def-list">
+                <dt><kbd>Enter</kbd></dt><dd>Submit the prompt, or pick from a picker.</dd>
+                <dt><kbd>Tab</kbd></dt><dd>Accept an autocomplete suggestion or toggle a multi-select option.</dd>
+                <dt><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd></dt><dd>Move the cursor by word.</dd>
+                <dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>Jump to the start / end of the prompt.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Selection &amp; clipboard</h3>
+              <dl class="def-list">
+                <dt><kbd>Ctrl+C</kbd></dt><dd>Copy the current selection (or the last assistant response if no selection). Configure via <code>LASH_COPY_BINDING</code> if the default conflicts with your terminal.</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Close pickers and cancel modal flows.</dd>
+                <dt><kbd>Ctrl+C</kbd> (idle)</dt><dd>Quit <code>lash</code> when no selection is active.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Pickers &amp; multi-select</h3>
+              <dl class="def-list">
+                <dt><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd></dt><dd>Move selection.</dd>
+                <dt><kbd>Space</kbd></dt><dd>Toggle a multi-select option when supported.</dd>
+                <dt><kbd>Tab</kbd> / <kbd>BackTab</kbd></dt><dd>Add / remove a note on a selection when supported.</dd>
+              </dl>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="cli-flags">
+          <div class="section-header">
+            <h2>CLI Flags</h2>
+            <p>Run <code>lash --help</code> for the full list. The most common flags, grouped by purpose:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel">
+              <h3>Provider &amp; model</h3>
+              <dl class="def-list">
+                <dt><code>--provider</code></dt><dd>Re-run the provider setup wizard.</dd>
+                <dt><code>--model &lt;name&gt;</code></dt><dd>Override the default model for this session.</dd>
+                <dt><code>--variant &lt;name&gt;</code></dt><dd>Override the provider-native model variant (e.g. <code>high</code>, <code>max</code>, <code>xhigh</code>).</dd>
+                <dt><code>--api-key &lt;key&gt;</code></dt><dd>One-shot API key for OpenAI or OpenAI-compatible providers.</dd>
+                <dt><code>--base-url &lt;url&gt;</code></dt><dd>Base URL for the LLM API (OpenAI-compatible).</dd>
+                <dt><code>--tavily-api-key &lt;key&gt;</code> <span class="micro-label">(env <code>TAVILY_API_KEY</code>)</span></dt><dd>Tavily key for the bundled web-search tool.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Execution</h3>
+              <dl class="def-list">
+                <dt><code>-em</code>, <code>--execution-mode &lt;mode&gt;</code></dt><dd><code>standard</code> (default) or <code>rlm</code>.</dd>
+                <dt><code>-c</code>, <code>--context-approach &lt;approach&gt;</code></dt><dd>For standard mode: <code>rolling_history</code> or <code>observational_memory</code>.</dd>
+                <dt><code>--rlm-var name=&lt;json&gt;</code></dt><dd>Repeatable. Project a read-only bound variable into the RLM autonomous turn.</dd>
+                <dt><code>--rlm-vars-file &lt;path&gt;</code></dt><dd>Same as above but load the projections from a JSON object file.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Session</h3>
+              <dl class="def-list">
+                <dt><code>--resume &lt;id_or_name&gt;</code></dt><dd>Resume by session id, name, or legacy <code>.db</code> filename.</dd>
+                <dt><code>--resume-prompt &lt;prompt&gt;</code></dt><dd>Queue and send a prompt right after resume.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Output modes</h3>
+              <dl class="def-list">
+                <dt><code>-p</code>, <code>--print &lt;prompt&gt;</code></dt><dd>Autonomous: run the prompt once, write the answer to stdout, exit. See <em>Print mode</em> below.</dd>
+                <dt><code>--await-background-work</code></dt><dd>In autonomous mode, wait for plugin background work before exiting.</dd>
+                <dt><code>--turn-usage-json &lt;path&gt;</code></dt><dd>In autonomous mode, write per-turn and cumulative usage JSON to a file.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Debug &amp; tracing</h3>
+              <dl class="def-list">
+                <dt><code>--debug</code></dt><dd>Detailed lifecycle/debug logs plus per-session LLM traces.</dd>
+                <dt><code>--trace-level &lt;standard|extended&gt;</code></dt><dd>Trace detail. Default <code>standard</code>.</dd>
+                <dt><code>--debug-ui-trace trace.json</code></dt><dd>Record the live TUI session as a replayable UI trace plus a final snapshot.</dd>
+              </dl>
+            </article>
+            <article class="panel">
+              <h3>Admin</h3>
+              <dl class="def-list">
+                <dt><code>--reset</code></dt><dd>Delete <code>~/.lash/</code> and <code>~/.cache/lash/</code> and exit.</dd>
+                <dt><code>--info</code></dt><dd>Print current config / runtime info and exit.</dd>
+                <dt><code>--check-update</code> / <code>--update</code></dt><dd>Check / install the latest release.</dd>
+                <dt><code>--export &lt;db&gt;</code></dt><dd>Export a persisted session database. Combine with <code>--export-format html|json</code>, <code>--export-trace &lt;jsonl&gt;</code>, and <code>--export-out &lt;path&gt;</code>.</dd>
+              </dl>
+            </article>
+          </div>
+        </div>
+
+        <div class="section" id="print-mode">
+          <div class="section-header">
+            <h2>Print Mode</h2>
+            <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the assistant's prose to stdout, and exits. There is no TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
+          </div>
+          <pre><code>$ lash --print "Summarise this branch's changes in two bullets."
+# Assistant prose to stdout, tool/lifecycle logs to stderr.
+
+$ lash --print "Investigate the latest test failure." \
+       --await-background-work \
+       --turn-usage-json out/usage.json</code></pre>
+        </div>
+
+        <div class="section" id="config-file">
+          <div class="section-header">
+            <h2>Config File</h2>
+            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is owned by <code>LashConfig</code> in <code>lash-cli/src/config.rs</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
+          </div>
+          <pre><code>{
+  "active_provider": "openai",
+  "providers": {
+    "openai": { "kind": "openai", "api_key": "sk-..." },
+    "anthropic": {
+      "kind": "anthropic",
+      "api_key": "sk-ant-...",
+      "options": {
+        "cache_retention": "long",
+        "max_output_tokens": 16384
+      }
+    }
+  },
+  "auxiliary_secrets": {
+    "tavily_api_key": "tvly-..."
+  },
+  "mcp_servers": {
+    "docs": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-docs"]
+    }
+  },
+  "agent_models": {},
+  "model_defaults": {
+    "openai": { "model": "gpt-4o", "variant": null }
+  },
+  "runtime": {}
+}</code></pre>
+          <div class="table">
+            <table>
+              <thead><tr><th>Field</th><th>Type</th><th>Purpose</th></tr></thead>
+              <tbody>
+                <tr><td><code>active_provider</code></td><td>string</td><td>Key of the currently active provider; must exist in <code>providers</code>.</td></tr>
+                <tr><td><code>providers</code></td><td>map</td><td>Per-provider credentials and metadata, keyed by provider kind. Shared provider tuning lives under <code>options</code>, including <code>cache_retention</code> (<code>none</code> | <code>short</code> | <code>long</code>) and <code>max_output_tokens</code>.</td></tr>
+                <tr><td><code>auxiliary_secrets</code></td><td>object</td><td>Secrets for non-LLM services. Currently <code>tavily_api_key</code>.</td></tr>
+                <tr><td><code>mcp_servers</code></td><td>map</td><td>MCP server configs by name. Discriminated by <code>transport</code>: <code>stdio</code>, <code>streamable_http</code>, or <code>sse</code>.</td></tr>
+                <tr><td><code>agent_models</code></td><td>map</td><td>User-overridable model names per subagent capability.</td></tr>
+                <tr><td><code>model_defaults</code></td><td>map</td><td>Fresh-session model + variant default per provider kind. Session resumes ignore this and use the persisted head.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="environment-variables">
+          <div class="section-header">
+            <h2>Environment Variables</h2>
+            <p>The CLI reads a small set of environment variables — most are overrides for paths or behavior the config file doesn't cover.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+              <tbody>
+                <tr><td><code>LASH_HOME</code></td><td>Override the root data directory (defaults to <code>~/.lash/</code>).</td></tr>
+                <tr><td><code>TAVILY_API_KEY</code></td><td>Tavily API key for the bundled web search tool. Alternative to <code>--tavily-api-key</code> and the config file.</td></tr>
+                <tr><td><code>LASH_COPY_BINDING</code></td><td>Override the copy keystroke (<code>ctrl-c</code>, <code>ctrl-shift-c</code>, or <code>ctrl-y</code>).</td></tr>
+                <tr><td><code>LASH_LOG</code></td><td><code>tracing-subscriber</code> log filter (e.g. <code>debug</code>, <code>warn</code>, <code>lash=trace</code>).</td></tr>
+                <tr><td><code>LASH_NO_OSC52</code></td><td>Disable OSC 52 clipboard escape sequences.</td></tr>
+                <tr><td><code>LASH_INSTALL_DIR</code></td><td>Override the install dir used by <code>--update</code>.</td></tr>
+                <tr><td><code>LASH_REPO</code></td><td>Override the GitHub repo used by <code>--check-update</code> / <code>--update</code>.</td></tr>
+                <tr><td><code>GOOGLE_CLOUD_PROJECT[_ID]</code></td><td>Google Cloud project ID for the Gemini / Code Assist provider.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="resume-fork">
+          <div class="section-header">
+            <h2>Resume &amp; Fork</h2>
+            <p>Every session has a UUID and a generated human-readable name. <code>--resume &lt;id_or_name&gt;</code> accepts either, plus the legacy <code>.db</code> filename for old sessions. Without an argument, <code>/resume</code> opens an interactive picker showing the 50 most recent sessions sorted by recency.</p>
+          </div>
+          <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher using the running binary's <code>$PATH</code> entry and falls back to the executable directory if needed. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
+        </div>
+
+        <div class="section-nav">
+          <a href="./example-agent-service.html"><span>Previous</span><strong>Agent Service</strong></a>
+          <a href="./plugins.html"><span>Next</span><strong>Plugins</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Source anchors: <code>lash-cli/src/main.rs</code>, <code>lash-cli/src/command.rs</code>, <code>lash-cli/src/config.rs</code>, <code>lash-cli/src/setup.rs</code>, <code>lash-cli/src/paths.rs</code>, <code>lash-cli/src/interactive/input_handling.rs</code>.</footer>
+    </div>
+  </main>
+</body>
+</html>

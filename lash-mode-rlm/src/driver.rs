@@ -366,7 +366,9 @@ impl RlmContextProjector {
     }
 }
 
-fn projection_from_projector_context(ctx: &ProjectorContext<'_>) -> lash_core::ChronologicalProjection {
+fn projection_from_projector_context(
+    ctx: &ProjectorContext<'_>,
+) -> lash_core::ChronologicalProjection {
     let read_view = lash_core::SessionReadView::from_derived_message_view(
         lash_core::SessionStateEnvelope::default(),
         Arc::new(ctx.events.to_vec()),
@@ -377,7 +379,9 @@ fn projection_from_projector_context(ctx: &ProjectorContext<'_>) -> lash_core::C
 }
 
 #[cfg(test)]
-fn projection_from_events(events: &[lash_core::SessionEventRecord]) -> lash_core::ChronologicalProjection {
+fn projection_from_events(
+    events: &[lash_core::SessionEventRecord],
+) -> lash_core::ChronologicalProjection {
     let read_view = lash_core::SessionReadView::from_derived_message_view(
         lash_core::SessionStateEnvelope::default(),
         Arc::new(events.to_vec()),
@@ -650,7 +654,12 @@ fn message_history_text(message: &lash_core::Message) -> String {
     let chunks = message
         .parts
         .iter()
-        .filter(|part| matches!(part.kind, lash_core::PartKind::Text | lash_core::PartKind::Prose))
+        .filter(|part| {
+            matches!(
+                part.kind,
+                lash_core::PartKind::Text | lash_core::PartKind::Prose
+            )
+        })
         .map(|part| part.content.trim())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
@@ -838,8 +847,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -961,8 +969,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,

@@ -223,7 +223,6 @@ pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
     TurnInput {
         items: vec![InputItem::Text { text }],
         image_blobs: std::collections::HashMap::new(),
-        mode: None,
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,

@@ -224,7 +224,7 @@ impl CliSessionOpener {
             .default_mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
             .provider(policy.provider.clone())
             .model(policy.model.clone(), policy.model_variant.clone())
-            .child_store_factory(Arc::new(session_log::DbSessionStoreFactory::new(
+            .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
             )));
         if let Some(max_context_tokens) = policy.max_context_tokens {

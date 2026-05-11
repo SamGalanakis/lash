@@ -34,8 +34,11 @@ fn test_config_with_termination(
         system_prompt: std::sync::Arc::from(""),
         session_id: "test".to_string(),
         emit_llm_trace: false,
-        termination: lash_core::ModeTurnOptions::typed(lash_core::ExecutionMode::new("rlm"), rlm_termination)
-            .expect("valid rlm turn options"),
+        termination: lash_core::ModeTurnOptions::typed(
+            lash_core::ExecutionMode::new("rlm"),
+            rlm_termination,
+        )
+        .expect("valid rlm turn options"),
     }
 }
 
@@ -50,8 +53,7 @@ fn user_message(content: &str) -> Message {
             attachment: None,
             tool_call_id: None,
             tool_name: None,
-            tool_item_id: None,
-            tool_signature: None,
+            tool_replay: None,
             prune_state: PruneState::Intact,
             reasoning_meta: None,
             response_meta: None,
@@ -184,8 +186,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
                     call_id: "tc1".to_string(),
                     tool_name: "read_file".to_string(),
                     input_json: r#"{"path":"foo.txt"}"#.to_string(),
-                    item_id: None,
-                    signature: None,
+                    replay: None,
                 },
             ],
             ..LlmResponse::default()
@@ -216,7 +217,7 @@ fn standard_tool_calls_produce_effects_and_loop() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
             duration_ms: 10,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -249,8 +250,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
                 call_id: "tc1".to_string(),
                 tool_name: "update_plan".to_string(),
                 input_json: r#"{"plan":[{"step":"done","status":"completed"}]}"#.to_string(),
-                item_id: None,
-                signature: None,
+                replay: None,
             }],
             ..LlmResponse::default()
         }),
@@ -273,7 +273,7 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
             duration_ms: 1,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -336,8 +336,7 @@ fn standard_max_turns_stops_iteration() {
                 call_id: "tc1".to_string(),
                 tool_name: "test".to_string(),
                 input_json: "{}".to_string(),
-                item_id: None,
-                signature: None,
+                replay: None,
             }],
             ..LlmResponse::default()
         }),
@@ -360,7 +359,7 @@ fn standard_max_turns_stops_iteration() {
             result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             model_result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
             duration_ms: 1,
-            item_id: None,
+            replay: None,
         }],
     });
 
@@ -943,11 +942,7 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
             parts: vec![
                 LlmOutputPart::Reasoning {
                     text: "I'll answer directly.".to_string(),
-                    signature: None,
-                    redacted: false,
-                    item_id: None,
-                    encrypted_content: None,
-                    summary: Vec::new(),
+                    replay: None,
                 },
                 LlmOutputPart::Text {
                     text: "```lashlang\nsubmit \"Hi.\"\n```".to_string(),

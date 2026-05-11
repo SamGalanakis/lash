@@ -18,7 +18,7 @@ async fn run_one_tool_call(
             pending_tool.tool_name,
             pending_tool.args,
             index,
-            pending_tool.item_id,
+            pending_tool.replay,
         )
         .await;
     (executed.index, executed.completed)
@@ -114,7 +114,7 @@ impl RuntimeTurnDriver {
                                     result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     duration_ms: 0,
-                                    item_id: None,
+                                    replay: None,
                                 },
                             ));
                         }
@@ -131,7 +131,7 @@ impl RuntimeTurnDriver {
                                     "tool task panicked: {e}"
                                 )),
                                 duration_ms: 0,
-                                item_id: None,
+                                replay: None,
                             },
                         )),
                     }
@@ -153,7 +153,7 @@ impl RuntimeTurnDriver {
                         result: crate::ToolResult::err_fmt("tool call cancelled"),
                         model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                         duration_ms: 0,
-                        item_id: pending_tool.item_id,
+                        replay: pending_tool.replay,
                     },
                 ));
                 continue;

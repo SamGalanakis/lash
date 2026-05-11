@@ -491,6 +491,12 @@ pub(crate) fn provider_display_label(provider: &ProviderHandle) -> &'static str 
     crate::provider_metadata::provider_cli_label(provider.kind())
 }
 
+pub(crate) fn expose_provider_thinking(provider: &mut ProviderHandle) {
+    let mut options = provider.options();
+    options.thinking.expose = true;
+    provider.set_options(options);
+}
+
 pub(crate) fn hash12(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("{:x}", digest)[..12].to_string()

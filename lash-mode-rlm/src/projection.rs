@@ -1,12 +1,15 @@
 use std::collections::HashSet;
 
-use lash_core::{ChronologicalPayload, ExecutionMode, Message, MessageRole, PartKind, ToolCallRecord};
+use lash_core::{
+    ChronologicalPayload, ExecutionMode, Message, MessageRole, PartKind, ToolCallRecord,
+};
 use lash_rlm_types::{
     RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmModeEvent, RlmTrajectoryEntry,
 };
 
 pub fn rlm_mode_event(event: RlmModeEvent) -> lash_core::ModeEvent {
-    lash_core::ModeEvent::typed(ExecutionMode::new("rlm"), event).expect("RLM mode events serialize")
+    lash_core::ModeEvent::typed(ExecutionMode::new("rlm"), event)
+        .expect("RLM mode events serialize")
 }
 
 pub fn decode_rlm_mode_event(event: &lash_core::ModeEvent) -> Option<RlmModeEvent> {
@@ -83,7 +86,9 @@ impl RlmHistoryProjection {
     }
 }
 
-pub fn rlm_history_projection(projection: &lash_core::ChronologicalProjection) -> RlmHistoryProjection {
+pub fn rlm_history_projection(
+    projection: &lash_core::ChronologicalProjection,
+) -> RlmHistoryProjection {
     RlmHistoryProjection::from_chronological(projection)
 }
 

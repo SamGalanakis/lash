@@ -5,15 +5,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Parser;
-use lash_core::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, FollowedTurn, InputItem, LashRuntime, NoopEventSink,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInputInjectionBridge,
-};
-use lash_cli::config::LashConfig;
 use lash::{
     TurnInput,
     advanced::{
@@ -23,6 +14,15 @@ use lash::{
     provider::ProviderHandle,
     tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
     usage::{SessionUsageReport, TokenLedgerEntry},
+};
+use lash_cli::config::LashConfig;
+use lash_core::{
+    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
+    EmbeddedRuntimeHost, FollowedTurn, InputItem, LashRuntime, NoopEventSink,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
+    RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
+    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge,
+    TurnInputInjectionBridge,
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -171,7 +171,6 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                     text: clbench_turn_text(&request),
                 }],
                 image_blobs: Default::default(),
-                mode: None,
                 mode_turn_options: Some(ModeTurnOptions::typed(
                     ExecutionMode::new("rlm"),
                     RlmTermination::SubmitRequired {

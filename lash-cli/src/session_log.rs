@@ -60,48 +60,6 @@ struct HostInputRecord {
     effective_text: String,
 }
 
-#[derive(Clone)]
-pub struct DbSessionStoreFactory {
-    sessions_dir: PathBuf,
-}
-
-impl DbSessionStoreFactory {
-    pub fn new(sessions_dir: PathBuf) -> Self {
-        Self { sessions_dir }
-    }
-
-    fn next_path(&self) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
-        let filename = format!(
-            "{}-{}.db",
-            chrono::Local::now().format("%Y%m%d_%H%M%S"),
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-        Ok(self.sessions_dir.join(filename))
-    }
-}
-
-impl lash_core::SessionStoreFactory for DbSessionStoreFactory {
-    fn create_store(
-        &self,
-        request: &lash_core::SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn lash_core::RuntimePersistence>, String> {
-        let path = self.next_path()?;
-        let store = Arc::new(Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(lash_core::SessionMeta {
-            session_id: request.session_id.clone(),
-            session_name: request.session_id.clone(),
-            created_at: chrono::Local::now().to_rfc3339(),
-            model: request.policy.model.clone(),
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string)),
-            parent_session_id: request.parent_session_id.clone(),
-        });
-        Ok(store as Arc<dyn lash_core::RuntimePersistence>)
-    }
-}
-
 impl SessionLogger {
     pub fn new(
         store: Arc<Store>,
@@ -473,8 +431,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: None,
                 tool_name: None,
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
@@ -495,8 +452,7 @@ mod tests {
                 attachment: None,
                 tool_call_id: Some(call_id.to_string()),
                 tool_name: Some(tool_name.to_string()),
-                tool_item_id: None,
-                tool_signature: None,
+                tool_replay: None,
                 prune_state: lash_core::PruneState::Intact,
                 reasoning_meta: None,
                 response_meta: None,
