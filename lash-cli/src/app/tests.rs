@@ -1,7 +1,7 @@
 use super::*;
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use async_trait::async_trait;
-use lash_core::{Part, PruneState, SessionEvent, TurnEvent};
+use lash_core::{Part, PruneState, SessionEvent, TurnActivity, TurnEvent};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };

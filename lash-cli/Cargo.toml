@@ -12,7 +12,7 @@ semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
 # Hidden `--runtime-perf-benchmark` self-benchmark mode. Requires
 # `lash-core/testing` fixtures and is intended for CI / dev profiling,
 # not user-facing builds.
-runtime-perf = ["lash-core/testing"]
+runtime-perf = ["dep:lash-plugin-observational-memory", "lash-core/testing"]
 
 [lib]
 name = "lash_cli"
@@ -26,6 +26,7 @@ path = "src/main.rs"
 lash-core = { path = "../lash-core", default-features = false, features = ["full"] }
 lash = { path = "../lash" }
 lash-plugin-mcp = { path = "../lash-plugin-mcp" }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", optional = true }
 lash-sqlite-store = { path = "../lash-sqlite-store" }
 lash-llm-tools = { path = "../lash-llm-tools" }
 lash-standard-plugins = { path = "../lash-standard-plugins" }

@@ -18,6 +18,7 @@ mod interactive;
 mod markdown;
 mod overlay;
 mod paths;
+mod perf_support;
 mod persistence;
 mod plugin_surface;
 mod prompt_tool;
@@ -34,7 +35,6 @@ mod setup;
 mod skill_catalog;
 mod skill_prompt;
 mod stream_markdown;
-#[cfg(test)]
 #[cfg(test)]
 mod test_support;
 mod text_display;

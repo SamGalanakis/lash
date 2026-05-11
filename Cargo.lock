@@ -2296,6 +2296,7 @@ dependencies = [
  "lash-mode-rlm",
  "lash-mode-standard",
  "lash-plugin-mcp",
+ "lash-plugin-observational-memory",
  "lash-plugin-plan-mode",
  "lash-plugin-prompt-context",
  "lash-plugin-ui-activity",

@@ -7,9 +7,9 @@ pub(crate) use std::collections::HashMap;
 pub(crate) use lash_core::SchemaProjectionOverride;
 pub(crate) use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 pub(crate) use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
-    ResponseTextMeta, ResponseTextPhase,
+    LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
+    LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
+    LlmUsage, ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 pub(crate) use lash_core::provider::{
     AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
@@ -28,4 +28,6 @@ pub(crate) use lash_openai_schema::{
 pub(crate) use crate::chat::*;
 pub(crate) use crate::common::*;
 pub(crate) use crate::config::*;
+pub(crate) use crate::driver::*;
+pub(crate) use crate::policy::*;
 pub(crate) use crate::responses::*;

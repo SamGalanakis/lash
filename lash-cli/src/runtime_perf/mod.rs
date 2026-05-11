@@ -1,5 +1,9 @@
-pub(crate) mod runner;
+mod harness;
+mod measurement;
+mod openai_compat;
+mod providers;
+mod report;
 mod scenarios;
+mod store;
 
-pub(crate) use runner::run_cli;
-pub(crate) use scenarios::RuntimePerfScenario;
+pub(crate) use report::run_cli;

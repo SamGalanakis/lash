@@ -1,16 +1,17 @@
+mod cache;
 mod input;
+mod live;
 mod projection;
+mod queues;
+mod runtime_events;
 mod view;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-use lash_core::SessionEvent;
 use lash_core::{
     ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
-    PluginMessage, PluginSurfaceEvent, PromptUsage, TokenUsage, ToolCallRecord, TurnActivity,
-    TurnEvent,
+    PluginMessage, PromptUsage, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -20,19 +21,14 @@ use crate::activity::{
     ActivityArtifact, ActivityBlock, ActivityKind, ActivityState, ActivityStatus,
     is_batch_tool_name,
 };
-use crate::assistant_text::{
-    MarkdownLane, merge_assistant_reasoning_text, normalize_assistant_text,
-    push_assistant_reasoning_block, push_assistant_text_block,
-};
 use crate::editor::EditorState;
 use crate::overlay::{OverlayState, PickerState};
-use crate::plugin_surface;
-use crate::render;
 use crate::repo_status::RepoStatus;
 use crate::skill_prompt::append_skill_blocks;
 use crate::stream_markdown::LiveMarkdown;
-use crate::util::{is_cancelled_error, manual_interrupt_message};
 
+use self::cache::BlockRenderCacheEntry;
+pub(super) use self::live::{LiveToolOutput, LiveTurnState};
 pub(crate) use self::projection::{
     UiTimeline, UiTimelineItem, interrupted_assistant_tail, interrupted_blocks_from_read_view,
     preview_text_lines, timeline_from_read_view,
@@ -52,24 +48,6 @@ fn user_turn_start_indices(blocks: &[UiTimelineItem]) -> Vec<usize> {
             .then_some(idx)
         })
         .collect()
-}
-
-fn runtime_status_from_plugin_event(
-    event: &PluginSurfaceEvent,
-) -> Option<(String, Option<String>, std::time::Duration)> {
-    match event {
-        PluginSurfaceEvent::Status {
-            label,
-            detail,
-            transient_ms,
-            ..
-        } => Some((
-            label.clone(),
-            detail.clone(),
-            std::time::Duration::from_millis(transient_ms.unwrap_or(8_000)),
-        )),
-        _ => None,
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -154,131 +132,6 @@ impl BackgroundTaskView {
 
 pub use crate::editor::{LargePaste, PendingImage, SuggestionKind};
 pub use crate::overlay::PromptState;
-
-pub struct LiveTurnState {
-    pub status_text: String,
-    pub status_detail: Option<String>,
-    pub phase_started_at: std::time::Instant,
-    pub turn_started_at: std::time::Instant,
-    pub has_visible_output: bool,
-    pub output_start_anchor_pending: bool,
-    pub transient_until: Option<std::time::Instant>,
-}
-
-impl LiveTurnState {
-    fn new(status_text: impl Into<String>, status_detail: Option<String>) -> Self {
-        let now = std::time::Instant::now();
-        Self {
-            status_text: status_text.into(),
-            status_detail,
-            phase_started_at: now,
-            turn_started_at: now,
-            has_visible_output: false,
-            output_start_anchor_pending: false,
-            transient_until: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LiveToolOutput {
-    #[serde(default)]
-    pub lines: Vec<String>,
-    #[serde(default)]
-    pub hidden: usize,
-    #[serde(default)]
-    pub partial: String,
-    #[serde(default)]
-    pub call_id: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-}
-
-impl LiveToolOutput {
-    fn clear(&mut self) {
-        self.lines.clear();
-        self.hidden = 0;
-        self.partial.clear();
-        self.call_id = None;
-        self.title = None;
-    }
-
-    fn start(&mut self, call_id: Option<String>, title: String) {
-        self.clear();
-        self.call_id = call_id;
-        self.title = Some(title);
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        usize::from(self.hidden > 0) + self.lines.len() + usize::from(!self.partial.is_empty())
-    }
-
-    #[cfg(test)]
-    fn push_text(&mut self, text: &str, line_char_limit: usize, max_lines: usize) {
-        let sanitized = strip_ansi_escape_sequences(text);
-        let mut chars = sanitized.chars().peekable();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '\r' if matches!(chars.peek(), Some('\n')) => {
-                    chars.next();
-                    let completed = std::mem::take(&mut self.partial);
-                    self.push_line(completed, line_char_limit, max_lines);
-                }
-                '\r' => {
-                    self.partial.clear();
-                }
-                '\n' => {
-                    let completed = std::mem::take(&mut self.partial);
-                    self.push_line(completed, line_char_limit, max_lines);
-                }
-                '\t' => {
-                    if !self.partial.chars().last().is_some_and(char::is_whitespace) {
-                        self.partial.push(' ');
-                    }
-                }
-                '\u{8}' | '\u{7f}' => {
-                    self.partial.pop();
-                }
-                control if control.is_control() => {}
-                _ => self.partial.push(ch),
-            }
-
-            if self.partial.chars().count() > line_char_limit {
-                self.partial = smart_truncate_preview_line(&self.partial, line_char_limit);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn push_line(&mut self, line: String, line_char_limit: usize, max_lines: usize) {
-        if self.lines.len() == max_lines {
-            self.lines.remove(0);
-            self.hidden += 1;
-        }
-        self.lines
-            .push(smart_truncate_preview_line(&line, line_char_limit));
-    }
-}
-
-fn live_tool_output_title(name: &str, args: &serde_json::Value) -> String {
-    fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-        args.get(key).and_then(|value| value.as_str())
-    }
-
-    match name {
-        "exec_command" | "start_command" => arg_str(args, "cmd")
-            .map(str::to_string)
-            .unwrap_or_else(|| "shell output".to_string()),
-        "write_stdin" => {
-            if arg_str(args, "chars").is_some_and(str::is_empty) {
-                "poll command output".to_string()
-            } else {
-                "write to command".to_string()
-            }
-        }
-        other => other.replace('_', " "),
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FollowOutputMode {
@@ -501,16 +354,7 @@ impl UiProjectionState {
 
 pub(crate) const SPLASH_CONTENT_HEIGHT: usize = 8;
 pub(crate) const SPLASH_SCROLLBACK_HEIGHT: usize = SPLASH_CONTENT_HEIGHT + 2;
-#[cfg(test)]
-const STREAMING_OUTPUT_MAX_LINES: usize = 48;
-#[cfg(test)]
-const STREAMING_OUTPUT_LINE_CHAR_LIMIT: usize = 240;
-const FOLLOW_OUTPUT_CONTEXT_LINES: usize = 2;
-
-/// Fast, coarse token estimate used only for live UI counters while streaming.
-fn estimate_tokens_from_char_count(chars: i64) -> i64 {
-    if chars <= 0 { 0 } else { (chars + 3) / 4 }
-}
+pub(super) const FOLLOW_OUTPUT_CONTEXT_LINES: usize = 2;
 
 #[cfg(test)]
 mod tests;
@@ -530,14 +374,6 @@ pub struct TextSelection {
     pub active: bool,
     /// Whether a completed selection is being displayed.
     pub visible: bool,
-}
-
-#[derive(Clone, Debug)]
-struct BlockRenderCacheEntry {
-    width: usize,
-    viewport_height: usize,
-    expand_level: u8,
-    lines: Vec<Line<'static>>,
 }
 
 pub struct App {
@@ -576,14 +412,14 @@ pub struct App {
     /// Loaded skills registry.
     pub skills: SkillCatalog,
     /// Priority follow-ups entered with Enter while a turn is running.
-    pub pending_steers: VecDeque<PreparedTurn>,
+    pub pending_steers: std::collections::VecDeque<PreparedTurn>,
     /// FIFO drafts explicitly queued for later turns.
-    pub queued_turns: VecDeque<PreparedTurn>,
+    pub queued_turns: std::collections::VecDeque<PreparedTurn>,
     /// Hidden monitor-origin wake requests awaiting injection or dispatch.
-    pending_monitor_wakes: VecDeque<String>,
+    pending_monitor_wakes: std::collections::VecDeque<String>,
     /// Hidden monitor wake requests already handed to the runtime bridge and
     /// awaiting checkpoint acceptance.
-    in_flight_monitor_wakes: VecDeque<String>,
+    in_flight_monitor_wakes: std::collections::VecDeque<String>,
     /// Most recent selection-style prompt response, held briefly so the next
     /// tool result can render it inline if it exposes a question-panel artifact.
     pending_option_prompt_response: Option<String>,
@@ -695,93 +531,6 @@ impl App {
         self.scroll_to_bottom();
     }
 
-    fn ensure_live_turn(&mut self) -> &mut LiveTurnState {
-        self.live_turn
-            .get_or_insert_with(|| LiveTurnState::new("starting", None))
-    }
-
-    pub fn start_turn(&mut self) {
-        self.running = true;
-        self.manual_interrupt_requested = false;
-        self.pending_retry_status = None;
-        self.iteration = 0;
-        self.live_assistant.clear();
-        self.live_reasoning.clear();
-        self.clear_live_tool_output();
-        self.live_output_chars_estimate = 0;
-        self.live_output_tokens_estimate = 0;
-        self.live_turn = Some(LiveTurnState::new("starting", None));
-        self.follow_mode = FollowOutputMode::Contextual;
-    }
-
-    pub fn stop_turn(&mut self) {
-        self.invalidate_live_reasoning_tail();
-        self.running = false;
-        self.manual_interrupt_requested = false;
-        self.pending_retry_status = None;
-        self.live_reasoning.clear();
-        self.live_assistant.clear();
-        self.clear_live_tool_output();
-        self.live_output_chars_estimate = 0;
-        self.live_output_tokens_estimate = 0;
-        if self.follow_mode == FollowOutputMode::Contextual {
-            self.follow_mode = FollowOutputMode::Bottom;
-        }
-        if let Some(display) = self.pending_option_prompt_response.take() {
-            self.push_prompt_response_user_block(display);
-        }
-        if self
-            .live_turn
-            .as_ref()
-            .and_then(|turn| turn.transient_until)
-            .is_none_or(|until| until <= std::time::Instant::now())
-        {
-            self.live_turn = None;
-        }
-    }
-
-    fn set_status(
-        &mut self,
-        header: impl Into<String>,
-        details: Option<String>,
-        reset_timer: bool,
-    ) {
-        let header = header.into();
-        let turn = self.ensure_live_turn();
-        let changed = turn.status_text != header || turn.status_detail != details;
-        turn.status_text = header;
-        turn.status_detail = details;
-        turn.transient_until = None;
-        if changed || reset_timer {
-            turn.phase_started_at = std::time::Instant::now();
-        }
-    }
-
-    fn set_transient_status(
-        &mut self,
-        header: impl Into<String>,
-        details: Option<String>,
-        duration: std::time::Duration,
-    ) {
-        let header = header.into();
-        let now = std::time::Instant::now();
-        let turn = self.ensure_live_turn();
-        turn.status_text = header;
-        turn.status_detail = details;
-        turn.phase_started_at = now;
-        turn.transient_until = Some(now + duration);
-    }
-
-    fn clear_status(&mut self) {
-        self.manual_interrupt_requested = false;
-        self.pending_retry_status = None;
-        self.live_turn = None;
-    }
-
-    pub fn note_manual_interrupt_requested(&mut self) {
-        self.manual_interrupt_requested = true;
-    }
-
     pub fn on_tick(&mut self) {
         if self.running {
             self.tick += 1;
@@ -822,66 +571,6 @@ impl App {
         }
     }
 
-    fn mark_first_token_arrived(&mut self) {
-        if self
-            .live_turn
-            .as_ref()
-            .is_some_and(|turn| turn.status_text == "thinking")
-        {
-            self.set_status("responding", None, true);
-        }
-    }
-
-    fn mark_visible_output(&mut self) {
-        if let Some(turn) = self.live_turn.as_mut()
-            && !turn.has_visible_output
-        {
-            turn.has_visible_output = true;
-            turn.output_start_anchor_pending =
-                matches!(self.follow_mode, FollowOutputMode::Contextual);
-        }
-    }
-
-    fn push_activity_block(&mut self, activity: ActivityBlock) {
-        let invalidate_from = self.append_invalidation_start();
-        let prior_len = self.timeline.len();
-        ActivityState::append_projected_activity_to_timeline(&mut self.timeline, activity);
-        if !self.timeline.is_empty() {
-            let changed_idx = if self.timeline.len() == prior_len {
-                prior_len.saturating_sub(1)
-            } else {
-                prior_len
-            };
-            self.invalidate_height_cache_from(
-                invalidate_from
-                    .min(changed_idx)
-                    .min(self.timeline.len().saturating_sub(1)),
-            );
-        }
-    }
-
-    fn activity_renders_prompt_response_inline(activity: &ActivityBlock) -> bool {
-        matches!(
-            activity.result.artifact,
-            Some(ActivityArtifact::QuestionPanel(_))
-        )
-    }
-
-    fn push_prompt_response_user_block(&mut self, display: String) {
-        if display.trim().is_empty() {
-            return;
-        }
-        let changed_idx = self.timeline.len();
-        let invalidate_from = self.append_invalidation_start();
-        self.timeline.push(UiTimelineItem::UserInput(display));
-        self.invalidate_height_cache_from(
-            invalidate_from
-                .min(changed_idx)
-                .min(self.timeline.len().saturating_sub(1)),
-        );
-        self.keep_latest_user_block_visible();
-    }
-
     pub fn new(model: String, session_name: String, session_id: String) -> Self {
         let cwd = {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -903,8 +592,8 @@ impl App {
             iteration: 0,
             tick: 0,
             live_turn: None,
-            live_assistant: LiveMarkdown::new(MarkdownLane::Assistant),
-            live_reasoning: LiveMarkdown::new(MarkdownLane::Reasoning),
+            live_assistant: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Assistant),
+            live_reasoning: LiveMarkdown::new(crate::assistant_text::MarkdownLane::Reasoning),
             dirty: true,
             follow_mode: FollowOutputMode::Bottom,
             height_cache: Vec::new(),
@@ -915,10 +604,10 @@ impl App {
             editor: EditorState::default(),
             live_tool_output: LiveToolOutput::default(),
             skills: SkillCatalog::from_dirs(&crate::paths::default_skill_dirs()),
-            pending_steers: VecDeque::new(),
-            queued_turns: VecDeque::new(),
-            pending_monitor_wakes: VecDeque::new(),
-            in_flight_monitor_wakes: VecDeque::new(),
+            pending_steers: std::collections::VecDeque::new(),
+            queued_turns: std::collections::VecDeque::new(),
+            pending_monitor_wakes: std::collections::VecDeque::new(),
+            in_flight_monitor_wakes: std::collections::VecDeque::new(),
             pending_option_prompt_response: None,
             overlay: None,
             focused: true,
@@ -996,12 +685,6 @@ impl App {
         self.editor.take_large_pastes()
     }
 
-    /// Mark the height cache as stale so it will be recomputed on next access.
-    pub fn invalidate_height_cache(&mut self) {
-        self.height_cache_dirty_from = 0;
-        self.block_render_cache.clear();
-    }
-
     /// Recompute the session-wide cumulative token usage from the parent's
     /// cumulative plus the latest cumulative reported by each child session.
     fn recompute_session_token_usage(&mut self) {
@@ -1010,47 +693,6 @@ impl App {
             total.add(child);
         }
         self.token_usage = total;
-    }
-
-    fn invalidate_height_cache_from(&mut self, idx: usize) {
-        if self.timeline.is_empty() {
-            self.height_cache.clear();
-            self.height_cache_dirty_from = 0;
-            self.block_render_cache.clear();
-            return;
-        }
-        if self.height_cache.is_empty() {
-            self.height_cache_dirty_from = 0;
-        }
-        if idx < self.block_render_cache.len() {
-            self.block_render_cache.truncate(idx);
-        }
-        self.height_cache_dirty_from = self
-            .height_cache_dirty_from
-            .min(idx.min(self.timeline.len().saturating_sub(1)));
-    }
-
-    fn live_reasoning_tail_index(&self) -> Option<usize> {
-        self.running
-            .then(|| self.timeline.len().checked_sub(1))
-            .flatten()
-            .filter(|&idx| {
-                matches!(
-                    self.timeline.get(idx),
-                    Some(UiTimelineItem::AssistantReasoning(_))
-                )
-            })
-    }
-
-    fn append_invalidation_start(&self) -> usize {
-        self.live_reasoning_tail_index()
-            .unwrap_or(self.timeline.len())
-    }
-
-    fn invalidate_live_reasoning_tail(&mut self) {
-        if let Some(idx) = self.live_reasoning_tail_index() {
-            self.invalidate_height_cache_from(idx);
-        }
     }
 
     /// Remove the empty-state splash once real conversation content is present.
@@ -1062,721 +704,6 @@ impl App {
         self.timeline
             .retain(|block| !matches!(block, UiTimelineItem::Splash));
         self.invalidate_height_cache();
-    }
-
-    fn live_assistant_normalized_text(&self) -> Option<String> {
-        self.live_assistant
-            .has_renderable_output()
-            .then(|| self.live_assistant.normalized_text())
-            .flatten()
-    }
-
-    fn live_reasoning_normalized_text(&self) -> Option<String> {
-        self.live_reasoning
-            .has_renderable_output()
-            .then(|| self.live_reasoning.normalized_text())
-            .flatten()
-    }
-
-    fn ensure_live_markdown_rendered(&mut self, viewport_width: usize) {
-        self.live_reasoning.ensure_rendered(viewport_width);
-        self.live_assistant.ensure_rendered(viewport_width);
-    }
-
-    pub fn live_reasoning_lines_snapshot(&self) -> Option<&[Line<'static>]> {
-        (!self.live_reasoning.lines().is_empty()).then_some(self.live_reasoning.lines())
-    }
-
-    pub fn live_assistant_lines_snapshot(&self) -> Option<&[Line<'static>]> {
-        (!self.live_assistant.lines().is_empty()).then_some(self.live_assistant.lines())
-    }
-
-    pub(crate) fn has_live_markdown_output(&self) -> bool {
-        self.live_reasoning.has_renderable_output() || self.live_assistant.has_renderable_output()
-    }
-
-    pub(crate) fn rendered_block_lines_cached(
-        &mut self,
-        idx: usize,
-        viewport_width: usize,
-        viewport_height: usize,
-    ) -> &[Line<'static>] {
-        if self.block_render_cache.len() <= idx {
-            self.block_render_cache.resize_with(idx + 1, || None);
-        }
-
-        let needs_refresh = self.block_render_cache[idx].as_ref().is_none_or(|entry| {
-            entry.width != viewport_width
-                || entry.viewport_height != viewport_height
-                || entry.expand_level != self.expand_level
-        });
-
-        if needs_refresh {
-            let lines = render::render_block_lines(self, idx, viewport_width, viewport_height);
-            self.block_render_cache[idx] = Some(BlockRenderCacheEntry {
-                width: viewport_width,
-                viewport_height,
-                expand_level: self.expand_level,
-                lines,
-            });
-        }
-
-        self.block_render_cache[idx]
-            .as_ref()
-            .map(|entry| entry.lines.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub(crate) fn rendered_block_height_cached(
-        &mut self,
-        idx: usize,
-        viewport_width: usize,
-        viewport_height: usize,
-    ) -> usize {
-        self.rendered_block_lines_cached(idx, viewport_width, viewport_height)
-            .len()
-    }
-
-    pub(crate) fn live_reasoning_leading_padding(&self) -> usize {
-        if !self.live_reasoning.has_renderable_output() {
-            return 0;
-        }
-
-        match self.timeline.last() {
-            Some(
-                UiTimelineItem::AssistantReasoning(_)
-                | UiTimelineItem::Splash
-                | UiTimelineItem::TurnStart(_),
-            )
-            | None => 0,
-            _ => 1,
-        }
-    }
-
-    pub(crate) fn live_assistant_leading_padding(&self) -> usize {
-        if !self.live_assistant.has_renderable_output() {
-            return 0;
-        }
-        if self.live_reasoning.has_renderable_output() {
-            return 0;
-        }
-
-        match self.timeline.last() {
-            Some(
-                UiTimelineItem::AssistantText(_)
-                | UiTimelineItem::AssistantReasoning(_)
-                | UiTimelineItem::Splash
-                | UiTimelineItem::TurnStart(_),
-            )
-            | None => 0,
-            _ => 1,
-        }
-    }
-
-    fn live_reasoning_height(&self) -> usize {
-        let lines = self.live_reasoning.lines();
-        if lines.is_empty() {
-            return 0;
-        }
-        self.live_reasoning_leading_padding() + lines.len()
-    }
-
-    fn live_assistant_height(&self) -> usize {
-        let lines = self.live_assistant.lines();
-        if lines.is_empty() {
-            return 0;
-        }
-        self.live_assistant_leading_padding() + lines.len()
-    }
-
-    pub(crate) fn live_tool_output_anchor_block_index(&self) -> Option<usize> {
-        if self.live_tool_output.height() == 0 {
-            return None;
-        }
-        self.timeline
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(idx, block)| match block {
-                UiTimelineItem::Activity(activity)
-                    if matches!(
-                        activity.call.kind,
-                        ActivityKind::ShellCommand
-                            | ActivityKind::ShellInteraction
-                            | ActivityKind::Subagent
-                    ) && matches!(
-                        activity.result.status,
-                        ActivityStatus::Running | ActivityStatus::Partial
-                    ) =>
-                {
-                    Some(idx)
-                }
-                _ => None,
-            })
-    }
-
-    fn invalidate_live_tool_output_cache(&mut self) {
-        if let Some(idx) = self.live_tool_output_anchor_block_index() {
-            self.invalidate_height_cache_from(idx);
-        }
-    }
-
-    fn clear_live_tool_output(&mut self) {
-        let had_output = self.live_tool_output.height() > 0;
-        let anchor_idx = self.live_tool_output_anchor_block_index();
-        self.live_tool_output.clear();
-        if had_output && let Some(idx) = anchor_idx {
-            self.invalidate_height_cache_from(idx);
-        }
-    }
-
-    fn reconcile_trailing_assistant_block(&mut self, text: &str) -> bool {
-        let Some(UiTimelineItem::AssistantText(existing)) = self.timeline.last_mut() else {
-            return false;
-        };
-        if text.starts_with(existing.as_str()) {
-            if *existing != text {
-                *existing = text.to_string();
-                let idx = self.timeline.len().saturating_sub(1);
-                self.invalidate_height_cache_from(idx);
-            }
-            return true;
-        }
-        if existing.is_empty() || existing.starts_with(text) {
-            return true;
-        }
-        false
-    }
-
-    #[cfg(test)]
-    fn set_live_assistant_from_final(&mut self, text: &str) {
-        let cleaned = normalize_assistant_text(text);
-        if cleaned.is_empty() {
-            self.live_assistant.clear();
-            return;
-        }
-
-        let final_text = match self.live_assistant_normalized_text() {
-            Some(existing) if !existing.is_empty() && !cleaned.starts_with(existing.as_str()) => {
-                existing
-            }
-            _ => cleaned,
-        };
-        self.live_assistant.clear();
-        self.live_assistant.append(&final_text);
-        self.mark_visible_output();
-    }
-
-    fn commit_live_assistant_block(&mut self) {
-        let Some(cleaned) = self.live_assistant.take_normalized_text() else {
-            return;
-        };
-
-        if self.reconcile_trailing_assistant_block(&cleaned) {
-            self.mark_visible_output();
-            return;
-        }
-
-        let changed_idx = self.timeline.len();
-        let invalidate_from = self.append_invalidation_start();
-        if push_assistant_text_block(&mut self.timeline, &cleaned) {
-            self.invalidate_height_cache_from(
-                invalidate_from
-                    .min(changed_idx)
-                    .min(self.timeline.len().saturating_sub(1)),
-            );
-            self.mark_visible_output();
-        }
-    }
-
-    fn commit_live_reasoning_block(&mut self) {
-        let Some(cleaned) = self.live_reasoning.take_normalized_text() else {
-            return;
-        };
-        let prior_len = self.timeline.len();
-        if push_assistant_reasoning_block(&mut self.timeline, &cleaned) {
-            let changed_idx = if self.timeline.len() == prior_len {
-                prior_len.saturating_sub(1)
-            } else {
-                prior_len
-            };
-            self.invalidate_height_cache_from(changed_idx.min(self.timeline.len() - 1));
-            self.mark_visible_output();
-        }
-    }
-
-    fn merge_into_trailing_reasoning_block(&mut self, text: &str) -> bool {
-        let Some(UiTimelineItem::AssistantReasoning(existing)) = self.timeline.last_mut() else {
-            return false;
-        };
-        let changed = merge_assistant_reasoning_text(existing, text);
-        if changed {
-            let idx = self.timeline.len().saturating_sub(1);
-            self.invalidate_height_cache_from(idx);
-            self.mark_visible_output();
-        }
-        true
-    }
-
-    fn finalize_live_markdown(&mut self) {
-        self.commit_live_reasoning_block();
-        self.commit_live_assistant_block();
-    }
-
-    fn accept_injected_turn_input(&mut self, messages: &[PluginMessage]) {
-        self.finalize_live_markdown();
-        let mut accepted_user_message = false;
-        for message in messages {
-            if !matches!(message.role, MessageRole::User) {
-                continue;
-            }
-            accepted_user_message = true;
-            if let Some(turn) = self.take_matching_pending_steer(&message.content) {
-                self.push_prepared_user_input(&turn);
-            } else {
-                self.push_user_input_history_text(message.content.clone());
-            }
-        }
-        if accepted_user_message {
-            self.keep_latest_user_block_visible();
-        }
-    }
-
-    fn commit_injected_messages(&mut self, messages: &[PluginMessage]) {
-        self.finalize_live_markdown();
-        let mut committed_user_message = false;
-        for message in messages {
-            match message.role {
-                MessageRole::User => {
-                    committed_user_message = true;
-                    if let Some(turn) = self.take_matching_pending_steer(&message.content) {
-                        self.push_prepared_user_input(&turn);
-                    } else {
-                        self.push_user_input_history_text(message.content.clone());
-                    }
-                }
-                MessageRole::System => {
-                    self.timeline
-                        .push(UiTimelineItem::SystemMessage(message.content.clone()));
-                }
-                _ => continue,
-            }
-        }
-        if !messages.is_empty() {
-            self.invalidate_height_cache();
-            if committed_user_message {
-                self.keep_latest_user_block_visible();
-            } else {
-                self.scroll_to_bottom();
-            }
-        }
-    }
-
-    pub fn push_prepared_user_input(&mut self, turn: &PreparedTurn) {
-        self.push_user_input_history_text(turn.history_text());
-    }
-
-    fn push_user_input_history_text(&mut self, history_text: String) {
-        let history_text = history_text.trim().to_string();
-        if history_text.is_empty() {
-            return;
-        }
-        // The original UserInput is pushed immediately when the user sends
-        // a steered/queued message. By the time the runtime fires the
-        // checkpoint commit (e.g. codex `InjectedMessagesCommitted` after
-        // post-tool checkpoint), the assistant may have already pushed
-        // AssistantText / Activity blocks on top, so checking only the
-        // last block lets a duplicate slip through. Scan everything since
-        // the most recent user TurnStart instead.
-        let scan_start = self
-            .timeline
-            .iter()
-            .rposition(|block| {
-                matches!(
-                    block,
-                    UiTimelineItem::TurnStart(turn) if turn.role == TurnRole::User
-                )
-            })
-            .unwrap_or(0);
-        if self.timeline[scan_start..].iter().any(
-            |block| matches!(block, UiTimelineItem::UserInput(text) if text.trim() == history_text),
-        ) {
-            return;
-        }
-        let changed_idx = self.timeline.len();
-        let invalidate_from = self.append_invalidation_start();
-        self.timeline.push_user_turn_start();
-        self.timeline.push(UiTimelineItem::UserInput(history_text));
-        self.invalidate_height_cache_from(
-            invalidate_from
-                .min(changed_idx)
-                .min(self.timeline.len().saturating_sub(1)),
-        );
-    }
-
-    /// Process a semantic turn activity, updating display blocks.
-    pub fn handle_turn_activity(&mut self, activity: TurnActivity) {
-        match activity.event {
-            TurnEvent::ReasoningDelta { text } => {
-                if text.is_empty() {
-                    return;
-                }
-                self.mark_first_token_arrived();
-                if self.live_assistant.has_renderable_output()
-                    && self.merge_into_trailing_reasoning_block(&text)
-                {
-                    self.scroll_to_bottom();
-                    return;
-                }
-                let had_output = self.live_reasoning.has_renderable_output();
-                self.live_reasoning.append(&text);
-                if !had_output && self.live_reasoning.has_renderable_output() {
-                    self.mark_visible_output();
-                }
-                self.mark_visible_output();
-                self.scroll_to_bottom();
-            }
-            TurnEvent::AssistantProseDelta { text } => {
-                self.mark_first_token_arrived();
-                self.live_output_chars_estimate += text.chars().count() as i64;
-                self.live_output_tokens_estimate =
-                    estimate_tokens_from_char_count(self.live_output_chars_estimate);
-                if self.live_reasoning.has_renderable_output() {
-                    self.commit_live_reasoning_block();
-                }
-                let had_output = self.live_assistant.has_renderable_output();
-                self.live_assistant.append(&text);
-                if !had_output && self.live_assistant.has_renderable_output() {
-                    self.mark_visible_output();
-                }
-                self.scroll_to_bottom();
-            }
-            TurnEvent::SubmittedValue { value } => {
-                self.finalize_live_markdown();
-                let text = self::projection::render_submitted_value(&value);
-                if push_assistant_text_block(&mut self.timeline, &text) {
-                    self.mark_first_token_arrived();
-                    self.live_output_chars_estimate += text.chars().count() as i64;
-                    self.live_output_tokens_estimate =
-                        estimate_tokens_from_char_count(self.live_output_chars_estimate);
-                    self.mark_visible_output();
-                    self.invalidate_height_cache();
-                    self.scroll_to_bottom();
-                }
-            }
-            TurnEvent::ToolCallCompleted {
-                name,
-                args,
-                result,
-                success,
-                duration_ms,
-                ..
-            } => {
-                self.finalize_live_markdown();
-                self.clear_live_tool_output();
-                let activities = self.activity_state.project_tool_call(
-                    &name,
-                    args,
-                    result,
-                    success,
-                    duration_ms,
-                );
-                let renders_prompt_response_inline = activities
-                    .iter()
-                    .any(Self::activity_renders_prompt_response_inline);
-                if renders_prompt_response_inline || name == "plan_exit" {
-                    self.pending_option_prompt_response = None;
-                } else if let Some(display) = self.pending_option_prompt_response.take() {
-                    self.push_prompt_response_user_block(display);
-                }
-                if let Some(activity) = activities.last() {
-                    let detail = activity.result.detail_lines.first().cloned();
-                    self.set_status(activity.call.summary.clone(), detail, true);
-                } else if !is_batch_tool_name(&name) {
-                    self.set_status(name.clone(), None, true);
-                }
-                for activity in activities {
-                    self.push_activity_block(activity);
-                }
-                if !matches!(self.timeline.last(), Some(UiTimelineItem::Splash)) {
-                    self.mark_visible_output();
-                }
-                self.scroll_to_bottom();
-            }
-            TurnEvent::ToolCallStarted {
-                call_id,
-                name,
-                args,
-            } => {
-                self.finalize_live_markdown();
-                let title = live_tool_output_title(&name, &args);
-                self.live_tool_output.start(call_id, title);
-                self.invalidate_live_tool_output_cache();
-            }
-            TurnEvent::CodeBlockStarted { code, .. } => {
-                self.finalize_live_markdown();
-                let changed_idx = self.timeline.len();
-                let invalidate_from = self.append_invalidation_start();
-                self.timeline.push(UiTimelineItem::LashlangCode(code));
-                self.invalidate_height_cache_from(
-                    invalidate_from
-                        .min(changed_idx)
-                        .min(self.timeline.len().saturating_sub(1)),
-                );
-                self.invalidate_live_tool_output_cache();
-                self.scroll_to_bottom();
-            }
-            TurnEvent::ModelRequestStarted { mode_iteration } => {
-                self.finalize_live_markdown();
-                self.iteration = mode_iteration + 1;
-                if let Some(detail) = self.pending_retry_status.take() {
-                    self.set_status("retrying", Some(detail), true);
-                } else {
-                    self.set_status("thinking", None, true);
-                }
-                self.live_output_chars_estimate = 0;
-                self.live_output_tokens_estimate = 0;
-                self.keep_latest_user_block_visible();
-            }
-            TurnEvent::RetryStatus {
-                wait_seconds,
-                attempt,
-                max_attempts,
-                reason,
-            } => {
-                let mut reason_short: String = reason.chars().take(60).collect();
-                if reason.chars().count() > 60 {
-                    reason_short.push_str("...");
-                }
-                let retry_detail =
-                    format!("attempt {}/{} · {}", attempt, max_attempts, reason_short);
-                self.pending_retry_status = Some(retry_detail.clone());
-                self.set_status(
-                    "retrying",
-                    Some(format!("in {}s · {}", wait_seconds, retry_detail)),
-                    true,
-                );
-                self.scroll_to_bottom();
-            }
-            TurnEvent::Error { message } => {
-                self.finalize_live_markdown();
-                if is_cancelled_error(&message, None) {
-                    let manual_interrupt_requested = self.manual_interrupt_requested;
-                    self.stop_turn();
-                    self.timeline
-                        .push_system_message_if_new(if manual_interrupt_requested {
-                            manual_interrupt_message().to_string()
-                        } else {
-                            "Cancelled.".to_string()
-                        });
-                } else {
-                    self.manual_interrupt_requested = false;
-                    self.set_transient_status(
-                        "error",
-                        Some(message.chars().take(96).collect()),
-                        std::time::Duration::from_secs(8),
-                    );
-                    let changed_idx = self.timeline.len();
-                    let invalidate_from = self.append_invalidation_start();
-                    self.timeline.push(UiTimelineItem::Error(message));
-                    self.invalidate_height_cache_from(
-                        invalidate_from
-                            .min(changed_idx)
-                            .min(self.timeline.len().saturating_sub(1)),
-                    );
-                }
-                self.mark_visible_output();
-                self.scroll_to_bottom();
-            }
-            TurnEvent::Usage {
-                usage, cumulative, ..
-            } => {
-                let should_clear_live_estimate = usage.output_tokens > 0
-                    || usage.reasoning_tokens > 0
-                    || usage.cached_input_tokens > 0;
-                self.last_response_usage = usage.clone();
-                self.parent_session_cumulative = cumulative;
-                self.recompute_session_token_usage();
-                if should_clear_live_estimate {
-                    self.live_output_chars_estimate = 0;
-                    self.live_output_tokens_estimate = 0;
-                }
-            }
-            TurnEvent::ChildUsage {
-                session_id,
-                cumulative,
-                ..
-            } => {
-                self.child_session_cumulatives
-                    .insert(session_id, cumulative);
-                self.recompute_session_token_usage();
-            }
-            TurnEvent::PluginSurface { plugin_id, event } => {
-                if let Some((status, detail, duration)) = runtime_status_from_plugin_event(&event) {
-                    self.set_transient_status(status, detail, duration);
-                    self.dirty = true;
-                }
-                let renders_visible_output = plugin_surface::event_renders_visible_output(&event);
-                let mutation = plugin_surface::apply_surface_event(
-                    &mut self.timeline,
-                    &mut self.plugin_mode_indicators,
-                    &self.plan_dock,
-                    &plugin_id,
-                    event,
-                );
-                if mutation.blocks_changed {
-                    self.invalidate_height_cache();
-                    if renders_visible_output {
-                        self.mark_visible_output();
-                    }
-                    self.scroll_to_bottom();
-                }
-                if mutation.indicators_changed {
-                    self.dirty = true;
-                }
-                if let Some(next_dock) = mutation.plan_dock_change {
-                    // The dock steals height from the history viewport,
-                    // so invalidating the cache keeps wrapping/fold
-                    // positions correct.
-                    self.plan_dock = next_dock.filter(|state| !state.is_empty());
-                    self.invalidate_height_cache();
-                    self.dirty = true;
-                }
-            }
-            TurnEvent::QueuedInputAccepted { inputs, .. } => {
-                let messages = inputs
-                    .iter()
-                    .map(|input| input.message.clone())
-                    .collect::<Vec<_>>();
-                self.accept_injected_turn_input(&messages);
-            }
-            TurnEvent::QueuedMessagesCommitted { messages, .. } => {
-                self.commit_injected_messages(&messages);
-            }
-            TurnEvent::CodeBlockCompleted { .. } | TurnEvent::ToolValue { .. } => {}
-        }
-    }
-
-    #[cfg(test)]
-    pub fn handle_session_event(&mut self, event: SessionEvent) {
-        if matches!(event, SessionEvent::Done) {
-            self.finalize_live_markdown();
-            self.stop_turn();
-            self.scroll_to_bottom();
-        } else if let SessionEvent::Message { text, kind } = &event
-            && kind == "tool_output"
-        {
-            let current_status = self
-                .live_turn
-                .as_ref()
-                .map(|turn| turn.status_text.as_str());
-            let stream_active =
-                self.running || current_status.is_some_and(|status| status.contains("shell"));
-            if stream_active {
-                self.live_tool_output.push_text(
-                    text,
-                    STREAMING_OUTPUT_LINE_CHAR_LIMIT,
-                    STREAMING_OUTPUT_MAX_LINES,
-                );
-                self.invalidate_live_tool_output_cache();
-                self.mark_visible_output();
-                self.scroll_to_bottom();
-            }
-        } else if let SessionEvent::Message { text, kind } = &event
-            && kind == "final"
-        {
-            self.set_live_assistant_from_final(text);
-            self.scroll_to_bottom();
-        } else if let Some(activity) = test_session_event_to_turn_activity(event) {
-            self.handle_turn_activity(activity);
-        }
-    }
-
-    pub fn queue_pending_steer(&mut self, turn: PreparedTurn) {
-        if turn.is_empty() {
-            return;
-        }
-        self.pending_steers.push_back(turn);
-    }
-
-    pub fn queue_turn(&mut self, turn: PreparedTurn) {
-        if turn.is_empty() {
-            return;
-        }
-        self.queued_turns.push_back(turn);
-    }
-
-    pub fn queue_monitor_wake(&mut self, input: String) {
-        if input.trim().is_empty() {
-            return;
-        }
-        self.pending_monitor_wakes.push_back(input);
-    }
-
-    pub fn has_pending_monitor_wakes(&self) -> bool {
-        !self.pending_monitor_wakes.is_empty()
-    }
-
-    pub fn take_pending_monitor_wakes(&mut self) -> Vec<String> {
-        self.pending_monitor_wakes.drain(..).collect::<Vec<_>>()
-    }
-
-    pub fn mark_monitor_wakes_in_flight(&mut self, wakes: &[String]) {
-        self.in_flight_monitor_wakes.extend(wakes.iter().cloned());
-    }
-
-    pub fn acknowledge_monitor_wakes(&mut self, messages: &[PluginMessage]) {
-        for message in messages {
-            if !matches!(message.role, MessageRole::System) {
-                continue;
-            }
-            if let Some(idx) = self
-                .in_flight_monitor_wakes
-                .iter()
-                .position(|candidate| candidate == &message.content)
-            {
-                let _ = self.in_flight_monitor_wakes.remove(idx);
-            }
-        }
-    }
-
-    pub fn recycle_unaccepted_monitor_wakes(&mut self) {
-        while let Some(wake) = self.in_flight_monitor_wakes.pop_back() {
-            self.pending_monitor_wakes.push_front(wake);
-        }
-    }
-
-    pub fn requeue_front(&mut self, turn: PreparedTurn, pending: bool) {
-        if turn.is_empty() {
-            return;
-        }
-        if pending {
-            self.pending_steers.push_front(turn);
-        } else {
-            self.queued_turns.push_front(turn);
-        }
-    }
-
-    pub fn take_next_queued_turn(&mut self) -> Option<(PreparedTurn, bool)> {
-        self.queued_turns.pop_front().map(|turn| (turn, false))
-    }
-
-    pub fn take_last_queued_turn(&mut self) -> Option<(PreparedTurn, bool)> {
-        self.queued_turns.pop_back().map(|turn| (turn, false))
-    }
-
-    pub fn has_queued_messages(&self) -> bool {
-        !self.pending_steers.is_empty() || !self.queued_turns.is_empty()
-    }
-
-    fn take_matching_pending_steer(&mut self, content: &str) -> Option<PreparedTurn> {
-        let idx = self.pending_steers.iter().position(|turn| {
-            turn.display_text == content
-                || turn.effective_text == content
-                || (!turn.input_metadata.transforms.is_empty()
-                    && content.starts_with(&turn.display_text))
-        })?;
-        self.pending_steers.remove(idx)
     }
 
     pub fn set_ui_extensions(&mut self, ui_extensions: Arc<TuiExtensions>) {
@@ -1850,88 +777,6 @@ impl App {
         self.model_variant = model_variant;
         self.dirty = true;
     }
-}
-
-#[cfg(test)]
-fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivity> {
-    let turn_event = match event {
-        SessionEvent::LlmRequest { mode_iteration, .. } => {
-            TurnEvent::ModelRequestStarted { mode_iteration }
-        }
-        SessionEvent::TextDelta { content } => TurnEvent::AssistantProseDelta { text: content },
-        SessionEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { text: content },
-        SessionEvent::ToolCallStart {
-            call_id,
-            name,
-            args,
-        } => TurnEvent::ToolCallStarted {
-            call_id,
-            name,
-            args,
-        },
-        SessionEvent::ToolCall {
-            call_id,
-            name,
-            args,
-            result,
-            success,
-            duration_ms,
-        } => TurnEvent::ToolCallCompleted {
-            call_id,
-            name,
-            args,
-            result,
-            success,
-            duration_ms,
-        },
-        SessionEvent::Message { text, kind } if kind == "lashlang_code" => {
-            TurnEvent::CodeBlockStarted {
-                language: "lashlang".to_string(),
-                code: text,
-            }
-        }
-        SessionEvent::TokenUsage {
-            mode_iteration,
-            usage,
-            cumulative,
-        } => TurnEvent::Usage {
-            mode_iteration,
-            usage,
-            cumulative,
-        },
-        SessionEvent::RetryStatus {
-            wait_seconds,
-            attempt,
-            max_attempts,
-            reason,
-            ..
-        } => TurnEvent::RetryStatus {
-            wait_seconds,
-            attempt,
-            max_attempts,
-            reason,
-        },
-        SessionEvent::Error { message, .. } => TurnEvent::Error { message },
-        SessionEvent::PluginEvent { plugin_id, event } => {
-            TurnEvent::PluginSurface { plugin_id, event }
-        }
-        SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
-            TurnEvent::QueuedInputAccepted { checkpoint, inputs }
-        }
-        SessionEvent::InjectedMessagesCommitted {
-            messages,
-            checkpoint,
-        } => TurnEvent::QueuedMessagesCommitted {
-            messages,
-            checkpoint,
-        },
-        SessionEvent::Done
-        | SessionEvent::ChildTokenUsage { .. }
-        | SessionEvent::TurnOutcome { .. }
-        | SessionEvent::LlmResponse { .. }
-        | SessionEvent::Message { .. } => return None,
-    };
-    Some(TurnActivity::independent(turn_event))
 }
 
 /// Compute the visual height of pending streaming text.
