@@ -10,6 +10,7 @@ mod core;
 mod error;
 mod mode;
 mod plugin_binding;
+mod plugin_stack;
 mod session;
 mod support;
 #[cfg(test)]
@@ -24,6 +25,7 @@ pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset, ModelSelection};
 pub use crate::plugin_binding::PluginBinding;
+pub use crate::plugin_stack::PluginStack;
 pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
@@ -31,15 +33,16 @@ pub use crate::turn::{
     TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    InputItem, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
+    InputItem, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput,
 };
 
 pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError, Handoffs,
         InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
-        PluginActions, PluginBinding, Result, SessionBuilder, ToolsControl, TurnActivity,
-        TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        PluginActions, PluginBinding, PluginStack, Result, SessionBuilder, SessionSpec,
+        ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult,
+        TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -52,6 +55,13 @@ pub mod tools {
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
         StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolAvailabilityConfig, ToolCall,
         ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, ToolSourceHandle,
+    };
+}
+
+pub mod direct {
+    pub use lash_core::{
+        DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
+        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
     };
 }
 
@@ -70,7 +80,8 @@ pub mod plugins {
     pub use lash_core::{
         BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginError,
         PluginFactory, PluginMessage, PluginRegistrar, PluginSession, PluginSessionContext,
-        PluginSpec, PluginSurfaceEvent, SessionPlugin,
+        PluginSpec, PluginSurfaceEvent, SessionPlugin, ToolOutputBudgetConfig,
+        ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
     };
 }
 

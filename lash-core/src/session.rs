@@ -13,9 +13,8 @@ use crate::tool_dispatch::{
     ToolDispatchContext, ToolDispatchOutcome, dispatch_tool_call_with_execution_context,
 };
 use crate::{
-    PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost, SandboxMessage,
-    SessionEvent, ToolCallRecord, ToolContext, ToolImage, ToolProvider, TurnActivity,
-    TurnActivityId, TurnEvent,
+    PluginMessage, PromptContribution, RuntimeServices, SandboxMessage, SessionEvent,
+    ToolCallRecord, ToolContext, ToolImage, ToolProvider, TurnActivity, TurnActivityId, TurnEvent,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -375,7 +374,6 @@ impl ModeExecutionContext {
                 args: outcome.record.args.clone(),
                 result: result.clone(),
                 duration_ms: outcome.record.duration_ms,
-                host: self.dispatch.host.clone(),
             })
             .await
         {
@@ -1267,7 +1265,7 @@ impl Session {
     pub(crate) fn mode_execution_context(
         &self,
         session_id: &str,
-        host: Arc<dyn RuntimeSessionHost>,
+        host: Arc<dyn crate::plugin::ToolHookHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,

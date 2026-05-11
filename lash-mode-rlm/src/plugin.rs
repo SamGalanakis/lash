@@ -12,7 +12,7 @@ use lash_core::plugin::{
 use lash_core::session_model::context::PreparedContext;
 use lash_core::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
-    ToolResultProjectionPluginConfig,
+    ToolOutputBudgetConfig,
 };
 use lash_rlm_types::RlmCreateExtras;
 
@@ -31,7 +31,7 @@ const BUDGET_WARNING_STATUS: &str = "rlm_context_budget_warning";
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RlmModePluginConfig {
-    pub observe_projection: ToolResultProjectionPluginConfig,
+    pub observe_projection: ToolOutputBudgetConfig,
     #[serde(default)]
     pub prompt_features: crate::protocol::RlmPromptFeatures,
     #[serde(default = "default_max_output_chars")]
@@ -57,7 +57,7 @@ fn default_continue_as_forced_fallback_tokens() -> Option<usize> {
 impl Default for RlmModePluginConfig {
     fn default() -> Self {
         Self {
-            observe_projection: ToolResultProjectionPluginConfig::default(),
+            observe_projection: ToolOutputBudgetConfig::default(),
             prompt_features: crate::protocol::RlmPromptFeatures::default(),
             max_output_chars: default_max_output_chars(),
             continue_as_soft_warn_tokens: default_continue_as_soft_warn_tokens(),
@@ -502,9 +502,17 @@ impl ModeSessionPlugin for RlmModeSession {
                 serde_json::Value::String("rlm_forced_fallback".to_string()),
             ),
         ]);
+        let current_snapshot = ctx
+            .host
+            .snapshot_session(&ctx.session_id)
+            .await
+            .map_err(|err| {
+                PluginError::Session(format!("failed to snapshot current session: {err}"))
+            })?;
         let session_id = crate::control_tools::create_continue_as_successor(
             ctx.host.as_ref(),
             &ctx.session_id,
+            current_snapshot,
             task,
             seed,
             crate::control_tools::ContinueAsHandoff {

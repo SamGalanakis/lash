@@ -14,7 +14,7 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::{
-    TurnInput,
+    SessionSpec, TurnInput,
     advanced::{
         AssembledTurn, EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     },
@@ -24,10 +24,10 @@ use lash::{
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
 };
 use lash_core::{
-    BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
+    SessionPolicy, StandardContextApproach, TokioSessionTaskExecutor,
+    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -749,7 +749,7 @@ fn build_plugin_session(
     session_policy: &SessionPolicy,
 ) -> anyhow::Result<Arc<PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
+        vec![Arc::new(ToolOutputBudgetPluginFactory::default())];
     if let Some(standard_context_approach) = &standard_context_approach {
         match standard_context_approach {
             StandardContextApproach::RollingHistory(_) => {
@@ -766,11 +766,10 @@ fn build_plugin_session(
     let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
     factories.push(Arc::new(LlmToolsPluginFactory));
-    factories.push(Arc::new(SubagentsPluginFactory::new(
-        session_policy.clone(),
-        registry,
-        subagent_host,
-    )));
+    factories.push(Arc::new(
+        SubagentsPluginFactory::new(registry, subagent_host)
+            .with_session_spec(SessionSpec::inherit()),
+    ));
     if session_tools {
         factories.push(Arc::new(StaticPluginFactory::new(
             "longmemeval_tools",

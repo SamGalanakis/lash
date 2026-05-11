@@ -3,8 +3,8 @@ use std::sync::Arc;
 use lash_core::instructions::InstructionSource;
 use lash_core::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash_core::{
-    BuiltinToolResultProjectionPluginFactory, ExecutionMode, FsInstructionSource, PluginHost,
-    StandardContextApproach, ToolProvider,
+    ExecutionMode, FsInstructionSource, PluginHost, StandardContextApproach,
+    ToolOutputBudgetPluginFactory, ToolProvider,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
@@ -93,7 +93,7 @@ pub fn tool_plugin_factories(mut options: DefaultToolPluginOptions) -> Vec<Arc<d
         match bundle {
             DefaultToolBundle::CoreRuntime => {
                 factories.push(Arc::new(ToolDiscoveryPluginFactory::new()));
-                factories.push(Arc::new(BuiltinToolResultProjectionPluginFactory::default()));
+                factories.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
             }
             DefaultToolBundle::RollingHistory => {
                 factories.push(Arc::new(RollingHistoryPluginFactory::default()));

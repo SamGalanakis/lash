@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Parser;
 use lash::{
-    TurnInput,
+    SessionSpec, TurnInput,
     advanced::{
         EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     },
@@ -17,12 +17,11 @@ use lash::{
 };
 use lash_cli::config::LashConfig;
 use lash_core::{
-    AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, FollowedTurn, InputItem, LashRuntime, NoopEventSink,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge,
-    TurnInputInjectionBridge,
+    AppendSessionNodesRequest, BackgroundRuntimeHost, EmbeddedRuntimeHost, FollowedTurn, InputItem,
+    LashRuntime, NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
+    StandardContextApproach, TokioSessionTaskExecutor, ToolOutputBudgetPluginFactory,
+    TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -30,8 +29,7 @@ use lash_mode_rlm::RlmTurnInputExt;
 use lash_rlm_types::{RlmGlobalsPatchPluginBody, RlmModeEvent, RlmTermination};
 use lash_sqlite_store::Store;
 use lash_subagents::{
-    CapabilityField, CapabilityOptionalField, CapabilityRegistry, CapabilitySpec,
-    LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
+    CapabilityRegistry, LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -248,11 +246,11 @@ fn clbench_turn_text(request: &RunnerRequest) -> String {
 
 fn build_plugin_session(
     execution_mode: ExecutionMode,
-    policy: &SessionPolicy,
+    _policy: &SessionPolicy,
 ) -> Result<Arc<PluginSession>> {
     let _clbench_tools = clbench_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
+        Arc::new(ToolOutputBudgetPluginFactory::default()),
         Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::new(
             lash_mode_rlm::RlmModePluginConfig {
                 prompt_features: lash_mode_rlm::RlmPromptFeatures {
@@ -267,20 +265,18 @@ fn build_plugin_session(
             "clbench_async_handles",
             PluginSpec::new().with_tool_provider(Arc::new(ClbenchAsyncHandlesTool)),
         )),
-        Arc::new(SubagentsPluginFactory::new(
-            policy.clone(),
-            Arc::new(
-                CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
-                    "explore",
-                    CapabilitySpec {
-                        model: CapabilityField::Inherit,
-                        model_variant: CapabilityOptionalField::Inherit,
-                        execution_mode: CapabilityField::Inherit,
-                    },
-                ))),
-            ),
-            Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
-        )),
+        Arc::new(
+            SubagentsPluginFactory::new(
+                Arc::new(
+                    CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
+                        "explore",
+                        SessionSpec::inherit(),
+                    ))),
+                ),
+                Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
+            )
+            .with_session_spec(SessionSpec::inherit()),
+        ),
     ];
     PluginHost::new(factories)
         .with_background_tasks()

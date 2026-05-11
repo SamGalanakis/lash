@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::plugin::ToolHookHost;
+use crate::plugin::{DirectCompletion, PluginError, SessionHandle, SessionSnapshot, ToolHookHost};
 use crate::{ToolDefinition, ToolResult};
 
 /// A message sent from the sandbox to the host during execution.
@@ -31,6 +31,129 @@ pub struct ToolContext {
     pub(crate) tool_call_id: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolSessionModel {
+    pub model: String,
+    pub model_variant: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ToolSessionControl {
+    host: Arc<dyn ToolHookHost>,
+}
+
+impl ToolSessionControl {
+    pub async fn create_session(
+        &self,
+        request: crate::SessionCreateRequest,
+    ) -> Result<SessionHandle, PluginError> {
+        self.host.create_session(request).await
+    }
+
+    pub async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+        self.host.close_session(session_id).await
+    }
+
+    pub async fn start_turn_stream(
+        &self,
+        session_id: &str,
+        input: crate::TurnInput,
+    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        self.host.start_turn_stream(session_id, input).await
+    }
+
+    pub async fn await_turn(&self, turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
+        self.host.await_turn(turn_id).await
+    }
+
+    pub async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+        self.host.cancel_turn(turn_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::plugin::SessionLifecycleHost for ToolSessionControl {
+    async fn create_session(
+        &self,
+        request: crate::SessionCreateRequest,
+    ) -> Result<SessionHandle, PluginError> {
+        ToolSessionControl::create_session(self, request).await
+    }
+
+    async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+        ToolSessionControl::close_session(self, session_id).await
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolTaskControl {
+    session_id: String,
+    host: Arc<dyn ToolHookHost>,
+}
+
+impl ToolTaskControl {
+    pub async fn register_background_task(
+        &self,
+        spec: crate::ManagedTaskSpec,
+        cancel: Option<crate::ManagedTaskCancel>,
+    ) -> Result<(), PluginError> {
+        self.host
+            .register_background_task(&self.session_id, spec, cancel)
+            .await
+    }
+
+    pub async fn unregister_background_task(&self, task_id: &str) {
+        self.unregister_background_task_for_session(&self.session_id, task_id)
+            .await;
+    }
+
+    pub async fn complete_background_task(&self, task_id: &str, run_state: crate::ManagedRunState) {
+        self.complete_background_task_for_session(&self.session_id, task_id, run_state)
+            .await;
+    }
+
+    pub async fn transition_background_task_live_state(
+        &self,
+        task_id: &str,
+        run_state: crate::ManagedRunState,
+    ) {
+        self.transition_background_task_live_state_for_session(
+            &self.session_id,
+            task_id,
+            run_state,
+        )
+        .await;
+    }
+
+    pub async fn unregister_background_task_for_session(&self, session_id: &str, task_id: &str) {
+        self.host
+            .unregister_background_task(session_id, task_id)
+            .await;
+    }
+
+    pub async fn complete_background_task_for_session(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        run_state: crate::ManagedRunState,
+    ) {
+        self.host
+            .complete_background_task(session_id, task_id, run_state)
+            .await;
+    }
+
+    pub async fn transition_background_task_live_state_for_session(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        run_state: crate::ManagedRunState,
+    ) {
+        self.host
+            .transition_background_task_live_state(session_id, task_id, run_state)
+            .await;
+    }
+}
+
 impl ToolContext {
     pub(crate) fn new(
         session_id: String,
@@ -52,8 +175,57 @@ impl ToolContext {
         &self.session_id
     }
 
-    pub fn host(&self) -> &Arc<dyn ToolHookHost> {
-        &self.host
+    pub async fn session_model(&self) -> Result<ToolSessionModel, PluginError> {
+        let snapshot = self.session_snapshot().await?;
+        Ok(ToolSessionModel {
+            model: snapshot.policy.model,
+            model_variant: snapshot.policy.model_variant,
+        })
+    }
+
+    pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
+        self.host.snapshot_session(&self.session_id).await
+    }
+
+    pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
+        self.host.tool_catalog(&self.session_id).await
+    }
+
+    pub async fn set_tools_availability(
+        &self,
+        names: &[String],
+        availability: Option<crate::ToolAvailability>,
+    ) -> Result<u64, PluginError> {
+        self.host
+            .set_tools_availability(&self.session_id, names, availability)
+            .await
+    }
+
+    pub fn sessions(&self) -> ToolSessionControl {
+        ToolSessionControl {
+            host: Arc::clone(&self.host),
+        }
+    }
+
+    pub fn tasks(&self) -> ToolTaskControl {
+        ToolTaskControl {
+            session_id: self.session_id.clone(),
+            host: Arc::clone(&self.host),
+        }
+    }
+
+    pub async fn direct_completion(
+        &self,
+        mut request: crate::DirectRequest,
+        usage_source: &str,
+    ) -> Result<DirectCompletion, PluginError> {
+        if request.session_id.is_none() {
+            request.session_id = Some(self.session_id.clone());
+        }
+        if request.originating_tool_call_id.is_none() {
+            request.originating_tool_call_id = self.tool_call_id.clone();
+        }
+        self.host.direct_completion(request, usage_source).await
     }
 
     pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {

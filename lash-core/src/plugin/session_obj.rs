@@ -564,7 +564,6 @@ impl PluginSession {
         &self,
         session_id: &str,
         chunk: String,
-        host: Arc<dyn ToolHookHost>,
     ) -> Result<Vec<PluginOwned<AssistantStreamTransform>>, PluginError> {
         let mut current = chunk;
         let mut transforms = Vec::new();
@@ -572,7 +571,6 @@ impl PluginSession {
             let transform = (registered.hook)(AssistantStreamHookContext {
                 session_id: session_id.to_string(),
                 chunk: current.clone(),
-                host: host.clone(),
             })
             .await?;
             current = transform.chunk.clone();
@@ -588,7 +586,6 @@ impl PluginSession {
         &self,
         session_id: &str,
         response: crate::llm::types::LlmResponse,
-        host: Arc<dyn ToolHookHost>,
     ) -> Result<Vec<PluginOwned<AssistantResponseTransform>>, PluginError> {
         let mut current = response;
         let mut transforms = Vec::new();
@@ -596,7 +593,6 @@ impl PluginSession {
             let transform = (registered.hook)(AssistantResponseHookContext {
                 session_id: session_id.to_string(),
                 response: current.clone(),
-                host: host.clone(),
             })
             .await?;
             current = transform.response.clone();

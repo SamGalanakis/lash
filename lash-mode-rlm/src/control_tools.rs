@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use lash_core::session_model::SessionEventRecord;
 use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
-    SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation, SessionSnapshotHost,
+    SessionLifecycleHost, SessionPluginMode, SessionPolicy, SessionRelation, SessionSnapshot,
     SessionStartPoint, ToolCall, ToolContext, ToolControl, ToolDefinition, ToolExecutionMode,
     ToolProvider, ToolResult,
 };
@@ -23,9 +23,14 @@ impl RlmControlToolsProvider {
         let seed =
             lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
 
+        let current_snapshot = context
+            .session_snapshot()
+            .await
+            .map_err(|err| format!("failed to snapshot current session: {err}"))?;
         let successor_session_id = create_continue_as_successor(
-            context.host().as_ref(),
+            &context.sessions(),
             context.session_id(),
+            current_snapshot,
             task.clone(),
             seed,
             ContinueAsHandoff {
@@ -102,20 +107,14 @@ pub(crate) struct ContinueAsHandoff {
     pub metadata: serde_json::Map<String, Value>,
 }
 
-pub(crate) async fn create_continue_as_successor<H>(
-    host: &H,
+pub(crate) async fn create_continue_as_successor(
+    sessions: &dyn SessionLifecycleHost,
     parent_session_id: &str,
+    current_snapshot: SessionSnapshot,
     task: String,
     seed: lash_rlm_types::ClassifiedSeed,
     handoff: ContinueAsHandoff,
-) -> Result<String, String>
-where
-    H: SessionSnapshotHost + SessionLifecycleHost + ?Sized,
-{
-    let current_snapshot = host
-        .snapshot_session(parent_session_id)
-        .await
-        .map_err(|err| format!("failed to snapshot current session: {err}"))?;
+) -> Result<String, String> {
     let termination = current_snapshot
         .mode_turn_options
         .decode(&lash_core::ExecutionMode::new("rlm"))
@@ -149,7 +148,8 @@ where
         .expect("fresh successor request sets session id");
     request.initial_nodes = rlm_seed_initial_nodes(seed.globals);
     request.first_turn_input = Some(PluginMessage::text(MessageRole::User, task));
-    host.create_session(request)
+    sessions
+        .create_session(request)
         .await
         .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
     Ok(successor_session_id)

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash_core::{ExecutionMode, ProviderHandle, SessionPolicy};
+use lash_core::{ExecutionMode, ProviderHandle, SessionPolicy, SessionSpec};
 
 pub const DEFAULT_EXPLORE_EXECUTION_MODE: &str = "rlm";
 
@@ -23,53 +23,20 @@ pub struct CapabilityContext<'a> {
     pub parent_policy: &'a SessionPolicy,
 }
 
-/// Required policy field resolved by a capability.
-#[derive(Clone, Debug)]
-pub enum CapabilityField<T> {
-    Inherit,
-    Set(T),
-}
-
-/// Optional policy field resolved by a capability.
-#[derive(Clone, Debug)]
-pub enum CapabilityOptionalField<T> {
-    Inherit,
-    Set(T),
-    Clear,
-}
-
-/// Resolved spawn configuration.
-#[derive(Clone, Debug)]
-pub struct CapabilitySpec {
-    pub model: CapabilityField<String>,
-    pub model_variant: CapabilityOptionalField<String>,
-    pub execution_mode: CapabilityField<ExecutionMode>,
-}
-
-impl CapabilitySpec {
-    pub fn inherit() -> Self {
-        Self {
-            model: CapabilityField::Inherit,
-            model_variant: CapabilityOptionalField::Inherit,
-            execution_mode: CapabilityField::Inherit,
-        }
-    }
-}
-
 pub trait Capability: Send + Sync {
     fn name(&self) -> &str;
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilitySpec;
+    fn resolve(&self, ctx: &CapabilityContext<'_>) -> SessionSpec;
 }
 
 /// Fixed capability for callers that already know the exact child authority
 /// they want and do not need provider-tier lookup.
 pub struct StaticCapability {
     name: String,
-    spec: CapabilitySpec,
+    spec: SessionSpec,
 }
 
 impl StaticCapability {
-    pub fn new(name: impl Into<String>, spec: CapabilitySpec) -> Self {
+    pub fn new(name: impl Into<String>, spec: SessionSpec) -> Self {
         Self {
             name: name.into(),
             spec,
@@ -82,7 +49,7 @@ impl Capability for StaticCapability {
         &self.name
     }
 
-    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> CapabilitySpec {
+    fn resolve(&self, _ctx: &CapabilityContext<'_>) -> SessionSpec {
         self.spec.clone()
     }
 }
@@ -123,21 +90,13 @@ impl Capability for TierCapability {
         &self.name
     }
 
-    fn resolve(&self, ctx: &CapabilityContext<'_>) -> CapabilitySpec {
+    fn resolve(&self, ctx: &CapabilityContext<'_>) -> SessionSpec {
         let (model, variant) = pick_tier_model(self, ctx.parent_policy);
-        let execution_mode = match &self.execution_mode {
-            TierExecutionMode::Inherit => CapabilityField::Inherit,
-            TierExecutionMode::Explicit(mode) => CapabilityField::Set(mode.clone()),
+        let mut spec = SessionSpec::inherit().model(model, variant);
+        if let TierExecutionMode::Explicit(mode) = &self.execution_mode {
+            spec = spec.mode(mode.clone());
         };
-        let model_variant = match variant {
-            Some(variant) => CapabilityOptionalField::Set(variant),
-            None => CapabilityOptionalField::Inherit,
-        };
-        CapabilitySpec {
-            model: CapabilityField::Set(model),
-            model_variant,
-            execution_mode,
-        }
+        spec
     }
 }
 

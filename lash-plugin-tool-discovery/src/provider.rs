@@ -64,11 +64,7 @@ impl ToolDiscoveryToolsProvider {
         }
 
         let request = llm_rerank_request(args, &candidates, limit);
-        let completion = match context
-            .host()
-            .direct_completion(request, "search_tools")
-            .await
-        {
+        let completion = match context.direct_completion(request, "search_tools").await {
             Ok(completion) => completion,
             Err(err) => return ToolResult::err_fmt(format_args!("search_tools failed: {err}")),
         };
@@ -123,7 +119,7 @@ impl ToolDiscoveryToolsProvider {
     }
 
     async fn load_tools(&self, args: &Value, context: &ToolContext) -> ToolResult {
-        let catalog = match context.host().tool_catalog(context.session_id()).await {
+        let catalog = match context.tool_catalog().await {
             Ok(catalog) => catalog,
             Err(err) => return ToolResult::err_fmt(err.to_string()),
         };
@@ -167,12 +163,7 @@ impl ToolDiscoveryToolsProvider {
 
         if !to_promote.is_empty()
             && let Err(err) = context
-                .host()
-                .set_tools_availability(
-                    context.session_id(),
-                    &to_promote,
-                    Some(ToolAvailability::Showcased),
-                )
+                .set_tools_availability(&to_promote, Some(ToolAvailability::Showcased))
                 .await
         {
             return ToolResult::err_fmt(format_args!("failed to load tools: {err}"));
@@ -196,12 +187,7 @@ impl ToolProvider for ToolDiscoveryToolsProvider {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         match call.name {
-            "search_tools" => match call
-                .context
-                .host()
-                .tool_catalog(call.context.session_id())
-                .await
-            {
+            "search_tools" => match call.context.tool_catalog().await {
                 Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },

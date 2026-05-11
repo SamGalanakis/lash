@@ -923,8 +923,40 @@ pub struct ToolCallHookContext {
     pub session_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
-    pub host: Arc<dyn ToolHookHost>,
     pub turn_context: crate::TurnContext,
+    pub(crate) host: Arc<dyn ToolHookHost>,
+}
+
+impl ToolCallHookContext {
+    pub fn new(
+        session_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        turn_context: crate::TurnContext,
+        host: Arc<dyn ToolHookHost>,
+    ) -> Self {
+        Self {
+            session_id,
+            tool_name,
+            args,
+            turn_context,
+            host,
+        }
+    }
+
+    pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
+        self.host.snapshot_session(&self.session_id).await
+    }
+
+    pub async fn set_tools_availability(
+        &self,
+        names: &[String],
+        availability: Option<crate::ToolAvailability>,
+    ) -> Result<u64, PluginError> {
+        self.host
+            .set_tools_availability(&self.session_id, names, availability)
+            .await
+    }
 }
 
 #[derive(Clone)]
@@ -934,8 +966,44 @@ pub struct ToolResultHookContext {
     pub args: serde_json::Value,
     pub result: ToolResult,
     pub duration_ms: u64,
-    pub host: Arc<dyn ToolHookHost>,
     pub turn_context: crate::TurnContext,
+    pub(crate) host: Arc<dyn ToolHookHost>,
+}
+
+impl ToolResultHookContext {
+    pub fn new(
+        session_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        result: ToolResult,
+        duration_ms: u64,
+        turn_context: crate::TurnContext,
+        host: Arc<dyn ToolHookHost>,
+    ) -> Self {
+        Self {
+            session_id,
+            tool_name,
+            args,
+            result,
+            duration_ms,
+            turn_context,
+            host,
+        }
+    }
+
+    pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
+        self.host.snapshot_session(&self.session_id).await
+    }
+
+    pub async fn set_tools_availability(
+        &self,
+        names: &[String],
+        availability: Option<crate::ToolAvailability>,
+    ) -> Result<u64, PluginError> {
+        self.host
+            .set_tools_availability(&self.session_id, names, availability)
+            .await
+    }
 }
 
 #[derive(Clone)]
@@ -945,7 +1013,6 @@ pub struct ToolResultProjectionContext {
     pub args: serde_json::Value,
     pub result: ToolResult,
     pub duration_ms: u64,
-    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone)]
@@ -967,7 +1034,6 @@ pub struct CheckpointHookContext {
 pub struct AssistantStreamHookContext {
     pub session_id: String,
     pub chunk: String,
-    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -988,7 +1054,6 @@ pub struct AssistantStreamTransform {
 pub struct AssistantResponseHookContext {
     pub session_id: String,
     pub response: LlmResponse,
-    pub host: Arc<dyn ToolHookHost>,
 }
 
 #[derive(Clone, Debug)]
@@ -1128,10 +1193,9 @@ pub(crate) use services::NoopSessionManager;
 pub use services::{PersistentRuntimeServices, PluginActionInvokeError, RuntimeServices};
 pub use session_obj::PluginSession;
 pub use tool_result_projection_builtin::{
-    BuiltinToolResultProjectionPluginFactory, DEFAULT_TOOL_RESULT_PROJECTION_LIMIT_BYTES,
-    DEFAULT_TOOL_RESULT_PROJECTION_MAX_LINES, ToolResultProjectionMode,
-    ToolResultProjectionPluginConfig, observation_projection_metadata, project_observation_text,
-    truncate_observation_text,
+    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
+    ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+    observation_projection_metadata, project_observation_text, truncate_observation_text,
 };
 
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
