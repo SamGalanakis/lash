@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use lash::session_model::{Part, PartKind, PruneState};
-use lash::{PluginMessage, *};
+use lash::{
+    AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, InputItem,
+    MediaType, Message, MessageRole, PluginMessage, ToolState, TurnInput,
+};
 use lash_embed::LashSession;
 
 use super::helpers::TurnActivityBridge;
@@ -13,7 +16,7 @@ use crate::turn_runner::{RuntimeRunResult, spawn_session_turn};
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-    let attachment_store = lash::FileAttachmentStore::new(crate::paths::attachments_dir());
+    let attachment_store = FileAttachmentStore::new(crate::paths::attachments_dir());
     let mut parts = Vec::new();
     let mut image_ids = Vec::new();
     for item in items {
@@ -44,9 +47,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     continue;
                 }
                 image_ids.push(id.clone());
-                let meta = lash::AttachmentMeta::new(
-                    lash::AttachmentId::new("pending"),
-                    lash::MediaType::Image(lash::ImageMediaType::Png),
+                let meta = AttachmentMeta::new(
+                    AttachmentId::new("pending"),
+                    MediaType::Image(ImageMediaType::Png),
                     bytes.len() as u64,
                     None,
                     None,

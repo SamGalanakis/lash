@@ -1,8 +1,24 @@
 use std::sync::Arc;
 
 use crate::config::LashConfig;
-use lash::provider::ProviderHandle;
-use lash::*;
+use lash::{
+    FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
+    PluginHost, PromptLayer, RuntimeCoreConfig, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+};
+use lash_embed::advanced::ExecutionMode;
+use lash_embed::plugins::{
+    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
+};
+use lash_embed::prompt::{
+    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection,
+};
+use lash_embed::provider::ProviderHandle;
+#[cfg(test)]
+use lash_embed::tools::{
+    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
+use lash_embed::tracing::TraceLevel;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -435,7 +451,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
         lash_config.save(&crate::paths::config_file())?;
     }
-    let trace_level = lash::TraceLevel::from(args.trace_level);
+    let trace_level = TraceLevel::from(args.trace_level);
     let trace_path =
         if crate::detailed_debug_logging_enabled(args.debug) || trace_level.is_extended() {
             let dir = crate::paths::lash_home().join("sessions");
@@ -693,6 +709,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::ToolRegistry;
 
     struct DummyToolProvider;
 
@@ -703,7 +720,7 @@ mod tests {
             ToolDefinition::default_input_schema(),
             serde_json::json!({ "type": "null" }),
         )
-        .with_availability(lash::ToolAvailabilityConfig::callable())
+        .with_availability(ToolAvailabilityConfig::callable())
         .with_execution_mode(ToolExecutionMode::Parallel)
     }
 
@@ -718,7 +735,7 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
             ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
         }
     }

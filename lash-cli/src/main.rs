@@ -51,7 +51,13 @@ mod util;
 use clap::{Parser, ValueEnum};
 #[cfg(feature = "dhat-heap")]
 use dhat::Alloc as DhatAlloc;
-use lash::*;
+#[cfg(test)]
+use lash::InputItem;
+#[cfg(test)]
+use lash_embed::plugins::PluginSurfaceEvent;
+use lash_embed::tracing::TraceLevel;
+#[cfg(test)]
+use lash_embed::{TurnActivity, TurnEvent};
 #[cfg(not(feature = "dhat-heap"))]
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 #[cfg(not(feature = "dhat-heap"))]

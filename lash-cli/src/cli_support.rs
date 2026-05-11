@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::provider::ProviderHandle;
-use lash::*;
+use lash::{CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec};
+use lash_embed::advanced::ExecutionMode;
+use lash_embed::plugins::PluginSurfaceEvent;
+use lash_embed::provider::ProviderHandle;
+use lash_embed::{TurnActivity, TurnEvent};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};

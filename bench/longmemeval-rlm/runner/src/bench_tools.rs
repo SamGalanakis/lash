@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_embed::tools::{
+    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
 use regex::RegexBuilder;
 use serde_json::json;
 
@@ -201,7 +203,7 @@ fn bench_tool(name: &str, description: &str, input_schema: serde_json::Value) ->
         input_schema,
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_availability(lash::ToolAvailabilityConfig::callable())
+    .with_availability(ToolAvailabilityConfig::callable())
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 

@@ -12,9 +12,17 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{ProviderHandle, ToolCall, ToolDefinition, ToolProvider, TurnInput};
 use lash_embed::{
-    LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnBuilder, TurnEvent,
+    LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
+    TurnBuilder, TurnEvent, TurnInput,
+    persistence::{
+        RuntimePersistence, SessionMeta, SessionStoreCreateRequest, SessionStoreFactory,
+    },
+    plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
+    prompt::PromptContribution,
+    provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
+    tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult},
+    tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -146,24 +154,21 @@ struct StderrTraceSink {
     lock: Mutex<()>,
 }
 
-impl lash::TraceSink for StderrTraceSink {
-    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+impl TraceSink for StderrTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         let line = serde_json::to_string(record)?;
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|_| lash::TraceSinkError::LockPoisoned)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
         eprintln!("{line}");
         Ok(())
     }
 }
 
 struct FanoutTraceSink {
-    sinks: Vec<Arc<dyn lash::TraceSink>>,
+    sinks: Vec<Arc<dyn TraceSink>>,
 }
 
-impl lash::TraceSink for FanoutTraceSink {
-    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+impl TraceSink for FanoutTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         for sink in &self.sinks {
             sink.append(record)?;
         }
@@ -193,9 +198,9 @@ async fn main() -> anyhow_like::Result<()> {
 
     let provider = ProviderHandle::new(
         OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
-            .with_options(lash::ProviderOptions {
-                thinking: lash::ProviderThinkingPolicy { expose: true },
-                ..lash::ProviderOptions::default()
+            .with_options(ProviderOptions {
+                thinking: ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
             })
             .into_components(),
     );
@@ -211,10 +216,10 @@ async fn main() -> anyhow_like::Result<()> {
         .trace_sink(Some(Arc::new(FanoutTraceSink {
             sinks: vec![
                 Arc::new(StderrTraceSink::default()),
-                Arc::new(lash::JsonlTraceSink::new(trace_path)),
+                Arc::new(JsonlTraceSink::new(trace_path)),
             ],
         })))
-        .trace_level(lash::TraceLevel::Extended)
+        .trace_level(TraceLevel::Extended)
         .build()
         .map_err(|err| err.to_string())?;
 
@@ -556,7 +561,7 @@ impl ChannelTurnEvents {
 }
 
 #[async_trait]
-impl lash::TurnActivitySink for ChannelTurnEvents {
+impl TurnActivitySink for ChannelTurnEvents {
     async fn emit(&self, activity: TurnActivity) {
         self.handle(activity).await;
     }
@@ -594,7 +599,7 @@ impl PluginBinding for DemoPlugin {
     type SessionConfig = DemoPluginConfig;
     type TurnContext = DemoTurnContext;
 
-    fn factory(_config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
+    fn factory(_config: &Self::SessionConfig) -> Arc<dyn PluginFactory> {
         Arc::new(DemoPluginFactory)
     }
 
@@ -605,27 +610,24 @@ impl PluginBinding for DemoPlugin {
 
 struct DemoPluginFactory;
 
-impl lash::PluginFactory for DemoPluginFactory {
+impl PluginFactory for DemoPluginFactory {
     fn id(&self) -> &'static str {
         DemoPlugin::ID
     }
 
-    fn build(
-        &self,
-        _ctx: &lash::PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, lash::PluginError> {
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(DemoSessionPlugin))
     }
 }
 
 struct DemoSessionPlugin;
 
-impl lash::SessionPlugin for DemoSessionPlugin {
+impl SessionPlugin for DemoSessionPlugin {
     fn id(&self) -> &'static str {
         DemoPlugin::ID
     }
 
-    fn register(&self, reg: &mut lash::PluginRegistrar) -> Result<(), lash::PluginError> {
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
                 let Some(input) = ctx
@@ -635,7 +637,7 @@ impl lash::SessionPlugin for DemoSessionPlugin {
                     return Ok(Vec::new());
                 };
                 let context = board_prompt(&input.board);
-                Ok(vec![lash::PromptContribution::environment(
+                Ok(vec![PromptContribution::environment(
                     "Tic Tac Toe Board",
                     context,
                 )])
@@ -654,23 +656,23 @@ impl ToolProvider for DemoTools {
         vec![read_board_tool(), play_move_tool()]
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> lash::ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let Some(input) = call
             .context
             .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
         else {
-            return lash::ToolResult::err_fmt("missing board turn context");
+            return ToolResult::err_fmt("missing board turn context");
         };
 
         match call.name {
-            "read_board" => lash::ToolResult::ok(board_snapshot(&input.board)),
+            "read_board" => ToolResult::ok(board_snapshot(&input.board)),
             "play_move" => {
                 let Some(cell) = call.args.get("cell").and_then(|value| value.as_u64()) else {
-                    return lash::ToolResult::err_fmt("missing integer cell");
+                    return ToolResult::err_fmt("missing integer cell");
                 };
-                lash::ToolResult::ok(apply_agent_move(&input.board, cell as usize))
+                ToolResult::ok(apply_agent_move(&input.board, cell as usize))
             }
-            other => lash::ToolResult::err_fmt(format!("unknown demo tool `{other}`")),
+            other => ToolResult::err_fmt(format!("unknown demo tool `{other}`")),
         }
     }
 }
@@ -1241,15 +1243,15 @@ impl ChatStoreFactory {
     }
 }
 
-impl lash::SessionStoreFactory for ChatStoreFactory {
+impl SessionStoreFactory for ChatStoreFactory {
     fn create_store(
         &self,
-        request: &lash::SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn lash::RuntimePersistence>, String> {
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn RuntimePersistence>, String> {
         std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
         let path = self.sessions_dir.join(format!("{}.db", request.session_id));
         let store = Arc::new(lash_sqlite_store::Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(lash::SessionMeta {
+        store.save_session_meta(SessionMeta {
             session_id: request.session_id.clone(),
             session_name: request.session_id.clone(),
             created_at: now(),
@@ -1259,7 +1261,7 @@ impl lash::SessionStoreFactory for ChatStoreFactory {
                 .and_then(|path| path.to_str().map(str::to_string)),
             parent_session_id: request.parent_session_id.clone(),
         });
-        Ok(store as Arc<dyn lash::RuntimePersistence>)
+        Ok(store as Arc<dyn RuntimePersistence>)
     }
 }
 

@@ -13,14 +13,21 @@ use bench_tools::{BenchmarkQuestionContext, LongMemEvalSessionTools};
 use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
-use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, ProviderHandle, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
-    SessionPolicy, SessionUsageReport, StandardContextApproach, TokioSessionTaskExecutor,
-    TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
+};
+use lash_embed::{
+    TurnInput,
+    advanced::{
+        AssembledTurn, EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+    },
+    plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
+    prompt::{PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection},
+    provider::ProviderHandle,
+    usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -279,7 +286,7 @@ impl LiveTokenBudget {
         }
     }
 
-    fn record(&mut self, usage: &lash::TokenUsage) -> bool {
+    fn record(&mut self, usage: &TokenUsage) -> bool {
         self.observed_context_tokens = self
             .observed_context_tokens
             .saturating_add(context_tokens_for_usage(usage));
@@ -646,7 +653,7 @@ async fn run_question(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
-                turn_context: lash::TurnContext::default(),
+                turn_context: TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&question)?)?,
             &sink,
@@ -741,7 +748,7 @@ fn build_plugin_session(
     session_tools: bool,
     benchmark_context: BenchmarkQuestionContext,
     session_policy: &SessionPolicy,
-) -> anyhow::Result<Arc<lash::PluginSession>> {
+) -> anyhow::Result<Arc<PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     if let Some(standard_context_approach) = &standard_context_approach {
@@ -1047,7 +1054,7 @@ fn load_completed_ids(path: &Path) -> anyhow::Result<BTreeSet<String>> {
 }
 
 fn aggregate_usage(reports: impl IntoIterator<Item = SessionUsageReport>) -> SessionUsageReport {
-    let mut total = BTreeMap::<(String, String), lash::TokenUsage>::new();
+    let mut total = BTreeMap::<(String, String), TokenUsage>::new();
     for report in reports {
         for row in report.by_source_model {
             let key = (row.source.clone(), row.model.clone());
@@ -1060,7 +1067,7 @@ fn aggregate_usage(reports: impl IntoIterator<Item = SessionUsageReport>) -> Ses
     }
     let entries = total
         .into_iter()
-        .map(|((source, model), usage)| lash::TokenLedgerEntry {
+        .map(|((source, model), usage)| TokenLedgerEntry {
             source,
             model,
             usage,
@@ -1131,7 +1138,7 @@ fn write_summary_text(path: PathBuf, summary: &RunSummary) -> anyhow::Result<()>
     fs::write(&path, lines.join("\n") + "\n").with_context(|| format!("write {}", path.display()))
 }
 
-fn format_usage_line(label: &str, usage: &lash::UsageTotals) -> String {
+fn format_usage_line(label: &str, usage: &UsageTotals) -> String {
     format!(
         "{label}: input={} cached={} output={} reasoning={} total={} context_total={}",
         usage.input_tokens,
@@ -1376,42 +1383,40 @@ impl EventSink for JsonlEventSink {
     }
 }
 
-fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+fn turn_completed(outcome: &TurnOutcome) -> bool {
     matches!(
         outcome,
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
     )
 }
 
-fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
-        lash::TurnOutcome::Stopped(_) => "failed",
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => "completed",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "interrupted",
+        TurnOutcome::Stopped(_) => "failed",
     }
 }
 
-fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
-            "assistant_message"
-        }
-        lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. }) => "submitted_value",
-        lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { .. }) => "tool_value",
-        lash::TurnOutcome::Handoff { .. } => "handoff",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
-        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
-        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
-        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => "assistant_message",
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => "submitted_value",
+        TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
+        TurnOutcome::Handoff { .. } => "handoff",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "cancelled",
+        TurnOutcome::Stopped(TurnStop::InvalidInput) => "invalid_input",
+        TurnOutcome::Stopped(TurnStop::MaxTurns) => "max_turns",
+        TurnOutcome::Stopped(TurnStop::ToolFailure) => "tool_failure",
+        TurnOutcome::Stopped(TurnStop::ProviderError) => "provider_error",
+        TurnOutcome::Stopped(TurnStop::PluginAbort) => "plugin_abort",
+        TurnOutcome::Stopped(TurnStop::RuntimeError) => "runtime_error",
+        TurnOutcome::Stopped(TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 
-fn context_tokens_for_usage(usage: &lash::TokenUsage) -> i64 {
+fn context_tokens_for_usage(usage: &TokenUsage) -> i64 {
     usage
         .input_tokens
         .max(0)
@@ -1430,7 +1435,7 @@ fn non_empty_text(text: &str) -> Option<String> {
 }
 
 fn format_failure_reason(
-    turn: &lash::AssembledTurn,
+    turn: &AssembledTurn,
     error_records: &[SinkErrorRecord],
 ) -> Option<String> {
     if turn_completed(&turn.outcome) {
@@ -1468,7 +1473,7 @@ mod tests {
     #[test]
     fn live_token_budget_counts_context_tokens() {
         let mut budget = LiveTokenBudget::new(100);
-        assert!(!budget.record(&lash::TokenUsage {
+        assert!(!budget.record(&TokenUsage {
             input_tokens: 40,
             output_tokens: 5,
             cached_input_tokens: 10,
@@ -1481,13 +1486,13 @@ mod tests {
     #[test]
     fn live_token_budget_trips_after_combined_root_and_child_usage() {
         let mut budget = LiveTokenBudget::new(100);
-        assert!(!budget.record(&lash::TokenUsage {
+        assert!(!budget.record(&TokenUsage {
             input_tokens: 45,
             output_tokens: 5,
             cached_input_tokens: 0,
             reasoning_tokens: 0,
         }));
-        assert!(budget.record(&lash::TokenUsage {
+        assert!(budget.record(&TokenUsage {
             input_tokens: 40,
             output_tokens: 0,
             cached_input_tokens: 20,

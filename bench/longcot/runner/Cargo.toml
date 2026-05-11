@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
+lash-embed = { path = "../../../lash-embed" }
 lash-cli = { path = "../../../lash-cli" }
-lash-plugin-mcp = { path = "../../../lash-plugin-mcp" }
 lash-export = { path = "../../../lash-export" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-llm-tools = { path = "../../../lash-llm-tools" }

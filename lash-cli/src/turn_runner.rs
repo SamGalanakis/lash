@@ -1,5 +1,9 @@
-use lash::*;
+use lash::{
+    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, RunMode,
+    SessionStateEnvelope, TokenUsage, TurnContext, TurnIssue, TurnOutcome, TurnStop,
+};
 use lash_embed::LashSession;
+use lash_embed::{TurnActivitySink, TurnInput};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use tokio::sync::oneshot;
@@ -24,7 +28,7 @@ pub(crate) fn make_turn_input(turn: &PreparedTurn) -> TurnInput {
         mode_turn_options: None,
         trace_turn_id: None,
         mode_extension: None,
-        turn_context: lash::TurnContext::default(),
+        turn_context: TurnContext::default(),
     }
 }
 
@@ -102,6 +106,12 @@ where
 mod tests {
     use super::*;
     use lash::session_model::fresh_message_id;
+    use lash::{
+        HydratedSessionCheckpoint, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
+        PersistedTurnState, PruneState, RollingHistoryConfig, SessionGraph, SessionHead,
+        StandardContextApproach, refresh_persisted_session_state,
+    };
+    use lash_embed::{advanced::ExecutionMode, usage::TokenLedgerEntry};
 
     #[tokio::test]
     async fn refresh_runtime_persistence_state_recovers_latest_token_ledger() {
@@ -137,7 +147,7 @@ mod tests {
             },
         }];
         let checkpoint_ref = store
-            .put_checkpoint(&lash::HydratedSessionCheckpoint {
+            .put_checkpoint(&HydratedSessionCheckpoint {
                 turn_state: PersistedTurnState {
                     turn_index: 2,
                     token_usage: TokenUsage {
@@ -159,7 +169,7 @@ mod tests {
             })
             .checkpoint_ref;
         store.append_usage_deltas(&ledger);
-        store.save_session_head(lash::SessionHead {
+        store.save_session_head(SessionHead {
             session_id: "root".to_string(),
             head_revision: 0,
             graph: graph.clone(),
@@ -177,12 +187,12 @@ mod tests {
             token_ledger: ledger,
         });
 
-        let mut persistence_state = lash::PersistedSessionState {
+        let mut persistence_state = PersistedSessionState {
             session_graph: SessionGraph::default(),
             token_ledger: Vec::new(),
-            ..lash::PersistedSessionState::default()
+            ..PersistedSessionState::default()
         };
-        lash::refresh_persisted_session_state(&store, &mut persistence_state)
+        refresh_persisted_session_state(&store, &mut persistence_state)
             .await
             .expect("refresh persisted session state");
         let stale_state = persistence_state;

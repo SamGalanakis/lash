@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use lash::*;
-use lash_embed::LashSession;
+use lash::{SessionStateEnvelope, TurnOutcome};
+use lash_embed::{
+    LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput,
+    plugins::PluginSurfaceEvent,
+    usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
+};
 use tokio::sync::mpsc;
 
 use crate::SkillCatalog;
@@ -230,7 +234,7 @@ async fn run_autonomous_turn(
         }
     };
     let done = done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
-    if let lash::TurnOutcome::Handoff { session_id } = &done.result.outcome {
+    if let TurnOutcome::Handoff { session_id } = &done.result.outcome {
         handoff_session_id = Some(session_id.clone());
     }
     while let Ok(activity) = event_rx.try_recv() {
@@ -298,7 +302,7 @@ pub(crate) async fn run_autonomous(
         if let Some(session_id) = outcome.handoff_session_id {
             if !matches!(
                 &turn_done.result.outcome,
-                lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
             ) {
                 break (turn_done, outcome.cancel);
             }
@@ -311,7 +315,7 @@ pub(crate) async fn run_autonomous(
     if persistence.await_background_work {
         session.control().state().await_background_work().await?;
         let state = session.control().state().persist_current().await?;
-        done.result.state = lash::SessionStateEnvelope {
+        done.result.state = SessionStateEnvelope {
             session_id: state.session_id,
             policy: state.policy,
             session_graph: state.session_graph,
@@ -323,7 +327,7 @@ pub(crate) async fn run_autonomous(
     }
     let cumulative_usage = session.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
-        let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(
+        let (delta_entries, delta_error, delta_is_fallback) = match diff_usage_reports(
             &before_usage,
             &cumulative_usage,
         ) {
@@ -335,7 +339,7 @@ pub(crate) async fn run_autonomous(
                 );
                 let fallback =
                     if done.result.usage.total() > 0 || done.result.usage.cached_input_tokens > 0 {
-                        vec![lash::TokenLedgerEntry {
+                        vec![TokenLedgerEntry {
                             source: "turn".to_string(),
                             model: done.result.state.policy.model.clone(),
                             usage: done.result.usage.clone(),
@@ -348,7 +352,7 @@ pub(crate) async fn run_autonomous(
         };
         let usage_artifact = serde_json::json!({
             "delta_entries": delta_entries,
-            "delta": lash::SessionUsageReport::from_entries(&delta_entries),
+            "delta": SessionUsageReport::from_entries(&delta_entries),
             "delta_error": delta_error,
             "delta_is_fallback": delta_is_fallback,
             "cumulative_rows": cumulative_usage.by_source_model,
@@ -358,7 +362,7 @@ pub(crate) async fn run_autonomous(
     }
 
     match &done.result.outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => {
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => {
             let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
@@ -384,7 +388,7 @@ pub(crate) async fn run_autonomous(
                 std::process::exit(1);
             }
         }
-        lash::TurnOutcome::Stopped(_) => {
+        TurnOutcome::Stopped(_) => {
             for issue in &done.result.errors {
                 eprintln!("error: {}", issue.message);
             }

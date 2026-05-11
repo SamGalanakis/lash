@@ -12,17 +12,24 @@ use async_trait::async_trait;
 use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
-use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, PromptBuiltin, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, ProviderHandle, RuntimeCoreConfig,
-    RuntimePersistence, SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    TokioSessionTaskExecutor, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider,
-    ToolResult, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge, diff_usage_reports,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_cli::config::LashConfig;
+use lash_embed::{
+    TurnInput,
+    advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
+    plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
+    prompt::{
+        PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    },
+    provider::ProviderHandle,
+    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
+};
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::{
@@ -658,7 +665,7 @@ async fn run_question(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
-                turn_context: lash::TurnContext::default(),
+                turn_context: TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&question)?)?,
             sink_trait.as_ref(),
@@ -821,7 +828,7 @@ fn extract_text(content: Option<&Value>) -> String {
 fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
-) -> anyhow::Result<Arc<lash::PluginSession>> {
+) -> anyhow::Result<Arc<PluginSession>> {
     let _longcot_tools = longcot_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
@@ -1076,38 +1083,36 @@ fn read_env_var(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+fn turn_completed(outcome: &TurnOutcome) -> bool {
     matches!(
         outcome,
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
     )
 }
 
-fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
-        lash::TurnOutcome::Stopped(_) => "failed",
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => "completed",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "interrupted",
+        TurnOutcome::Stopped(_) => "failed",
     }
 }
 
-fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
-            "assistant_message"
-        }
-        lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. }) => "submitted_value",
-        lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { .. }) => "tool_value",
-        lash::TurnOutcome::Handoff { .. } => "handoff",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
-        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
-        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
-        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => "assistant_message",
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => "submitted_value",
+        TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
+        TurnOutcome::Handoff { .. } => "handoff",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "cancelled",
+        TurnOutcome::Stopped(TurnStop::InvalidInput) => "invalid_input",
+        TurnOutcome::Stopped(TurnStop::MaxTurns) => "max_turns",
+        TurnOutcome::Stopped(TurnStop::ToolFailure) => "tool_failure",
+        TurnOutcome::Stopped(TurnStop::ProviderError) => "provider_error",
+        TurnOutcome::Stopped(TurnStop::PluginAbort) => "plugin_abort",
+        TurnOutcome::Stopped(TurnStop::RuntimeError) => "runtime_error",
+        TurnOutcome::Stopped(TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 
@@ -1164,7 +1169,7 @@ fn load_completed_ids(path: &Path) -> anyhow::Result<BTreeSet<String>> {
 }
 
 fn aggregate_usage(reports: impl IntoIterator<Item = SessionUsageReport>) -> SessionUsageReport {
-    let mut total = BTreeMap::<(String, String), lash::TokenUsage>::new();
+    let mut total = BTreeMap::<(String, String), TokenUsage>::new();
     for report in reports {
         for row in report.by_source_model {
             let key = (row.source.clone(), row.model.clone());
@@ -1177,7 +1182,7 @@ fn aggregate_usage(reports: impl IntoIterator<Item = SessionUsageReport>) -> Ses
     }
     let entries = total
         .into_iter()
-        .map(|((source, model), usage)| lash::TokenLedgerEntry {
+        .map(|((source, model), usage)| TokenLedgerEntry {
             source,
             model,
             usage,

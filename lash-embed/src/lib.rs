@@ -30,7 +30,7 @@ pub use crate::session::{
 pub use crate::turn::{
     TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
 };
-pub use lash::{TurnActivity, TurnActivityId, TurnEvent, TurnInput};
+pub use lash::{TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput};
 
 pub mod prelude {
     pub use crate::{
@@ -48,21 +48,28 @@ pub mod tools {
         AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState,
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
-        StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolDefinition, ToolProvider,
-        ToolResult, ToolSourceHandle,
+        StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolAvailabilityConfig, ToolCall,
+        ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
 pub mod persistence {
     pub use lash::{
-        AttachmentStore, PersistedSessionState, RuntimePersistence, SessionReadView,
-        SessionStoreCreateRequest, SessionStoreFactory,
+        AttachmentStore, BlobRef, HydratedSessionCheckpoint, PersistedSessionConfig,
+        PersistedSessionState, PersistedTurnState, RuntimePersistence, SessionGraph, SessionHead,
+        SessionHeadMeta, SessionMeta, SessionReadView, SessionStoreCreateRequest,
+        SessionStoreFactory,
     };
 }
 
 pub mod plugins {
     pub use crate::plugin_binding::PluginBinding;
-    pub use lash::{PluginError, PluginFactory, PluginMessage, PluginSpec};
+    pub use lash::plugin::StaticPluginFactory;
+    pub use lash::{
+        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginError,
+        PluginFactory, PluginMessage, PluginRegistrar, PluginSession, PluginSessionContext,
+        PluginSpec, PluginSurfaceEvent, SessionPlugin,
+    };
 }
 
 pub mod modes {
@@ -71,11 +78,14 @@ pub mod modes {
 
 pub mod advanced {
     pub use crate::AdvancedLashCoreBuilder;
+    // Benchmarks and diagnostics still need a semantic harness facade for
+    // preloaded state, event capture, plugin-stack presets, and graph seeding.
+    // Do not expose runtime bridge internals here to fill that gap.
     pub use lash::{
         AssembledTurn, EventSink, ExecutionMode, ManagedTaskStatus, ModeSessionExtensionHandle,
         ModeTurnOptions, PluginMessage, Residency, RewriteTrigger, RuntimeSessionHost,
         SessionCreateRequest, SessionHandle, SessionTurnHandle, StandardContextApproach,
-        TerminationPolicy,
+        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 
@@ -87,7 +97,22 @@ pub mod prompt {
 }
 
 pub mod tracing {
+    pub use lash::{
+        JsonlTraceSink, TraceAttachment, TraceContentBlock, TraceError, TraceEvent,
+        TraceLlmMessage, TraceLlmRequest, TraceLlmResponse, TracePromptComponent,
+        TraceProviderStreamEvent, TraceRecord, TraceRuntimeStreamEvent, TraceSinkError,
+        TraceTokenUsage, TraceToolSpec,
+    };
     pub use lash_trace::{TraceContext, TraceLevel, TraceSink};
+}
+
+pub mod provider {
+    pub use lash::{
+        AgentModelSelection, LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle,
+        ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
+        ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
+        VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
+    };
 }
 
 pub type ToolState = lash::ToolState;

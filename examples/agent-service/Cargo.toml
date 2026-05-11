@@ -10,7 +10,6 @@ async-trait = { workspace = true }
 axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true }
-lash = { path = "../../lash" }
 lash-sqlite-store = { path = "../../lash-sqlite-store" }
 lash-embed = { path = "../../lash-embed" }
 lash-provider-openai = { path = "../../lash-provider-openai" }

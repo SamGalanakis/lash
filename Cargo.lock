@@ -34,7 +34,6 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
- "lash",
  "lash-embed",
  "lash-provider-openai",
  "lash-sqlite-store",
@@ -316,10 +315,10 @@ dependencies = [
  "dirs 6.0.0",
  "lash",
  "lash-cli",
+ "lash-embed",
  "lash-harness-opt",
  "lash-llm-tools",
  "lash-mode-rlm",
- "lash-plugin-mcp",
  "lash-providers-builtin",
  "lash-rlm-types",
  "lash-sqlite-store",
@@ -342,10 +341,10 @@ dependencies = [
  "dotenvy",
  "lash",
  "lash-cli",
+ "lash-embed",
  "lash-export",
  "lash-llm-tools",
  "lash-mode-rlm",
- "lash-plugin-mcp",
  "lash-provider-openai",
  "lash-providers-builtin",
  "lash-sqlite-store",
@@ -367,6 +366,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "lash",
+ "lash-embed",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-plugin-observational-memory",
@@ -394,10 +394,10 @@ dependencies = [
  "dotenvy",
  "lash",
  "lash-cli",
+ "lash-embed",
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-mode-standard",
- "lash-plugin-mcp",
  "lash-plugin-observational-memory",
  "lash-plugin-rolling-history",
  "lash-providers-builtin",
@@ -2244,7 +2244,6 @@ version = "0.2.110"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "futures-util",
  "jsonschema",
@@ -2479,7 +2478,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2828,7 +2826,6 @@ dependencies = [
  "lash-plugin-plan-mode",
  "lash-tui",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

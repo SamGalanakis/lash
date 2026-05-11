@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use lash::*;
+use lash::{MessageRole, PluginMessage, SessionPolicy, SessionStateEnvelope};
+use lash_embed::{
+    TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent, TurnInput, advanced::ExecutionMode,
+};
 use lash_tui_extensions::{
     KeyChord as UiKeyChord, KeyCode as UiKeyCode, KeyModifiers as UiKeyModifiers,
 };

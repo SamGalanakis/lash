@@ -4,6 +4,8 @@ use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
+use lash::SessionPolicy;
+use lash_embed::{TurnActivity, TurnActivityId, TurnActivitySink};
 
 async fn monitor_test_session() -> lash_embed::LashSession {
     lash_embed::LashCore::standard()
