@@ -3,26 +3,28 @@ name = "lash-harness-opt"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "lash-harness-opt"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 dirs = "6"
 lash = { path = "../lash", default-features = false, features = ["full"] }
+lash-cli = { path = "../lash-cli" }
 lash-embed = { path = "../lash-embed" }
 lash-providers-builtin = { path = "../lash-providers-builtin" }
 lash-rlm-types = { path = "../lash-rlm-types" }
 lash-sansio = { path = "../lash-sansio" }
 lash-trace = { path = "../lash-trace" }
 rusqlite = { version = "0.33", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+uuid = { workspace = true, features = ["v4", "serde"] }

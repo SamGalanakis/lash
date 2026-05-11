@@ -3,6 +3,7 @@ name = "lash-file-index"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+publish = false
 
 [dependencies]
 ignore = "0.4"

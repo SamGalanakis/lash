@@ -8,15 +8,18 @@ use std::time::Instant;
 
 use serde_json::json;
 
+use std::collections::BTreeMap;
+
 use crate::ToolCallRecord;
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmUsage};
 use crate::session_model::{MessageRole, PartKind, SessionEvent, TokenUsage};
 use crate::{TurnFinish, TurnOutcome, TurnStop};
 
 use super::state::SessionStateEnvelope;
+use super::usage::TokenLedgerEntry;
 use super::{
-    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, SanitizerPolicy,
-    TerminationPolicy, TurnActivity, TurnActivityId, TurnEvent, TurnIssue,
+    AssembledTurn, AssistantOutput, ExecutionSummary, OutputState, TerminationPolicy, TurnActivity,
+    TurnActivityId, TurnEvent, TurnIssue,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -481,6 +484,12 @@ pub(super) struct TurnAssembler {
     pub(super) tool_calls: Vec<ToolCallRecord>,
     pub(super) token_usage: TokenUsage,
     pub(super) last_llm_usage: Option<TokenUsage>,
+    /// Latest `cumulative` reported by each child session, keyed by
+    /// `(session_id, source, model)`. Cumulative is monotonically
+    /// increasing per child session, so each new event for the same key
+    /// supersedes the previous value. At `finish()` time we aggregate by
+    /// `(source, model)` and sum across child sessions.
+    pub(super) child_cumulatives: BTreeMap<(String, String, String), TokenUsage>,
     pub(super) issues: Vec<TurnIssue>,
     pub(super) saw_done: bool,
     pub(super) saw_tool_failure: bool,
@@ -504,6 +513,7 @@ impl TurnAssembler {
             tool_calls: Vec::new(),
             token_usage: TokenUsage::default(),
             last_llm_usage: None,
+            child_cumulatives: BTreeMap::new(),
             issues: Vec::new(),
             saw_done: false,
             saw_tool_failure: false,
@@ -560,6 +570,18 @@ impl TurnAssembler {
                 self.token_usage = cumulative.clone();
                 self.last_llm_usage = Some(usage.clone());
             }
+            SessionEvent::ChildTokenUsage {
+                session_id,
+                source,
+                model,
+                cumulative,
+                ..
+            } => {
+                self.child_cumulatives.insert(
+                    (session_id.clone(), source.clone(), model.clone()),
+                    cumulative.clone(),
+                );
+            }
             SessionEvent::Error { message, envelope } => {
                 let (kind, code, raw) = if let Some(envelope) = envelope {
                     (
@@ -592,7 +614,6 @@ impl TurnAssembler {
         state: SessionStateEnvelope,
         interrupted: bool,
         force_runtime_error: Option<TurnIssue>,
-        sanitizer: &SanitizerPolicy,
         termination: &TerminationPolicy,
     ) -> AssembledTurn {
         let mut issues = self.issues;
@@ -625,7 +646,7 @@ impl TurnAssembler {
                 streamed
             }
         };
-        let safe_output = sanitize_assistant_output(raw_output.clone(), sanitizer);
+        let safe_output = sanitize_assistant_output(raw_output.clone());
         let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
         let outcome = if interrupted {
@@ -655,6 +676,8 @@ impl TurnAssembler {
             })
         };
 
+        let children_usage = aggregate_child_cumulatives(self.child_cumulatives);
+
         AssembledTurn {
             execution: ExecutionSummary {
                 mode: state.policy.execution_mode.clone(),
@@ -669,6 +692,7 @@ impl TurnAssembler {
                 state: output_state,
             },
             token_usage: self.token_usage,
+            children_usage,
             tool_calls: self.tool_calls,
             errors: issues,
         }
@@ -677,6 +701,28 @@ impl TurnAssembler {
     pub(super) fn last_llm_usage(&self) -> Option<&TokenUsage> {
         self.last_llm_usage.as_ref()
     }
+}
+
+/// Sum the latest cumulative usage reported by each `(session_id, source,
+/// model)` triple into `(source, model)` ledger entries.
+fn aggregate_child_cumulatives(
+    cumulatives: BTreeMap<(String, String, String), TokenUsage>,
+) -> Vec<TokenLedgerEntry> {
+    let mut by_source_model: BTreeMap<(String, String), TokenUsage> = BTreeMap::new();
+    for ((_session_id, source, model), usage) in cumulatives {
+        by_source_model
+            .entry((source, model))
+            .or_default()
+            .add(&usage);
+    }
+    by_source_model
+        .into_iter()
+        .map(|((source, model), usage)| TokenLedgerEntry {
+            source,
+            model,
+            usage,
+        })
+        .collect()
 }
 
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
@@ -708,7 +754,7 @@ pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope)
         .unwrap_or_default()
 }
 
-pub(super) fn sanitize_assistant_output(text: String, _policy: &SanitizerPolicy) -> String {
+pub(super) fn sanitize_assistant_output(text: String) -> String {
     text.lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()

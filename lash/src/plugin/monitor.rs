@@ -13,9 +13,9 @@ use crate::monitor::{
     MonitorUpdateBatch, MonitorWakePolicy,
 };
 use crate::plugin::{
-    ExternalInvokeContext, ExternalOpKind, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, PluginSnapshotMeta, SessionParam, SessionPlugin, SnapshotReader,
-    SnapshotWriter, TypedExternalOp, TypedExternalOpError,
+    PluginAction, PluginActionContext, PluginActionFailure, PluginActionKind, PluginError,
+    PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
+    SessionPlugin, SnapshotReader, SnapshotWriter,
 };
 
 pub const MONITOR_PLUGIN_ID: &str = "monitor";
@@ -38,22 +38,22 @@ struct MonitorPlugin {
     state: Arc<Mutex<MonitorPluginState>>,
 }
 
-fn tool_result_output<T>(result: ToolResult) -> Result<T, TypedExternalOpError>
+fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginActionFailure>
 where
     T: serde::de::DeserializeOwned,
 {
     if !result.success {
-        return Err(TypedExternalOpError::new(result.result.to_string()));
+        return Err(PluginActionFailure::new(result.result.to_string()));
     }
     serde_json::from_value(result.result)
-        .map_err(|err| TypedExternalOpError::new(format!("invalid monitor output: {err}")))
+        .map_err(|err| PluginActionFailure::new(format!("invalid monitor output: {err}")))
 }
 
-fn tool_result_unit(result: ToolResult) -> Result<(), TypedExternalOpError> {
+fn tool_result_unit(result: ToolResult) -> Result<(), PluginActionFailure> {
     if result.success {
         Ok(())
     } else {
-        Err(TypedExternalOpError::new(result.result.to_string()))
+        Err(PluginActionFailure::new(result.result.to_string()))
     }
 }
 
@@ -123,55 +123,55 @@ pub struct MonitorAckWakeOp;
 pub struct MonitorStartOp;
 pub struct MonitorStopOp;
 
-impl TypedExternalOp for MonitorRegisterSpecsOp {
+impl PluginAction for MonitorRegisterSpecsOp {
     const NAME: &'static str = "monitor.register_specs";
     const DESCRIPTION: &'static str = "Register typed monitor specs for the current session.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = RegisterSpecsArgs;
     type Output = ();
 }
 
-impl TypedExternalOp for MonitorStatusOp {
+impl PluginAction for MonitorStatusOp {
     const NAME: &'static str = "monitor.status";
     const DESCRIPTION: &'static str = "Return current monitor status.";
-    const KIND: ExternalOpKind = ExternalOpKind::Query;
+    const KIND: PluginActionKind = PluginActionKind::Query;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = MonitorEmptyArgs;
     type Output = MonitorSnapshot;
 }
 
-impl TypedExternalOp for MonitorTakeUpdatesOp {
+impl PluginAction for MonitorTakeUpdatesOp {
     const NAME: &'static str = "monitor.take_updates";
     const DESCRIPTION: &'static str = "Drain pending monitor updates.";
-    const KIND: ExternalOpKind = ExternalOpKind::Task;
+    const KIND: PluginActionKind = PluginActionKind::Task;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = MonitorEmptyArgs;
     type Output = MonitorUpdateBatch;
 }
 
-impl TypedExternalOp for MonitorAckWakeOp {
+impl PluginAction for MonitorAckWakeOp {
     const NAME: &'static str = "monitor.ack_wake";
     const DESCRIPTION: &'static str = "Acknowledge pending monitor wake-ups.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AckWakeArgs;
     type Output = ();
 }
 
-impl TypedExternalOp for MonitorStartOp {
+impl PluginAction for MonitorStartOp {
     const NAME: &'static str = "monitor.start";
     const DESCRIPTION: &'static str = "Start a monitor.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = StartMonitorArgs;
     type Output = MonitorSnapshot;
 }
 
-impl TypedExternalOp for MonitorStopOp {
+impl PluginAction for MonitorStopOp {
     const NAME: &'static str = "monitor.stop";
     const DESCRIPTION: &'static str = "Stop a monitor.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = StopMonitorArgs;
     type Output = MonitorSnapshot;
@@ -373,7 +373,7 @@ impl MonitorPlugin {
 
     async fn handle_register_specs(
         &self,
-        ctx: ExternalInvokeContext,
+        ctx: PluginActionContext,
         args: serde_json::Value,
     ) -> ToolResult {
         let _ = ctx;
@@ -393,7 +393,7 @@ impl MonitorPlugin {
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 
-    async fn handle_status(&self, ctx: ExternalInvokeContext) -> ToolResult {
+    async fn handle_status(&self, ctx: PluginActionContext) -> ToolResult {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.status requires a session");
         };
@@ -407,7 +407,7 @@ impl MonitorPlugin {
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 
-    async fn handle_take_updates(&self, ctx: ExternalInvokeContext) -> ToolResult {
+    async fn handle_take_updates(&self, ctx: PluginActionContext) -> ToolResult {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.take_updates requires a session");
         };
@@ -449,11 +449,7 @@ impl MonitorPlugin {
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 
-    async fn handle_start(
-        &self,
-        ctx: ExternalInvokeContext,
-        args: serde_json::Value,
-    ) -> ToolResult {
+    async fn handle_start(&self, ctx: PluginActionContext, args: serde_json::Value) -> ToolResult {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.start requires a session");
         };
@@ -494,7 +490,7 @@ impl MonitorPlugin {
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 
-    async fn handle_stop(&self, ctx: ExternalInvokeContext, args: serde_json::Value) -> ToolResult {
+    async fn handle_stop(&self, ctx: PluginActionContext, args: serde_json::Value) -> ToolResult {
         let Some(session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.stop requires a session");
         };
@@ -551,7 +547,7 @@ impl SessionPlugin for MonitorPlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorRegisterSpecsOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
@@ -569,7 +565,7 @@ impl SessionPlugin for MonitorPlugin {
             })?;
 
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorStatusOp, _, _>(move |ctx, _args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
@@ -578,7 +574,7 @@ impl SessionPlugin for MonitorPlugin {
             })?;
 
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorTakeUpdatesOp, _, _>(move |ctx, _args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
@@ -587,7 +583,7 @@ impl SessionPlugin for MonitorPlugin {
             })?;
 
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorAckWakeOp, _, _>(move |_ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
@@ -602,7 +598,7 @@ impl SessionPlugin for MonitorPlugin {
             })?;
 
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorStartOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),
@@ -617,7 +613,7 @@ impl SessionPlugin for MonitorPlugin {
             })?;
 
         let state = Arc::clone(&self.state);
-        reg.external()
+        reg.actions()
             .typed::<MonitorStopOp, _, _>(move |ctx, args| {
                 let plugin = MonitorPlugin {
                     state: Arc::clone(&state),

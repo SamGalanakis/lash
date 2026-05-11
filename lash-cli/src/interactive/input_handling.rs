@@ -5,8 +5,8 @@ use crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
 use lash::session_model::Message;
-use lash::*;
-use lash_embed::LashSession;
+use lash::{CachedModelCatalog, InjectedTurnInput, RunMode, ToolState};
+use lash_embed::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -43,19 +43,16 @@ use super::runtime::{
 pub(super) fn handle_surface_input(
     ui_extensions: &TuiExtensions,
     event: &TuiInputEvent,
-    plugin_host: &PluginHost,
-    session_manager: &Arc<dyn RuntimeSessionHost>,
+    session: Option<&LashSession>,
     app: &mut App,
 ) -> bool {
-    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
-        plugin_host,
-        session_id: app.session_id.as_str(),
-        session_manager: Arc::clone(session_manager),
+    let Some(session) = session else {
+        return false;
     };
     match ui_extensions.handle_input(
         event,
         TuiExtensionContext {
-            session: &tui_session,
+            actions: &session.plugin_actions(),
         },
     ) {
         TuiInputOutcome::Ignored => false,
@@ -217,15 +214,17 @@ pub(super) async fn activate_foreground_session_handoff(
     app: &mut App,
     session_id: String,
     _history: &mut Vec<lash::session_model::Message>,
-    _runtime: &mut Option<LashSession>,
+    runtime: &mut Option<LashSession>,
     _turn_counter: &mut usize,
     _current_execution_mode: &mut ExecutionMode,
     _current_model_variant: &mut Option<String>,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     _ui_extensions: &TuiExtensions,
-    _plugin_host: &PluginHost,
 ) -> bool {
-    let queued_turn = match session_manager.take_first_turn_input(&session_id).await {
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(app, "No active session for handoff.".to_string());
+        return false;
+    };
+    let queued_turn = match session.handoffs().take_first_turn_input(&session_id).await {
         Ok(Some(seed)) if !seed.content.trim().is_empty() => {
             Some(PreparedTurn::prepare_with_effective_text(
                 seed.content.clone(),
@@ -338,8 +337,7 @@ pub(super) fn handle_mouse_event(
     terminal: &Terminal,
     ui_trace: &mut Option<UiTraceRecorder>,
     ui_extensions: &TuiExtensions,
-    plugin_host: &PluginHost,
-    session_manager: &Arc<dyn RuntimeSessionHost>,
+    runtime: &Option<LashSession>,
 ) -> anyhow::Result<()> {
     use crossterm::event::{MouseButton, MouseEventKind};
     // Some terminals (notably kitty) can paint transient hover/search
@@ -393,7 +391,7 @@ pub(super) fn handle_mouse_event(
     }
 
     if let Some(event) = normalize_event(&TermEvent::Mouse(mouse))
-        && handle_surface_input(ui_extensions, &event, plugin_host, session_manager, app)
+        && handle_surface_input(ui_extensions, &event, runtime.as_ref(), app)
     {
         return Ok(());
     }
@@ -553,10 +551,9 @@ pub(super) async fn handle_key_event(
     logger: &mut SessionLogger,
     args: &Args,
     paused: &Arc<AtomicBool>,
-    plugin_host: &PluginHost,
     ui_extensions: &TuiExtensions,
     runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &lash::provider::LashConfig,
+    lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -567,7 +564,6 @@ pub(super) async fn handle_key_event(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -810,14 +806,12 @@ pub(super) async fn handle_key_event(
                         app,
                         logger,
                         runtime_factory,
-                        lash_config,
                         runtime,
                         history,
                         turn_counter,
                         provider,
                         current_model_variant,
                         current_execution_mode,
-                        session_manager,
                         desired_tool_state,
                         model_catalog,
                         toolset_hash,
@@ -885,13 +879,6 @@ pub(super) async fn handle_key_event(
                     .await
                     {
                         Ok(()) => {
-                            match rt.control().state().session_manager().await {
-                                Ok(manager) => *session_manager = manager,
-                                Err(err) => push_system_message(
-                                    app,
-                                    format!("Failed to refresh session manager: {}", err),
-                                ),
-                            }
                             app.dirty = true;
                         }
                         Err(err) => {
@@ -968,7 +955,7 @@ pub(super) async fn handle_key_event(
     }
 
     if let Some(event) = normalize_event(&TermEvent::Key(key))
-        && handle_surface_input(ui_extensions, &event, plugin_host, session_manager, app)
+        && handle_surface_input(ui_extensions, &event, runtime.as_ref(), app)
     {
         return Ok(false);
     }
@@ -976,16 +963,15 @@ pub(super) async fn handle_key_event(
     if let Some(chord) = key_chord_from_event(key)
         && let Some(shortcut) = ui_extensions.shortcut_for(chord)
     {
-        let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
-            plugin_host,
-            session_id: app.session_id.as_str(),
-            session_manager: Arc::clone(session_manager),
+        let Some(session) = runtime.as_ref() else {
+            push_system_message(app, "No active session for UI shortcut.".to_string());
+            return Ok(false);
         };
         match ui_extensions
             .invoke_shortcut(
                 &shortcut,
                 TuiExtensionContext {
-                    session: &tui_session,
+                    actions: &session.plugin_actions(),
                 },
             )
             .await
@@ -1038,7 +1024,6 @@ pub(super) async fn handle_key_event(
                         logger,
                         args,
                         paused,
-                        plugin_host,
                         ui_extensions,
                         runtime_factory,
                         lash_config,
@@ -1052,7 +1037,6 @@ pub(super) async fn handle_key_event(
                         provider,
                         current_model_variant,
                         current_execution_mode,
-                        session_manager,
                         desired_tool_state,
                         pending_reconfigure,
                         model_catalog,
@@ -1143,7 +1127,6 @@ pub(super) async fn handle_key_event(
                             logger,
                             args,
                             paused,
-                            plugin_host,
                             ui_extensions,
                             runtime_factory,
                             lash_config,
@@ -1157,7 +1140,6 @@ pub(super) async fn handle_key_event(
                             provider,
                             current_model_variant,
                             current_execution_mode,
-                            session_manager,
                             desired_tool_state,
                             pending_reconfigure,
                             model_catalog,
@@ -1184,7 +1166,6 @@ pub(super) async fn handle_key_event(
                     logger,
                     args,
                     paused,
-                    plugin_host,
                     ui_extensions,
                     runtime_factory,
                     lash_config,
@@ -1198,7 +1179,6 @@ pub(super) async fn handle_key_event(
                     provider,
                     current_model_variant,
                     current_execution_mode,
-                    session_manager,
                     desired_tool_state,
                     pending_reconfigure,
                     model_catalog,
@@ -1258,7 +1238,6 @@ pub(super) async fn handle_key_event(
                         logger,
                         args,
                         paused,
-                        plugin_host,
                         ui_extensions,
                         runtime_factory,
                         lash_config,
@@ -1272,7 +1251,6 @@ pub(super) async fn handle_key_event(
                         provider,
                         current_model_variant,
                         current_execution_mode,
-                        session_manager,
                         desired_tool_state,
                         pending_reconfigure,
                         model_catalog,
@@ -1412,7 +1390,6 @@ pub(super) async fn handle_key_event(
                     logger,
                     args,
                     paused,
-                    plugin_host,
                     ui_extensions,
                     runtime_factory,
                     lash_config,
@@ -1426,7 +1403,6 @@ pub(super) async fn handle_key_event(
                     provider,
                     current_model_variant,
                     current_execution_mode,
-                    session_manager,
                     desired_tool_state,
                     pending_reconfigure,
                     model_catalog,

@@ -24,6 +24,11 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
                 )
                 .await;
             }
+            // ChildTokenUsage is projected to TurnEvent::ChildUsage at its
+            // origin in `session_manager::usage::ChildUsageEventRelay::emit`,
+            // not here. Child usage events bypass `send_session_event` because
+            // they're produced by the session manager rather than the parent's
+            // turn driver.
             SessionEvent::LlmRequest { mode_iteration, .. } => {
                 send_independent_turn_event(
                     event_tx,
@@ -583,10 +588,10 @@ impl RuntimeTurnDriver {
                                     call_id: Some(outcome.call_id.clone()),
                                     tool: outcome.tool_name.clone(),
                                     args: outcome.args.clone(),
-                                    result: outcome.state_result.result.clone(),
-                                    success: outcome.state_result.success,
+                                    result: outcome.result.result.clone(),
+                                    success: outcome.result.success,
                                     duration_ms: outcome.duration_ms,
-                                    control: outcome.raw_result.control.clone(),
+                                    control: outcome.result.control.clone(),
                                 };
                                 self.emit_tool_call_trace(machine.mode_iteration(), &record);
                             }
@@ -596,10 +601,10 @@ impl RuntimeTurnDriver {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
                                 args: outcome.args.clone(),
-                                result: outcome.state_result.result.clone(),
-                                success: outcome.state_result.success,
+                                result: outcome.result.result.clone(),
+                                success: outcome.result.success,
                                 duration_ms: outcome.duration_ms,
-                                control: outcome.raw_result.control.clone(),
+                                control: outcome.result.control.clone(),
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
                     }

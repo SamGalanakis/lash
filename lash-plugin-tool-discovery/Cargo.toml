@@ -10,11 +10,12 @@ semantic-tool-search = ["dep:model2vec-rs"]
 
 [dependencies]
 lash = { path = "../lash" }
-async-trait = "0.1"
+async-trait = { workspace = true }
 model2vec-rs = { version = "0.1.4", optional = true }
-serde_json = "1"
-schemars = "0.8"
+serde_json = { workspace = true }
+schemars = { workspace = true }
 strsim = "0.11"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+lash = { path = "../lash", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

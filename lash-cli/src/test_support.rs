@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lash::{PromptRequest, PromptResponse, SessionEvent};
+use lash::{PromptRequest, PromptResponse, SessionEvent, TurnEvent};
 use lash_tui::ScreenSnapshot;
 use lash_tui_extensions::TuiExtensions;
 use tokio::sync::Mutex;
@@ -121,12 +121,9 @@ impl UiHarness {
     }
 
     pub(crate) fn dispatch_event(&mut self, event: SessionEvent) -> &mut Self {
-        let mut effects = crate::interactive::session_event_to_turn_event(&event)
+        let effects = test_session_event_to_turn_event(&event)
             .map(|event| self.ui_extensions.effects_for_turn_event(&event))
             .unwrap_or_default();
-        if matches!(event, SessionEvent::Done) {
-            effects.extend(self.ui_extensions.effects_for_turn_finished());
-        }
         self.app.handle_session_event(event);
         apply_ui_host_effects(&mut self.app, effects);
         self
@@ -169,6 +166,34 @@ impl UiHarness {
 
     pub(crate) fn render(&mut self) -> ScreenSnapshot {
         render_screen_snapshot(&mut self.app, self.width, self.height)
+    }
+}
+
+fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
+    match event {
+        SessionEvent::LlmRequest { mode_iteration, .. } => Some(TurnEvent::ModelRequestStarted {
+            mode_iteration: *mode_iteration,
+        }),
+        SessionEvent::ToolCall {
+            call_id,
+            name,
+            args,
+            result,
+            success,
+            duration_ms,
+        } => Some(TurnEvent::ToolCallCompleted {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+            result: result.clone(),
+            success: *success,
+            duration_ms: *duration_ms,
+        }),
+        SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginSurface {
+            plugin_id: plugin_id.clone(),
+            event: event.clone(),
+        }),
+        _ => None,
     }
 }
 

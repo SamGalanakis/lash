@@ -224,16 +224,18 @@ impl CliSessionOpener {
             .default_mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
             .provider(policy.provider.clone())
             .model(policy.model.clone(), policy.model_variant.clone())
-            .plugin_host(self.plugin_host.clone())
-            .runtime_core_config(self.core.clone())
-            .session_task_executor(Arc::clone(&self.session_task_executor))
             .child_store_factory(Arc::new(session_log::DbSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
             )));
         if let Some(max_context_tokens) = policy.max_context_tokens {
             core_builder = core_builder.max_context_tokens(max_context_tokens);
         }
-        let core = core_builder.build()?;
+        let core = core_builder
+            .advanced()
+            .plugin_host(self.plugin_host.clone())
+            .runtime_core_config(self.core.clone())
+            .session_task_executor(Arc::clone(&self.session_task_executor))
+            .build()?;
         let session = core
             .session(session_id)
             .mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))

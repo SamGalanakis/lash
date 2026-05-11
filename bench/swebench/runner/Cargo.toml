@@ -3,6 +3,7 @@ name = "bench-swebench"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "bench-swebench"
@@ -11,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 dirs = "6"
 lash = { path = "../../../lash", default-features = false, features = ["full"] }
+lash-embed = { path = "../../../lash-embed" }
+lash-cli = { path = "../../../lash-cli" }
 lash-standard-plugins = { path = "../../../lash-standard-plugins" }
 lash-sqlite-store = { path = "../../../lash-sqlite-store" }
 lash-llm-tools = { path = "../../../lash-llm-tools" }
@@ -20,12 +23,12 @@ lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-
 lash-plugin-rolling-history = { path = "../../../lash-plugin-rolling-history" }
 lash-providers-builtin = { path = "../../../lash-providers-builtin" }
 lash-subagents = { path = "../../../lash-subagents" }
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-clap = { version = "4", features = ["derive", "env"] }
-anyhow = "1"
-chrono = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-trait = "0.1"
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true, features = ["rt"] }
+clap = { workspace = true, features = ["derive", "env"] }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
 dotenvy = "0.15"

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_embed::tools::{
+    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
 use regex::RegexBuilder;
 use serde_json::json;
 
@@ -195,13 +197,13 @@ impl LongMemEvalSessionTools {
 }
 
 fn bench_tool(name: &str, description: &str, input_schema: serde_json::Value) -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         name,
         description,
         input_schema,
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_availability(lash::ToolAvailabilityConfig::callable())
+    .with_availability(ToolAvailabilityConfig::callable())
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -253,8 +255,9 @@ impl ToolProvider for LongMemEvalSessionTools {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        match name {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
+        match call.name {
             "list_sessions" => ToolResult::ok(self.ctx.list_sessions()),
             "get_session" => {
                 let Some(number) = args.get("session_number").and_then(|value| value.as_u64())

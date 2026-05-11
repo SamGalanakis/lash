@@ -17,21 +17,21 @@ full = []
 [dependencies]
 lash-sansio = { path = "../lash-sansio" }
 lash-trace = { path = "../lash-trace" }
-tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
-schemars = { version = "0.8", features = ["derive"] }
-jsonschema = "0.18"
-async-trait = "0.1"
-uuid = { version = "1", features = ["v4"] }
-thiserror = "2"
-tempfile = "3"
-tracing = "0.1"
-regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-base64 = "0.22"
-sha2 = "0.10"
-chrono = "0.4"
-futures-util = "0.3"
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json = { workspace = true }
+schemars = { workspace = true, features = ["derive"] }
+jsonschema = { workspace = true }
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
+tokio-util = { workspace = true, features = ["rt"] }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
 libc = "0.2"

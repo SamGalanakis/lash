@@ -41,20 +41,17 @@ async fn handle_ui_command(
     invocation: TuiSlashInvocation,
     app: &mut App,
     ui_extensions: &TuiExtensions,
-    plugin_host: &PluginHost,
-    session_manager: &Arc<dyn RuntimeSessionHost>,
     runtime: &mut Option<LashSession>,
 ) {
-    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
-        plugin_host,
-        session_id: app.session_id.as_str(),
-        session_manager: Arc::clone(session_manager),
+    let Some(session) = runtime.as_ref() else {
+        push_system_message(app, "No active session for UI command.".to_string());
+        return;
     };
     match ui_extensions
         .invoke_parsed_command(
             &invocation,
             TuiExtensionContext {
-                session: &tui_session,
+                actions: &session.plugin_actions(),
             },
         )
         .await
@@ -87,10 +84,9 @@ pub(super) async fn dispatch_next_queued_turn(
     logger: &mut SessionLogger,
     args: &Args,
     paused: &Arc<AtomicBool>,
-    plugin_host: &PluginHost,
     ui_extensions: &TuiExtensions,
     runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &lash::provider::LashConfig,
+    lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -101,7 +97,6 @@ pub(super) async fn dispatch_next_queued_turn(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -131,7 +126,6 @@ pub(super) async fn dispatch_next_queued_turn(
                 logger,
                 args,
                 paused,
-                plugin_host,
                 ui_extensions,
                 runtime_factory,
                 lash_config,
@@ -145,7 +139,6 @@ pub(super) async fn dispatch_next_queued_turn(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                session_manager,
                 desired_tool_state,
                 pending_reconfigure,
                 model_catalog,
@@ -212,10 +205,9 @@ pub(super) async fn handle_parsed_slash_command(
     logger: &mut SessionLogger,
     args: &Args,
     paused: &Arc<AtomicBool>,
-    plugin_host: &PluginHost,
     ui_extensions: &TuiExtensions,
     runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &lash::provider::LashConfig,
+    lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -226,7 +218,6 @@ pub(super) async fn handle_parsed_slash_command(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -243,7 +234,6 @@ pub(super) async fn handle_parsed_slash_command(
                 logger,
                 args,
                 paused,
-                plugin_host,
                 runtime_factory,
                 lash_config,
                 runtime,
@@ -256,7 +246,6 @@ pub(super) async fn handle_parsed_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                session_manager,
                 desired_tool_state,
                 pending_reconfigure,
                 model_catalog,
@@ -267,15 +256,7 @@ pub(super) async fn handle_parsed_slash_command(
             .await
         }
         ParsedSlashCommand::Ui(command) => {
-            handle_ui_command(
-                command,
-                app,
-                ui_extensions,
-                plugin_host,
-                session_manager,
-                runtime,
-            )
-            .await;
+            handle_ui_command(command, app, ui_extensions, runtime).await;
             Ok(false)
         }
     }
@@ -289,9 +270,8 @@ async fn handle_slash_command(
     logger: &mut SessionLogger,
     _args: &Args,
     paused: &Arc<AtomicBool>,
-    _plugin_host: &PluginHost,
     runtime_factory: &crate::session_bootstrap::CliSessionOpener,
-    lash_config: &lash::provider::LashConfig,
+    _lash_config: &crate::config::LashConfig,
     runtime: &mut Option<LashSession>,
     history: &mut Vec<Message>,
     turn_counter: &mut usize,
@@ -302,7 +282,6 @@ async fn handle_slash_command(
     provider: &mut ProviderHandle,
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
-    session_manager: &mut Arc<dyn RuntimeSessionHost>,
     desired_tool_state: &mut ToolState,
     pending_reconfigure: &mut bool,
     model_catalog: &CachedModelCatalog,
@@ -316,7 +295,6 @@ async fn handle_slash_command(
             session::handle_clear(
                 app,
                 runtime_factory,
-                lash_config,
                 logger,
                 runtime,
                 history,
@@ -326,7 +304,6 @@ async fn handle_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                session_manager,
                 desired_tool_state,
                 pending_clear_after_return,
             )
@@ -343,7 +320,7 @@ async fn handle_slash_command(
             let session_name = app.session_name.clone();
             let standard_context_approach = runtime
                 .as_ref()
-                .map(|rt| async { rt.policy_snapshot().await.standard_context_approach });
+                .map(|rt| async { rt.policy_snapshot().standard_context_approach });
             let standard_context_approach = match standard_context_approach {
                 Some(future) => future.await,
                 None => None,
@@ -443,7 +420,6 @@ async fn handle_slash_command(
                 app,
                 logger,
                 runtime_factory,
-                lash_config,
                 runtime,
                 history,
                 turn_counter,
@@ -451,7 +427,6 @@ async fn handle_slash_command(
                 provider,
                 current_model_variant,
                 current_execution_mode,
-                session_manager,
                 desired_tool_state,
                 model_catalog,
                 toolset_hash,
@@ -491,7 +466,7 @@ async fn handle_slash_command(
             };
             match rt.control().state().rewrite_history(trigger).await {
                 Ok(true) => {
-                    let read_view = rt.read_view().await;
+                    let read_view = rt.read_view();
                     history.clear();
                     history.extend(read_view.messages().iter().cloned());
                     app.timeline =

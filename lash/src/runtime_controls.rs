@@ -144,7 +144,7 @@ impl ModeNativeToolsPlugin for MonitorNativeTool {
 
 /// Build the `monitor` tool definition.
 pub fn monitor_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "monitor",
         "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. In RLM mode this returns a lashlang async handle; use `list_async_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
         serde_json::json!({
@@ -184,7 +184,7 @@ pub fn monitor_tool_definition() -> ToolDefinition {
 }
 
 pub fn tasks_list_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "tasks_list",
         "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running`, `idle`, `completed`, `failed`, or `cancelled`. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.",
         ToolDefinition::default_input_schema(),
@@ -195,7 +195,7 @@ pub fn tasks_list_tool_definition() -> ToolDefinition {
 }
 
 pub fn tasks_stop_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "tasks_stop",
         "Cancel a background task by `task_id`. Monitors and subagents return this id when started; `tasks_list` can also rediscover it. For monitors this terminates the process tree; for subagents it closes the subtree (running turns are cancelled, idle sessions closed).",
         serde_json::json!({

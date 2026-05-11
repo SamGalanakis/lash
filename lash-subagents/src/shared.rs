@@ -10,7 +10,7 @@
 use lash::plugin::PluginError;
 use lash::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPluginMode, SessionPolicy,
-    SessionStartPoint, SessionToolAccess, ToolDefinition, ToolExecutionContext, ToolExecutionMode,
+    SessionStartPoint, SessionToolAccess, ToolContext, ToolDefinition, ToolExecutionMode,
     ToolResult, ToolSurfaceContribution, TurnInput,
 };
 use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
@@ -108,15 +108,15 @@ pub(crate) fn normalize_context_policy(policy: &mut SessionPolicy) {
 
 pub(crate) async fn build_spawn_create_request(
     registry: &CapabilityRegistry,
-    context: &ToolExecutionContext,
+    context: &ToolContext,
     capability_name: &str,
     output_schema: Option<Value>,
     seed: ClassifiedSeed,
     configurator: &dyn SubagentSessionConfigurator,
 ) -> Result<SessionCreateRequest, String> {
     let current_snapshot = context
-        .host
-        .snapshot_session(&context.session_id)
+        .host()
+        .snapshot_session(context.session_id())
         .await
         .map_err(|err| format!("failed to snapshot current session: {err}"))?;
     let spec = resolve_capability_spec(registry, &current_snapshot.policy, capability_name)?;
@@ -158,7 +158,7 @@ pub(crate) async fn build_spawn_create_request(
     normalize_context_policy(&mut policy);
 
     let mut request = fresh_child_request(
-        context.session_id.clone(),
+        context.session_id().to_string(),
         SessionStartPoint::Empty,
         policy,
         mode_extras,
@@ -171,7 +171,7 @@ pub(crate) async fn build_spawn_create_request(
     let child_policy = request.policy.as_ref().expect("child policy set").clone();
     configurator.configure(
         &SubagentSpawnContext {
-            parent_session_id: &context.session_id,
+            parent_session_id: context.session_id(),
             capability: capability_name,
             parent_policy: &current_snapshot.policy,
             child_policy: &child_policy,
@@ -266,7 +266,7 @@ pub(crate) fn tool_definition(
     examples: Vec<String>,
     execution_mode: ToolExecutionMode,
 ) -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         name,
         description,
         input_schema,
@@ -310,7 +310,7 @@ pub(crate) const SUBAGENT_SUITE_DENY: &[&str] = &["spawn_agent"];
 pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "submit_error",
         "End the current subagent task as a terminal failure with a concise reason. Use `call submit_error { reason: \"...\" }` when the child cannot produce a valid result.",
         json!({
@@ -352,7 +352,7 @@ pub(crate) fn subagent_surface_contribution(
 }
 
 /// Wrap an `Ok`/`Err` result as a `ToolResult`. Used by both providers'
-/// `execute_with_context` so error encoding stays identical.
+/// `execute` so error encoding stays identical.
 pub(crate) fn finalise_tool_result(result: Result<Value, String>) -> ToolResult {
     match result {
         Ok(value) => ToolResult::ok(value),

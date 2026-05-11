@@ -416,7 +416,7 @@ fn build_status_slots(app: &App) -> (Vec<StatusSlot>, Vec<StatusSlot>) {
         });
     }
 
-    // RIGHT side: context-window meter. The expand keybind is discoverable
+    // RIGHT side: context-window meter. The expand keybind is searchable
     // via `/controls` and the `▸` marker on tool activities — no teaching
     // slot needed in the status bar.
     let mut right = Vec::new();
@@ -637,7 +637,7 @@ fn selection_ordered(sel: &crate::app::TextSelection) -> ((u16, usize), (u16, us
 
 /// Push the live-turn snapshot into the `chrome_ui` extension and
 /// mount/unmount its `turn_status` footer surface accordingly. The
-/// indicator is hidden whenever a prompt is open — the prompt panel
+/// indicator is off whenever a prompt is open — the prompt panel
 /// itself communicates the paused state.
 ///
 /// Callable from layout-query paths (e.g. tests) so the surface
@@ -1346,7 +1346,7 @@ mod tests {
         // `live_output_tokens_estimate` is nonzero; using it as the displayed
         // total reads as if those streamed bytes were the entire context, so
         // the bar shows e.g. `36 · 0%` against a 1.1M-token window. The
-        // meter should stay hidden until real input accounting lands.
+        // meter should stay off until real input accounting lands.
         let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
         app.context_window = Some(1_100_000);
         app.running = true;

@@ -111,8 +111,7 @@ impl RuntimeTurnDriver {
                                     call_id: uuid::Uuid::new_v4().to_string(),
                                     tool_name: "unknown".to_string(),
                                     args: serde_json::json!({}),
-                                    raw_result: crate::ToolResult::err_fmt("tool call cancelled"),
-                                    state_result: crate::ToolResult::err_fmt("tool call cancelled"),
+                                    result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                                     duration_ms: 0,
                                     item_id: None,
@@ -125,10 +124,7 @@ impl RuntimeTurnDriver {
                                 call_id: uuid::Uuid::new_v4().to_string(),
                                 tool_name: "unknown".to_string(),
                                 args: serde_json::json!({}),
-                                raw_result: crate::ToolResult::err_fmt(format!(
-                                    "tool task panicked: {e}"
-                                )),
-                                state_result: crate::ToolResult::err_fmt(format!(
+                                result: crate::ToolResult::err_fmt(format!(
                                     "tool task panicked: {e}"
                                 )),
                                 model_result: crate::ToolResult::err_fmt(format!(
@@ -154,8 +150,7 @@ impl RuntimeTurnDriver {
                         call_id: pending_tool.call_id,
                         tool_name: pending_tool.tool_name,
                         args: pending_tool.args,
-                        raw_result: crate::ToolResult::err_fmt("tool call cancelled"),
-                        state_result: crate::ToolResult::err_fmt("tool call cancelled"),
+                        result: crate::ToolResult::err_fmt("tool call cancelled"),
                         model_result: crate::ToolResult::err_fmt("tool call cancelled"),
                         duration_ms: 0,
                         item_id: pending_tool.item_id,

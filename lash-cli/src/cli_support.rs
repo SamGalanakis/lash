@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lash::provider::ProviderHandle;
-use lash::*;
+use lash::{CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec};
+use lash_embed::advanced::ExecutionMode;
+use lash_embed::plugins::PluginSurfaceEvent;
+use lash_embed::provider::ProviderHandle;
+use lash_embed::{TurnActivity, TurnEvent};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
@@ -688,20 +691,20 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
                 title,
                 content,
             } => {
-                app.handle_session_event(SessionEvent::PluginEvent {
+                app.handle_turn_activity(TurnActivity::independent(TurnEvent::PluginSurface {
                     plugin_id,
                     event: PluginSurfaceEvent::PanelUpsert {
                         key,
                         title,
                         content,
                     },
-                });
+                }));
             }
             TuiHostEffect::ClearPanel { plugin_id, key } => {
-                app.handle_session_event(SessionEvent::PluginEvent {
+                app.handle_turn_activity(TurnActivity::independent(TurnEvent::PluginSurface {
                     plugin_id,
                     event: PluginSurfaceEvent::PanelClear { key },
-                });
+                }));
             }
             TuiHostEffect::QueueTurn { input } => {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
@@ -733,28 +736,21 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
 }
 
 pub(crate) async fn collect_ui_snapshot(
-    session_id: String,
+    session: lash_embed::LashSession,
     ui_extensions: &TuiExtensions,
-    plugin_host: &PluginHost,
-    session_manager: Arc<dyn RuntimeSessionHost>,
 ) -> crate::event::UiSnapshotResult {
     let started = std::time::Instant::now();
     let mut diagnostics = Vec::new();
-    let background_tasks = match session_manager.list_background_tasks(&session_id).await {
+    let background_tasks = match session.background_tasks().list().await {
         Ok(tasks) => Some(tasks),
         Err(err) => {
             diagnostics.push(format!("background task snapshot failed: {err}"));
             None
         }
     };
-    let tui_session = crate::tui_extension_session::LegacyTuiExtensionSession {
-        plugin_host,
-        session_id: &session_id,
-        session_manager: Arc::clone(&session_manager),
-    };
     let effects = match ui_extensions
         .snapshot_all(TuiExtensionContext {
-            session: &tui_session,
+            actions: &session.plugin_actions(),
         })
         .await
     {

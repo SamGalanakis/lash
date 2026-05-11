@@ -12,12 +12,19 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
-use lash::{
-    ExecutionMode, ProviderHandle, ToolDefinition, ToolExecutionContext, ToolProvider, TurnInput,
+use lash_embed::{
+    LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
+    TurnBuilder, TurnEvent, TurnInput,
+    persistence::{
+        RuntimePersistence, SessionMeta, SessionStoreCreateRequest, SessionStoreFactory,
+    },
+    plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
+    prompt::PromptContribution,
+    provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
+    tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult},
+    tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
-use lash_embed::{EmbedPlugin, LashCore, LashSession, ModeId, ModePreset, TurnActivity, TurnEvent};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
-use lash_rlm_types::RlmTermination;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -147,24 +154,21 @@ struct StderrTraceSink {
     lock: Mutex<()>,
 }
 
-impl lash::TraceSink for StderrTraceSink {
-    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+impl TraceSink for StderrTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         let line = serde_json::to_string(record)?;
-        let _guard = self
-            .lock
-            .lock()
-            .map_err(|_| lash::TraceSinkError::LockPoisoned)?;
+        let _guard = self.lock.lock().map_err(|_| TraceSinkError::LockPoisoned)?;
         eprintln!("{line}");
         Ok(())
     }
 }
 
 struct FanoutTraceSink {
-    sinks: Vec<Arc<dyn lash::TraceSink>>,
+    sinks: Vec<Arc<dyn TraceSink>>,
 }
 
-impl lash::TraceSink for FanoutTraceSink {
-    fn append(&self, record: &lash::TraceRecord) -> Result<(), lash::TraceSinkError> {
+impl TraceSink for FanoutTraceSink {
+    fn append(&self, record: &TraceRecord) -> Result<(), TraceSinkError> {
         for sink in &self.sinks {
             sink.append(record)?;
         }
@@ -179,24 +183,24 @@ async fn main() -> anyhow_like::Result<()> {
     let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
     let model_variant =
         std::env::var("OPENROUTER_MODEL_VARIANT").unwrap_or_else(|_| "medium".to_string());
-    let addr: SocketAddr = std::env::var("OPENROUTER_CHAT_ADDR")
+    let addr: SocketAddr = std::env::var("AGENT_SERVICE_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()
-        .map_err(|err| format!("invalid OPENROUTER_CHAT_ADDR: {err}"))?;
-    let data_dir = std::env::var("OPENROUTER_CHAT_DATA_DIR")
+        .map_err(|err| format!("invalid AGENT_SERVICE_ADDR: {err}"))?;
+    let data_dir = std::env::var("AGENT_SERVICE_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".openrouter-chat-ui"));
+        .unwrap_or_else(|_| PathBuf::from(".agent-service"));
     std::fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
-    let trace_path = std::env::var("OPENROUTER_CHAT_TRACE")
+    let trace_path = std::env::var("AGENT_SERVICE_TRACE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("trace.jsonl"));
-    eprintln!("rlm-plugin-chat trace: {}", trace_path.display());
+    eprintln!("agent-service trace: {}", trace_path.display());
 
     let provider = ProviderHandle::new(
         OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
-            .with_options(lash::ProviderOptions {
-                thinking: lash::ProviderThinkingPolicy { expose: true },
-                ..lash::ProviderOptions::default()
+            .with_options(ProviderOptions {
+                thinking: ProviderThinkingPolicy { expose: true },
+                ..ProviderOptions::default()
             })
             .into_components(),
     );
@@ -212,10 +216,10 @@ async fn main() -> anyhow_like::Result<()> {
         .trace_sink(Some(Arc::new(FanoutTraceSink {
             sinks: vec![
                 Arc::new(StderrTraceSink::default()),
-                Arc::new(lash::JsonlTraceSink::new(trace_path)),
+                Arc::new(JsonlTraceSink::new(trace_path)),
             ],
         })))
-        .trace_level(lash::TraceLevel::Extended)
+        .trace_level(TraceLevel::Extended)
         .build()
         .map_err(|err| err.to_string())?;
 
@@ -239,7 +243,7 @@ async fn main() -> anyhow_like::Result<()> {
         )
         .with_state(state);
 
-    println!("rlm-plugin-chat listening on http://{addr}");
+    println!("agent-service listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| err.to_string())?;
@@ -324,33 +328,10 @@ async fn send_message(
         };
         let turn = session
             .turn(TurnInput::text(text))
-            .with_plugin_input::<DemoPlugin>(DemoTurnInput {
-                board: request.board,
-            })
-            .mode_turn_options(
-                lash::ModeTurnOptions::typed(
-                    ExecutionMode::new("rlm"),
-                    RlmTermination::SubmitRequired { schema: None },
-                )
-                .expect("RLM termination options serialize"),
-            )
-            .into_stream();
+            .with_board(request.board)
+            .require_submit();
         let turn = match turn {
-            Ok(mut stream) => {
-                while let Some(activity) = stream.next_activity().await {
-                    match activity {
-                        Ok(activity) => ui_events.handle(activity).await,
-                        Err(err) => {
-                            let _ = tx
-                                .send(StreamItem::Error {
-                                    message: err.to_string(),
-                                })
-                                .await;
-                        }
-                    }
-                }
-                stream.finish().await
-            }
+            Ok(turn) => turn.collect_with(&ui_events).await.map(|_| ()),
             Err(err) => Err(err),
         };
         match turn {
@@ -579,6 +560,13 @@ impl ChannelTurnEvents {
     }
 }
 
+#[async_trait]
+impl TurnActivitySink for ChannelTurnEvents {
+    async fn emit(&self, activity: TurnActivity) {
+        self.handle(activity).await;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DemoPlugin;
 
@@ -592,57 +580,64 @@ struct BoardState {
 }
 
 #[derive(Clone, Debug)]
-struct DemoTurnInput {
+struct DemoTurnContext {
     board: BoardState,
 }
 
-impl EmbedPlugin for DemoPlugin {
+trait BoardTurnExt {
+    fn with_board(self, board: BoardState) -> Self;
+}
+
+impl BoardTurnExt for TurnBuilder {
+    fn with_board(self, board: BoardState) -> Self {
+        self.with_plugin_context::<DemoPlugin>(DemoTurnContext { board })
+    }
+}
+
+impl PluginBinding for DemoPlugin {
     const ID: &'static str = "demo_tic_tac_toe";
     type SessionConfig = DemoPluginConfig;
-    type TurnInput = DemoTurnInput;
+    type TurnContext = DemoTurnContext;
 
-    fn factory(_config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
+    fn factory(_config: &Self::SessionConfig) -> Arc<dyn PluginFactory> {
         Arc::new(DemoPluginFactory)
     }
 
-    fn requires_turn_input(_config: &Self::SessionConfig) -> bool {
+    fn requires_turn_context(_config: &Self::SessionConfig) -> bool {
         true
     }
 }
 
 struct DemoPluginFactory;
 
-impl lash::PluginFactory for DemoPluginFactory {
+impl PluginFactory for DemoPluginFactory {
     fn id(&self) -> &'static str {
         DemoPlugin::ID
     }
 
-    fn build(
-        &self,
-        _ctx: &lash::PluginSessionContext,
-    ) -> Result<Arc<dyn lash::SessionPlugin>, lash::PluginError> {
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(DemoSessionPlugin))
     }
 }
 
 struct DemoSessionPlugin;
 
-impl lash::SessionPlugin for DemoSessionPlugin {
+impl SessionPlugin for DemoSessionPlugin {
     fn id(&self) -> &'static str {
         DemoPlugin::ID
     }
 
-    fn register(&self, reg: &mut lash::PluginRegistrar) -> Result<(), lash::PluginError> {
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
                 let Some(input) = ctx
                     .turn_context
-                    .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
+                    .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
                 else {
                     return Ok(Vec::new());
                 };
                 let context = board_prompt(&input.board);
-                Ok(vec![lash::PromptContribution::environment(
+                Ok(vec![PromptContribution::environment(
                     "Tic Tac Toe Board",
                     context,
                 )])
@@ -661,38 +656,29 @@ impl ToolProvider for DemoTools {
         vec![read_board_tool(), play_move_tool()]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> lash::ToolResult {
-        lash::ToolResult::err_fmt("demo tools require turn context")
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> lash::ToolResult {
-        let Some(input) = context
-            .turn_context
-            .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let Some(input) = call
+            .context
+            .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
         else {
-            return lash::ToolResult::err_fmt("missing board turn input");
+            return ToolResult::err_fmt("missing board turn context");
         };
 
-        match name {
-            "read_board" => lash::ToolResult::ok(board_snapshot(&input.board)),
+        match call.name {
+            "read_board" => ToolResult::ok(board_snapshot(&input.board)),
             "play_move" => {
-                let Some(cell) = args.get("cell").and_then(|value| value.as_u64()) else {
-                    return lash::ToolResult::err_fmt("missing integer cell");
+                let Some(cell) = call.args.get("cell").and_then(|value| value.as_u64()) else {
+                    return ToolResult::err_fmt("missing integer cell");
                 };
-                lash::ToolResult::ok(apply_agent_move(&input.board, cell as usize))
+                ToolResult::ok(apply_agent_move(&input.board, cell as usize))
             }
-            _ => lash::ToolResult::err_fmt(format!("unknown demo tool `{name}`")),
+            other => ToolResult::err_fmt(format!("unknown demo tool `{other}`")),
         }
     }
 }
 
 fn read_board_tool() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "read_board",
         "Read the app-owned Tic Tac Toe board. Returns the 0..8 index map, current marks by index, legal moves, winner, and whose turn it is.",
         json!({
@@ -705,7 +691,7 @@ fn read_board_tool() -> ToolDefinition {
 }
 
 fn play_move_tool() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "play_move",
         "Play one O move for the agent when it is O's turn. The move is a zero-based cell index: 0 top-left, 1 top-middle, 2 top-right, 3 middle-left, 4 center, 5 middle-right, 6 bottom-left, 7 bottom-middle, 8 bottom-right.",
         json!({
@@ -1257,15 +1243,15 @@ impl ChatStoreFactory {
     }
 }
 
-impl lash::SessionStoreFactory for ChatStoreFactory {
+impl SessionStoreFactory for ChatStoreFactory {
     fn create_store(
         &self,
-        request: &lash::SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn lash::RuntimePersistence>, String> {
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn RuntimePersistence>, String> {
         std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
         let path = self.sessions_dir.join(format!("{}.db", request.session_id));
         let store = Arc::new(lash_sqlite_store::Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(lash::SessionMeta {
+        store.save_session_meta(SessionMeta {
             session_id: request.session_id.clone(),
             session_name: request.session_id.clone(),
             created_at: now(),
@@ -1275,7 +1261,7 @@ impl lash::SessionStoreFactory for ChatStoreFactory {
                 .and_then(|path| path.to_str().map(str::to_string)),
             parent_session_id: request.parent_session_id.clone(),
         });
-        Ok(store as Arc<dyn lash::RuntimePersistence>)
+        Ok(store as Arc<dyn RuntimePersistence>)
     }
 }
 
@@ -1537,7 +1523,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       sendText(`I played X in the ${cellName(index)}.`);
     }
     function applyToolBoard(event) {
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       const board = raw?.board?.cells ? raw.board : raw;
       if (board?.cells) setBoard(board);
     }
@@ -1555,7 +1541,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return out;
     }
     function compactToolPayload(event) {
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       if (event.name === 'play_move') {
         return {
           args: cleanArgs(event.args),
@@ -1578,7 +1564,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       return { args: cleanArgs(event.args), result: raw };
     }
-    function renderTerminalOutput(value) {
+    function renderTerminalValue(value) {
       if (value === null || value === undefined) return '';
       if (typeof value === 'string') return value;
       return JSON.stringify(value, null, 2);
@@ -1656,7 +1642,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       el.querySelector('.badge').textContent = 'completed';
       el.querySelector('.tool-head span:last-child').textContent = `${event.success ? 'ok' : 'failed'} in ${event.duration_ms}ms`;
       const summary = el.querySelector('.tool-summary');
-      const raw = event?.result?.raw;
+      const raw = event?.result;
       if (event.name === 'play_move') {
         const terminal = terminalToolSummary(raw?.board);
         summary.textContent = raw?.accepted
@@ -1776,7 +1762,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
           if (item.type === 'event' && item.event.type === 'code_block_started') pendingCodeBlock = item.event;
           if (item.type === 'event' && item.event.type === 'code_block_completed') completeCodeBlock(item.event);
           if (item.type === 'event' && item.event.type === 'tool_call_completed') appendCompletedTool({ ...item.event, phase:'completed' });
-          if (item.type === 'event' && item.event.type === 'terminal_output') appendStreamText(renderTerminalOutput(item.event.value));
+          if (item.type === 'event' && item.event.type === 'submitted_value') appendStreamText(renderTerminalValue(item.event.value));
+          if (item.type === 'event' && item.event.type === 'tool_value') appendStreamText(renderTerminalValue(item.event.value));
           if (item.type === 'error') alert(item.message);
           messagesEl.scrollTop = messagesEl.scrollHeight;
         }

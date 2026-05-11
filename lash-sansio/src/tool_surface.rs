@@ -64,26 +64,26 @@ impl ToolSurface {
         self.callable_tools_iter().cloned().collect()
     }
 
-    pub fn documented_tools_iter(&self) -> impl Iterator<Item = &ToolDefinition> {
+    pub fn showcased_tools_iter(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.tools
             .iter()
-            .filter(|tool| tool.availability.is_documented())
+            .filter(|tool| tool.availability.is_showcased())
             .map(|tool| &tool.definition)
     }
 
-    pub fn documented_tools(&self) -> Vec<ToolDefinition> {
-        self.documented_tools_iter().cloned().collect()
+    pub fn showcased_tools(&self) -> Vec<ToolDefinition> {
+        self.showcased_tools_iter().cloned().collect()
     }
 
-    pub fn discoverable_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
+    pub fn searchable_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
         self.tools
             .iter()
-            .filter(|tool| tool.availability.is_discoverable())
+            .filter(|tool| tool.availability.is_searchable())
     }
 
     pub fn omitted_tools_iter(&self) -> impl Iterator<Item = &ToolSurfaceEntry> {
-        self.discoverable_tools_iter()
-            .filter(|tool| !tool.availability.is_documented())
+        self.searchable_tools_iter()
+            .filter(|tool| !tool.availability.is_showcased())
     }
 
     pub fn has_callable_tool(&self, tool_name: &str) -> bool {
@@ -114,7 +114,7 @@ impl ToolSurface {
     }
 
     pub fn prompt_tool_docs(&self) -> String {
-        let mut docs = ToolDefinition::format_tool_docs_iter(self.documented_tools_iter());
+        let mut docs = ToolDefinition::format_tool_docs_iter(self.showcased_tools_iter());
         for note in &self.tool_list_notes {
             let note = note.trim();
             if note.is_empty() {
@@ -184,7 +184,7 @@ mod tests {
     use crate::{ToolActivation, ToolAvailabilityConfig, ToolExecutionMode};
 
     fn tool(name: &str, availability: ToolAvailability) -> ToolDefinition {
-        let mut definition = ToolDefinition::new(
+        let mut definition = ToolDefinition::raw(
             name,
             format!("Tool {name}"),
             serde_json::json!({
@@ -201,20 +201,20 @@ mod tests {
     }
 
     #[test]
-    fn surface_splits_callable_and_documented_tools() {
+    fn surface_splits_callable_and_showcased_tools() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![
-                tool("search_tools", ToolAvailability::Documented),
-                tool("read_file", ToolAvailability::Documented),
+                tool("search_tools", ToolAvailability::Showcased),
+                tool("read_file", ToolAvailability::Showcased),
                 tool("grep", ToolAvailability::Callable),
-                tool("privileged_tool", ToolAvailability::Discoverable),
+                tool("privileged_tool", ToolAvailability::Searchable),
             ],
             mode: crate::ExecutionMode::new("test_mode"),
             contributions: Vec::new(),
         });
 
         assert_eq!(surface.callable_tools().len(), 3);
-        assert_eq!(surface.documented_tools().len(), 2);
+        assert_eq!(surface.showcased_tools().len(), 2);
         assert_eq!(surface.omitted_tool_count(), 2);
         assert!(!surface.prompt_tool_docs().contains("Catalogued tools"));
     }
@@ -222,12 +222,12 @@ mod tests {
     #[test]
     fn explicit_contributions_override_availability() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
-            tools: vec![tool("read_file", ToolAvailability::Documented)],
+            tools: vec![tool("read_file", ToolAvailability::Showcased)],
             mode: crate::ExecutionMode::new("test_mode"),
             contributions: vec![ToolSurfaceContribution {
                 overrides: vec![ToolSurfaceOverride {
                     tool_name: "read_file".to_string(),
-                    availability: Some(ToolAvailability::Hidden),
+                    availability: Some(ToolAvailability::Off),
                 }],
                 tool_list_notes: vec!["custom note".to_string()],
             }],
@@ -240,7 +240,7 @@ mod tests {
                 .find(|tool| tool.definition.name == "read_file")
                 .expect("read_file present")
                 .availability,
-            ToolAvailability::Hidden
+            ToolAvailability::Off
         );
         assert!(
             surface
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn prompt_gate_requires_matching_tool_availability() {
         let surface = build_tool_surface(ToolSurfaceBuildInput {
-            tools: vec![tool("search_tools", ToolAvailability::Documented)],
+            tools: vec![tool("search_tools", ToolAvailability::Showcased)],
             mode: crate::ExecutionMode::standard(),
             contributions: Vec::new(),
         });
@@ -261,8 +261,8 @@ mod tests {
         let kept = surface.filter_prompt_contributions(vec![
             PromptContribution::guidance("Plain", "always"),
             PromptContribution::guidance("Discovery", "discover")
-                .requires_tool("search_tools", ToolAvailability::Documented),
-            PromptContribution::guidance("Hidden", "hidden")
+                .requires_tool("search_tools", ToolAvailability::Showcased),
+            PromptContribution::guidance("Off", "off")
                 .requires_tool("load_tools", ToolAvailability::Callable),
         ]);
 

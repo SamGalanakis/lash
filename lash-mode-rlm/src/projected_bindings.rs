@@ -157,20 +157,20 @@ impl RlmTurnInputExt for TurnInput {
     ) -> Result<Self, ProjectedBindingError> {
         let bindings = if let Some(existing) = self
             .turn_context
-            .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+            .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
             .cloned()
         {
             existing.bindings.clone().merge(bindings)?
         } else {
             bindings
         };
-        self.turn_context.insert_plugin_input(
+        self.turn_context.insert_plugin_context(
             RLM_TURN_CONTEXT_PLUGIN_ID,
             RlmProjectionExtension::new(bindings),
         );
         self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
             self.turn_context
-                .plugin_input::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
                 .expect("RLM projection was just inserted")
                 .bindings
                 .clone(),

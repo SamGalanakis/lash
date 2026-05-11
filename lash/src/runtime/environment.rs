@@ -4,7 +4,7 @@
 //! startup and reuses across every `LashRuntime` instance it spawns.
 //! Fields are all `Arc`-wrapped or cheap-to-clone so building a runtime
 //! from an environment never rebuilds expensive state (plugin host,
-//! path resolver, prompt layer, …).
+//! prompt layer, …).
 //!
 //! Three embedder patterns this enables:
 //!
@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
 
-use super::host::{DefaultPathResolver, RuntimeCoreConfig, SessionTaskExecutor};
-use super::{PathResolver, SanitizerPolicy, TerminationPolicy};
+use super::TerminationPolicy;
+use super::host::{RuntimeCoreConfig, SessionTaskExecutor};
 
 /// Where session nodes live at runtime.
 ///
@@ -81,14 +81,11 @@ pub struct RuntimeEnvironment {
     // All fields below mirror `RuntimeCoreConfig` and carry the same
     // semantics. They live on `RuntimeEnvironment` directly so
     // embedders don't have to build a separate core config.
-    pub base_dir: PathBuf,
-    pub path_resolver: Arc<dyn PathResolver>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
-    pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
 }
 
@@ -99,14 +96,11 @@ impl Default for RuntimeEnvironment {
             residency: Residency::default(),
             session_task_executor: None,
             session_store_factory: None,
-            base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            path_resolver: Arc::new(DefaultPathResolver),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
-            sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
         }
     }
@@ -122,14 +116,11 @@ impl RuntimeEnvironment {
     /// paths during the migration to `from_environment`.
     pub fn to_runtime_core_config(&self) -> RuntimeCoreConfig {
         RuntimeCoreConfig {
-            base_dir: self.base_dir.clone(),
-            path_resolver: Arc::clone(&self.path_resolver),
             attachment_store: Arc::clone(&self.attachment_store),
             prompt: self.prompt.clone(),
             trace_sink: self.trace_sink.clone(),
             trace_level: self.trace_level,
             trace_context: self.trace_context.clone(),
-            sanitizer: self.sanitizer.clone(),
             termination: self.termination.clone(),
         }
     }
@@ -188,16 +179,6 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
-        self.env.base_dir = base_dir.into();
-        self
-    }
-
-    pub fn with_path_resolver(mut self, resolver: Arc<dyn PathResolver>) -> Self {
-        self.env.path_resolver = resolver;
-        self
-    }
-
     pub fn with_attachment_store(mut self, store: Arc<dyn crate::AttachmentStore>) -> Self {
         self.env.attachment_store = store;
         self
@@ -252,11 +233,6 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_sanitizer(mut self, sanitizer: SanitizerPolicy) -> Self {
-        self.env.sanitizer = sanitizer;
-        self
-    }
-
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.env.termination = termination;
         self
@@ -275,7 +251,6 @@ mod tests {
     fn env_default_matches_legacy_core_config() {
         let env = RuntimeEnvironment::default();
         let cfg = env.to_runtime_core_config();
-        // Cheap sanity: base dir comes through.
-        assert_eq!(cfg.base_dir, env.base_dir);
+        assert!(Arc::ptr_eq(&cfg.attachment_store, &env.attachment_store));
     }
 }

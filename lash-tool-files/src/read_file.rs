@@ -9,8 +9,8 @@ use lash::plugin::{
     SessionPlugin,
 };
 use lash::{
-    MessageRole, PluginMessage, ToolDefinition, ToolExecutionMode, ToolImage, ToolProvider,
-    ToolResult,
+    MessageRole, PluginMessage, ToolCall, ToolDefinition, ToolExecutionMode, ToolImage,
+    ToolProvider, ToolResult,
 };
 
 use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
@@ -105,7 +105,7 @@ const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
 impl ToolProvider for ReadFile {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "read_file",
                 "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
                 object_schema(
@@ -136,7 +136,8 @@ impl ToolProvider for ReadFile {
         ]
     }
 
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
         let path_str = match require_str(args, "path") {
             Ok(s) => s.to_string(),
             Err(e) => return e,
@@ -547,7 +548,6 @@ fn truncate_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash::ToolProvider;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -556,10 +556,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3").unwrap();
-        let tool = ReadFile;
-        let result = tool
-            .execute("read_file", &json!({"path": path.to_str().unwrap()}))
-            .await;
+        let result = lash::testing::run_tool(
+            &ReadFile,
+            "read_file",
+            &json!({"path": path.to_str().unwrap()}),
+        )
+        .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
         assert!(text.contains("1: line1"));
@@ -573,13 +575,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
-        let tool = ReadFile;
-        let result = tool
-            .execute(
-                "read_file",
-                &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ReadFile,
+            "read_file",
+            &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
+        )
+        .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
         assert!(text.contains("2: line2"));
@@ -599,13 +600,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(&path, content).unwrap();
-        let tool = ReadFile;
-        let result = tool
-            .execute(
-                "read_file",
-                &json!({"path": path.to_str().unwrap(), "limit": 200}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ReadFile,
+            "read_file",
+            &json!({"path": path.to_str().unwrap(), "limit": 200}),
+        )
+        .await;
         assert!(result.success);
         let text = result.result.as_str().unwrap();
         assert!(text.contains("output capped at 50 KB"));
@@ -614,13 +614,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent() {
-        let tool = ReadFile;
-        let result = tool
-            .execute(
-                "read_file",
-                &json!({"path": "/nonexistent/path/to/file.txt"}),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ReadFile,
+            "read_file",
+            &json!({"path": "/nonexistent/path/to/file.txt"}),
+        )
+        .await;
         assert!(!result.success);
     }
 

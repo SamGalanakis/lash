@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn validation_reports_missing_required_property_by_path() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "spotify",
             "",
             serde_json::json!({
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn validation_reports_numeric_limits_by_path() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "spotify",
             "",
             serde_json::json!({
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_unknown_property_when_additional_properties_is_omitted() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "mcp__appworld__venmo_show_transactions",
             "",
             serde_json::json!({
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn validation_allows_unknown_property_when_additional_properties_is_true() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "open",
             "",
             serde_json::json!({
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn validation_preserves_internal_session_id_argument() {
-        let tool = ToolDefinition::new(
+        let tool = ToolDefinition::raw(
             "lashlang_tool",
             "",
             serde_json::json!({

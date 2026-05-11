@@ -83,17 +83,17 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
             if tool.name == "load_tools" {
                 return Some(ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    availability: Some(ToolAvailability::Hidden),
+                    availability: Some(ToolAvailability::Off),
                 });
             }
             if tool.name == "search_tools" && !has_catalogued_tools {
                 return Some(ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
-                    availability: Some(ToolAvailability::Hidden),
+                    availability: Some(ToolAvailability::Off),
                 });
             }
             let availability = tool.effective_availability(&ctx.mode);
-            if availability == ToolAvailability::Discoverable {
+            if availability == ToolAvailability::Searchable {
                 Some(ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
                     availability: Some(ToolAvailability::Callable),
@@ -113,8 +113,8 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
 fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
     ctx.tools.iter().any(|tool| {
         !matches!(tool.name.as_str(), "search_tools" | "load_tools")
-            && tool.effective_availability(&ctx.mode).is_discoverable()
-            && !tool.effective_availability(&ctx.mode).is_documented()
+            && tool.effective_availability(&ctx.mode).is_searchable()
+            && !tool.effective_availability(&ctx.mode).is_showcased()
     })
 }
 
@@ -133,7 +133,7 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
             continue;
         }
         let availability = tool.effective_availability(&ctx.mode);
-        if !availability.is_discoverable() || availability.is_documented() {
+        if !availability.is_searchable() || availability.is_showcased() {
             continue;
         }
         omitted_tool_count += 1;
@@ -194,7 +194,7 @@ mod tests {
         ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
     use lash::{
-        AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolExecutionContext,
+        AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolCall,
         ToolSurfaceBuildInput, TurnInput, build_tool_surface,
     };
     use std::sync::Mutex;
@@ -212,21 +212,21 @@ mod tests {
             "output_schema": {},
             "examples": [],
             "aliases": [],
-            "availability": "discoverable",
+            "availability": "searchable",
             "callable": false,
-            "documented": false,
-            "discoverable": true,
+            "showcased": false,
+            "searchable": true,
             "activation": "loadable",
             "loadable": true,
             "activation_hint": "",
         })
     }
 
-    fn callable_undocumented_tool(name: &str) -> Value {
+    fn callable_unshowcased_tool(name: &str) -> Value {
         let mut tool = catalog_tool(name, "callable omitted tool");
         let obj = tool.as_object_mut().unwrap();
         obj.insert("callable".to_string(), json!(true));
-        obj.insert("documented".to_string(), json!(false));
+        obj.insert("showcased".to_string(), json!(false));
         obj.insert("loadable".to_string(), json!(false));
         tool
     }
@@ -1245,26 +1245,20 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = ToolExecutionContext {
-            session_id: "session".to_string(),
-            host,
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(host);
 
+        let args = json!({
+            "query": "cat",
+            "namespace": "filesystem",
+            "limit": 1,
+        });
         let result = provider
-            .execute_streaming_with_context(
-                "search_tools",
-                &json!({
-                    "query": "cat",
-                    "namespace": "filesystem",
-                    "limit": 1,
-                }),
-                &context,
-                None,
-            )
+            .execute(ToolCall {
+                name: "search_tools",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
 
         assert!(result.success, "{result:?}");
@@ -1326,22 +1320,16 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = ToolExecutionContext {
-            session_id: "session".to_string(),
-            host,
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(host);
 
+        let spawn_args = json!({ "query": "spawn_agent", "limit": 1 });
         let result = provider
-            .execute_streaming_with_context(
-                "search_tools",
-                &json!({ "query": "spawn_agent", "limit": 1 }),
-                &context,
-                None,
-            )
+            .execute(ToolCall {
+                name: "search_tools",
+                args: &spawn_args,
+                context: &context,
+                progress: None,
+            })
             .await;
         assert!(result.success, "{result:?}");
         let results = result.result.as_array().expect("spawn results");
@@ -1354,13 +1342,14 @@ mod tests {
         );
         assert!(results[0].get("returns").is_none());
 
+        let llm_args = json!({ "query": "llm_query", "limit": 1 });
         let result = provider
-            .execute_streaming_with_context(
-                "search_tools",
-                &json!({ "query": "llm_query", "limit": 1 }),
-                &context,
-                None,
-            )
+            .execute(ToolCall {
+                name: "search_tools",
+                args: &llm_args,
+                context: &context,
+                progress: None,
+            })
             .await;
         assert!(result.success, "{result:?}");
         let results = result.result.as_array().expect("llm results");
@@ -1469,25 +1458,20 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = ToolExecutionContext {
-            session_id: "session".to_string(),
-            host: host.clone(),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(host.clone());
 
+        let args = json!({
+            "query": "",
+            "exclude": ["read_file"],
+            "limit": 2,
+        });
         let result = provider
-            .execute_with_context(
-                "search_tools",
-                &json!({
-                    "query": "",
-                    "exclude": ["read_file"],
-                    "limit": 2,
-                }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "search_tools",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
 
         assert!(result.success, "{result:?}");
@@ -1521,32 +1505,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_tools_reports_callable_undocumented_as_already_callable() {
+    async fn load_tools_reports_callable_unshowcased_as_already_callable() {
         let host = Arc::new(FakeSessionManager {
             catalog: vec![
-                callable_undocumented_tool("mcp__appworld__spotify_search_songs"),
+                callable_unshowcased_tool("mcp__appworld__spotify_search_songs"),
                 catalog_tool("fetch_url", "Fetch a URL"),
             ],
             promoted: Mutex::default(),
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = ToolExecutionContext {
-            session_id: "session".to_string(),
-            host: host.clone(),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(host.clone());
+
+        let args = json!({
+            "names": ["mcp__appworld__spotify_search_songs", "fetch_url"]
+        });
         let result = provider
-            .execute_with_context(
-                "load_tools",
-                &json!({
-                    "names": ["mcp__appworld__spotify_search_songs", "fetch_url"]
-                }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "load_tools",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
         assert!(result.success, "{result:?}");
         assert_eq!(
@@ -1597,17 +1577,17 @@ mod tests {
     }
 
     #[test]
-    fn rlm_surface_hides_load_tools_and_promotes_discoverable_tools() {
+    fn rlm_surface_hides_load_tools_and_promotes_searchable_tools() {
         let tools = vec![
             search_tools_definition(),
             load_tools_definition(),
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "fetch_url",
                 "Fetch URL",
                 ToolDefinition::default_input_schema(),
                 serde_json::json!({ "type": "string" }),
             )
-            .with_availability(ToolAvailabilityConfig::same(ToolAvailability::Discoverable))
+            .with_availability(ToolAvailabilityConfig::same(ToolAvailability::Searchable))
             .with_activation(ToolActivation::Loadable)
             .with_execution_mode(ToolExecutionMode::Parallel),
         ];
@@ -1628,11 +1608,11 @@ mod tests {
 
         assert_eq!(
             surface.tool_availability("load_tools"),
-            Some(ToolAvailability::Hidden)
+            Some(ToolAvailability::Off)
         );
         assert_eq!(
             surface.tool_availability("search_tools"),
-            Some(ToolAvailability::Documented)
+            Some(ToolAvailability::Showcased)
         );
         assert_eq!(
             surface.tool_availability("fetch_url"),
@@ -1663,11 +1643,11 @@ mod tests {
 
         assert_eq!(
             surface.tool_availability("search_tools"),
-            Some(ToolAvailability::Hidden)
+            Some(ToolAvailability::Off)
         );
         assert_eq!(
             surface.tool_availability("load_tools"),
-            Some(ToolAvailability::Hidden)
+            Some(ToolAvailability::Off)
         );
         assert!(!surface.prompt_tool_docs().contains("search_tools"));
         assert_eq!(surface.omitted_tool_count(), 0);

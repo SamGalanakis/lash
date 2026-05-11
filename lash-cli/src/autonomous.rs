@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use lash::*;
-use lash_embed::LashSession;
+use lash::{SessionStateEnvelope, TurnOutcome};
+use lash_embed::{
+    LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput,
+    plugins::PluginSurfaceEvent,
+    usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
+};
 use tokio::sync::mpsc;
 
 use crate::SkillCatalog;
@@ -16,13 +20,13 @@ pub(crate) struct AutonomousPersistenceContext {
 }
 
 struct AutonomousChannelSink {
-    tx: mpsc::Sender<SessionEvent>,
+    tx: mpsc::Sender<TurnActivity>,
 }
 
 #[async_trait::async_trait]
-impl EventSink for AutonomousChannelSink {
-    async fn emit(&self, event: SessionEvent) {
-        let _ = self.tx.send(event).await;
+impl TurnActivitySink for AutonomousChannelSink {
+    async fn emit(&self, activity: TurnActivity) {
+        let _ = self.tx.send(activity).await;
     }
 }
 
@@ -43,24 +47,18 @@ impl AutonomousRenderer {
         }
     }
 
-    pub(crate) fn handle(&mut self, event: SessionEvent) -> Result<Option<String>, String> {
-        let handoff_session_id = match &event {
-            SessionEvent::TurnOutcome {
-                outcome: lash::TurnOutcome::Handoff { session_id },
-            } => Some(session_id.clone()),
-            _ => None,
-        };
-        match event {
-            SessionEvent::TextDelta { content } => {
-                if !content.is_empty() {
+    pub(crate) fn handle(&mut self, activity: TurnActivity) -> Result<(), String> {
+        match activity.event {
+            TurnEvent::AssistantProseDelta { text } => {
+                if !text.is_empty() {
                     self.streamed_text = true;
                     self.wrote_stdout = true;
-                    self.stdout_text.push_str(&content);
-                    print!("{content}");
+                    self.stdout_text.push_str(&text);
+                    print!("{text}");
                     let _ = io::stdout().flush();
                 }
             }
-            SessionEvent::ToolCall {
+            TurnEvent::ToolCallCompleted {
                 name,
                 success,
                 duration_ms,
@@ -73,39 +71,24 @@ impl AutonomousRenderer {
                     eprintln!("[tool] {name} · {status}");
                 }
             }
-            SessionEvent::Message { text, kind } => match kind.as_str() {
-                "tool_output" | "final" if !text.trim().is_empty() => {
-                    if kind == "final" {
-                        self.streamed_text = true;
-                        self.wrote_stdout = true;
-                        self.stdout_text.push_str(&text);
-                        print!("{text}");
-                        let _ = io::stdout().flush();
-                    } else {
-                        eprintln!("{text}");
-                    }
-                }
-                _ => {}
-            },
-            SessionEvent::LlmRequest { mode_iteration, .. } => {
+            TurnEvent::ModelRequestStarted { mode_iteration } => {
                 eprintln!("[thinking] step {}", mode_iteration + 1);
             }
-            SessionEvent::RetryStatus {
+            TurnEvent::RetryStatus {
                 wait_seconds,
                 attempt,
                 max_attempts,
                 reason,
-                ..
             } => {
                 eprintln!(
                     "[retry] in {}s · attempt {}/{} · {}",
                     wait_seconds, attempt, max_attempts, reason
                 );
             }
-            SessionEvent::Error { message, .. } => {
+            TurnEvent::Error { message } => {
                 eprintln!("error: {message}");
             }
-            SessionEvent::PluginEvent { plugin_id, event } => match event {
+            TurnEvent::PluginSurface { plugin_id, event } => match event {
                 PluginSurfaceEvent::PanelUpsert {
                     key,
                     title,
@@ -137,17 +120,18 @@ impl AutonomousRenderer {
             // Reasoning summaries are a TUI-only affordance; in
             // autonomous mode we deliberately discard them to keep stdout
             // aligned with the model's final answer.
-            SessionEvent::ReasoningDelta { .. } => {}
-            SessionEvent::Done
-            | SessionEvent::ToolCallStart { .. }
-            | SessionEvent::TokenUsage { .. }
-            | SessionEvent::ChildTokenUsage { .. }
-            | SessionEvent::InjectedTurnInputAccepted { .. }
-            | SessionEvent::InjectedMessagesCommitted { .. }
-            | SessionEvent::TurnOutcome { .. }
-            | SessionEvent::LlmResponse { .. } => {}
+            TurnEvent::ReasoningDelta { .. } => {}
+            TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::Usage { .. }
+            | TurnEvent::ChildUsage { .. }
+            | TurnEvent::QueuedInputAccepted { .. }
+            | TurnEvent::QueuedMessagesCommitted { .. }
+            | TurnEvent::CodeBlockStarted { .. }
+            | TurnEvent::CodeBlockCompleted { .. }
+            | TurnEvent::SubmittedValue { .. }
+            | TurnEvent::ToolValue { .. } => {}
         }
-        Ok(handoff_session_id)
+        Ok(())
     }
 
     pub(crate) fn rendered_plugin_output(&self) -> Option<String> {
@@ -213,7 +197,7 @@ async fn run_autonomous_turn(
     renderer: &mut AutonomousRenderer,
     stream_id: u64,
 ) -> anyhow::Result<AutonomousTurnOutcome> {
-    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<TurnActivity>(100);
     let sink = AutonomousChannelSink { tx: event_tx };
     let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
     #[cfg(unix)]
@@ -232,12 +216,9 @@ async fn run_autonomous_turn(
 
     let (done, cancel) = loop {
         tokio::select! {
-            Some(event) = event_rx.recv() => {
-                match renderer.handle(event) {
-                    Ok(Some(session_id)) => {
-                        handoff_session_id = Some(session_id);
-                    }
-                    Ok(None) => {}
+            Some(activity) = event_rx.recv() => {
+                match renderer.handle(activity) {
+                    Ok(()) => {}
                     Err(err) => {
                         eprintln!("error: {err}");
                         std::process::exit(2);
@@ -253,12 +234,12 @@ async fn run_autonomous_turn(
         }
     };
     let done = done.map_err(|err| anyhow::anyhow!("autonomous turn task channel failed: {err}"))?;
-    while let Ok(event) = event_rx.try_recv() {
-        match renderer.handle(event) {
-            Ok(Some(session_id)) => {
-                handoff_session_id = Some(session_id);
-            }
-            Ok(None) => {}
+    if let TurnOutcome::Handoff { session_id } = &done.result.outcome {
+        handoff_session_id = Some(session_id.clone());
+    }
+    while let Ok(activity) = event_rx.try_recv() {
+        match renderer.handle(activity) {
+            Ok(()) => {}
             Err(err) => {
                 eprintln!("error: {err}");
                 std::process::exit(2);
@@ -306,7 +287,7 @@ pub(crate) async fn run_autonomous(
     persistence: AutonomousPersistenceContext,
     rlm_projected_bindings: Option<lash_mode_rlm::RlmProjectedBindings>,
 ) -> anyhow::Result<()> {
-    let before_usage = session.usage_report().await;
+    let before_usage = session.usage_report();
     let prepared = PreparedTurn::prepare(prompt, Vec::new(), &skills);
     let mut turn_input = make_turn_input(&prepared);
     if let Some(bindings) = rlm_projected_bindings {
@@ -321,7 +302,7 @@ pub(crate) async fn run_autonomous(
         if let Some(session_id) = outcome.handoff_session_id {
             if !matches!(
                 &turn_done.result.outcome,
-                lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+                TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
             ) {
                 break (turn_done, outcome.cancel);
             }
@@ -334,7 +315,7 @@ pub(crate) async fn run_autonomous(
     if persistence.await_background_work {
         session.control().state().await_background_work().await?;
         let state = session.control().state().persist_current().await?;
-        done.result.state = lash::SessionStateEnvelope {
+        done.result.state = SessionStateEnvelope {
             session_id: state.session_id,
             policy: state.policy,
             session_graph: state.session_graph,
@@ -344,9 +325,9 @@ pub(crate) async fn run_autonomous(
             mode_turn_options: state.mode_turn_options,
         };
     }
-    let cumulative_usage = session.usage_report().await;
+    let cumulative_usage = session.usage_report();
     if let Some(path) = &persistence.turn_usage_json {
-        let (delta_entries, delta_error, delta_is_fallback) = match lash::diff_usage_reports(
+        let (delta_entries, delta_error, delta_is_fallback) = match diff_usage_reports(
             &before_usage,
             &cumulative_usage,
         ) {
@@ -356,23 +337,22 @@ pub(crate) async fn run_autonomous(
                     %err,
                     "failed to diff token ledger for autonomous turn; falling back to assembled turn usage"
                 );
-                let fallback = if done.result.token_usage.total() > 0
-                    || done.result.token_usage.cached_input_tokens > 0
-                {
-                    vec![lash::TokenLedgerEntry {
-                        source: "turn".to_string(),
-                        model: done.result.state.policy.model.clone(),
-                        usage: done.result.token_usage.clone(),
-                    }]
-                } else {
-                    Vec::new()
-                };
+                let fallback =
+                    if done.result.usage.total() > 0 || done.result.usage.cached_input_tokens > 0 {
+                        vec![TokenLedgerEntry {
+                            source: "turn".to_string(),
+                            model: done.result.state.policy.model.clone(),
+                            usage: done.result.usage.clone(),
+                        }]
+                    } else {
+                        Vec::new()
+                    };
                 (fallback, Some(err), true)
             }
         };
         let usage_artifact = serde_json::json!({
             "delta_entries": delta_entries,
-            "delta": lash::SessionUsageReport::from_entries(&delta_entries),
+            "delta": SessionUsageReport::from_entries(&delta_entries),
             "delta_error": delta_error,
             "delta_is_fallback": delta_is_fallback,
             "cumulative_rows": cumulative_usage.by_source_model,
@@ -382,7 +362,7 @@ pub(crate) async fn run_autonomous(
     }
 
     match &done.result.outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => {
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => {
             let turn = &done.result;
             if !turn.assistant_output.safe_text.is_empty() {
                 renderer.finish_output(&turn.assistant_output.safe_text);
@@ -408,7 +388,7 @@ pub(crate) async fn run_autonomous(
                 std::process::exit(1);
             }
         }
-        lash::TurnOutcome::Stopped(_) => {
+        TurnOutcome::Stopped(_) => {
             for issue in &done.result.errors {
                 eprintln!("error: {}", issue.message);
             }

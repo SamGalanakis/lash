@@ -292,6 +292,47 @@ pub fn mock_session_policy() -> SessionPolicy {
     }
 }
 
+/// A `ToolContext` backed by a default [`MockSessionManager`], suitable for
+/// unit-testing a `ToolProvider` in isolation. Use [`mock_tool_context_with_host`]
+/// when the tool under test interacts with host state and needs a configured
+/// `MockSessionManager` (or another `ToolHookHost` implementation).
+pub fn mock_tool_context() -> crate::ToolContext {
+    mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
+}
+
+/// Like [`mock_tool_context`], but lets the caller supply the host. Useful
+/// when a tool reads from the host (snapshots, tool state, lifecycle hooks)
+/// and the test wants to assert against captured interactions.
+pub fn mock_tool_context_with_host(
+    host: Arc<dyn crate::plugin::ToolHookHost>,
+) -> crate::ToolContext {
+    crate::tool_provider::ToolContext::__for_testing(
+        "test-session".to_string(),
+        host,
+        crate::TurnContext::new(),
+        None,
+    )
+}
+
+/// Convenience helper for the common tool-test shape: build a
+/// [`mock_tool_context`], wrap `name` + `args` in a `ToolCall`, and `await`
+/// the provider's `execute`. Use this for unit tests that don't need to
+/// inspect host interactions; call `mock_tool_context()` directly and
+/// construct `ToolCall` manually for more involved scenarios.
+pub async fn run_tool<P>(tool: &P, name: &str, args: &serde_json::Value) -> crate::ToolResult
+where
+    P: crate::ToolProvider + ?Sized,
+{
+    let context = mock_tool_context();
+    tool.execute(crate::ToolCall {
+        name,
+        args,
+        context: &context,
+        progress: None,
+    })
+    .await
+}
+
 /// Build an empty `AssembledTurn` whose assistant text is `summary`.
 pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
     AssembledTurn {
@@ -317,6 +358,7 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
             had_code_execution: false,
         },
         token_usage: TokenUsage::default(),
+        children_usage: Vec::new(),
         tool_calls: Vec::new(),
         errors: Vec::new(),
     }
@@ -691,7 +733,7 @@ mod test_mode_fakes {
     /// but lives here so lash's tests don't need a dev-dep on
     /// `lash-mode-standard`.
     fn test_batch_tool_definition() -> crate::ToolDefinition {
-        crate::ToolDefinition::new(
+        crate::ToolDefinition::raw(
             "batch",
             "Execute up to 25 independent tool calls concurrently.",
             serde_json::json!({
@@ -1036,8 +1078,8 @@ mod test_mode_fakes {
             let mut result_parts = Vec::new();
             let mut terminal_outcome = None;
             for outcome in completed {
-                if terminal_outcome.is_none() && outcome.raw_result.success {
-                    terminal_outcome = match outcome.raw_result.control.as_ref() {
+                if terminal_outcome.is_none() && outcome.result.success {
+                    terminal_outcome = match outcome.result.control.as_ref() {
                         Some(crate::ToolControl::Handoff { session_id })
                             if !session_id.trim().is_empty() =>
                         {

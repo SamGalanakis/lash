@@ -8,15 +8,16 @@ license.workspace = true
 lash = { path = "../lash" }
 lashlang = { path = "../lashlang" }
 lash-rlm-types = { path = "../lash-rlm-types" }
-async-trait = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-jsonschema = "0.18"
-tokio = { version = "1", features = ["rt", "sync"] }
-tempfile = "3"
-tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+jsonschema = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+lash = { path = "../lash", features = ["testing"] }
 lash-sansio = { path = "../lash-sansio" }
 lash-mode-standard = { path = "../lash-mode-standard" }

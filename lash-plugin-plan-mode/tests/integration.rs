@@ -169,7 +169,7 @@ fn test_tool(
     availability: lash::ToolAvailabilityConfig,
     execution_mode: lash::ToolExecutionMode,
 ) -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         name,
         description,
         ToolDefinition::default_input_schema(),
@@ -188,15 +188,15 @@ impl ToolProvider for PlanModeTestTools {
             test_tool(
                 "plan_exit",
                 "Ask whether to exit plan mode.",
-                lash::ToolAvailabilityConfig::hidden(),
+                lash::ToolAvailabilityConfig::off(),
                 lash::ToolExecutionMode::Parallel,
             )
             .with_examples(vec!["plan_exit()".to_string()]),
         ]
     }
 
-    async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
+    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+        ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
     }
 }
 
@@ -283,7 +283,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let enabled = session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
     assert!(enabled.success);
@@ -305,7 +305,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .build_standard_session("restored", Some(&snapshot))
         .expect("restored");
     let restored_toggle = restored
-        .invoke_external("plan_mode.toggle", json!({}), None, true, manager)
+        .invoke_plugin_action("plan_mode.toggle", json!({}), None, true, manager)
         .await
         .expect("toggle restored");
     assert_eq!(
@@ -320,7 +320,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .restore(&lash::PluginSessionSnapshot::default())
         .expect("reset restore");
     let reset_toggle = restored
-        .invoke_external(
+        .invoke_plugin_action(
             "plan_mode.toggle",
             json!({}),
             None,
@@ -352,11 +352,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     assert!(initial.get("plan_exit").is_some_and(|tool| {
         tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Hidden
+            == lash::ToolAvailability::Off
     }));
 
     session
-        .invoke_external(
+        .invoke_plugin_action(
             "plan_mode.enable",
             json!({}),
             None,
@@ -373,11 +373,11 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     assert!(enabled.get("plan_exit").is_some_and(|tool| {
         tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Documented
+            == lash::ToolAvailability::Showcased
     }));
 
     session
-        .invoke_external("plan_mode.disable", json!({}), None, true, manager_host)
+        .invoke_plugin_action("plan_mode.disable", json!({}), None, true, manager_host)
         .await
         .expect("disable");
 
@@ -388,7 +388,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     assert!(disabled.get("plan_exit").is_some_and(|tool| {
         tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Hidden
+            == lash::ToolAvailability::Off
     }));
 }
 
@@ -402,7 +402,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -491,25 +491,25 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 test_tool(
                     "read_file",
                     "Read files",
-                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolAvailabilityConfig::showcased(),
                     lash::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
                     "search_web",
                     "Search the web",
-                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolAvailabilityConfig::showcased(),
                     lash::ToolExecutionMode::Parallel,
                 ),
                 test_tool(
                     "apply_patch",
                     "Apply patches",
-                    lash::ToolAvailabilityConfig::documented(),
+                    lash::ToolAvailabilityConfig::showcased(),
                     lash::ToolExecutionMode::Serial,
                 ),
                 test_tool(
                     "plan_exit",
                     "Exit plan mode",
-                    lash::ToolAvailabilityConfig::hidden(),
+                    lash::ToolAvailabilityConfig::off(),
                     lash::ToolExecutionMode::Parallel,
                 ),
             ],
@@ -522,14 +522,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             .tools
             .iter()
             .find(|tool| tool.definition.name == "search_web")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
+            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Showcased)
     );
     assert!(
         surface
             .tools
             .iter()
             .find(|tool| tool.definition.name == "plan_exit")
-            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Documented)
+            .is_some_and(|tool| tool.availability == lash::ToolAvailability::Showcased)
     );
     assert!(
         surface
@@ -600,11 +600,11 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     )));
 
     session
-        .invoke_external("plan_mode.disable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.disable", json!({}), None, true, manager.clone())
         .await
         .expect("disable");
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -647,7 +647,7 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -699,7 +699,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -834,7 +834,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     let session = host.build_standard_session("root", None).expect("session");
 
     session
-        .invoke_external(
+        .invoke_plugin_action(
             "plan_mode.enable",
             json!({}),
             None,
@@ -853,20 +853,16 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
         .await
         .expect("before_turn");
 
+    let plan_exit_args = json!({});
+    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager_host.clone());
     let result = session
         .tools()
-        .execute_with_context(
-            "plan_exit",
-            &json!({}),
-            &lash::ToolExecutionContext {
-                session_id: "root".to_string(),
-                host: manager_host.clone(),
-                cancellation_token: None,
-                async_task_id: None,
-                turn_context: lash::TurnContext::default(),
-                tool_call_id: None,
-            },
-        )
+        .execute(lash::ToolCall {
+            name: "plan_exit",
+            args: &plan_exit_args,
+            context: &plan_exit_ctx,
+            progress: None,
+        })
         .await;
     assert!(result.success);
     assert_eq!(
@@ -895,7 +891,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
         tool.definition()
             .effective_availability(&lash::ExecutionMode::standard())
-            == lash::ToolAvailability::Hidden
+            == lash::ToolAvailability::Off
     }));
 }
 
@@ -983,7 +979,7 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -997,20 +993,16 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
         .await
         .expect("before_turn");
 
+    let plan_exit_args = json!({});
+    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager.clone());
     let result = session
         .tools()
-        .execute_with_context(
-            "plan_exit",
-            &json!({}),
-            &lash::ToolExecutionContext {
-                session_id: "root".to_string(),
-                host: manager.clone(),
-                turn_context: lash::TurnContext::default(),
-                cancellation_token: None,
-                async_task_id: None,
-                tool_call_id: None,
-            },
-        )
+        .execute(lash::ToolCall {
+            name: "plan_exit",
+            args: &plan_exit_args,
+            context: &plan_exit_ctx,
+            progress: None,
+        })
         .await;
     assert!(result.success);
     assert!(
@@ -1106,7 +1098,7 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -1120,20 +1112,16 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
         .await
         .expect("before_turn");
 
+    let plan_exit_args = json!({});
+    let plan_exit_ctx = lash::testing::mock_tool_context_with_host(manager.clone());
     let result = session
         .tools()
-        .execute_with_context(
-            "plan_exit",
-            &json!({}),
-            &lash::ToolExecutionContext {
-                session_id: "root".to_string(),
-                host: manager.clone(),
-                turn_context: lash::TurnContext::default(),
-                cancellation_token: None,
-                async_task_id: None,
-                tool_call_id: None,
-            },
-        )
+        .execute(lash::ToolCall {
+            name: "plan_exit",
+            args: &plan_exit_args,
+            context: &plan_exit_ctx,
+            progress: None,
+        })
         .await;
     assert!(result.success);
     assert_eq!(
@@ -1221,7 +1209,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     let manager = Arc::new(CapturingSessionManager::default());
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 
@@ -1287,7 +1275,7 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_external("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
 

@@ -7,6 +7,7 @@ mod chrome_ui;
 mod cli_support;
 mod clipboard;
 mod command;
+mod config;
 mod diff;
 mod editor;
 mod event;
@@ -24,6 +25,7 @@ mod provider_metadata;
 mod render;
 mod repo_status;
 mod resume;
+#[cfg(feature = "runtime-perf")]
 mod runtime_perf;
 mod scratch_tui;
 mod session_bootstrap;
@@ -33,12 +35,12 @@ mod skill_catalog;
 mod skill_prompt;
 mod stream_markdown;
 #[cfg(test)]
+#[cfg(test)]
 mod test_support;
 mod text_display;
 mod text_layout;
 mod theme;
 mod tree;
-mod tui_extension_session;
 mod turn_runner;
 mod ui_action;
 mod ui_perf;
@@ -49,7 +51,13 @@ mod util;
 use clap::{Parser, ValueEnum};
 #[cfg(feature = "dhat-heap")]
 use dhat::Alloc as DhatAlloc;
-use lash::*;
+#[cfg(test)]
+use lash::InputItem;
+#[cfg(test)]
+use lash_embed::plugins::PluginSurfaceEvent;
+use lash_embed::tracing::TraceLevel;
+#[cfg(test)]
+use lash_embed::{TurnActivity, TurnEvent};
 #[cfg(not(feature = "dhat-heap"))]
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 #[cfg(not(feature = "dhat-heap"))]
@@ -102,7 +110,7 @@ static GLOBAL_ALLOCATOR: DhatAlloc = DhatAlloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-fn turn_has_visible_output(turn: &AssembledTurn) -> bool {
+fn turn_has_visible_output(turn: &lash_embed::TurnResult) -> bool {
     !turn.assistant_output.safe_text.trim().is_empty() || !turn.errors.is_empty()
 }
 
@@ -311,38 +319,47 @@ struct Args {
     ui_perf_enforce_budgets: bool,
 
     /// Run the synthetic non-inference runtime performance benchmark and exit
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true)]
     runtime_perf_benchmark: bool,
 
     /// Write the runtime benchmark JSON report to this file
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     runtime_perf_out: Option<std::path::PathBuf>,
 
     /// Write a dhat heap profile for the measured runtime benchmark window
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true)]
     runtime_perf_dhat: bool,
 
     /// Write a dhat heap profile for the measured runtime benchmark window
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, value_name = "OUT.json")]
     runtime_perf_dhat_out: Option<std::path::PathBuf>,
 
     /// Trim dhat backtraces to this many frames
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, value_name = "FRAMES")]
     runtime_perf_dhat_frames: Option<usize>,
 
     /// Number of measured runs for the runtime benchmark
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, default_value_t = 5)]
     runtime_perf_runs: usize,
 
     /// Number of warmup runs for the runtime benchmark
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, default_value_t = 1)]
     runtime_perf_warmups: usize,
 
     /// Limit the runtime benchmark to one or more named scenarios
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, value_name = "SCENARIO")]
     runtime_perf_scenario: Vec<String>,
 
     /// Number of committed turns to run inside each measured runtime session
+    #[cfg(feature = "runtime-perf")]
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
 
@@ -413,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
             BUILD_GIT_HEAD,
         );
     }
+    #[cfg(feature = "runtime-perf")]
     if args.runtime_perf_benchmark {
         return runtime_perf::run_cli(
             args.runtime_perf_out,
@@ -553,11 +571,15 @@ mod tests {
             .map(|item| match item {
                 InputItem::Text { .. } => "text",
                 InputItem::ImageRef { .. } => "image",
-                InputItem::FileRef { .. } => "file",
-                InputItem::DirRef { .. } => "dir",
             })
             .collect();
-        assert_eq!(kinds, vec!["text", "image", "text", "file", "text"]);
+        assert_eq!(kinds, vec!["text", "image", "text"]);
+        let tail_text = match items.last().expect("tail item") {
+            InputItem::Text { text } => text,
+            _ => panic!("expected text tail"),
+        };
+        assert!(tail_text.contains("[file:"));
+        assert!(tail_text.ends_with(" after"));
         assert_eq!(image_blobs.len(), 1);
     }
 
@@ -591,9 +613,9 @@ mod tests {
     #[test]
     fn autonomous_renderer_prints_missing_final_tail_after_streamed_prefix() {
         let mut renderer = AutonomousRenderer::new();
-        let _ = renderer.handle(SessionEvent::TextDelta {
-            content: "Inspected files.\n".to_string(),
-        });
+        let _ = renderer.handle(TurnActivity::independent(TurnEvent::AssistantProseDelta {
+            text: "Inspected files.\n".to_string(),
+        }));
 
         renderer.finish_output("Inspected files.\nCompleted successfully.");
 
@@ -606,33 +628,19 @@ mod tests {
     #[test]
     fn autonomous_renderer_collects_plugin_panel_output() {
         let mut renderer = AutonomousRenderer::new();
-        let _ = renderer.handle(SessionEvent::PluginEvent {
+        let _ = renderer.handle(TurnActivity::independent(TurnEvent::PluginSurface {
             plugin_id: "demo".to_string(),
             event: PluginSurfaceEvent::PanelUpsert {
                 key: "panel:1".to_string(),
                 title: "TASK BOARD".to_string(),
                 content: "1. Inspect\n2. Patch".to_string(),
             },
-        });
+        }));
 
         assert_eq!(
             renderer.rendered_plugin_output().as_deref(),
             Some("TASK BOARD\n1. Inspect\n2. Patch")
         );
-    }
-
-    #[test]
-    fn autonomous_renderer_reports_session_handoff() {
-        let mut renderer = AutonomousRenderer::new();
-        let handoff = renderer
-            .handle(SessionEvent::TurnOutcome {
-                outcome: lash::TurnOutcome::Handoff {
-                    session_id: "next".to_string(),
-                },
-            })
-            .expect("handle handoff");
-
-        assert_eq!(handoff.as_deref(), Some("next"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod environment;
 mod host;
 mod io;
 mod lifecycle;
+mod observation;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -21,7 +22,6 @@ mod usage;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,7 +42,7 @@ use crate::session_model::{
     fresh_message_id, make_error_event, reassign_part_ids, shared_parts, transport_stream_events,
 };
 use crate::{
-    CheckpointKind, ExecutionMode, ExternalInvokeError, PersistentRuntimeServices,
+    CheckpointKind, ExecutionMode, PersistentRuntimeServices, PluginActionInvokeError,
     PromptHookContext, RuntimeServices, RuntimeSessionHost, SandboxMessage, Session,
     SessionCreateRequest, SessionError, SessionHandle, SessionSnapshot, SessionStartPoint,
     ToolCallRecord, TurnFinish, TurnOutcome, TurnStop,
@@ -68,11 +68,12 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
-    BackgroundRuntimeHost, DefaultPathResolver, EmbeddedRuntimeHost, ManagedRunState,
-    ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig,
-    SessionTaskExecutor, TokioSessionTaskExecutor,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, ManagedRunState, ManagedTaskCancel,
+    ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig, SessionTaskExecutor,
+    TokioSessionTaskExecutor,
 };
 use io::normalize_input_items;
+pub use observation::{RuntimeHandle, RuntimeObservation};
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
@@ -112,8 +113,6 @@ pub enum RunMode {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text { text: String },
-    FileRef { path: String },
-    DirRef { path: String },
     ImageRef { id: String },
 }
 
@@ -163,7 +162,7 @@ impl TurnInput {
 
 #[derive(Clone, Default)]
 pub struct TurnContext {
-    plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    plugin_contexts: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
     provider: Option<crate::ProviderHandle>,
     model: Option<String>,
     model_variant: Option<Option<String>>,
@@ -175,11 +174,11 @@ impl TurnContext {
         Self::default()
     }
 
-    pub fn insert_plugin_input<T>(&mut self, plugin_id: &'static str, input: T)
+    pub fn insert_plugin_context<T>(&mut self, plugin_id: &'static str, input: T)
     where
         T: Send + Sync + 'static,
     {
-        self.plugin_inputs.insert(plugin_id, Arc::new(input));
+        self.plugin_contexts.insert(plugin_id, Arc::new(input));
     }
 
     pub fn set_provider(&mut self, provider: crate::ProviderHandle) {
@@ -206,17 +205,17 @@ impl TurnContext {
         })
     }
 
-    pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
+    pub fn plugin_context<T>(&self, plugin_id: &'static str) -> Option<&T>
     where
         T: 'static,
     {
-        self.plugin_inputs
+        self.plugin_contexts
             .get(plugin_id)
             .and_then(|input| input.downcast_ref::<T>())
     }
 
-    pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
-        self.plugin_inputs.contains_key(plugin_id)
+    pub fn has_plugin_context(&self, plugin_id: &'static str) -> bool {
+        self.plugin_contexts.contains_key(plugin_id)
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
@@ -252,8 +251,8 @@ impl fmt::Debug for TurnContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TurnContext")
             .field(
-                "plugin_inputs",
-                &self.plugin_inputs.keys().collect::<Vec<_>>(),
+                "plugin_contexts",
+                &self.plugin_contexts.keys().collect::<Vec<_>>(),
             )
             .field("has_provider", &self.provider.is_some())
             .field("has_model", &self.model.is_some())
@@ -378,6 +377,12 @@ pub struct AssembledTurn {
     pub execution: ExecutionSummary,
     #[serde(default)]
     pub token_usage: TokenUsage,
+    /// Per-(session, source, model) ledger entries for child sessions whose
+    /// LLM calls completed during this turn. `token_usage` above is the
+    /// parent's own LLM tokens; `total_usage` (on the embed-facing
+    /// `TurnResult`) sums both.
+    #[serde(default)]
+    pub children_usage: Vec<TokenLedgerEntry>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,
     #[serde(default)]
@@ -426,15 +431,6 @@ impl std::fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
-/// Pluggable path resolver for file and directory references.
-pub trait PathResolver: Send + Sync {
-    fn resolve(&self, path: &str, expect_file: bool, base_dir: &Path) -> Result<PathBuf, String>;
-}
-
-/// Sanitization policy knobs.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct SanitizerPolicy {}
-
 /// Termination policy knobs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TerminationPolicy {
@@ -471,14 +467,6 @@ impl EventSink for NoopEventSink {
     }
 
     async fn emit(&self, _event: SessionEvent) {}
-}
-
-/// Canonical semantic view of a completed tool result.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ToolResultView {
-    pub raw: serde_json::Value,
-    pub for_model: serde_json::Value,
-    pub for_state: serde_json::Value,
 }
 
 /// Stable identifier for a semantic turn activity.
@@ -561,7 +549,7 @@ pub enum TurnEvent {
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
-        result: ToolResultView,
+        result: serde_json::Value,
         success: bool,
         duration_ms: u64,
     },
@@ -573,6 +561,14 @@ pub enum TurnEvent {
         value: serde_json::Value,
     },
     Usage {
+        mode_iteration: usize,
+        usage: TokenUsage,
+        cumulative: TokenUsage,
+    },
+    ChildUsage {
+        session_id: String,
+        source: String,
+        model: String,
         mode_iteration: usize,
         usage: TokenUsage,
         cumulative: TokenUsage,
@@ -656,7 +652,7 @@ pub struct LashRuntime {
     pub(in crate::runtime) services: RuntimeServices,
     pub(in crate::runtime) state: PersistedSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
-    pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, Arc<Mutex<LashRuntime>>>>>,
+    pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
     pub(in crate::runtime) overflow_recovery_attempted: bool,

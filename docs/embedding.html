@@ -65,20 +65,20 @@ println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared configuration: provider, model, installed modes, tool providers, plugin factories, store factory, attachment store, tracing, residency, sanitizer, and termination policy.</dd>
+            <dd>Cloneable shared configuration: provider, model, installed modes, tool providers, plugin factories, store factory, attachment store, and tracing. Runtime internals such as residency and termination policy live behind <code>.advanced()</code>.</dd>
             <dt><code>ModePreset</code></dt>
             <dd>Installs execution modes. Use <code>ModePreset::standard()</code> for native provider tool calls, <code>ModePreset::rlm()</code> for Lashlang-driven RLM turns, or install both and choose the default with <code>default_mode</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and <code>rlm_project(...)</code>.</dd>
+            <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
+            <dd>Per-turn configuration: cancellation, mode options, typed plugin context, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
           </dl>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Run A Turn</h2>
-            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>CollectedTurnOutput</code> with the terminal <code>TurnResult</code> and the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
+            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>TurnOutput</code> with the terminal <code>TurnResult</code> and the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
           </div>
           <div class="two-col">
             <article class="panel">
@@ -92,7 +92,9 @@ let visible_answer: String = collected.activities.iter().filter_map(|activity| m
     TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
     _ =&gt; None,
 }).collect();
-let usage = collected.result.usage;
+let parent_usage = collected.result.usage;          // parent's own LLM tokens
+let children = &amp;collected.result.children_usage;    // per-(source, model) child entries
+let total = collected.result.total_usage();         // parent + children
 let outcome = collected.result.outcome;</code></pre>
             </article>
             <article class="panel">
@@ -104,7 +106,7 @@ let turn = session
     .stream(ui_sink.as_ref())
     .await?;
 
-persist(app_turn_state.assistant_text(), turn.usage)?;</code></pre>
+persist(app_turn_state.assistant_text(), turn.total_usage())?;</code></pre>
             </article>
           </div>
           <p>Apps own their projection policy. Fold <code>TurnActivity</code> directly when persisting assistant prose, terminal values, tool summaries, or timelines.</p>
@@ -112,8 +114,19 @@ persist(app_turn_state.assistant_text(), turn.usage)?;</code></pre>
 
         <div class="section">
           <div class="section-header">
+            <h2>Input Boundary</h2>
+            <p><code>TurnInput</code> is semantic core input: text plus image references backed by the attachment store. Filesystem syntax is a host concern.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>Text</h3><p>Pass ordinary user text with <code>TurnInput::text(...)</code> or explicit <code>InputItem::Text</code> values. If your host supports <code>@path</code>, resolve and validate it in the host, then include whatever marker text you want the model to see.</p></article>
+            <article class="panel"><h3>Images</h3><p>Use <code>InputItem::ImageRef</code> with a matching entry in <code>TurnInput::image_blobs</code>. Lash stores the bytes as typed attachments and resolves them when building provider requests.</p></article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
             <h2>Semantic Events</h2>
-            <p>The app stream is additive. Assistant prose arrives as deltas, tool and code activity arrive as structured events, and terminal values authored by <code>submit</code> or tool controls arrive as <code>TerminalOutput</code>.</p>
+            <p>The app stream is additive. Assistant prose arrives as deltas, tool and code activity arrive as structured events, and terminal values authored by <code>submit</code> or tool controls arrive as <code>SubmittedValue</code> or <code>ToolValue</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">TurnActivity sink</div>
@@ -138,12 +151,18 @@ impl TurnActivitySink for AppEvents {
             TurnEvent::CodeBlockStarted { language, code } =&gt; {
                 show_code_block(language, code).await;
             }
-            TurnEvent::TerminalOutput { source, value } =&gt; {
+            TurnEvent::SubmittedValue { value } =&gt; {
                 append_live_text(render_terminal_value(&amp;value)).await;
-                record_terminal_source(source).await;
+            }
+            TurnEvent::ToolValue { tool_name, value } =&gt; {
+                append_live_text(render_terminal_value(&amp;value)).await;
+                record_terminal_tool(tool_name).await;
             }
             TurnEvent::Usage { usage, cumulative, .. } =&gt; {
                 update_usage(usage, cumulative).await;
+            }
+            TurnEvent::ChildUsage { source, usage, cumulative, .. } =&gt; {
+                update_child_usage(source, usage, cumulative).await;
             }
             TurnEvent::ReasoningDelta { .. }
             | TurnEvent::CodeBlockCompleted { .. }
@@ -163,49 +182,55 @@ fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
           </div>
           <div class="callout">
             <strong>Do not synthesize a second final answer.</strong>
-            <p><code>TurnEvent::TerminalOutput</code> means “a new terminal value was authored by a control path.” It is not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code>.</p>
+            <p><code>TurnEvent::SubmittedValue</code> and <code>TurnEvent::ToolValue</code> mean “a new terminal value was authored by a control path.” They are not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code>.</p>
           </div>
         </div>
 
         <div class="section">
           <div class="section-header">
+            <h2>Token Usage</h2>
+            <p>Four channels surface token usage, finest granularity to coarsest. Pick the one that matches what you want to display or persist.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>TraceSink</code></dt>
+            <dd>Every provider call across every session in the runtime. Right for billing, audit, off-line analysis. Heavier than necessary for plain totals.</dd>
+            <dt><code>TurnEvent::Usage</code> / <code>TurnEvent::ChildUsage</code></dt>
+            <dd>Live during a turn, one event per LLM iteration. <code>Usage</code> is the parent's own model call; <code>ChildUsage</code> carries <code>session_id</code> and <code>source</code> so a UI can group child traffic (subagent, compaction, observer). Right for live counters.</dd>
+            <dt><code>TurnResult.usage</code> / <code>TurnResult.children_usage</code></dt>
+            <dd>Per-turn snapshot at completion. <code>usage</code> is parent-only; <code>children_usage</code> is a per-<code>(source, model)</code> breakdown for any child sessions that ran during the turn. <code>TurnResult::total_usage()</code> sums both.</dd>
+            <dt><code>session.usage_report()</code> → <code>SessionUsageReport</code></dt>
+            <dd>Aggregate across the whole session, broken down by <code>source × model</code>. Right for dashboards and "session so far."</dd>
+          </dl>
+          <p>The full re-export and well-known <code>source</code> label constants live in <code>lash_embed::usage</code>.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
             <h2>RLM And Submit</h2>
-            <p>RLM turns can require <code>submit</code> or allow direct prose. With <code>SubmitRequired</code>, a <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::Value</code>, and emits a <code>TerminalOutput</code> semantic event. With <code>ProseOrSubmit</code>, a no-code prose answer finishes as <code>TurnFinish::AssistantMessage</code> and emits no <code>TerminalOutput</code>.</p>
+            <p>RLM turns can require <code>submit</code> or allow direct prose. With <code>SubmitRequired</code>, a <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::SubmittedValue</code>, and emits a <code>SubmittedValue</code> semantic event. With <code>ProseOrSubmit</code>, a no-code prose answer finishes as <code>TurnFinish::AssistantMessage</code> and emits no terminal-value event.</p>
           </div>
           <div class="two-col">
             <article class="panel">
               <h3>Per-turn RLM options</h3>
-              <pre><code>use lash::{ExecutionMode, ModeTurnOptions};
-use lash_rlm_types::RlmTermination;
-
-let options = ModeTurnOptions::typed(
-    ExecutionMode::new("rlm"),
-    RlmTermination::SubmitRequired {
-        schema: None,
-    },
-)?;
-
-let prose_options = ModeTurnOptions::typed(
-    ExecutionMode::new("rlm"),
-    RlmTermination::ProseOrSubmit,
-)?;
-
-let result = session
+              <pre><code>let submitted = session
     .turn(TurnInput::text("Move on the board."))
-    .mode_turn_options(options)
+    .require_submit()?
     .stream(&amp;sink)
+    .await?;
+
+let prose_or_submit = session
+    .turn(TurnInput::text("Answer directly if no code is needed."))
+    .allow_prose_or_submit()?
+    .run()
     .await?;</code></pre>
             </article>
             <article class="panel">
               <h3>Outcome shape</h3>
               <pre><code>match result.outcome {
     lash::TurnOutcome::Finished(
-        lash::TurnFinish::Value {
-            source: lash::TerminalOutputSource::RlmSubmit,
-            value,
-        }
+        lash::TurnFinish::SubmittedValue { value }
     ) =&gt; {
-        // Same value already arrived as TurnEvent::TerminalOutput.
+        // Same value already arrived as TurnEvent::SubmittedValue.
         persist_typed_value(value)?;
     }
     lash::TurnOutcome::Finished(
@@ -276,8 +301,8 @@ let result = session
 
         <div class="section">
           <div class="section-header">
-            <h2>Typed Plugin Input</h2>
-            <p>Embed plugins let an app provide strongly typed session configuration and per-turn input. The plugin can contribute prompt context and tools, and tools read the same typed turn input through <code>ToolExecutionContext</code>.</p>
+            <h2>Typed Plugin Context</h2>
+            <p>Plugin bindings let an app provide strongly typed session configuration and per-turn context. The binding activates an ordinary core plugin factory; the resulting session plugin registers prompt context, tools, and other capabilities through <code>PluginRegistrar</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Plugin and tool pattern</div>
@@ -288,20 +313,20 @@ struct BoardPlugin;
 struct BoardConfig;
 
 #[derive(Clone, Debug)]
-struct BoardTurnInput {
+struct BoardTurnContext {
     board: BoardState,
 }
 
-impl lash_embed::EmbedPlugin for BoardPlugin {
+impl lash_embed::PluginBinding for BoardPlugin {
     const ID: &amp;'static str = "board";
     type SessionConfig = BoardConfig;
-    type TurnInput = BoardTurnInput;
+    type TurnContext = BoardTurnContext;
 
     fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::PluginFactory&gt; {
         Arc::new(BoardPluginFactory)
     }
 
-    fn requires_turn_input(_: &amp;Self::SessionConfig) -&gt; bool {
+    fn requires_turn_context(_: &amp;Self::SessionConfig) -&gt; bool {
         true
     }
 }
@@ -312,7 +337,7 @@ impl lash::SessionPlugin for BoardSessionPlugin {
     fn register(&amp;self, reg: &amp;mut lash::PluginRegistrar) -&gt; Result&lt;(), lash::PluginError&gt; {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
-                let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
+                let Some(input) = ctx.turn_context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
                     return Ok(Vec::new());
                 };
                 Ok(vec![lash::PromptContribution::environment(
@@ -331,21 +356,26 @@ impl lash::ToolProvider for BoardTools {
         vec![/* read_board, play_move, app tools */]
     }
 
-    async fn execute_with_context(
-        &amp;self,
-        name: &amp;str,
-        args: &amp;serde_json::Value,
-        context: &amp;lash::ToolExecutionContext,
-    ) -&gt; lash::ToolResult {
-        let Some(input) = context.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
-            return lash::ToolResult::err_fmt("missing board input");
+    async fn execute(&amp;self, call: lash::ToolCall&lt;'_&gt;) -&gt; lash::ToolResult {
+        let Some(input) = call.context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
+            return lash::ToolResult::err_fmt("missing board context");
         };
-        run_board_tool(name, args, &amp;input.board)
+        run_board_tool(call.name, call.args, &amp;input.board)
     }
 }</code></pre>
           </div>
           <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. Embed streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
-          <p>Register the plugin on the core, activate it on the session, and provide turn input before each run:</p>
+          <p>Plugin crates should export a domain extension trait that wraps the generic context primitive:</p>
+          <pre><code>trait BoardTurnExt {
+    fn with_board(self, board: BoardState) -&gt; Self;
+}
+
+impl BoardTurnExt for lash_embed::TurnBuilder {
+    fn with_board(self, board: BoardState) -&gt; Self {
+        self.with_plugin_context::&lt;BoardPlugin&gt;(BoardTurnContext { board })
+    }
+}</code></pre>
+          <p>Register the plugin on the core, activate it on the session, and use the extension method before each run:</p>
           <pre><code>let core = LashCore::rlm()
     .register_plugin::&lt;BoardPlugin&gt;()
     .provider(provider)
@@ -361,8 +391,9 @@ let session = core
 
 let result = session
     .turn(TurnInput::text("Play one move."))
-    .with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
-    .stream(&amp;sink)
+    .with_board(board)
+    .require_submit()?
+    .collect_with(&amp;sink)
     .await?;</code></pre>
         </div>
 
@@ -379,16 +410,32 @@ let result = session
 
         <div class="section">
           <div class="section-header">
-            <h2>Complete Example</h2>
-            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn context, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
+            <h2>Advanced Runtime</h2>
+            <p>The normal builder exposes app-facing setup. Use <code>.advanced()</code> only for runtime-host concerns such as custom plugin hosts, shared task executors, residency policy, imported <code>RuntimeCoreConfig</code>, and termination policy.</p>
           </div>
-          <pre><code>OPENROUTER_API_KEY=... cargo run -p openrouter-chat-ui
+          <pre><code>let core = LashCore::rlm()
+    .provider(provider)
+    .model("anthropic/claude-sonnet-4.6", None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .advanced()
+    .residency(Residency::ActivePathOnly)
+    .build()?;</code></pre>
+          <p>Turn streaming is semantic by default: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> items and resolves with a rich <code>TurnResult</code>. Raw runtime telemetry belongs in tracing and lower-level runtime debugging, not the normal embed surface.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Complete Example</h2>
+            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin context, tools that read turn context, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
+          </div>
+          <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>
-          <p>Source: <code>examples/openrouter-chat-ui</code>.</p>
+          <p>Source: <code>examples/agent-service</code>.</p>
         </div>
       </section>
 
-      <footer class="footer">Embedding anchors: <code>lash-embed/src/lib.rs</code>, <code>examples/openrouter-chat-ui/src/main.rs</code>, <code>lash/src/runtime/*</code>.</footer>
+      <footer class="footer">Embedding anchors: <code>lash-embed/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash/src/runtime/*</code>.</footer>
     </div>
   </main>
 </body>

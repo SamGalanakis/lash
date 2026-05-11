@@ -143,11 +143,10 @@ pub struct PluginSession {
     pub(super) checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     pub(super) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(super) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    pub(super) tool_result_projectors:
-        BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
+    pub(super) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
     pub(super) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub(super) session_config_mutators: Vec<SessionConfigMutator>,
-    pub(super) external_ops: BTreeMap<String, RegisteredExternalOp>,
+    pub(super) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(super) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     pub(super) turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
     pub(super) history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
@@ -229,7 +228,7 @@ impl PluginSession {
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
         let surface = self.tool_surface(session_id, mode.clone());
         let mut catalog =
-            crate::tool_registry::project_tool_catalog(surface.discoverable_tools_iter().cloned());
+            crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
         let contributions = collect_owned_sync(
             &self.tool_discovery_contributors,
             ToolDiscoveryContext {
@@ -285,7 +284,7 @@ impl PluginSession {
                     .into_iter()
                     .map(|tool_name| ToolSurfaceOverride {
                         tool_name,
-                        availability: Some(crate::ToolAvailability::Hidden),
+                        availability: Some(crate::ToolAvailability::Off),
                     })
                     .collect(),
                 ..Default::default()
@@ -298,8 +297,8 @@ impl PluginSession {
         }))
     }
 
-    pub fn external_ops(&self) -> Vec<ExternalOpDef> {
-        self.external_ops
+    pub fn plugin_actions(&self) -> Vec<PluginActionDef> {
+        self.plugin_actions
             .values()
             .map(|op| op.def.clone())
             .collect()
@@ -613,7 +612,7 @@ impl PluginSession {
         &self,
         ctx: ToolResultProjectionContext,
     ) -> Result<ToolResult, PluginError> {
-        let Some(projector) = self.tool_result_projectors.get(&ctx.hook) else {
+        let Some(projector) = &self.tool_result_projector else {
             return Ok(ctx.result);
         };
         (projector.hook)(ctx).await
@@ -736,41 +735,7 @@ impl PluginSession {
         }
 
         if self.has_runtime_event_hooks() {
-            let mut history_tool_calls = turn.state.read_view().tool_calls().to_vec();
-            let mut history_changed = false;
-            for tool_call in &mut history_tool_calls {
-                let projected = self
-                    .project_tool_result(ToolResultProjectionContext {
-                        hook: ToolResultProjectionHook::BeforeHistory,
-                        session_id: session_id.clone(),
-                        tool_name: tool_call.tool.clone(),
-                        args: tool_call.args.clone(),
-                        result: ToolResult {
-                            success: tool_call.success,
-                            result: tool_call.result.clone(),
-                            images: Vec::new(),
-                            control: tool_call.control.clone(),
-                        },
-                        duration_ms: tool_call.duration_ms,
-                        host: host.clone(),
-                    })
-                    .await?;
-                history_changed |=
-                    projected.success != tool_call.success || projected.result != tool_call.result;
-                tool_call.result = projected.result;
-                tool_call.success = projected.success;
-            }
-            let committed_turn = if history_changed {
-                let mut committed_turn = turn.clone();
-                committed_turn
-                    .state
-                    .replace_active_tool_calls(&history_tool_calls);
-                committed_turn.tool_calls = history_tool_calls;
-                Arc::new(committed_turn)
-            } else {
-                Arc::new(turn.clone())
-            };
-            self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(committed_turn))
+            self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(Arc::new(turn.clone())))
                 .await;
         }
 
@@ -903,16 +868,16 @@ impl PluginSession {
         )
     }
 
-    pub async fn invoke_external(
+    pub async fn invoke_plugin_action(
         &self,
         name: &str,
         args: serde_json::Value,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn ExternalInvokeHost>,
-    ) -> Result<ToolResult, ExternalInvokeError> {
-        let Some(op) = self.external_ops.get(name).cloned() else {
-            return Err(ExternalInvokeError::Unknown(name.to_string()));
+        host: Arc<dyn PluginActionHost>,
+    ) -> Result<ToolResult, PluginActionInvokeError> {
+        let Some(op) = self.plugin_actions.get(name).cloned() else {
+            return Err(PluginActionInvokeError::Unknown(name.to_string()));
         };
 
         let effective_session = session_id.or_else(|| {
@@ -925,16 +890,16 @@ impl PluginSession {
 
         match (op.def.session_param, effective_session.as_ref()) {
             (SessionParam::Required, None) => {
-                return Err(ExternalInvokeError::MissingSession(name.to_string()));
+                return Err(PluginActionInvokeError::MissingSession(name.to_string()));
             }
             (SessionParam::Forbidden, Some(_)) => {
-                return Err(ExternalInvokeError::UnexpectedSession(name.to_string()));
+                return Err(PluginActionInvokeError::UnexpectedSession(name.to_string()));
             }
             _ => {}
         }
 
         Ok((op.handler)(
-            ExternalInvokeContext {
+            PluginActionContext {
                 session_id: effective_session,
                 host,
             },
@@ -943,17 +908,17 @@ impl PluginSession {
         .await)
     }
 
-    pub async fn invoke_external_typed<Op: TypedExternalOp>(
+    pub async fn call_plugin_action<Op: PluginAction>(
         &self,
         args: Op::Args,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn ExternalInvokeHost>,
+        host: Arc<dyn PluginActionHost>,
     ) -> Result<Op::Output, PluginError> {
         let args = serde_json::to_value(args)
             .map_err(|err| PluginError::Invoke(format!("invalid {} args: {err}", Op::NAME)))?;
         let result = self
-            .invoke_external(Op::NAME, args, session_id, default_to_current_session, host)
+            .invoke_plugin_action(Op::NAME, args, session_id, default_to_current_session, host)
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))?;
         if !result.success {

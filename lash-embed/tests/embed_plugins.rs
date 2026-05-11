@@ -2,13 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::{
-    LlmOutputPart, LlmResponse, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult,
-    TurnInput,
+    LlmOutputPart, LlmResponse, ToolCall, ToolDefinition, ToolProvider, ToolResult, TurnInput,
 };
-use lash_embed::{EmbedError, EmbedPlugin, LashCore, ModePreset};
+use lash_embed::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
 
-fn assistant_prose(result: &lash_embed::turn::CollectedTurnOutput) -> String {
+fn assistant_prose(result: &lash_embed::turn::TurnOutput) -> String {
     result.assistant_transcript_text()
 }
 
@@ -23,14 +22,14 @@ struct TestPluginConfig {
 }
 
 #[derive(Clone, Debug)]
-struct TestTurnInput {
+struct TestTurnContext {
     label: String,
 }
 
-impl EmbedPlugin for TestPlugin {
+impl PluginBinding for TestPlugin {
     const ID: &'static str = "test_typed";
     type SessionConfig = TestPluginConfig;
-    type TurnInput = TestTurnInput;
+    type TurnContext = TestTurnContext;
 
     fn factory(config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
         Arc::new(TestPluginFactory {
@@ -38,7 +37,7 @@ impl EmbedPlugin for TestPlugin {
         })
     }
 
-    fn requires_turn_input(config: &Self::SessionConfig) -> bool {
+    fn requires_turn_context(config: &Self::SessionConfig) -> bool {
         config.required
     }
 }
@@ -78,7 +77,7 @@ impl lash::SessionPlugin for TestSessionPlugin {
             Box::pin(async move {
                 if let Some(input) = ctx
                     .turn_context
-                    .plugin_input::<TestTurnInput>(TestPlugin::ID)
+                    .plugin_context::<TestTurnContext>(TestPlugin::ID)
                 {
                     prompt_seen
                         .lock()
@@ -101,9 +100,9 @@ struct TestTools {
 #[async_trait]
 impl ToolProvider for TestTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::new(
+        vec![ToolDefinition::raw(
             "typed_probe",
-            "Probe typed turn input.",
+            "Probe typed turn context.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -113,20 +112,11 @@ impl ToolProvider for TestTools {
         )]
     }
 
-    async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ToolResult {
-        ToolResult::err_fmt("typed_probe requires context")
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        _args: &serde_json::Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        assert_eq!(name, "typed_probe");
-        let Some(input) = context
-            .turn_context
-            .plugin_input::<TestTurnInput>(TestPlugin::ID)
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        assert_eq!(call.name, "typed_probe");
+        let Some(input) = call
+            .context
+            .plugin_context::<TestTurnContext>(TestPlugin::ID)
         else {
             return ToolResult::err_fmt("missing typed input");
         };
@@ -187,7 +177,7 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
 }
 
 #[tokio::test]
-async fn required_turn_input_missing_is_validated_before_execution() {
+async fn required_turn_context_missing_is_validated_before_execution() {
     let config = TestPluginConfig {
         required: true,
         prompt_seen: Arc::new(Mutex::new(Vec::new())),
@@ -205,10 +195,10 @@ async fn required_turn_input_missing_is_validated_before_execution() {
     let err = session
         .run(TurnInput::text("hello"))
         .await
-        .expect_err("missing required input");
+        .expect_err("missing required context");
     assert!(matches!(
         err,
-        EmbedError::MissingPluginTurnInput {
+        EmbedError::MissingPluginTurnContext {
             plugin_id: TestPlugin::ID
         }
     ));
@@ -234,7 +224,7 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
 
     let result = session
         .turn(TurnInput::text("probe"))
-        .with_plugin_input::<TestPlugin>(TestTurnInput {
+        .with_plugin_context::<TestPlugin>(TestTurnContext {
             label: "page-a".to_string(),
         })
         .run()

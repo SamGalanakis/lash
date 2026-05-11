@@ -24,7 +24,7 @@ impl BackgroundTaskCapability {
             .collect::<Vec<_>>();
         current
             .plugins
-            .invoke_external_typed::<crate::MonitorRegisterSpecsOp>(
+            .call_plugin_action::<crate::MonitorRegisterSpecsOp>(
                 crate::RegisterSpecsArgs { specs },
                 Some(session_id.to_string()),
                 false,
@@ -44,7 +44,7 @@ impl BackgroundTaskCapability {
             .await?;
         current
             .plugins
-            .invoke_external_typed::<crate::MonitorStatusOp>(
+            .call_plugin_action::<crate::MonitorStatusOp>(
                 crate::MonitorEmptyArgs {},
                 Some(session_id.to_string()),
                 false,
@@ -63,7 +63,7 @@ impl BackgroundTaskCapability {
             .await?;
         current
             .plugins
-            .invoke_external_typed::<crate::MonitorTakeUpdatesOp>(
+            .call_plugin_action::<crate::MonitorTakeUpdatesOp>(
                 crate::MonitorEmptyArgs {},
                 Some(session_id.to_string()),
                 false,
@@ -83,7 +83,7 @@ impl BackgroundTaskCapability {
             .await?;
         current
             .plugins
-            .invoke_external_typed::<crate::MonitorStartOp>(
+            .call_plugin_action::<crate::MonitorStartOp>(
                 crate::StartMonitorArgs { spec },
                 Some(session_id.to_string()),
                 false,
@@ -103,7 +103,7 @@ impl BackgroundTaskCapability {
             .await?;
         current
             .plugins
-            .invoke_external_typed::<crate::MonitorStopOp>(
+            .call_plugin_action::<crate::MonitorStopOp>(
                 crate::StopMonitorArgs {
                     id: monitor_id.to_string(),
                 },

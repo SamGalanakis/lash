@@ -6,14 +6,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use lash::plugin::{
-    ExternalInvokeContext, ExternalOpKind, PluginDirective, PluginError, PluginFactory,
-    PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, PromptHookContext, SessionParam,
-    SessionPlugin, SnapshotReader, SnapshotWriter, ToolCallHookContext, ToolResultHookContext,
-    TurnResultHookContext, TypedExternalOp, TypedExternalOpError,
+    PluginAction, PluginActionContext, PluginActionFailure, PluginActionKind, PluginDirective,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta,
+    PromptHookContext, SessionParam, SessionPlugin, SnapshotReader, SnapshotWriter,
+    ToolCallHookContext, ToolResultHookContext, TurnResultHookContext,
 };
 use lash::{
-    MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolCall, ToolContext,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -101,48 +101,48 @@ pub struct AutoresearchStopOp;
 pub struct AutoresearchClearOp;
 pub struct AutoresearchExportOp;
 
-impl TypedExternalOp for AutoresearchStatusOp {
+impl PluginAction for AutoresearchStatusOp {
     const NAME: &'static str = "autoresearch.status";
     const DESCRIPTION: &'static str =
         "Return the current autoresearch runtime and journal summary.";
-    const KIND: ExternalOpKind = ExternalOpKind::Query;
+    const KIND: PluginActionKind = PluginActionKind::Query;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchEmptyArgs;
     type Output = StatusSummary;
 }
 
-impl TypedExternalOp for AutoresearchStartOp {
+impl PluginAction for AutoresearchStartOp {
     const NAME: &'static str = "autoresearch.start";
     const DESCRIPTION: &'static str =
         "Enable autoresearch mode and optionally seed a new objective.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchStartArgs;
     type Output = AutoresearchCommandOutput;
 }
 
-impl TypedExternalOp for AutoresearchStopOp {
+impl PluginAction for AutoresearchStopOp {
     const NAME: &'static str = "autoresearch.stop";
     const DESCRIPTION: &'static str = "Disable autoresearch mode for the current session.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchEmptyArgs;
     type Output = AutoresearchCommandOutput;
 }
 
-impl TypedExternalOp for AutoresearchClearOp {
+impl PluginAction for AutoresearchClearOp {
     const NAME: &'static str = "autoresearch.clear";
     const DESCRIPTION: &'static str = "Delete autoresearch session files and clear runtime state.";
-    const KIND: ExternalOpKind = ExternalOpKind::Command;
+    const KIND: PluginActionKind = PluginActionKind::Command;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchEmptyArgs;
     type Output = AutoresearchCommandOutput;
 }
 
-impl TypedExternalOp for AutoresearchExportOp {
+impl PluginAction for AutoresearchExportOp {
     const NAME: &'static str = "autoresearch.export";
     const DESCRIPTION: &'static str = "Write an HTML export of the current autoresearch summary.";
-    const KIND: ExternalOpKind = ExternalOpKind::Task;
+    const KIND: PluginActionKind = PluginActionKind::Task;
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = AutoresearchEmptyArgs;
     type Output = AutoresearchExportOutput;
@@ -295,19 +295,19 @@ impl SessionPlugin for AutoresearchPlugin {
             })
         }));
 
-        reg.external().typed::<AutoresearchStatusOp, _, _>({
+        reg.actions().typed::<AutoresearchStatusOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |_ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+            move |_ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move { tool_result_output(status_tool_result(&root, &state)) }
             }
         })?;
-        reg.external().typed::<AutoresearchStartOp, _, _>({
+        reg.actions().typed::<AutoresearchStartOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |ctx: ExternalInvokeContext, args: AutoresearchStartArgs| {
+            move |ctx: PluginActionContext, args: AutoresearchStartArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move {
@@ -323,28 +323,28 @@ impl SessionPlugin for AutoresearchPlugin {
                 }
             }
         })?;
-        reg.external().typed::<AutoresearchStopOp, _, _>({
+        reg.actions().typed::<AutoresearchStopOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+            move |ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move { tool_result_output(stop_mode_command(ctx, &root, &state).await) }
             }
         })?;
-        reg.external().typed::<AutoresearchClearOp, _, _>({
+        reg.actions().typed::<AutoresearchClearOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+            move |ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move { tool_result_output(clear_mode_command(ctx, &root, &state).await) }
             }
         })?;
-        reg.external().typed::<AutoresearchExportOp, _, _>({
+        reg.actions().typed::<AutoresearchExportOp, _, _>({
             let root = self.workdir.clone();
             let state = Arc::clone(&self.state);
-            move |_ctx: ExternalInvokeContext, _args: AutoresearchEmptyArgs| {
+            move |_ctx: PluginActionContext, _args: AutoresearchEmptyArgs| {
                 let root = root.clone();
                 let state = Arc::clone(&state);
                 async move { tool_result_output(export_summary(&root, &state)) }
@@ -418,13 +418,13 @@ fn autoresearch_tool(
     description: impl Into<String>,
     input_schema: Value,
 ) -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         name,
         description,
         input_schema,
         json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_availability(lash::ToolAvailabilityConfig::hidden())
+    .with_availability(lash::ToolAvailabilityConfig::off())
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -517,25 +517,15 @@ impl ToolProvider for AutoresearchTools {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &Value) -> ToolResult {
-        match name {
-            "init_experiment" => self.execute_init(args),
-            "log_experiment" => self.execute_log(args),
-            "run_experiment" => self.execute_run(args, None, None).await,
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "init_experiment" => self.execute_init(call.args),
+            "log_experiment" => self.execute_log(call.args),
+            "run_experiment" => {
+                self.execute_run(call.args, Some(call.context), call.progress)
+                    .await
+            }
             other => ToolResult::err_fmt(format_args!("unknown autoresearch tool `{other}`")),
-        }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-        progress: Option<&lash::ProgressSender>,
-    ) -> ToolResult {
-        match name {
-            "run_experiment" => self.execute_run(args, Some(context), progress).await,
-            _ => self.execute(name, args).await,
         }
     }
 }
@@ -690,7 +680,7 @@ impl AutoresearchTools {
     async fn execute_run(
         &self,
         args: &Value,
-        context: Option<&ToolExecutionContext>,
+        context: Option<&ToolContext>,
         progress: Option<&lash::ProgressSender>,
     ) -> ToolResult {
         let command = match require_string(args, "command") {
@@ -716,7 +706,7 @@ impl AutoresearchTools {
             &self.workdir,
             &command,
             timeout_seconds,
-            context.and_then(|value| value.cancellation_token.clone()),
+            context.and_then(|value| value.cancellation_token().cloned()),
             progress,
         )
         .await
@@ -737,7 +727,7 @@ impl AutoresearchTools {
                 &self.workdir,
                 "bash autoresearch.checks.sh",
                 checks_timeout_seconds,
-                context.and_then(|value| value.cancellation_token.clone()),
+                context.and_then(|value| value.cancellation_token().cloned()),
                 None,
             )
             .await
@@ -988,15 +978,15 @@ fn status_tool_result(root: &Path, state: &Arc<Mutex<RuntimeState>>) -> ToolResu
     }
 }
 
-fn tool_result_output<T>(result: ToolResult) -> Result<T, TypedExternalOpError>
+fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginActionFailure>
 where
     T: serde::de::DeserializeOwned,
 {
     if !result.success {
-        return Err(TypedExternalOpError::new(result.result.to_string()));
+        return Err(PluginActionFailure::new(result.result.to_string()));
     }
     serde_json::from_value(result.result)
-        .map_err(|err| TypedExternalOpError::new(format!("invalid autoresearch output: {err}")))
+        .map_err(|err| PluginActionFailure::new(format!("invalid autoresearch output: {err}")))
 }
 
 fn autoresearch_tool_names() -> Vec<String> {
@@ -1007,7 +997,7 @@ fn autoresearch_tool_names() -> Vec<String> {
 }
 
 async fn set_autoresearch_tools_enabled(
-    ctx: &ExternalInvokeContext,
+    ctx: &PluginActionContext,
     enabled: bool,
 ) -> Result<(), ToolResult> {
     let Some(session_id) = ctx.session_id.as_deref() else {
@@ -1016,9 +1006,9 @@ async fn set_autoresearch_tools_enabled(
         ));
     };
     let availability = if enabled {
-        Some(lash::ToolAvailability::Documented)
+        Some(lash::ToolAvailability::Showcased)
     } else {
-        Some(lash::ToolAvailability::Hidden)
+        Some(lash::ToolAvailability::Off)
     };
     ctx.host
         .set_tools_availability(session_id, &autoresearch_tool_names(), availability)
@@ -1031,7 +1021,7 @@ async fn set_autoresearch_tools_enabled(
 }
 
 async fn start_mode_command(
-    ctx: ExternalInvokeContext,
+    ctx: PluginActionContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
     args: Value,
@@ -1047,7 +1037,7 @@ async fn start_mode_command(
 }
 
 async fn stop_mode_command(
-    ctx: ExternalInvokeContext,
+    ctx: PluginActionContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {
@@ -1062,7 +1052,7 @@ async fn stop_mode_command(
 }
 
 async fn clear_mode_command(
-    ctx: ExternalInvokeContext,
+    ctx: PluginActionContext,
     root: &Path,
     state: &Arc<Mutex<RuntimeState>>,
 ) -> ToolResult {
@@ -1321,7 +1311,7 @@ mod tests {
         };
         assert!(tools.definitions().into_iter().all(|tool| {
             tool.effective_availability(&lash::ExecutionMode::standard())
-                == lash::ToolAvailability::Hidden
+                == lash::ToolAvailability::Off
         }));
     }
 }

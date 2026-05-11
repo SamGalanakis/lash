@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use lash::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    PluginSpec, PluginSpecFactory, ProgressSender, ToolDefinition, ToolExecutionContext,
-    ToolExecutionMode, ToolProvider, ToolResult,
+    PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
+    ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -41,17 +41,13 @@ impl PluginFactory for LlmToolsPluginFactory {
 struct LlmToolsProvider;
 
 impl LlmToolsProvider {
-    async fn llm_query(
-        &self,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> Result<Value, String> {
+    async fn llm_query(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
         let task = required_string(args, "task")?;
         let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
         let output_schema = parse_output_schema(args.get("output"))?;
         let current_snapshot = context
-            .host
-            .snapshot_session(&context.session_id)
+            .host()
+            .snapshot_session(context.session_id())
             .await
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
         let policy = current_snapshot.policy;
@@ -65,7 +61,7 @@ impl LlmToolsProvider {
         });
 
         let completion = context
-            .host
+            .host()
             .direct_completion(
                 DirectRequest {
                     model: policy.model,
@@ -86,7 +82,7 @@ impl LlmToolsProvider {
                     attachments: Vec::new(),
                     output,
                     stream_events: None,
-                    session_id: Some(format!("{}-llm-query", context.session_id)),
+                    session_id: Some(format!("{}-llm-query", context.session_id())),
                     originating_tool_call_id: None,
                 },
                 "llm_query",
@@ -104,33 +100,12 @@ impl ToolProvider for LlmToolsProvider {
         vec![llm_query_tool_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let result = match name {
-            "llm_query" => self.llm_query(args, context).await,
-            _ => Err(format!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let result = match call.name {
+            "llm_query" => self.llm_query(call.args, call.context).await,
+            _ => Err(format!("Unknown tool: {}", call.name)),
         };
         finalise_tool_result(result)
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 
@@ -295,7 +270,7 @@ fn tool_definition(
     examples: Vec<String>,
     execution_mode: ToolExecutionMode,
 ) -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         name,
         description,
         input_schema,
@@ -372,7 +347,7 @@ mod tests {
         SessionLifecycleHost, SessionSnapshotHost, SessionTurnHandle, TaskHost, ToolCatalogHost,
         ToolStateHost, TraceHost, TurnHost,
     };
-    use lash::{PersistedSessionState, SessionCreateRequest, ToolExecutionContext, TurnInput};
+    use lash::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
 
     #[derive(Default)]
     struct DirectCompletionManager {
@@ -546,25 +521,20 @@ mod tests {
                     .to_string(),
         });
         let provider = LlmToolsProvider;
-        let context = ToolExecutionContext {
-            session_id: "parent".to_string(),
-            host: manager.clone(),
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(manager.clone());
 
+        let args = json!({
+            "task": "extract root cause",
+            "inputs": { "log": "failed" },
+            "output": { "root_cause": "str", "confidence": "float" }
+        });
         let result = provider
-            .execute_with_context(
-                "llm_query",
-                &json!({
-                    "task": "extract root cause",
-                    "inputs": { "log": "failed" },
-                    "output": { "root_cause": "str", "confidence": "float" }
-                }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "llm_query",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
 
         assert!(result.success, "{:?}", result.result);
@@ -610,21 +580,16 @@ mod tests {
                 .to_string(),
         });
         let provider = LlmToolsProvider;
-        let context = ToolExecutionContext {
-            session_id: "parent".to_string(),
-            host: manager,
-            cancellation_token: None,
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let context = lash::testing::mock_tool_context_with_host(manager);
 
+        let args = json!({ "task": "answer from missing evidence" });
         let result = provider
-            .execute_with_context(
-                "llm_query",
-                &json!({ "task": "answer from missing evidence" }),
-                &context,
-            )
+            .execute(ToolCall {
+                name: "llm_query",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
             .await;
 
         assert!(!result.success);

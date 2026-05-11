@@ -1,8 +1,26 @@
 use std::sync::Arc;
 
-use lash::provider::{LashConfig, ProviderHandle};
-use lash::*;
+use crate::config::LashConfig;
+use lash::{
+    FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
+    PluginHost, PromptLayer, RuntimeCoreConfig, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+};
+use lash_embed::advanced::ExecutionMode;
+use lash_embed::plugins::{
+    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
+};
+use lash_embed::prompt::{
+    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection,
+};
+use lash_embed::provider::ProviderHandle;
+#[cfg(test)]
+use lash_embed::tools::{
+    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+};
+use lash_embed::tracing::TraceLevel;
 use lash_llm_tools::LlmToolsPluginFactory;
+use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
@@ -137,7 +155,12 @@ fn autonomous_tool_allowed(name: &str) -> bool {
 async fn apply_autonomous_tool_policy(session: &lash_embed::LashSession) -> anyhow::Result<()> {
     let mut snapshot = session.control().tools().state().await?;
     retain_autonomous_tools(&mut snapshot);
-    session.control().tools().apply_state(snapshot).await?;
+    session
+        .control()
+        .tools()
+        .advanced()
+        .apply_state(snapshot)
+        .await?;
     Ok(())
 }
 
@@ -428,7 +451,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         lash_config.set_model_default(active_provider.kind(), model.clone(), model_variant.clone());
         lash_config.save(&crate::paths::config_file())?;
     }
-    let trace_level = lash::TraceLevel::from(args.trace_level);
+    let trace_level = TraceLevel::from(args.trace_level);
     let trace_path =
         if crate::detailed_debug_logging_enabled(args.debug) || trace_level.is_extended() {
             let dir = crate::paths::lash_home().join("sessions");
@@ -562,7 +585,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let prompt_bridge = CliPromptBridge::default();
 
     let PluginFactoriesForSurface {
-        factories: plugin_factories,
+        factories: mut plugin_factories,
         subagent_host,
     } = plugin_factories_for_surface(PluginFactorySurfaceInput {
         autonomous,
@@ -574,6 +597,12 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
         prompt_bridge: prompt_bridge.clone(),
     });
+    let mcp_factory = Arc::new(
+        McpPluginFactory::new(lash_config.mcp_servers().clone())
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to connect MCP servers: {err}"))?,
+    );
+    plugin_factories.push(mcp_factory);
     let plugin_host = PluginHost::new(plugin_factories);
     if args.info {
         let cwd = std::env::current_dir()
@@ -609,12 +638,6 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         )
         .await?;
     let session = opened_session.session;
-    session
-        .control()
-        .tools()
-        .attach_mcp_servers(lash_config.mcp_servers())
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to attach MCP servers: {err}"))?;
     if autonomous {
         apply_autonomous_tool_policy(&session)
             .await
@@ -623,7 +646,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let active_tool_definitions = session.control().tools().active_definitions().await?;
     let toolset_hash =
         hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
-    let initial_policy = session.policy_snapshot().await;
+    let initial_policy = session.policy_snapshot();
     let initial_model_variant = initial_policy.model_variant.clone();
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();
@@ -663,7 +686,6 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     run_app(
         terminal,
         session,
-        plugin_host,
         runtime_factory,
         lash_config.clone(),
         prompt_bridge,
@@ -687,17 +709,18 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash::ToolRegistry;
 
     struct DummyToolProvider;
 
     fn dummy_tool(name: &str) -> ToolDefinition {
-        ToolDefinition::new(
+        ToolDefinition::raw(
             name,
             format!("{name} description"),
             ToolDefinition::default_input_schema(),
             serde_json::json!({ "type": "null" }),
         )
-        .with_availability(lash::ToolAvailabilityConfig::callable())
+        .with_availability(ToolAvailabilityConfig::callable())
         .with_execution_mode(ToolExecutionMode::Parallel)
     }
 
@@ -712,8 +735,8 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
-            ToolResult::err_fmt(format_args!("unexpected tool call: {name}"))
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
         }
     }
 

@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use lash::plugin::StaticPluginFactory;
 use lash::{
-    PluginError, PluginFactory, PluginSpec, ToolDefinition, ToolDiscoveryMetadata,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    PluginError, PluginFactory, PluginSpec, ToolCall, ToolDefinition, ToolDiscoveryMetadata,
+    ToolExecutionMode, ToolProvider, ToolResult,
 };
 use lash::{PromptRequest, PromptResponse, PromptSelectionMode};
 use serde_json::json;
@@ -102,7 +102,7 @@ impl CliAskTool {
 impl ToolProvider for CliAskTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "ask",
                 "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Provide `options` when there are roughly 2-6 discrete choices; omit it for open-ended responses.",
                 object_schema(
@@ -140,32 +140,11 @@ impl ToolProvider for CliAskTool {
         ]
     }
 
-    async fn execute(&self, name: &str, _args: &serde_json::Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{name}` requires session context and cannot run without it"
-        ))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        _context: &ToolExecutionContext,
-    ) -> ToolResult {
-        match name {
-            "ask" => self.execute_ask(args).await,
-            _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "ask" => self.execute_ask(call.args).await,
+            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
         }
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        _progress: Option<&lash::ProgressSender>,
-    ) -> ToolResult {
-        self.execute_with_context(name, args, context).await
     }
 }
 

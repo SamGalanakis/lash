@@ -21,8 +21,8 @@ use lash::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash::{
-    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolDefinition,
-    ToolExecutionContext, ToolExecutionMode, ToolProvider, ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -1271,7 +1271,7 @@ impl ToolProvider for StandardShell {
         };
         let output_schema = json!({ "type": "object", "additionalProperties": true });
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "exec_command",
                 exec_command_description,
                 {
@@ -1292,7 +1292,7 @@ impl ToolProvider for StandardShell {
             ])
             .with_discovery(lash_tool_support::discovery_metadata("shell", &["shell", "bash"]))
             .with_execution_mode(ToolExecutionMode::Serial),
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "start_command",
                 start_command_description,
                 {
@@ -1315,7 +1315,7 @@ impl ToolProvider for StandardShell {
                 &["long_running_command", "pty"],
             ))
             .with_execution_mode(ToolExecutionMode::Serial),
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "write_stdin",
                 "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 object_schema(
@@ -1367,27 +1367,9 @@ impl ToolProvider for StandardShell {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        self.execute_streaming(name, args, None).await
-    }
-
-    async fn execute_streaming(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.dispatch(name, args, progress, None).await
-    }
-
-    async fn execute_streaming_with_context(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        context: &ToolExecutionContext,
-        progress: Option<&ProgressSender>,
-    ) -> ToolResult {
-        self.dispatch(name, args, progress, context.cancellation_token.clone())
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let cancellation_token = call.context.cancellation_token().cloned();
+        self.dispatch(call.name, call.args, call.progress, cancellation_token)
             .await
     }
 }
@@ -1823,12 +1805,14 @@ mod tests {
         StandardShell::new().with_cwd("/")
     }
 
+    async fn run(shell: &StandardShell, name: &str, args: &serde_json::Value) -> ToolResult {
+        lash::testing::run_tool(shell, name, args).await
+    }
+
     #[tokio::test]
     async fn exec_command_returns_exit_code_when_command_finishes() {
         let shell = test_shell();
-        let result = shell
-            .execute("exec_command", &json!({"cmd": "echo hello"}))
-            .await;
+        let result = run(&shell, "exec_command", &json!({"cmd": "echo hello"})).await;
         assert!(result.success);
         assert!(result.result.get("session_id").is_none());
         assert_eq!(result.result["status"], "completed");
@@ -1842,9 +1826,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_waits_for_process_exit() {
         let shell = StandardShell::new().with_cwd("/");
-        let result = shell
-            .execute("exec_command", &json!({"cmd": "sleep 0.05; echo done"}))
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "sleep 0.05; echo done"}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         assert!(result.result.get("session_id").is_none());
         assert_eq!(result.result["status"], "completed");
@@ -1856,12 +1843,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_runs_without_a_tty() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then echo tty; exit 1; else echo no-tty; fi"}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then echo tty; exit 1; else echo no-tty; fi"}),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(result.result["exit_code"], 0);
@@ -1871,12 +1858,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_closes_stdin() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "python3 -c 'import sys; print(sys.stdin.read() == \"\")'"}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "python3 -c 'import sys; print(sys.stdin.read() == \"\")'"}),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(result.result["output"].as_str().unwrap().trim(), "True");
@@ -1885,12 +1872,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_captures_stdout_and_stderr() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "echo stdout-line; echo stderr-line >&2"}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "echo stdout-line; echo stderr-line >&2"}),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         let output = result.result["output"].as_str().unwrap();
@@ -1901,12 +1888,12 @@ mod tests {
     #[tokio::test]
     async fn start_command_runs_in_a_pty() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": "if [ -t 0 ] && [ -t 1 ]; then echo tty; else echo no-tty; exit 1; fi", "poll_ms": 1000}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": "if [ -t 0 ] && [ -t 1 ]; then echo tty; else echo no-tty; exit 1; fi", "poll_ms": 1000}),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(result.result["exit_code"], 0);
@@ -1916,12 +1903,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_timeout_kills_and_fails_running_process() {
         let shell = StandardShell::new().with_cwd("/");
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "printf started; sleep 5", "timeout_ms": 50}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "printf started; sleep 5", "timeout_ms": 50}),
+        )
+        .await;
         assert!(!result.success, "{}", result.result);
         assert_eq!(result.result["status"], "timed_out");
         assert_eq!(result.result["done"], true);
@@ -1950,12 +1937,12 @@ mod tests {
             marker.display()
         );
 
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": cmd, "timeout_ms": 50, "allow_nonzero_exit": true}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": cmd, "timeout_ms": 50, "allow_nonzero_exit": true}),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(result.result["status"], "timed_out");
@@ -1967,12 +1954,12 @@ mod tests {
     #[tokio::test]
     async fn start_command_returns_handle_id_for_running_process() {
         let shell = StandardShell::new().with_cwd("/");
-        let result = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": "sleep 1; echo done", "poll_ms": 10}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": "sleep 1; echo done", "poll_ms": 10}),
+        )
+        .await;
         assert!(result.success);
         assert!(result.result["session_id"].as_i64().is_some());
         assert_eq!(result.result["status"], "running");
@@ -1985,21 +1972,21 @@ mod tests {
     async fn write_stdin_reuses_running_exec_handle() {
         let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
-        let open = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
-            )
-            .await;
+        let open = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
+        )
+        .await;
         assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"].as_i64().unwrap();
 
-        let result = shell
-            .execute(
-                "write_stdin",
-                &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "write_stdin",
+            &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
+        )
+        .await;
         assert!(result.success);
         assert!(result.result.get("session_id").is_none());
         assert_eq!(result.result["status"], "completed");
@@ -2017,21 +2004,21 @@ mod tests {
         let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; line = sys.stdin.readline(); print(\"got:\" + line.strip())'";
         for _ in 0..16 {
-            let open = shell
-                .execute(
-                    "start_command",
-                    &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
-                )
-                .await;
+            let open = run(
+                &shell,
+                "start_command",
+                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
+            )
+            .await;
             assert!(open.success);
             let session_id = open.result["session_id"].as_i64().unwrap();
 
-            let result = shell
-                .execute(
-                    "write_stdin",
-                    &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
-                )
-                .await;
+            let result = run(
+                &shell,
+                "write_stdin",
+                &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
+            )
+            .await;
             assert!(result.success);
             assert!(
                 result.result.get("session_id").is_none(),
@@ -2051,21 +2038,21 @@ mod tests {
     #[tokio::test]
     async fn write_stdin_can_close_stdin_to_send_eof() {
         let shell = test_shell();
-        let open = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": "cat", "poll_ms": 10, "login": false}),
-            )
-            .await;
+        let open = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": "cat", "poll_ms": 10, "login": false}),
+        )
+        .await;
         assert!(open.success);
         let session_id = open.result["session_id"].as_i64().unwrap();
 
-        let result = shell
-            .execute(
-                "write_stdin",
-                &json!({"session_id": session_id, "chars": "hello", "close_stdin": true, "poll_ms": 1000}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "write_stdin",
+            &json!({"session_id": session_id, "chars": "hello", "close_stdin": true, "poll_ms": 1000}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         assert!(result.result.get("session_id").is_none());
         assert_eq!(result.result["exit_code"], 0);
@@ -2079,9 +2066,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_honors_workdir() {
         let shell = StandardShell::new().with_cwd("/");
-        let result = shell
-            .execute("exec_command", &json!({"cmd": "pwd", "workdir": "tmp"}))
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "pwd", "workdir": "tmp"}),
+        )
+        .await;
         assert!(result.success);
         assert_eq!(result.result["output"].as_str().unwrap().trim_end(), "/tmp");
     }
@@ -2089,9 +2079,7 @@ mod tests {
     #[tokio::test]
     async fn exec_command_pipeline_failure_uses_pipefail() {
         let shell = test_shell();
-        let result = shell
-            .execute("exec_command", &json!({"cmd": "false | cat"}))
-            .await;
+        let result = run(&shell, "exec_command", &json!({"cmd": "false | cat"})).await;
         assert!(!result.success);
         assert_ne!(result.result["exit_code"], 0);
         assert_eq!(
@@ -2103,12 +2091,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_allow_nonzero_exit_returns_nonzero_as_success() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         assert_eq!(result.result["exit_code"], 7);
         assert!(result.result["error"].is_null());
@@ -2124,21 +2112,21 @@ mod tests {
     async fn write_stdin_nonzero_exit_fails_by_default() {
         let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; sys.stdin.readline(); sys.exit(7)'";
-        let open = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
-            )
-            .await;
+        let open = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
+        )
+        .await;
         assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"].as_i64().unwrap();
 
-        let result = shell
-            .execute(
-                "write_stdin",
-                &json!({"session_id": session_id, "chars": "go\n", "poll_ms": 1000}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "write_stdin",
+            &json!({"session_id": session_id, "chars": "go\n", "poll_ms": 1000}),
+        )
+        .await;
         assert!(!result.success, "{}", result.result);
         assert_eq!(result.result["exit_code"], 7);
         assert_eq!(
@@ -2150,12 +2138,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_reports_full_output_path_when_token_truncated() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": "python3 -c 'print(\"hello \" * 4000)'", "max_output_tokens": 16, "login": false}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": "python3 -c 'print(\"hello \" * 4000)'", "max_output_tokens": 16, "login": false}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         let output = result.result["output"].as_str().unwrap();
         let full_output_path = result.result["full_output_path"].as_str().unwrap();
@@ -2167,12 +2155,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_spills_full_output_when_buffer_overflows() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", MAX_OUTPUT + 8192), "login": false}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", MAX_OUTPUT + 8192), "login": false}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         let output = result.result["output"].as_str().unwrap();
         let full_output_path = result.result["full_output_path"].as_str().unwrap();
@@ -2184,12 +2172,12 @@ mod tests {
     #[tokio::test]
     async fn exec_command_reports_full_output_path_for_large_output() {
         let shell = test_shell();
-        let result = shell
-            .execute(
-                "exec_command",
-                &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", SPILL_OUTPUT_THRESHOLD + 4096), "login": false}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "exec_command",
+            &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", SPILL_OUTPUT_THRESHOLD + 4096), "login": false}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         assert!(result.result["output"].as_str().is_some());
         let full_output_path = result.result["full_output_path"].as_str().unwrap();
@@ -2201,22 +2189,22 @@ mod tests {
     async fn write_stdin_reports_full_output_path_when_token_truncated() {
         let shell = test_shell();
         let cmd = "python3 -u -c 'import sys; data = sys.stdin.read(); sys.stdout.write(data)'";
-        let open = shell
-            .execute(
-                "start_command",
-                &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
-            )
-            .await;
+        let open = run(
+            &shell,
+            "start_command",
+            &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
+        )
+        .await;
         assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"].as_i64().unwrap();
         let payload = "segment ".repeat(5000);
 
-        let result = shell
-            .execute(
-                "write_stdin",
-                &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "poll_ms": 1000, "max_output_tokens": 24}),
-            )
-            .await;
+        let result = run(
+            &shell,
+            "write_stdin",
+            &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "poll_ms": 1000, "max_output_tokens": 24}),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         let output = result.result["output"].as_str().unwrap();
         let full_output_path = result.result["full_output_path"].as_str().unwrap();
@@ -2312,20 +2300,11 @@ mod tests {
 
     #[tokio::test]
     async fn exec_command_cancel_token_kills_running_child() {
-        use lash::testing::MockSessionManager;
-        use std::sync::Arc;
         use std::time::Instant;
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = ToolExecutionContext {
-            session_id: "test".to_string(),
-            host: Arc::new(MockSessionManager::default()),
-            cancellation_token: Some(token.clone()),
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let ctx = lash::testing::mock_tool_context().with_async_task("test", token.clone());
 
         // A long-running sleep that would otherwise hold the tool call for
         // 5s. The dispatcher must return promptly once the token fires, and
@@ -2345,7 +2324,12 @@ mod tests {
 
         let started = Instant::now();
         let result = shell
-            .execute_streaming_with_context("exec_command", &args, &ctx, None)
+            .execute(ToolCall {
+                name: "exec_command",
+                args: &args,
+                context: &ctx,
+                progress: None,
+            })
             .await;
         let elapsed = started.elapsed();
         let _ = cancel_handle.await;
@@ -2360,8 +2344,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_write_stdin_wait_kills_child_by_pid() {
-        use lash::testing::MockSessionManager;
-        use std::sync::Arc;
         use std::time::Instant;
 
         fn pid_alive(pid: i32) -> bool {
@@ -2373,14 +2355,7 @@ mod tests {
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = ToolExecutionContext {
-            session_id: "test".to_string(),
-            host: Arc::new(MockSessionManager::default()),
-            cancellation_token: Some(token.clone()),
-            async_task_id: None,
-            turn_context: lash::TurnContext::default(),
-            tool_call_id: None,
-        };
+        let ctx = lash::testing::mock_tool_context().with_async_task("test", token.clone());
 
         // Open a long-lived child. `echo $$` reports the shell's pid, then
         // `exec sleep 5` replaces the shell with sleep so the printed pid is
@@ -2390,7 +2365,7 @@ mod tests {
             "poll_ms": 500,
             "login": false,
         });
-        let open = shell.execute("start_command", &args).await;
+        let open = run(&shell, "start_command", &args).await;
         assert!(open.success, "{}", open.result);
         let session_id = open.result["session_id"]
             .as_i64()
@@ -2408,14 +2383,15 @@ mod tests {
             })
         };
 
+        let stdin_args = json!({"session_id": session_id, "chars": "", "poll_ms": 30_000});
         let started = Instant::now();
         let result = shell
-            .execute_streaming_with_context(
-                "write_stdin",
-                &json!({"session_id": session_id, "chars": "", "poll_ms": 30_000}),
-                &ctx,
-                None,
-            )
+            .execute(ToolCall {
+                name: "write_stdin",
+                args: &stdin_args,
+                context: &ctx,
+                progress: None,
+            })
             .await;
         let elapsed = started.elapsed();
         let _ = cancel_handle.await;

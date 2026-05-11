@@ -8,9 +8,9 @@ description = "Anthropic API (Claude) provider for lash."
 [dependencies]
 lash = { path = "../lash" }
 lash-llm-transport = { path = "../lash-llm-transport" }
-async-trait = "0.1"
-base64 = "0.22"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

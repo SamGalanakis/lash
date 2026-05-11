@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
 
@@ -110,7 +110,7 @@ pub struct PatchFileOp {
 impl ToolProvider for ApplyPatchTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "apply_patch",
                 APPLY_PATCH_INSTRUCTIONS,
                 object_schema(
@@ -138,12 +138,13 @@ impl ToolProvider for ApplyPatchTool {
             .with_execution_mode(ToolExecutionMode::Serial),
         ]
     }
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
-        let input = match require_str(args, "input") {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let input = match require_str(call.args, "input") {
             Ok(value) => value.to_string(),
             Err(err) => return err,
         };
-        let workdir = args
+        let workdir = call
+            .args
             .get("workdir")
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
@@ -972,15 +973,15 @@ mod tests {
     use tempfile::TempDir;
 
     async fn run_patch(dir: &TempDir, input: impl Into<String>) -> ToolResult {
-        ApplyPatchTool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": input.into()
-                }),
-            )
-            .await
+        lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": input.into()
+            }),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1253,17 +1254,16 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_absolute_add_paths() {
         let dir = TempDir::new().unwrap();
-        let tool = ApplyPatchTool;
         let abs = dir.path().join("hello.txt");
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": format!("*** Begin Patch\n*** Add File: {}\n+hello\n*** End Patch", abs.display())
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": format!("*** Begin Patch\n*** Add File: {}\n+hello\n*** End Patch", abs.display())
+            }),
+        )
+        .await;
         assert!(result.success, "{}", result.result);
         assert_eq!(std::fs::read_to_string(&abs).unwrap(), "hello\n");
         assert_eq!(result.result["files"][0]["path"], "hello.txt");
@@ -1272,18 +1272,17 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_absolute_update_paths() {
         let dir = TempDir::new().unwrap();
-        let tool = ApplyPatchTool;
         let abs = dir.path().join("main.rs");
         std::fs::write(&abs, "fn main() {\n    old();\n}\n").unwrap();
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": format!("*** Begin Patch\n*** Update File: {}\n@@ fn main() {{\n-    old();\n+    new();\n*** End Patch", abs.display())
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": format!("*** Begin Patch\n*** Update File: {}\n@@ fn main() {{\n-    old();\n+    new();\n*** End Patch", abs.display())
+            }),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1296,18 +1295,17 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_absolute_delete_paths() {
         let dir = TempDir::new().unwrap();
-        let tool = ApplyPatchTool;
         let abs = dir.path().join("old.txt");
         std::fs::write(&abs, "gone\n").unwrap();
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch", abs.display())
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch", abs.display())
+            }),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert!(!abs.exists());
@@ -1317,19 +1315,18 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_absolute_move_paths() {
         let dir = TempDir::new().unwrap();
-        let tool = ApplyPatchTool;
         let source = dir.path().join("old.txt");
         let dest = dir.path().join("nested").join("new.txt");
         std::fs::write(&source, "line\n").unwrap();
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": format!("*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n line\n*** End Patch", source.display(), dest.display())
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": format!("*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n line\n*** End Patch", source.display(), dest.display())
+            }),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert!(!source.exists());
@@ -1340,16 +1337,15 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_accepts_lenient_heredoc_wrapper() {
         let dir = TempDir::new().unwrap();
-        let tool = ApplyPatchTool;
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\nPATCH"
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\nPATCH"
+            }),
+        )
+        .await;
         assert!(result.success);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
@@ -1361,16 +1357,15 @@ mod tests {
     async fn apply_patch_treats_unified_diff_header_as_plain_context() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-        let tool = ApplyPatchTool;
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": "*** Begin Patch\n*** Update File: main.rs\n@@ -1,3 +1,3 @@\n-    old();\n+    new();\n*** End Patch"
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": "*** Begin Patch\n*** Update File: main.rs\n@@ -1,3 +1,3 @@\n-    old();\n+    new();\n*** End Patch"
+            }),
+        )
+        .await;
         assert!(!result.success);
         assert!(
             result
@@ -1388,16 +1383,15 @@ mod tests {
             "fn main() {\n    println!(\"old\");\n}\n",
         )
         .unwrap();
-        let tool = ApplyPatchTool;
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n*** End Patch"
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n*** End Patch"
+            }),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1414,16 +1408,15 @@ mod tests {
             "Hello from apply_patch!\nLine two.\n",
         )
         .unwrap();
-        let tool = ApplyPatchTool;
-        let result = tool
-            .execute(
-                "apply_patch",
-                &json!({
-                    "workdir": dir.path().to_str().unwrap(),
-                    "input": "*** Begin Patch\n*** Update File: hello.txt\n@@ \n Hello from apply_patch!\n-Line two.\n+Line two updated by patch.\n+Line three added.\n*** End Patch"
-                }),
-            )
-            .await;
+        let result = lash::testing::run_tool(
+            &ApplyPatchTool,
+            "apply_patch",
+            &json!({
+                "workdir": dir.path().to_str().unwrap(),
+                "input": "*** Begin Patch\n*** Update File: hello.txt\n@@ \n Hello from apply_patch!\n-Line two.\n+Line two updated by patch.\n+Line three added.\n*** End Patch"
+            }),
+        )
+        .await;
 
         assert!(result.success, "{}", result.result);
         assert_eq!(

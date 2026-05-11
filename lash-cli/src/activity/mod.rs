@@ -516,7 +516,7 @@ pub(crate) mod tests {
 
         async fn spawn_agent(
             &self,
-            _context: &lash::ToolExecutionContext,
+            _context: &lash::ToolContext,
             _request: SpawnAgentRequest,
         ) -> Result<SpawnAgentResponse, String> {
             unreachable!("MockSubagentHost is read-only")
@@ -524,7 +524,7 @@ pub(crate) mod tests {
 
         async fn wait_agent(
             &self,
-            _context: &lash::ToolExecutionContext,
+            _context: &lash::ToolContext,
             _request: WaitAgentRequest,
         ) -> Result<WaitAgentResponse, String> {
             unreachable!("MockSubagentHost is read-only")
@@ -532,7 +532,7 @@ pub(crate) mod tests {
 
         async fn close_agent(
             &self,
-            _context: &lash::ToolExecutionContext,
+            _context: &lash::ToolContext,
             _request: CloseAgentRequest,
         ) -> Result<CloseAgentResponse, String> {
             unreachable!("MockSubagentHost is read-only")

@@ -60,8 +60,7 @@ pub struct CompletedToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
-    pub raw_result: ToolResult,
-    pub state_result: ToolResult,
+    pub result: ToolResult,
     pub model_result: ToolResult,
     pub duration_ms: u64,
     /// See [`PendingToolCall::item_id`].
@@ -1070,8 +1069,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
-                result: outcome.state_result.result.clone(),
-                success: outcome.state_result.success,
+                result: outcome.result.result.clone(),
+                success: outcome.result.success,
                 duration_ms: outcome.duration_ms,
             });
         }

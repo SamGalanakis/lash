@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::ToolResult;
 use crate::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
-    ToolResultProjectionContext, ToolResultProjectionHook,
+    ToolResultProjectionContext,
 };
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
@@ -83,37 +83,26 @@ impl SessionPlugin for ToolResultProjectionPlugin {
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-        register_projector(reg, ToolResultProjectionHook::BeforeState, &self.config)?;
-        register_projector(reg, ToolResultProjectionHook::BeforeModel, &self.config)?;
-        register_projector(reg, ToolResultProjectionHook::BeforeHistory, &self.config)?;
-        Ok(())
+        register_projector(reg, &self.config)
     }
 }
 
 fn register_projector(
     reg: &mut PluginRegistrar,
-    hook: ToolResultProjectionHook,
     config: &ToolResultProjectionPluginConfig,
 ) -> Result<(), PluginError> {
     let config = config.clone();
-    reg.tool_results().projector(
-        hook,
-        Arc::new(move |ctx| {
-            let config = config.clone();
-            Box::pin(async move { Ok(project_tool_result(&config, ctx)) })
-        }),
-    )
+    reg.tool_results().projector(Arc::new(move |ctx| {
+        let config = config.clone();
+        Box::pin(async move { Ok(project_tool_result(&config, ctx)) })
+    }))
 }
 
 fn project_tool_result(
     config: &ToolResultProjectionPluginConfig,
     ctx: ToolResultProjectionContext,
 ) -> ToolResult {
-    let result = match ctx.hook {
-        ToolResultProjectionHook::BeforeState => project_stateful_value(config, &ctx),
-        ToolResultProjectionHook::BeforeModel => project_model_value(config, &ctx),
-        ToolResultProjectionHook::BeforeHistory => project_stateful_value(config, &ctx),
-    };
+    let result = project_model_value(config, &ctx);
     ToolResult {
         success: ctx.result.success,
         result,
@@ -139,16 +128,6 @@ fn project_model_value(
         tool_projection_direction(&ctx.tool_name),
         Some(ctx),
     ))
-}
-
-fn project_stateful_value(
-    config: &ToolResultProjectionPluginConfig,
-    ctx: &ToolResultProjectionContext,
-) -> serde_json::Value {
-    if ctx.tool_name == "batch" {
-        return project_batch_value(config, ctx);
-    }
-    project_json_value(&ctx.result.result, config, ctx)
 }
 
 fn render_tool_result_payload(success: bool, value: &serde_json::Value) -> String {
@@ -551,7 +530,6 @@ fn project_batch_child_value(
         project_tool_result(
             config,
             ToolResultProjectionContext {
-                hook: ctx.hook,
                 session_id: ctx.session_id.clone(),
                 tool_name: tool_name.clone(),
                 args: child_args,
@@ -621,7 +599,6 @@ mod tests {
             "this is an example of a long output that should be truncated",
             &config,
             &ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeHistory,
                 session_id: "root".to_string(),
                 tool_name: "grep".to_string(),
                 args: json!({}),
@@ -635,68 +612,6 @@ mod tests {
     }
 
     #[test]
-    fn history_projection_preserves_shape() {
-        let config = ToolResultProjectionPluginConfig {
-            limit: 512,
-            ..ToolResultProjectionPluginConfig::default()
-        };
-        let projected = project_tool_result(
-            &config,
-            ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeHistory,
-                session_id: "root".to_string(),
-                tool_name: "exec_command".to_string(),
-                args: json!({}),
-                result: ToolResult::ok(json!({
-                    "output": "x".repeat(20_000),
-                    "nested": { "stderr": "y".repeat(20_000) }
-                })),
-                duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
-            },
-        );
-        assert!(projected.result.is_object());
-        let output = projected
-            .result
-            .get("output")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        assert!(output.contains("bytes truncated"));
-        assert!(output.contains("Full output saved to:"));
-    }
-
-    #[test]
-    fn state_projection_preserves_shape() {
-        let config = ToolResultProjectionPluginConfig {
-            limit: 512,
-            ..ToolResultProjectionPluginConfig::default()
-        };
-        let projected = project_tool_result(
-            &config,
-            ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeState,
-                session_id: "root".to_string(),
-                tool_name: "exec_command".to_string(),
-                args: json!({}),
-                result: ToolResult::ok(json!({
-                    "output": "x".repeat(20_000),
-                    "nested": { "stderr": "y".repeat(20_000) }
-                })),
-                duration_ms: 1,
-                host: Arc::new(NoopSessionManager),
-            },
-        );
-        assert!(projected.result.is_object());
-        let output = projected
-            .result
-            .get("output")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        assert!(output.contains("bytes truncated"));
-        assert!(output.contains("Full output saved to:"));
-    }
-
-    #[test]
     fn truncation_hint_reuses_existing_full_output_path() {
         let config = ToolResultProjectionPluginConfig {
             limit: 512,
@@ -705,7 +620,6 @@ mod tests {
         let projected = project_tool_result(
             &config,
             ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeState,
                 session_id: "root".to_string(),
                 tool_name: "exec_command".to_string(),
                 args: json!({}),
@@ -717,11 +631,7 @@ mod tests {
                 host: Arc::new(NoopSessionManager),
             },
         );
-        let output = projected
-            .result
-            .get("output")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
+        let output = projected.result.as_str().unwrap_or_default();
         assert!(output.contains("Full output saved to: /tmp/existing-shell-output.log"));
     }
 
@@ -735,7 +645,6 @@ mod tests {
         let projected = project_tool_result(
             &config,
             ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeModel,
                 session_id: "root".to_string(),
                 tool_name: "search_tools".to_string(),
                 args: json!({}),
@@ -761,7 +670,6 @@ mod tests {
         let projected = project_tool_result(
             &ToolResultProjectionPluginConfig::default(),
             ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeModel,
                 session_id: "root".to_string(),
                 tool_name: "batch".to_string(),
                 args: json!({}),
@@ -796,7 +704,6 @@ mod tests {
                 ..ToolResultProjectionPluginConfig::default()
             },
             ToolResultProjectionContext {
-                hook: ToolResultProjectionHook::BeforeHistory,
                 session_id: "root".to_string(),
                 tool_name: "batch".to_string(),
                 args: json!({}),

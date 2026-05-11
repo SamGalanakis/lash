@@ -1,9 +1,11 @@
-use super::helpers::RuntimeEventBridge;
+use super::helpers::TurnActivityBridge;
 use super::*;
 use crate::app::App;
 use crate::clipboard::{ClipboardEnv, osc52_allowed_by_env, osc52_sequence_for};
 use crate::editor::LARGE_PASTE_CHAR_THRESHOLD;
 use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_action};
+use lash::SessionPolicy;
+use lash_embed::{TurnActivity, TurnActivityId, TurnActivitySink};
 
 async fn monitor_test_session() -> lash_embed::LashSession {
     lash_embed::LashCore::standard()
@@ -19,28 +21,37 @@ async fn monitor_test_session() -> lash_embed::LashSession {
 #[tokio::test]
 async fn runtime_event_bridge_coalesces_text_before_structural_event() {
     let mut pump = crate::event::AppEventPump::new();
-    let sink = RuntimeEventBridge::spawn(7, pump.sender());
+    let sink = TurnActivityBridge::spawn(7, pump.sender());
 
-    sink.emit(SessionEvent::TextDelta {
-        content: "Hello".to_string(),
-    })
+    sink.emit(TurnActivity::new(
+        TurnActivityId::new("assistant"),
+        TurnEvent::AssistantProseDelta {
+            text: "Hello".to_string(),
+        },
+    ))
     .await;
-    sink.emit(SessionEvent::TextDelta {
-        content: ", world".to_string(),
-    })
+    sink.emit(TurnActivity::new(
+        TurnActivityId::new("assistant"),
+        TurnEvent::AssistantProseDelta {
+            text: ", world".to_string(),
+        },
+    ))
     .await;
-    sink.emit(SessionEvent::Message {
-        text: "done".to_string(),
-        kind: "system".to_string(),
-    })
+    sink.emit(TurnActivity::independent(TurnEvent::ModelRequestStarted {
+        mode_iteration: 0,
+    }))
     .await;
 
     let first = pump.recv().await.expect("text event").event;
     match first {
         AppEvent::Session {
             stream_id: 7,
-            event: SessionEvent::TextDelta { content },
-        } => assert_eq!(content, "Hello, world"),
+            activity:
+                TurnActivity {
+                    event: TurnEvent::AssistantProseDelta { text },
+                    ..
+                },
+        } => assert_eq!(text, "Hello, world"),
         _ => panic!("expected coalesced text delta"),
     }
 
@@ -49,7 +60,10 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
         second,
         AppEvent::Session {
             stream_id: 7,
-            event: SessionEvent::Message { .. },
+            activity: TurnActivity {
+                event: TurnEvent::ModelRequestStarted { .. },
+                ..
+            },
         }
     ));
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::plugin::PluginError;
 
-use super::{PathResolver, SanitizerPolicy, SessionStoreFactory, TerminationPolicy};
+use super::{SessionStoreFactory, TerminationPolicy};
 
 /// Category of a registered background task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,45 +74,6 @@ pub struct ManagedTaskStatus {
 /// has no tokio handle.
 pub type ManagedTaskCancel =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
-
-/// Default resolver for file and directory references.
-#[derive(Default)]
-pub struct DefaultPathResolver;
-
-impl PathResolver for DefaultPathResolver {
-    fn resolve(&self, path: &str, expect_file: bool, base_dir: &Path) -> Result<PathBuf, String> {
-        if path.is_empty() {
-            return Err("Path reference cannot be empty".to_string());
-        }
-        let p = Path::new(path);
-        let candidate = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            base_dir.join(p)
-        };
-        if !candidate.exists() {
-            return Err(format!(
-                "Referenced path does not exist: {}",
-                candidate.display()
-            ));
-        }
-        if expect_file && !candidate.is_file() {
-            return Err(format!(
-                "Referenced path is not a file: {}",
-                candidate.display()
-            ));
-        }
-        if !expect_file && !candidate.is_dir() {
-            return Err(format!(
-                "Referenced path is not a directory: {}",
-                candidate.display()
-            ));
-        }
-        candidate
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize {}: {e}", candidate.display()))
-    }
-}
 
 /// Host-owned session task execution policy.
 #[async_trait::async_trait]
@@ -401,44 +362,28 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
 /// Required host configuration for all runtimes.
 #[derive(Clone)]
 pub struct RuntimeCoreConfig {
-    pub base_dir: PathBuf,
-    pub path_resolver: Arc<dyn PathResolver>,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
-    pub sanitizer: SanitizerPolicy,
     pub termination: TerminationPolicy,
 }
 
 impl Default for RuntimeCoreConfig {
     fn default() -> Self {
         Self {
-            base_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            path_resolver: Arc::new(DefaultPathResolver),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
-            sanitizer: SanitizerPolicy::default(),
             termination: TerminationPolicy::default(),
         }
     }
 }
 
 impl RuntimeCoreConfig {
-    pub fn with_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
-        self.base_dir = base_dir.into();
-        self
-    }
-
-    pub fn with_path_resolver(mut self, path_resolver: Arc<dyn PathResolver>) -> Self {
-        self.path_resolver = path_resolver;
-        self
-    }
-
     pub fn with_attachment_store(
         mut self,
         attachment_store: Arc<dyn crate::AttachmentStore>,
@@ -494,11 +439,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_trace_context(mut self, context: TraceContext) -> Self {
         self.trace_context = context;
-        self
-    }
-
-    pub fn with_sanitizer(mut self, sanitizer: SanitizerPolicy) -> Self {
-        self.sanitizer = sanitizer;
         self
     }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use lash::{ToolAvailability, ToolDefinition, ToolExecutionContext, ToolProvider, ToolResult};
+use lash::{ToolAvailability, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult};
 use serde_json::{Value, json};
 
 use crate::catalog::CatalogTool;
@@ -51,7 +51,7 @@ impl ToolDiscoveryToolsProvider {
         &self,
         args: &Value,
         catalog: Vec<Value>,
-        context: &ToolExecutionContext,
+        context: &ToolContext,
     ) -> ToolResult {
         let index = self.index_for_catalog(catalog);
         let limit = limit_from_args(args);
@@ -63,7 +63,7 @@ impl ToolDiscoveryToolsProvider {
 
         let request = llm_rerank_request(args, &candidates, limit);
         let completion = match context
-            .host
+            .host()
             .direct_completion(request, "search_tools")
             .await
         {
@@ -120,8 +120,8 @@ impl ToolDiscoveryToolsProvider {
         }
     }
 
-    async fn load_tools(&self, args: &Value, context: &ToolExecutionContext) -> ToolResult {
-        let catalog = match context.host.tool_catalog(&context.session_id).await {
+    async fn load_tools(&self, args: &Value, context: &ToolContext) -> ToolResult {
+        let catalog = match context.host().tool_catalog(context.session_id()).await {
             Ok(catalog) => catalog,
             Err(err) => return ToolResult::err_fmt(err.to_string()),
         };
@@ -141,7 +141,7 @@ impl ToolDiscoveryToolsProvider {
 
         let mut loaded = Vec::new();
         let mut already_callable = Vec::new();
-        let mut already_documented = Vec::new();
+        let mut already_showcased = Vec::new();
         let mut not_loadable = Vec::new();
         let mut unknown = Vec::new();
         let mut to_promote = Vec::new();
@@ -153,8 +153,8 @@ impl ToolDiscoveryToolsProvider {
             };
             if tool.callable {
                 already_callable.push(name);
-            } else if tool.documented {
-                already_documented.push(name);
+            } else if tool.showcased {
+                already_showcased.push(name);
             } else if tool.loadable {
                 to_promote.push(name.clone());
                 loaded.push(name);
@@ -165,11 +165,11 @@ impl ToolDiscoveryToolsProvider {
 
         if !to_promote.is_empty()
             && let Err(err) = context
-                .host
+                .host()
                 .set_tools_availability(
-                    &context.session_id,
+                    context.session_id(),
                     &to_promote,
-                    Some(ToolAvailability::Documented),
+                    Some(ToolAvailability::Showcased),
                 )
                 .await
         {
@@ -179,7 +179,7 @@ impl ToolDiscoveryToolsProvider {
         ToolResult::ok(json!({
             "loaded": loaded,
             "already_callable": already_callable,
-            "already_documented": already_documented,
+            "already_showcased": already_showcased,
             "not_loadable": not_loadable,
             "unknown": unknown,
         }))
@@ -192,23 +192,19 @@ impl ToolProvider for ToolDiscoveryToolsProvider {
         vec![search_tools_definition(), load_tools_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
-        ToolResult::err_fmt(format_args!("Unknown tool: {name}"))
-    }
-
-    async fn execute_with_context(
-        &self,
-        name: &str,
-        args: &Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        match name {
-            "search_tools" => match context.host.tool_catalog(&context.session_id).await {
-                Ok(catalog) => self.search_tools(args, catalog, context).await,
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "search_tools" => match call
+                .context
+                .host()
+                .tool_catalog(call.context.session_id())
+                .await
+            {
+                Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },
-            "load_tools" => self.load_tools(args, context).await,
-            _ => self.execute(name, args).await,
+            "load_tools" => self.load_tools(call.args, call.context).await,
+            _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         }
     }
 }

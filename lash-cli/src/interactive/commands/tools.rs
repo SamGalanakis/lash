@@ -1,5 +1,5 @@
-use lash::*;
-use lash_embed::LashSession;
+use lash::ToolState;
+use lash_embed::{LashSession, advanced::ExecutionMode, tools::ToolAvailability};
 
 use crate::app::App;
 use crate::{hash12, push_system_message};
@@ -8,27 +8,27 @@ use super::super::runtime::{apply_pending_reconfigure, parse_kv_args};
 
 fn availability_label(availability: ToolAvailability) -> &'static str {
     match availability {
-        ToolAvailability::Hidden => "hidden",
-        ToolAvailability::Discoverable => "discoverable",
+        ToolAvailability::Off => "off",
+        ToolAvailability::Searchable => "searchable",
         ToolAvailability::Callable => "callable",
-        ToolAvailability::Documented => "documented",
+        ToolAvailability::Showcased => "showcased",
     }
 }
 
 fn parse_availability(raw: &str) -> Option<ToolAvailability> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "hidden" => Some(ToolAvailability::Hidden),
-        "discoverable" => Some(ToolAvailability::Discoverable),
+        "off" => Some(ToolAvailability::Off),
+        "searchable" => Some(ToolAvailability::Searchable),
         "callable" => Some(ToolAvailability::Callable),
-        "documented" => Some(ToolAvailability::Documented),
+        "showcased" => Some(ToolAvailability::Showcased),
         _ => None,
     }
 }
 
 fn update_documentation_state(availability: ToolAvailability, injected: bool) -> ToolAvailability {
     match (availability, injected) {
-        (ToolAvailability::Documented, false) => ToolAvailability::Callable,
-        (ToolAvailability::Callable, true) => ToolAvailability::Documented,
+        (ToolAvailability::Showcased, false) => ToolAvailability::Callable,
+        (ToolAvailability::Callable, true) => ToolAvailability::Showcased,
         (other, _) => other,
     }
 }
@@ -135,7 +135,7 @@ pub(super) async fn handle_tools(
                 let Some(availability) = parse_availability(raw) else {
                     push_system_message(
                         app,
-                        "Invalid availability. Use: hidden, discoverable, callable, documented",
+                        "Invalid availability. Use: off, searchable, callable, showcased",
                     );
                     return Ok(false);
                 };
@@ -172,7 +172,7 @@ pub(super) async fn handle_tools(
             };
             if desired_tool_state.contains(name) {
                 desired_tool_state
-                    .set_availability(name, Some(ToolAvailability::Hidden))
+                    .set_availability(name, Some(ToolAvailability::Off))
                     .expect("checked contains");
                 *pending_reconfigure = true;
                 push_system_message(app, format!("Tool `{name}` staged for disable."));

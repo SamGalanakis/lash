@@ -14,8 +14,8 @@ use crate::tool_dispatch::{
 };
 use crate::{
     PluginMessage, PromptContribution, RuntimeServices, RuntimeSessionHost, SandboxMessage,
-    SessionEvent, ToolCallRecord, ToolExecutionContext, ToolImage, ToolProvider, ToolResultView,
-    TurnActivity, TurnActivityId, TurnEvent,
+    SessionEvent, ToolCallRecord, ToolContext, ToolImage, ToolProvider, TurnActivity,
+    TurnActivityId, TurnEvent,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ impl ToolSurfaceHandle {
     fn catalog(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(self.0.derived.catalog.get_or_init(|| {
             Arc::new(crate::tool_registry::project_tool_catalog(
-                self.0.surface.discoverable_tools_iter().cloned(),
+                self.0.surface.searchable_tools_iter().cloned(),
             ))
         }))
     }
@@ -330,7 +330,7 @@ impl ModeExecutionContext {
         let event_tx = self.dispatch.event_tx.clone();
         let progress_handle = tokio::spawn(async move {
             while let Some(sandbox_msg) = progress_rx.recv().await {
-                if sandbox_msg.kind != "final" {
+                if sandbox_msg.kind != "final" && sandbox_msg.kind != "lashlang_code" {
                     let _ = event_tx
                         .send(SessionEvent::Message {
                             text: sandbox_msg.text,
@@ -341,14 +341,13 @@ impl ModeExecutionContext {
             }
         });
 
-        let tool_context = crate::ToolExecutionContext {
-            session_id: self.dispatch.session_id.clone(),
-            host: Arc::clone(&self.dispatch.host),
-            cancellation_token: self.cancellation_token.clone(),
-            async_task_id: None,
-            turn_context: self.dispatch.turn_context.clone(),
-            tool_call_id: Some(call_id.clone()),
-        };
+        let mut tool_context = crate::ToolContext::new(
+            self.dispatch.session_id.clone(),
+            Arc::clone(&self.dispatch.host),
+            self.dispatch.turn_context.clone(),
+            Some(call_id.clone()),
+        );
+        tool_context.cancellation_token = self.cancellation_token.clone();
         let mut outcome = dispatch_tool_call_with_execution_context(
             &self.dispatch,
             name,
@@ -361,38 +360,20 @@ impl ModeExecutionContext {
         drop(progress_tx);
         let _ = progress_handle.await;
 
-        let raw_result = crate::ToolResult {
+        let result = crate::ToolResult {
             success: outcome.record.success,
             result: outcome.record.result.clone(),
             images: outcome.images.clone(),
             control: outcome.record.control.clone(),
         };
-        let state_result = match self
-            .dispatch
-            .plugins
-            .project_tool_result(crate::plugin::ToolResultProjectionContext {
-                hook: crate::plugin::ToolResultProjectionHook::BeforeState,
-                session_id: self.dispatch.session_id.clone(),
-                tool_name: outcome.record.tool.clone(),
-                args: outcome.record.args.clone(),
-                result: raw_result.clone(),
-                duration_ms: outcome.record.duration_ms,
-                host: self.dispatch.host.clone(),
-            })
-            .await
-        {
-            Ok(projected) => projected,
-            Err(err) => crate::ToolResult::err_fmt(err.to_string()),
-        };
         let model_result = match self
             .dispatch
             .plugins
             .project_tool_result(crate::plugin::ToolResultProjectionContext {
-                hook: crate::plugin::ToolResultProjectionHook::BeforeModel,
                 session_id: self.dispatch.session_id.clone(),
                 tool_name: outcome.record.tool.clone(),
                 args: outcome.record.args.clone(),
-                result: raw_result.clone(),
+                result: result.clone(),
                 duration_ms: outcome.record.duration_ms,
                 host: self.dispatch.host.clone(),
             })
@@ -408,12 +389,8 @@ impl ModeExecutionContext {
                 call_id: Some(call_id.clone()),
                 name: outcome.record.tool.clone(),
                 args: outcome.record.args.clone(),
-                result: ToolResultView {
-                    raw: raw_result.result.clone(),
-                    for_model: model_result.result.clone(),
-                    for_state: state_result.result.clone(),
-                },
-                success: state_result.success,
+                result: result.result.clone(),
+                success: result.success,
                 duration_ms: outcome.record.duration_ms,
             },
         )
@@ -423,10 +400,10 @@ impl ModeExecutionContext {
             call_id: Some(call_id.clone()),
             tool: outcome.record.tool.clone(),
             args: outcome.record.args.clone(),
-            result: state_result.result.clone(),
-            success: state_result.success,
+            result: result.result.clone(),
+            success: result.success,
             duration_ms: outcome.record.duration_ms,
-            control: raw_result.control.clone(),
+            control: result.control.clone(),
         };
         CompletedModeToolCall {
             index,
@@ -434,8 +411,7 @@ impl ModeExecutionContext {
                 call_id,
                 tool_name: outcome.record.tool,
                 args: outcome.record.args,
-                raw_result,
-                state_result,
+                result,
                 model_result,
                 duration_ms: outcome.record.duration_ms,
                 item_id,
@@ -461,13 +437,13 @@ impl ModeExecutionContext {
         let executed = self
             .execute_tool_call(call_id, name, args, index, None)
             .await;
-        let reply = if executed.completed.raw_result.success {
+        let reply = if executed.completed.result.success {
             ModeToolReply::success_with_images(
-                executed.completed.raw_result.result.clone(),
-                executed.completed.raw_result.images.clone(),
+                executed.completed.result.result.clone(),
+                executed.completed.result.images.clone(),
             )
         } else {
-            ModeToolReply::error(executed.completed.raw_result.result.clone())
+            ModeToolReply::error(executed.completed.result.result.clone())
         };
         reply.with_record(executed.record)
     }
@@ -714,14 +690,12 @@ impl ModeExecutionContext {
         let dispatch = Arc::clone(&self.dispatch);
         let async_call_id = handle_id.clone();
         let join_handle = tokio::spawn(async move {
-            let tool_context = ToolExecutionContext {
-                session_id: dispatch.session_id.clone(),
-                host: Arc::clone(&dispatch.host),
-                cancellation_token: None,
-                async_task_id: None,
-                turn_context: dispatch.turn_context.clone(),
-                tool_call_id: Some(async_call_id),
-            }
+            let tool_context = ToolContext::new(
+                dispatch.session_id.clone(),
+                Arc::clone(&dispatch.host),
+                dispatch.turn_context.clone(),
+                Some(async_call_id),
+            )
             .with_async_task(task_handle_id.clone(), cancellation.clone());
             let outcome = dispatch_tool_call_with_execution_context(
                 &dispatch,
@@ -766,10 +740,10 @@ impl ModeExecutionContext {
             .execute_tool_call(call_id, "monitor".to_string(), args, tc_num, None)
             .await;
 
-        let reply = if executed.completed.raw_result.success {
+        let reply = if executed.completed.result.success {
             let task_id = executed
                 .completed
-                .raw_result
+                .result
                 .result
                 .get("task_id")
                 .and_then(|value| value.as_str())
@@ -788,12 +762,12 @@ impl ModeExecutionContext {
                 None => ModeToolReply::error(json!("monitor started but did not return a task_id")),
             }
         } else {
-            ModeToolReply::error(executed.completed.raw_result.result.clone())
+            ModeToolReply::error(executed.completed.result.result.clone())
         };
 
         ModeToolReply {
             record: Some(executed.record),
-            images: executed.completed.raw_result.images,
+            images: executed.completed.result.images,
             ..reply
         }
     }

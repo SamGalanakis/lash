@@ -308,10 +308,10 @@ impl PluginHost {
             checkpoint_hooks: reg.checkpoint_hooks,
             assistant_stream_hooks: reg.assistant_stream_hooks,
             assistant_response_hooks: reg.assistant_response_hooks,
-            tool_result_projectors: reg.tool_result_projectors,
+            tool_result_projector: reg.tool_result_projector,
             runtime_event_hooks: reg.runtime_event_hooks,
             session_config_mutators: reg.session_config_mutators,
-            external_ops: reg.external_ops,
+            plugin_actions: reg.plugin_actions,
             monitor_specs: reg.monitor_specs,
             turn_context_transforms: {
                 let mut list = reg.turn_context_transforms;
@@ -343,7 +343,7 @@ impl PluginHost {
         Ok(session)
     }
 
-    pub async fn invoke_external_sessionless(
+    pub async fn invoke_plugin_action_sessionless(
         &self,
         name: &str,
         args: serde_json::Value,
@@ -353,7 +353,7 @@ impl PluginHost {
             None,
         )?;
         session
-            .invoke_external(name, args, None, false, Arc::new(NoopSessionManager))
+            .invoke_plugin_action(name, args, None, false, Arc::new(NoopSessionManager))
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))
     }
@@ -386,40 +386,44 @@ impl PluginHost {
         Ok(())
     }
 
-    pub fn session(&self, session_id: &str) -> Result<Arc<PluginSession>, ExternalInvokeError> {
+    pub fn session(&self, session_id: &str) -> Result<Arc<PluginSession>, PluginActionInvokeError> {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| ExternalInvokeError::SessionRegistryPoisoned)?;
+            .map_err(|_| PluginActionInvokeError::SessionRegistryPoisoned)?;
         let Some(weak) = sessions.get(session_id).cloned() else {
-            return Err(ExternalInvokeError::UnknownSession(session_id.to_string()));
+            return Err(PluginActionInvokeError::UnknownSession(
+                session_id.to_string(),
+            ));
         };
         match weak.upgrade() {
             Some(session) => Ok(session),
             None => {
                 sessions.remove(session_id);
-                Err(ExternalInvokeError::UnknownSession(session_id.to_string()))
+                Err(PluginActionInvokeError::UnknownSession(
+                    session_id.to_string(),
+                ))
             }
         }
     }
 
-    pub async fn invoke_external_for_session(
+    pub async fn invoke_plugin_action_for_session(
         &self,
         session_id: &str,
         name: &str,
         args: serde_json::Value,
         host: Arc<dyn RuntimeSessionHost>,
-    ) -> Result<ToolResult, ExternalInvokeError> {
+    ) -> Result<ToolResult, PluginActionInvokeError> {
         let session = self.session(session_id)?;
         session
-            .invoke_external(name, args, Some(session_id.to_string()), false, host)
+            .invoke_plugin_action(name, args, Some(session_id.to_string()), false, host)
             .await
     }
 
     pub fn monitor_specs_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::PluginOwned<crate::MonitorSpec>>, ExternalInvokeError> {
+    ) -> Result<Vec<crate::PluginOwned<crate::MonitorSpec>>, PluginActionInvokeError> {
         Ok(self.session(session_id)?.monitor_specs().to_vec())
     }
 }

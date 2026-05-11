@@ -49,29 +49,6 @@ fn exclusive_hook_owner(
     Ok(plugin_id)
 }
 
-fn register_exclusive_hook<K, H>(
-    hooks: &mut BTreeMap<K, RegisteredExclusiveHook<H>>,
-    registering_plugin_id: &Option<String>,
-    hook_kind: &str,
-    hook_name: &str,
-    key: K,
-    hook: H,
-) -> Result<(), PluginError>
-where
-    K: Ord,
-{
-    let plugin_id = exclusive_hook_owner(
-        hooks
-            .get(&key)
-            .map(|registered| registered.plugin_id.as_str()),
-        registering_plugin_id,
-        hook_kind,
-        hook_name,
-    )?;
-    hooks.insert(key, RegisteredExclusiveHook { plugin_id, hook });
-    Ok(())
-}
-
 fn register_singleton_hook<H>(
     slot: &mut Option<RegisteredExclusiveHook<H>>,
     registering_plugin_id: &Option<String>,
@@ -103,11 +80,10 @@ pub struct PluginRegistrar {
     pub(crate) checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
     pub(crate) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(crate) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    pub(crate) tool_result_projectors:
-        BTreeMap<ToolResultProjectionHook, RegisteredExclusiveHook<ToolResultProjector>>,
+    pub(crate) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
     pub(crate) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
-    pub(crate) external_ops: BTreeMap<String, RegisteredExternalOp>,
+    pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(crate) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
@@ -209,12 +185,8 @@ pub struct ToolResultRegistrations<'a> {
 }
 
 impl ToolResultRegistrations<'_> {
-    pub fn projector(
-        self,
-        hook_name: ToolResultProjectionHook,
-        hook: ToolResultProjector,
-    ) -> Result<(), PluginError> {
-        self.reg.add_tool_result_projector(hook_name, hook)
+    pub fn projector(self, hook: ToolResultProjector) -> Result<(), PluginError> {
+        self.reg.add_tool_result_projector(hook)
     }
 }
 
@@ -242,23 +214,23 @@ impl MonitorRegistrations<'_> {
     }
 }
 
-pub struct ExternalRegistrations<'a> {
+pub struct PluginActionRegistrations<'a> {
     reg: &'a mut PluginRegistrar,
 }
 
-impl ExternalRegistrations<'_> {
-    pub fn op(self, def: ExternalOpDef, handler: ExternalInvokeHandler) -> Result<(), PluginError> {
-        self.reg.add_external_op(def, handler)
+impl PluginActionRegistrations<'_> {
+    pub fn op(self, def: PluginActionDef, handler: PluginActionHandler) -> Result<(), PluginError> {
+        self.reg.add_plugin_action(def, handler)
     }
 
     pub fn typed<Op, F, Fut>(self, handler: F) -> Result<(), PluginError>
     where
-        Op: TypedExternalOp,
-        F: Fn(ExternalInvokeContext, Op::Args) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Op::Output, TypedExternalOpError>> + Send + 'static,
+        Op: PluginAction,
+        F: Fn(PluginActionContext, Op::Args) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Op::Output, PluginActionFailure>> + Send + 'static,
     {
         self.op(
-            typed_external_op_def::<Op>(),
+            plugin_action_def::<Op>(),
             Arc::new(move |ctx, args| {
                 let parsed = serde_json::from_value::<Op::Args>(args);
                 match parsed {
@@ -345,10 +317,10 @@ impl PluginRegistrar {
             checkpoint_hooks: Vec::new(),
             assistant_stream_hooks: Vec::new(),
             assistant_response_hooks: Vec::new(),
-            tool_result_projectors: BTreeMap::new(),
+            tool_result_projector: None,
             runtime_event_hooks: Vec::new(),
             session_config_mutators: Vec::new(),
-            external_ops: BTreeMap::new(),
+            plugin_actions: BTreeMap::new(),
             monitor_specs: Vec::new(),
             turn_context_transforms: Vec::new(),
             history_rewriters: Vec::new(),
@@ -395,8 +367,8 @@ impl PluginRegistrar {
         SessionRegistrations { reg: self }
     }
 
-    pub fn external(&mut self) -> ExternalRegistrations<'_> {
-        ExternalRegistrations { reg: self }
+    pub fn actions(&mut self) -> PluginActionRegistrations<'_> {
+        PluginActionRegistrations { reg: self }
     }
 
     pub fn monitors(&mut self) -> MonitorRegistrations<'_> {
@@ -504,34 +476,29 @@ impl PluginRegistrar {
         );
     }
 
-    fn add_tool_result_projector(
-        &mut self,
-        hook_name: ToolResultProjectionHook,
-        hook: ToolResultProjector,
-    ) -> Result<(), PluginError> {
-        register_exclusive_hook(
-            &mut self.tool_result_projectors,
+    fn add_tool_result_projector(&mut self, hook: ToolResultProjector) -> Result<(), PluginError> {
+        register_singleton_hook(
+            &mut self.tool_result_projector,
             &self.registering_plugin_id,
             "tool result projector",
-            hook_name.as_str(),
-            hook_name,
+            "model_observation",
             hook,
         )
     }
 
-    fn add_external_op(
+    fn add_plugin_action(
         &mut self,
-        def: ExternalOpDef,
-        handler: ExternalInvokeHandler,
+        def: PluginActionDef,
+        handler: PluginActionHandler,
     ) -> Result<(), PluginError> {
-        if self.external_ops.contains_key(&def.name) {
+        if self.plugin_actions.contains_key(&def.name) {
             return Err(PluginError::Registration(format!(
-                "duplicate external invoke name `{}`",
+                "duplicate plugin action name `{}`",
                 def.name
             )));
         }
-        self.external_ops
-            .insert(def.name.clone(), RegisteredExternalOp { def, handler });
+        self.plugin_actions
+            .insert(def.name.clone(), RegisteredPluginAction { def, handler });
         Ok(())
     }
 

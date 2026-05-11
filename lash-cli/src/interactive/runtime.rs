@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
 use lash::session_model::{Part, PartKind, PruneState};
-use lash::{PluginMessage, *};
+use lash::{
+    AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, InputItem,
+    MediaType, Message, MessageRole, PluginMessage, ToolState, TurnInput,
+};
 use lash_embed::LashSession;
 
-use super::helpers::RuntimeEventBridge;
+use super::helpers::TurnActivityBridge;
 use super::*;
 use crate::event::AppEventTx;
 use crate::input_items::build_items_from_editor_input;
@@ -13,7 +16,7 @@ use crate::turn_runner::{RuntimeRunResult, spawn_session_turn};
 pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage {
     let (items, image_blobs) =
         build_items_from_editor_input(&turn.effective_text, turn.images.clone());
-    let attachment_store = lash::FileAttachmentStore::new(crate::paths::attachments_dir());
+    let attachment_store = FileAttachmentStore::new(crate::paths::attachments_dir());
     let mut parts = Vec::new();
     let mut image_ids = Vec::new();
     for item in items {
@@ -36,36 +39,6 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     response_meta: None,
                 });
             }
-            InputItem::FileRef { path } => {
-                parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[file: {path}]"),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
-            InputItem::DirRef { path } => {
-                parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[directory: {}]", path.trim_end_matches('/')),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_item_id: None,
-                    tool_signature: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
             InputItem::ImageRef { id } => {
                 let Some(bytes) = image_blobs.get(&id) else {
                     continue;
@@ -74,9 +47,9 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     continue;
                 }
                 image_ids.push(id.clone());
-                let meta = lash::AttachmentMeta::new(
-                    lash::AttachmentId::new("pending"),
-                    lash::MediaType::Image(lash::ImageMediaType::Png),
+                let meta = AttachmentMeta::new(
+                    AttachmentId::new("pending"),
+                    MediaType::Image(ImageMediaType::Png),
                     bytes.len() as u64,
                     None,
                     None,
@@ -145,6 +118,7 @@ pub(super) async fn apply_pending_reconfigure(
     let generation = session
         .control()
         .tools()
+        .advanced()
         .apply_state(desired_tool_state.clone())
         .await
         .map_err(|err| err.to_string())?;
@@ -236,7 +210,7 @@ pub(super) async fn send_user_message(
         "send_user_message armed runtime return channel"
     );
 
-    let sink = RuntimeEventBridge::spawn(stream_id, app_tx.clone());
+    let sink = TurnActivityBridge::spawn(stream_id, app_tx.clone());
     let (cancel, return_rx) = spawn_session_turn(session, turn_input, sink, stream_id);
     *cancel_token = Some(cancel);
     *runtime_return_rx = Some(return_rx);

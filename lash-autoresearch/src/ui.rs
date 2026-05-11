@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash_embed::TurnEvent;
-use lash_embed::control::TypedExternalOp;
+use lash_embed::control::PluginAction;
 use lash_tui::{
     Axis, Color, Column, ColumnWidth, Constraint, Frame, InputEvent, KeyCode as InputKeyCode,
     KeyEventKind, Layout, Line, Modifier, Rect, Span, Style, Table, TableCell, TableRow,
@@ -11,7 +11,7 @@ use lash_tui::{
 use lash_tui_extensions::{
     KeyChord, KeyCode, KeyModifiers, ShortcutSpec, SlashCommandSpec, TuiExtension,
     TuiExtensionContext, TuiHostEffect, TuiInputOutcome, TuiRenderContext, TuiSurfaceSize,
-    TuiSurfaceSlot, TuiSurfaceSpec, invoke_typed_external,
+    TuiSurfaceSlot, TuiSurfaceSpec, call_plugin_action,
 };
 use serde_json::Value;
 
@@ -256,7 +256,7 @@ impl AutoresearchTuiExtension {
                 Ok(effects)
             }
             Some(raw) if raw.eq_ignore_ascii_case("off") => {
-                let result = invoke_external_op::<crate::AutoresearchStopOp>(
+                let result = invoke_plugin_action_op::<crate::AutoresearchStopOp>(
                     ctx,
                     crate::AutoresearchEmptyArgs {},
                 )
@@ -264,7 +264,7 @@ impl AutoresearchTuiExtension {
                 self.apply_command_result(result, false)
             }
             Some(raw) if raw.eq_ignore_ascii_case("clear") => {
-                let result = invoke_external_op::<crate::AutoresearchClearOp>(
+                let result = invoke_plugin_action_op::<crate::AutoresearchClearOp>(
                     ctx,
                     crate::AutoresearchEmptyArgs {},
                 )
@@ -272,8 +272,8 @@ impl AutoresearchTuiExtension {
                 self.apply_command_result(result, true)
             }
             Some(raw) if raw.eq_ignore_ascii_case("export") => {
-                let result = invoke_typed_external::<crate::AutoresearchExportOp>(
-                    ctx.session,
+                let result = call_plugin_action::<crate::AutoresearchExportOp>(
+                    ctx.actions,
                     crate::AutoresearchEmptyArgs {},
                 )
                 .await?;
@@ -290,7 +290,7 @@ impl AutoresearchTuiExtension {
                 Ok(effects)
             }
             objective => {
-                let result = invoke_external_op::<crate::AutoresearchStartOp>(
+                let result = invoke_plugin_action_op::<crate::AutoresearchStartOp>(
                     ctx,
                     crate::AutoresearchStartArgs {
                         objective: objective.map(str::to_string),
@@ -365,22 +365,19 @@ fn autoresearch_help_text() -> String {
 }
 
 async fn fetch_status(ctx: TuiExtensionContext<'_>) -> Result<StatusSummary, String> {
-    invoke_typed_external::<crate::AutoresearchStatusOp>(
-        ctx.session,
-        crate::AutoresearchEmptyArgs {},
-    )
-    .await
+    call_plugin_action::<crate::AutoresearchStatusOp>(ctx.actions, crate::AutoresearchEmptyArgs {})
+        .await
 }
 
-async fn invoke_external_op<Op>(
+async fn invoke_plugin_action_op<Op>(
     ctx: TuiExtensionContext<'_>,
     args: Op::Args,
 ) -> Result<Value, String>
 where
-    Op: TypedExternalOp,
+    Op: PluginAction,
     Op::Output: serde::Serialize,
 {
-    let result = invoke_typed_external::<Op>(ctx.session, args).await?;
+    let result = call_plugin_action::<Op>(ctx.actions, args).await?;
     serde_json::to_value(result).map_err(|err| format!("invalid autoresearch output: {err}"))
 }
 

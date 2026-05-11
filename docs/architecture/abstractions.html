@@ -63,7 +63,7 @@
                 <tr><td><code>Store</code></td><td><code>lash-sqlite-store</code></td><td>Concrete SQLite implementation for graph nodes, session heads, blobs, checkpoints, usage, tombstones, and vacuum metadata.</td></tr>
                 <tr><td><code>ProviderHandle</code>, <code>ProviderComponents</code></td><td><code>lash/src/provider.rs</code></td><td>Persisted provider handle split by state, auth, readiness, transport, and model policy.</td></tr>
                 <tr><td><code>ToolDefinition</code>, <code>ToolSurface</code>, <code>ToolOutputContract</code></td><td><code>lash-sansio</code></td><td>Tool visibility, model schema, examples, compact docs, and dynamic return contracts.</td></tr>
-                <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and external ops.</td></tr>
+                <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and plugin actions.</td></tr>
                 <tr><td><code>LlmToolsPluginFactory</code>, <code>DirectCompletionHost</code></td><td><code>lash-llm-tools</code> + <code>lash</code></td><td><code>llm_query</code> tool registration, output-schema handling, direct completion, and usage relay.</td></tr>
                 <tr><td><code>RlmControlToolsProvider</code></td><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>Mode-owned RLM control tools such as <code>continue_as</code>, which produces a <code>TurnOutcome::Handoff</code>.</td></tr>
                 <tr><td><code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, <code>ProjectedRead</code></td><td><code>lashlang/src/runtime/mod.rs</code></td><td>Read-only bindings injected from the host into Lashlang scope. RLM uses this to expose <code>history</code> and other projected globals without copying them into VM <code>State</code>; <code>set</code>/<code>set_default</code> over a projected name is rejected at runtime.</td></tr>
@@ -78,7 +78,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Plugin Registration</h2>
-            <p>Plugins are assembled per session. Each plugin can contribute mode drivers, native tools, tool-surface entries, prompt text, lifecycle hooks, external operations, and UI activity.</p>
+            <p>Plugins are assembled per session. Each plugin can contribute mode drivers, native tools, tool-surface entries, prompt text, lifecycle hooks, plugin actions, and UI activity.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Plugin contract shape</div>
@@ -89,7 +89,7 @@ flowchart LR
   Registrar --> Mode["mode hooks<br/>session + driver + native tools"]
   Registrar --> Tools["ToolProvider<br/>ToolSurfaceContributor"]
   Registrar --> Prompt["PromptContributor<br/>context transforms"]
-  Registrar --> Runtime["runtime events<br/>external ops"]
+  Registrar --> Runtime["runtime events<br/>plugin actions"]
   Registrar --> UI["UI activity / panels"]
   Mode --> Session["Session"]
   Tools --> Session

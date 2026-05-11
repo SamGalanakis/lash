@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PathResolver, PersistedSessionState,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PersistedSessionState,
     PersistentRuntimeServices, RuntimeCoreConfig, RuntimePersistence, RuntimeServices,
-    SanitizerPolicy, SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor,
-    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
+    SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor, TerminationPolicy,
+    TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -111,16 +111,6 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
-        self.core = self.core.with_base_dir(base_dir);
-        self
-    }
-
-    pub fn with_path_resolver(mut self, path_resolver: Arc<dyn PathResolver>) -> Self {
-        self.core = self.core.with_path_resolver(path_resolver);
-        self
-    }
-
     pub fn with_attachment_store(
         mut self,
         attachment_store: Arc<dyn crate::AttachmentStore>,
@@ -175,11 +165,6 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_trace_context(mut self, context: lash_trace::TraceContext) -> Self {
         self.core = self.core.with_trace_context(context);
-        self
-    }
-
-    pub fn with_sanitizer(mut self, sanitizer: SanitizerPolicy) -> Self {
-        self.core = self.core.with_sanitizer(sanitizer);
         self
     }
 

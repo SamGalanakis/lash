@@ -13,15 +13,22 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Parser;
 use dataset::{SweBenchInstance, load_instances};
-use lash::plugin::PluginFactory;
-use lash::provider::LashConfig;
 use lash::{
     BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory, EmbeddedRuntimeHost,
-    EventSink, ExecutionMode, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, ProviderHandle, RuntimeCoreConfig, RuntimePersistence,
-    SessionEvent, SessionPolicy, SessionUsageReport, StandardContextApproach,
-    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInput, TurnInputInjectionBridge,
-    diff_usage_reports,
+    InputItem, LashRuntime, PersistedSessionState, PersistentRuntimeServices, PluginHost,
+    RuntimeCoreConfig, RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
+    TokioSessionTaskExecutor, TurnInjectionBridge, TurnInputInjectionBridge,
+};
+use lash_cli::config::LashConfig;
+use lash_embed::{
+    TurnInput,
+    advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
+    plugins::{
+        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
+        PluginSession,
+    },
+    provider::ProviderHandle,
+    usage::{SessionUsageReport, diff_usage_reports},
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
@@ -637,9 +644,7 @@ async fn run_instance(
     );
     let host = BackgroundRuntimeHost::new(
         EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
-                .with_base_dir(&repo_dir)
-                .with_trace_jsonl_path(Some(trace_path.clone())),
+            RuntimeCoreConfig::default().with_trace_jsonl_path(Some(trace_path.clone())),
         ),
         Arc::new(TokioSessionTaskExecutor::default()),
     );
@@ -662,10 +667,9 @@ async fn run_instance(
     let before_usage = runtime.usage_report();
     let turn_started = Instant::now();
     // Each instance runs in its own subprocess (see `spawn_child`), so we
-    // own the process CWD for the duration of this turn. Lash's file tools
-    // resolve paths against the process CWD rather than
-    // `RuntimeCoreConfig::base_dir`, so this is the only way to pin them
-    // to the instance's worktree.
+    // own the process CWD for the duration of this turn. Lash core does not
+    // own filesystem-root policy; file tools resolve paths against process
+    // CWD, so this pins them to the instance's worktree.
     std::env::set_current_dir(&repo_dir)
         .with_context(|| format!("cd into {}", repo_dir.display()))?;
     let turn = runtime
@@ -677,7 +681,7 @@ async fn run_instance(
                 mode_turn_options: None,
                 trace_turn_id: None,
                 mode_extension: None,
-                turn_context: lash::TurnContext::default(),
+                turn_context: TurnContext::default(),
             },
             sink_trait.as_ref(),
             cancel,
@@ -764,38 +768,36 @@ async fn run_instance(
     Ok(result)
 }
 
-fn turn_completed(outcome: &lash::TurnOutcome) -> bool {
+fn turn_completed(outcome: &TurnOutcome) -> bool {
     matches!(
         outcome,
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. }
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
     )
 }
 
-fn turn_status_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(_) | lash::TurnOutcome::Handoff { .. } => "completed",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
-        lash::TurnOutcome::Stopped(_) => "failed",
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => "completed",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "interrupted",
+        TurnOutcome::Stopped(_) => "failed",
     }
 }
 
-fn done_reason_label(outcome: &lash::TurnOutcome) -> &'static str {
+fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
-        lash::TurnOutcome::Finished(lash::TurnFinish::AssistantMessage { .. }) => {
-            "assistant_message"
-        }
-        lash::TurnOutcome::Finished(lash::TurnFinish::SubmittedValue { .. }) => "submitted_value",
-        lash::TurnOutcome::Finished(lash::TurnFinish::ToolValue { .. }) => "tool_value",
-        lash::TurnOutcome::Handoff { .. } => "handoff",
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
-        lash::TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
-        lash::TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
-        lash::TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
-        lash::TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. }) => "assistant_message",
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => "submitted_value",
+        TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
+        TurnOutcome::Handoff { .. } => "handoff",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "cancelled",
+        TurnOutcome::Stopped(TurnStop::InvalidInput) => "invalid_input",
+        TurnOutcome::Stopped(TurnStop::MaxTurns) => "max_turns",
+        TurnOutcome::Stopped(TurnStop::ToolFailure) => "tool_failure",
+        TurnOutcome::Stopped(TurnStop::ProviderError) => "provider_error",
+        TurnOutcome::Stopped(TurnStop::PluginAbort) => "plugin_abort",
+        TurnOutcome::Stopped(TurnStop::RuntimeError) => "runtime_error",
+        TurnOutcome::Stopped(TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 
@@ -947,7 +949,7 @@ fn build_plugin_session(
     execution_mode: ExecutionMode,
     standard_context_approach: Option<StandardContextApproach>,
     policy: &SessionPolicy,
-) -> Result<Arc<lash::PluginSession>> {
+) -> Result<Arc<PluginSession>> {
     let mut factories: Vec<Arc<dyn PluginFactory>> =
         vec![Arc::new(BuiltinToolResultProjectionPluginFactory::default())];
     if let Some(standard_context_approach) = &standard_context_approach {
@@ -960,8 +962,8 @@ fn build_plugin_session(
             }
         }
     }
-    factories.push(Arc::new(lash::BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(lash::BuiltinMonitorToolPluginFactory::new()));
+    factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    factories.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));

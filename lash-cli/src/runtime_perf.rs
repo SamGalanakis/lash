@@ -11,7 +11,15 @@ use chrono::Utc;
 use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
 use lash::testing::TestProvider;
-use lash::*;
+use lash::{
+    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, ExecutionMode, InputItem,
+    MessageRole, ModeTurnOptions, PluginFactory, PluginHost, PluginMessage, ProviderHandle,
+    RunMode, SessionAppendNode, SessionGraph, SessionPolicy, SessionStateEnvelope,
+    StandardContextApproach, StandardContextApproachKind, TokenUsage, ToolCall, ToolDefinition,
+    ToolExecutionMode, ToolProvider, ToolResult, TurnContext, TurnInput, TurnOutcome, TurnStop,
+    diff_usage_reports,
+};
+use lash_embed::usage::{SessionUsageReport, TokenLedgerEntry};
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_provider_openai::OpenAiGenericProvider;
 use lash_standard_plugins::{
@@ -623,7 +631,7 @@ struct BenchmarkEchoTool;
 impl ToolProvider for BenchmarkEchoTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "benchmark_echo",
                 "Return the input payload with a tiny async yield for runtime profiling.",
                 serde_json::json!({
@@ -640,14 +648,14 @@ impl ToolProvider for BenchmarkEchoTool {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> ToolResult {
-        if name != "benchmark_echo" {
-            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {name}"));
+    async fn execute(&self, call: lash::ToolCall<'_>) -> ToolResult {
+        if call.name != "benchmark_echo" {
+            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name));
         }
         tokio::task::yield_now().await;
         ToolResult::ok(serde_json::json!({
-            "value": args.get("value").cloned().unwrap_or(serde_json::Value::Null),
-            "ordinal": args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
+            "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
+            "ordinal": call.args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
         }))
     }
 }
@@ -1080,7 +1088,7 @@ async fn run_once_embed(
 
     let export_before_alloc = allocator_stats();
     let export_started = Instant::now();
-    let read_view = session.read_view().await;
+    let read_view = session.read_view();
     let export_state_ms = elapsed_ms(export_started);
     let export_state_alloc = alloc_delta(export_before_alloc, allocator_stats());
     let after_export_memory = process_memory_sample();

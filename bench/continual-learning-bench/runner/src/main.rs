@@ -5,16 +5,24 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Parser;
-use lash::plugin::{PluginFactory, PluginSpec, StaticPluginFactory};
-use lash::provider::LashConfig;
 use lash::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, BuiltinToolResultProjectionPluginFactory,
-    EmbeddedRuntimeHost, EventSink, ExecutionMode, FollowedTurn, InputItem, LashRuntime,
-    NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost, ProviderHandle,
-    RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    SessionUsageReport, StandardContextApproach, TokenLedgerEntry, TokioSessionTaskExecutor,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnFinish, TurnInjectionBridge,
-    TurnInput, TurnInputInjectionBridge, TurnOutcome,
+    EmbeddedRuntimeHost, FollowedTurn, InputItem, LashRuntime, NoopEventSink,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
+    RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
+    StandardContextApproach, TokioSessionTaskExecutor, TurnInjectionBridge,
+    TurnInputInjectionBridge,
+};
+use lash_cli::config::LashConfig;
+use lash_embed::{
+    TurnInput,
+    advanced::{
+        EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+    },
+    plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
+    provider::ProviderHandle,
+    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    usage::{SessionUsageReport, TokenLedgerEntry},
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -164,7 +172,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                 }],
                 image_blobs: Default::default(),
                 mode: None,
-                mode_turn_options: Some(lash::ModeTurnOptions::typed(
+                mode_turn_options: Some(ModeTurnOptions::typed(
                     ExecutionMode::new("rlm"),
                     RlmTermination::SubmitRequired {
                         schema: Some(request.response_schema.clone()),
@@ -172,7 +180,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                 )?),
                 trace_turn_id: Some(format!("clbench-turn-{:04}", request.iteration)),
                 mode_extension: None,
-                turn_context: lash::TurnContext::default(),
+                turn_context: TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&request)?)?,
             &sink as &dyn EventSink,
@@ -242,7 +250,7 @@ fn clbench_turn_text(request: &RunnerRequest) -> String {
 fn build_plugin_session(
     execution_mode: ExecutionMode,
     policy: &SessionPolicy,
-) -> Result<Arc<lash::PluginSession>> {
+) -> Result<Arc<PluginSession>> {
     let _clbench_tools = clbench_tool_definitions();
     let factories: Vec<Arc<dyn PluginFactory>> = vec![
         Arc::new(BuiltinToolResultProjectionPluginFactory::default()),
@@ -294,9 +302,10 @@ impl ToolProvider for ClbenchAsyncHandlesTool {
         vec![list_async_handles_tool_definition()]
     }
 
-    async fn execute(&self, name: &str, _args: &Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!(
-            "`{name}` is handled by the RLM session runtime and cannot run directly"
+            "`{}` is handled by the RLM session runtime and cannot run directly",
+            call.name
         ))
     }
 }
@@ -316,7 +325,7 @@ fn list_async_handles_tool_definition() -> ToolDefinition {
 }
 
 fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
-    ToolDefinition::new(
+    ToolDefinition::raw(
         "list_async_handles",
         "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
         ToolDefinition::default_input_schema(),
@@ -380,7 +389,7 @@ fn lash_home() -> PathBuf {
 fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
     match outcome {
         TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => "completed",
-        TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "interrupted",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "interrupted",
         TurnOutcome::Stopped(_) => "failed",
     }
 }
@@ -391,15 +400,15 @@ fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Finished(TurnFinish::SubmittedValue { .. }) => "submitted_value",
         TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
         TurnOutcome::Handoff { .. } => "handoff",
-        TurnOutcome::Stopped(lash::TurnStop::Cancelled) => "cancelled",
-        TurnOutcome::Stopped(lash::TurnStop::InvalidInput) => "invalid_input",
-        TurnOutcome::Stopped(lash::TurnStop::MaxTurns) => "max_turns",
-        TurnOutcome::Stopped(lash::TurnStop::ToolFailure) => "tool_failure",
-        TurnOutcome::Stopped(lash::TurnStop::ProviderError) => "provider_error",
-        TurnOutcome::Stopped(lash::TurnStop::PluginAbort) => "plugin_abort",
-        TurnOutcome::Stopped(lash::TurnStop::RuntimeError) => "runtime_error",
-        TurnOutcome::Stopped(lash::TurnStop::SubmittedError { .. }) => "submitted_error",
-        TurnOutcome::Stopped(lash::TurnStop::ToolError { .. }) => "tool_error",
+        TurnOutcome::Stopped(TurnStop::Cancelled) => "cancelled",
+        TurnOutcome::Stopped(TurnStop::InvalidInput) => "invalid_input",
+        TurnOutcome::Stopped(TurnStop::MaxTurns) => "max_turns",
+        TurnOutcome::Stopped(TurnStop::ToolFailure) => "tool_failure",
+        TurnOutcome::Stopped(TurnStop::ProviderError) => "provider_error",
+        TurnOutcome::Stopped(TurnStop::PluginAbort) => "plugin_abort",
+        TurnOutcome::Stopped(TurnStop::RuntimeError) => "runtime_error",
+        TurnOutcome::Stopped(TurnStop::SubmittedError { .. }) => "submitted_error",
+        TurnOutcome::Stopped(TurnStop::ToolError { .. }) => "tool_error",
     }
 }
 

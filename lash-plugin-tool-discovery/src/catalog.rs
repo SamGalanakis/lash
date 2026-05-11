@@ -10,8 +10,8 @@ pub(crate) struct CatalogTool {
     pub(crate) namespace: Option<String>,
     pub(crate) aliases: Vec<String>,
     pub(crate) callable: bool,
-    pub(crate) documented: bool,
-    pub(crate) discoverable: bool,
+    pub(crate) showcased: bool,
+    pub(crate) searchable: bool,
     pub(crate) loadable: bool,
 }
 
@@ -30,12 +30,12 @@ impl CatalogTool {
             .get("callable")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let documented = obj
-            .get("documented")
+        let showcased = obj
+            .get("showcased")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let discoverable = obj
-            .get("discoverable")
+        let searchable = obj
+            .get("searchable")
             .and_then(Value::as_bool)
             .unwrap_or(true);
         let loadable = obj
@@ -48,8 +48,8 @@ impl CatalogTool {
             namespace,
             aliases,
             callable,
-            documented,
-            discoverable,
+            showcased,
+            searchable,
             loadable,
         })
     }
@@ -73,7 +73,7 @@ impl CatalogTool {
     }
 
     pub(crate) fn compact_definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
+        ToolDefinition::raw(
             self.name.clone(),
             string_field(&self.raw, "description"),
             self.raw

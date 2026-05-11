@@ -274,7 +274,7 @@ impl LocalSubagentHost {
     }
 
     /// Close an agent subtree by absolute path without needing a
-    /// ToolExecutionContext. Used by the background task registry when
+    /// ToolContext. Used by the background task registry when
     /// `tasks_stop` targets a subagent.
     pub async fn force_close_subtree(
         &self,
@@ -577,12 +577,12 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn spawn_agent(
         &self,
-        context: &lash::ToolExecutionContext,
+        context: &lash::ToolContext,
         mut request: SpawnAgentRequest,
     ) -> Result<SpawnAgentResponse, String> {
         if context
-            .host
-            .tool_catalog(&context.session_id)
+            .host()
+            .tool_catalog(context.session_id())
             .await
             .ok()
             .is_some_and(|catalog| {
@@ -609,7 +609,7 @@ impl SubagentHost for LocalSubagentHost {
         });
         let (root_session_id, path, child_depth, parent_session_id) = {
             let mut state = self.state_lock()?;
-            let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
+            let locator = Self::ensure_current_agent_locked(&mut state, context.session_id());
             let parent_depth = locator.depth;
             let child_depth = parent_depth.saturating_add(1);
             if child_depth > MAX_SUBAGENT_DEPTH {
@@ -619,7 +619,7 @@ impl SubagentHost for LocalSubagentHost {
             }
             if state
                 .children_by_parent_session
-                .get(&context.session_id)
+                .get(context.session_id())
                 .is_some_and(|children| children.contains_key(&normalized_agent_name))
             {
                 return Err(format!(
@@ -636,7 +636,7 @@ impl SubagentHost for LocalSubagentHost {
                 AgentRecord {
                     session_id: session_id.clone(),
                     agent_name: normalized_agent_name.clone(),
-                    parent_session_id: Some(context.session_id.clone()),
+                    parent_session_id: Some(context.session_id().to_string()),
                     capability: Some(request.capability.clone()),
                     model: request
                         .create_request
@@ -656,19 +656,19 @@ impl SubagentHost for LocalSubagentHost {
                     last_iterations: None,
                     last_tool_calls: None,
                     last_token_usage: None,
-                    owner_session_id: context.session_id.clone(),
+                    owner_session_id: context.session_id().to_string(),
                 },
             );
             state
                 .children_by_parent_session
-                .entry(context.session_id.clone())
+                .entry(context.session_id().to_string())
                 .or_default()
                 .insert(normalized_agent_name.clone(), session_id.clone());
             (
                 locator.root_session_id.clone(),
                 path.clone(),
                 child_depth,
-                context.session_id.clone(),
+                context.session_id().to_string(),
             )
         };
         let mut hidden_tools = request.hidden_tools.clone();
@@ -687,7 +687,7 @@ impl SubagentHost for LocalSubagentHost {
             max_depth: MAX_SUBAGENT_DEPTH,
         });
 
-        let session = match context.host.create_session(request.create_request).await {
+        let session = match context.host().create_session(request.create_request).await {
             Ok(session) => session,
             Err(err) => {
                 let mut state = self.state_lock()?;
@@ -698,7 +698,7 @@ impl SubagentHost for LocalSubagentHost {
 
         // Register with the parent session's background task registry so it
         // shows up in `tasks_list` and can be cancelled via `tasks_stop`.
-        let cancel_host = context.host.clone();
+        let cancel_host = context.host().clone();
         let cancel_self = self.clone();
         let cancel_root = root_session_id.clone();
         let cancel_path = path.clone();
@@ -718,9 +718,9 @@ impl SubagentHost for LocalSubagentHost {
             })
         });
         if let Err(err) = context
-            .host
+            .host()
             .register_background_task(
-                &context.session_id,
+                context.session_id(),
                 ManagedTaskSpec {
                     id: format!("subagent:{path}"),
                     kind: ManagedTaskKind::Subagent,
@@ -730,7 +730,7 @@ impl SubagentHost for LocalSubagentHost {
             )
             .await
         {
-            let _ = context.host.close_session(&session.session_id).await;
+            let _ = context.host().close_session(&session.session_id).await;
             let mut state = self.state_lock()?;
             Self::remove_agent_locked(&mut state, &root_session_id, &path);
             return Err(format!(
@@ -767,14 +767,18 @@ impl SubagentHost for LocalSubagentHost {
         }
 
         if let Err(err) = self
-            .start_next_turn(context.host.clone(), root_session_id.clone(), path.clone())
+            .start_next_turn(
+                context.host().clone(),
+                root_session_id.clone(),
+                path.clone(),
+            )
             .await
         {
             context
-                .host
-                .unregister_background_task(&context.session_id, &format!("subagent:{path}"))
+                .host()
+                .unregister_background_task(context.session_id(), &format!("subagent:{path}"))
                 .await;
-            let _ = context.host.close_session(&session.session_id).await;
+            let _ = context.host().close_session(&session.session_id).await;
             let mut state = self.state_lock()?;
             Self::remove_agent_locked(&mut state, &root_session_id, &path);
             return Err(err);
@@ -789,7 +793,7 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn wait_agent(
         &self,
-        context: &lash::ToolExecutionContext,
+        context: &lash::ToolContext,
         request: WaitAgentRequest,
     ) -> Result<WaitAgentResponse, String> {
         if request.all
@@ -805,11 +809,11 @@ impl SubagentHost for LocalSubagentHost {
         }
         let (root_session_id, parent_session_id, agents, notify) = {
             let mut state = self.state_lock()?;
-            let locator = Self::ensure_current_agent_locked(&mut state, &context.session_id);
+            let locator = Self::ensure_current_agent_locked(&mut state, context.session_id());
             let agents = if request.agents.is_empty() {
                 state
                     .children_by_parent_session
-                    .get(&context.session_id)
+                    .get(context.session_id())
                     .map(|children| children.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default()
             } else {
@@ -820,7 +824,7 @@ impl SubagentHost for LocalSubagentHost {
                         let normalized = normalize_agent_name(agent)?;
                         Self::resolve_direct_child_locked(
                             &state,
-                            &context.session_id,
+                            context.session_id(),
                             &normalized,
                         )?;
                         Ok::<String, String>(normalized)
@@ -833,13 +837,13 @@ impl SubagentHost for LocalSubagentHost {
                 .ok_or_else(|| "subagent tree missing".to_string())?;
             (
                 locator.root_session_id,
-                context.session_id.clone(),
+                context.session_id().to_string(),
                 agents,
                 Arc::clone(&tree.notify),
             )
         };
 
-        let cancellation = context.cancellation_token.clone();
+        let cancellation = context.cancellation_token().cloned();
         let mut events = Vec::new();
 
         // Two modes:
@@ -954,22 +958,22 @@ impl SubagentHost for LocalSubagentHost {
 
     async fn close_agent(
         &self,
-        context: &lash::ToolExecutionContext,
+        context: &lash::ToolContext,
         request: CloseAgentRequest,
     ) -> Result<CloseAgentResponse, String> {
         let (root_session_id, target, agent_name) = {
             let mut state = self.state_lock()?;
-            Self::ensure_current_agent_locked(&mut state, &context.session_id);
+            Self::ensure_current_agent_locked(&mut state, context.session_id());
             let (root_session_id, target) = Self::resolve_direct_child_locked(
                 &state,
-                &context.session_id,
+                context.session_id(),
                 &request.agent_name,
             )?;
             let agent_name = normalize_agent_name(&request.agent_name)?;
             (root_session_id, target, agent_name)
         };
         let paths = self
-            .force_close_subtree(context.host.clone(), &root_session_id, &target)
+            .force_close_subtree(context.host().clone(), &root_session_id, &target)
             .await?;
         let closed = paths
             .into_iter()

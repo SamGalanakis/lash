@@ -9,6 +9,13 @@ default = []
 dhat-heap = ["dep:dhat"]
 fff-zlob = ["lash-standard-plugins/fff-zlob"]
 semantic-tool-search = ["lash-standard-plugins/semantic-tool-search"]
+# Hidden `--runtime-perf-benchmark` self-benchmark mode. Requires `lash/testing`
+# fixtures and is intended for CI / dev profiling, not user-facing builds.
+runtime-perf = ["lash/testing"]
+
+[lib]
+name = "lash_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lash"
@@ -17,6 +24,7 @@ path = "src/main.rs"
 [dependencies]
 lash = { path = "../lash", default-features = false, features = ["full", "testing"] }
 lash-embed = { path = "../lash-embed" }
+lash-plugin-mcp = { path = "../lash-plugin-mcp" }
 lash-sqlite-store = { path = "../lash-sqlite-store" }
 lash-llm-tools = { path = "../lash-llm-tools" }
 lash-standard-plugins = { path = "../lash-standard-plugins" }
@@ -39,31 +47,31 @@ lash-autoresearch = { path = "../lash-autoresearch" }
 lash-export = { path = "../lash-export" }
 lash-file-index = { path = "../lash-file-index" }
 crossterm = "0.28"
-tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive", "env"] }
-anyhow = "1"
-async-trait = "0.1"
-chrono = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio = { workspace = true, features = ["full"] }
+clap = { workspace = true, features = ["derive", "env"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
 semver = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = "0.1"
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
-pulldown-cmark = "0.13"
+pulldown-cmark = { workspace = true }
 unicode-width = "0.2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 rand = "0.9"
 dirs = "6"
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = { workspace = true }
+base64 = { workspace = true }
 stats_alloc = "0.1"
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3", features = ["wayland-data-control"] }

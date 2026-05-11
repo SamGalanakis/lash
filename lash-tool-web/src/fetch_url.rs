@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use lash::{ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
 
 use lash_tool_support::{object_schema, require_str};
 
@@ -32,7 +32,7 @@ impl Default for FetchUrl {
 impl ToolProvider for FetchUrl {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition::new(
+            ToolDefinition::raw(
                 "fetch_url",
                 "Fetch one known URL and extract readable page text.",
                 object_schema(
@@ -66,7 +66,8 @@ impl ToolProvider for FetchUrl {
         ]
     }
 
-    async fn execute(&self, _name: &str, args: &serde_json::Value) -> ToolResult {
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
         let url = match require_str(args, "url") {
             Ok(s) => s,
             Err(e) => return e,
@@ -153,7 +154,7 @@ mod tests {
         assert_eq!(definition.activation, lash::ToolActivation::Always);
         assert_eq!(
             definition.availability.standard,
-            lash::ToolAvailability::Documented
+            lash::ToolAvailability::Showcased
         );
     }
 }
