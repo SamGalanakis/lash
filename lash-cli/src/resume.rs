@@ -456,7 +456,7 @@ mod tests {
         persist_session_head(&store, graph, checkpoint);
 
         let provider = lash::ProviderHandle::new(
-            lash_provider_openai::OpenAiGenericProvider::new(
+            lash_provider_openai::OpenAiCompatibleProvider::new(
                 "test-key",
                 "https://example.invalid/v1",
             )

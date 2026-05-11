@@ -24,7 +24,7 @@ use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_plugin_ui_activity::UiActivityPluginFactory;
-use lash_provider_openai::OpenAiGenericProvider;
+use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_standard_plugins::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
@@ -47,6 +47,14 @@ use crate::{
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
 const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";
 const CLI_RLM_SUBMISSION_GUIDANCE: &str = "- When calling `submit`, keep the submitted value concise. Do not include large variables such as diffs, full logs, raw command output, or other bulky dumps unless the user explicitly asks for them. Prefer short prose. If you use `format`, use it with small values rather than large captured variables.";
+
+fn openai_shortcut_provider(api_key: String, base_url: &str) -> ProviderHandle {
+    if base_url.trim().is_empty() {
+        ProviderHandle::new(OpenAiProvider::new(api_key).into_components())
+    } else {
+        ProviderHandle::new(OpenAiCompatibleProvider::new(api_key, base_url).into_components())
+    }
+}
 
 struct PluginFactorySurfaceInput<'a> {
     autonomous: bool,
@@ -351,7 +359,16 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 
     // Resolve config before TUI init (may need interactive terminal)
     let existing_config = LashConfig::load(&crate::paths::config_file());
-    if args.info && existing_config.is_none() && args.api_key.is_none() {
+    let shortcut_api_key = args.api_key.clone().or_else(|| {
+        if args.base_url.trim().is_empty() {
+            std::env::var("OPENAI_API_KEY").ok()
+        } else {
+            std::env::var("OPENAI_COMPATIBLE_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        }
+    });
+    if args.info && existing_config.is_none() && shortcut_api_key.is_none() {
         let execution_mode =
             ensure_supported_execution_mode(match args.execution_mode.as_deref() {
                 Some(raw) => parse_execution_mode(raw).map_err(anyhow::Error::msg)?,
@@ -367,11 +384,8 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let interactive_startup = !args.info && args.print_prompt.is_none();
     let startup_system_message: Option<String> = None;
     let (mut lash_config, active_provider) = if args.provider || existing_config.is_none() {
-        if let Some(ref key) = args.api_key {
-            // Shortcut: env var or --api-key activates OpenAI-compatible directly.
-            let provider = ProviderHandle::new(
-                OpenAiGenericProvider::new(key.clone(), args.base_url.clone()).into_components(),
-            );
+        if let Some(ref key) = shortcut_api_key {
+            let provider = openai_shortcut_provider(key.clone(), &args.base_url);
             let mut cfg = existing_config
                 .clone()
                 .unwrap_or_else(|| LashConfig::new(&provider));
@@ -742,7 +756,7 @@ mod tests {
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
         let provider =
-            ProviderHandle::new(OpenAiGenericProvider::new("test", "").into_components());
+            ProviderHandle::new(OpenAiCompatibleProvider::new("test", "").into_components());
         let lash_config = LashConfig::new(&provider);
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
@@ -867,6 +881,23 @@ mod tests {
             contribution.slot == PromptSlot::CliAutonomousExecution
                 && contribution.content == CLI_AUTONOMOUS_EXECUTION
         }));
+    }
+
+    #[test]
+    fn api_key_shortcut_selects_direct_openai_without_base_url() {
+        let provider = openai_shortcut_provider("key".to_string(), "");
+        assert_eq!(provider.kind(), "openai");
+        assert_eq!(provider.to_spec().kind, "openai");
+        assert!(provider.to_spec().config.get("base_url").is_none());
+    }
+
+    #[test]
+    fn api_key_shortcut_selects_compatible_provider_with_base_url() {
+        let provider = openai_shortcut_provider("key".to_string(), "https://example.invalid/v1");
+        let spec = provider.to_spec();
+        assert_eq!(provider.kind(), "openai-compatible");
+        assert_eq!(spec.kind, "openai-compatible");
+        assert_eq!(spec.config["base_url"], "https://example.invalid/v1");
     }
 
     #[test]

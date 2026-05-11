@@ -1,12 +1,11 @@
 use crate::support::*;
 
-impl OpenAiGenericProvider {
+impl OpenAiCompatibleProvider {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: base_url.into(),
             options: ProviderOptions::default(),
-            wire_api: OpenAiWireApi::Auto,
             cache_retention: OpenAiCacheRetention::Short,
             client: DEFAULT_HTTP_CLIENT.clone(),
         }
@@ -14,11 +13,6 @@ impl OpenAiGenericProvider {
 
     pub fn with_options(mut self, options: ProviderOptions) -> Self {
         self.options = options;
-        self
-    }
-
-    pub fn with_wire_api(mut self, wire_api: OpenAiWireApi) -> Self {
-        self.wire_api = wire_api;
         self
     }
 
@@ -393,16 +387,6 @@ impl OpenAiGenericProvider {
         base_url_is_openrouter(&self.base_url) && Self::model_is_anthropic_claude(&req.model)
     }
 
-    pub(crate) fn resolved_wire_api(&self, req: &LlmRequest) -> OpenAiWireApi {
-        match self.wire_api {
-            OpenAiWireApi::Auto if self.openrouter_claude_request(req) => {
-                OpenAiWireApi::ChatCompletions
-            }
-            OpenAiWireApi::Auto => OpenAiWireApi::Responses,
-            forced => forced,
-        }
-    }
-
     fn chat_cache_control_value(&self) -> Option<Value> {
         match self.cache_retention {
             OpenAiCacheRetention::None => None,
@@ -447,8 +431,7 @@ impl OpenAiGenericProvider {
         }
         if let Some(variant) = req.model_variant.as_deref()
             && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                OpenAiModelPolicy::new(self.base_url.clone())
-                    .request_variant_config(&req.model, variant)
+                OpenAiDirectModelPolicy.request_variant_config(&req.model, variant)
             && effort != "none"
         {
             let mut reasoning = json!({
@@ -1763,14 +1746,54 @@ impl OpenAiGenericProvider {
     }
 }
 
-impl OpenAiGenericProvider {
+impl OpenAiCompatibleProvider {
     pub fn into_components(self) -> ProviderComponents {
         let model_policy = std::sync::Arc::new(OpenAiModelPolicy::new(self.base_url.clone()));
         ProviderComponents::new(Box::new(self.clone()), Box::new(self), model_policy)
     }
 }
 
-impl ProviderState for OpenAiGenericProvider {
+impl OpenAiProvider {
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            inner: OpenAiCompatibleProvider::new(api_key, OPENAI_BASE_URL),
+        }
+    }
+
+    pub fn with_options(mut self, options: ProviderOptions) -> Self {
+        self.inner.options = options;
+        self
+    }
+
+    pub fn with_cache_retention(mut self, retention: OpenAiCacheRetention) -> Self {
+        self.inner.cache_retention = retention;
+        self
+    }
+
+    pub fn with_client(mut self, client: std::sync::Arc<reqwest::Client>) -> Self {
+        self.inner.client = (*client).clone();
+        self
+    }
+
+    pub fn into_components(self) -> ProviderComponents {
+        ProviderComponents::new(
+            Box::new(self.clone()),
+            Box::new(self),
+            std::sync::Arc::new(OpenAiDirectModelPolicy),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_responses_request_body(
+        &self,
+        req: &LlmRequest,
+        stream: bool,
+    ) -> Result<Value, LlmTransportError> {
+        self.inner.build_responses_request_body(req, stream)
+    }
+}
+
+impl ProviderState for OpenAiCompatibleProvider {
     fn kind(&self) -> &'static str {
         "openai-compatible"
     }
@@ -1799,16 +1822,49 @@ impl ProviderState for OpenAiGenericProvider {
                 serde_json::to_value(&self.options).unwrap_or(serde_json::Value::Null),
             );
         }
-        if self.wire_api != OpenAiWireApi::Auto {
-            map.insert(
-                "wire_api".to_string(),
-                serde_json::to_value(self.wire_api).unwrap_or(serde_json::Value::Null),
-            );
-        }
         if self.cache_retention != OpenAiCacheRetention::Short {
             map.insert(
                 "cache_retention".to_string(),
                 serde_json::to_value(self.cache_retention).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderState> {
+        Box::new(self.clone())
+    }
+}
+
+impl ProviderState for OpenAiProvider {
+    fn kind(&self) -> &'static str {
+        "openai"
+    }
+
+    fn options(&self) -> ProviderOptions {
+        self.inner.options.clone()
+    }
+
+    fn set_options(&mut self, options: ProviderOptions) {
+        self.inner.options = options;
+    }
+
+    fn serialize_config(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "api_key".to_string(),
+            serde_json::Value::String(self.inner.api_key.clone()),
+        );
+        if !self.inner.options.is_default() {
+            map.insert(
+                "options".to_string(),
+                serde_json::to_value(&self.inner.options).unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if self.inner.cache_retention != OpenAiCacheRetention::Short {
+            map.insert(
+                "cache_retention".to_string(),
+                serde_json::to_value(self.inner.cache_retention).unwrap_or(serde_json::Value::Null),
             );
         }
         serde_json::Value::Object(map)
@@ -1882,13 +1938,72 @@ impl ProviderModelPolicy for OpenAiModelPolicy {
     }
 }
 
-#[async_trait]
-impl ProviderTransport for OpenAiGenericProvider {
-    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
-        match self.resolved_wire_api(&req) {
-            OpenAiWireApi::Responses | OpenAiWireApi::Auto => self.complete_responses(req).await,
-            OpenAiWireApi::ChatCompletions => self.complete_chat_completions(req).await,
+#[derive(Clone, Debug)]
+struct OpenAiDirectModelPolicy;
+
+impl ProviderModelPolicy for OpenAiDirectModelPolicy {
+    fn default_model(&self) -> &str {
+        "gpt-5.4"
+    }
+
+    fn supported_variants(&self, model: &str) -> &'static [&'static str] {
+        let id = model_id(model).to_ascii_lowercase();
+        if id.starts_with("gpt-5") || id.starts_with("o") {
+            OPENROUTER_REASONING_VARIANTS
+        } else {
+            &[]
         }
+    }
+
+    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
+        self.supported_variants(model)
+            .contains(&"medium")
+            .then_some("medium")
+    }
+
+    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
+        if !self.supported_variants(model).contains(&variant) {
+            return None;
+        }
+        Some(VariantRequestConfig::ReasoningEffort(
+            OpenAiCompatibleProvider::clamp_reasoning_effort(model, variant),
+        ))
+    }
+
+    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
+        match tier {
+            "low" => Some(AgentModelSelection {
+                model: "gpt-5.4-mini".to_string(),
+                variant: Some("low".to_string()),
+            }),
+            "medium" => Some(AgentModelSelection {
+                model: "gpt-5.4".to_string(),
+                variant: Some("medium".to_string()),
+            }),
+            "high" => Some(AgentModelSelection {
+                model: "gpt-5.4".to_string(),
+                variant: Some("high".to_string()),
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for OpenAiCompatibleProvider {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        self.complete_chat_completions(req).await
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
+        Box::new(self.clone())
+    }
+}
+
+#[async_trait]
+impl ProviderTransport for OpenAiProvider {
+    async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        self.inner.complete_responses(req).await
     }
 
     fn clone_boxed(&self) -> Box<dyn ProviderTransport> {
@@ -1897,38 +2012,73 @@ impl ProviderTransport for OpenAiGenericProvider {
 }
 
 #[derive(Deserialize)]
-struct OpenAiProviderConfig {
+#[serde(deny_unknown_fields)]
+struct OpenAiCompatibleProviderConfig {
     api_key: String,
-    #[serde(default)]
     base_url: String,
     #[serde(default)]
     options: ProviderOptions,
     #[serde(default)]
-    wire_api: OpenAiWireApi,
+    cache_retention: OpenAiCacheRetention,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiProviderConfig {
+    api_key: String,
+    #[serde(default)]
+    options: ProviderOptions,
     #[serde(default)]
     cache_retention: OpenAiCacheRetention,
 }
 
-pub struct OpenAiGenericProviderFactory;
+pub struct OpenAiCompatibleProviderFactory;
+pub struct OpenAiProviderFactory;
 
-impl OpenAiGenericProviderFactory {
+impl OpenAiCompatibleProviderFactory {
     pub fn register() {
         lash::register_provider_factory(std::sync::Arc::new(Self));
     }
 }
 
-impl ProviderFactory for OpenAiGenericProviderFactory {
+impl OpenAiProviderFactory {
+    pub fn register() {
+        lash::register_provider_factory(std::sync::Arc::new(Self));
+    }
+}
+
+impl ProviderFactory for OpenAiProviderFactory {
+    fn kind(&self) -> &'static str {
+        "openai"
+    }
+
+    fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
+        let cfg: OpenAiProviderConfig =
+            serde_json::from_value(config).map_err(|err| err.to_string())?;
+        Ok(OpenAiProvider {
+            inner: OpenAiCompatibleProvider {
+                api_key: cfg.api_key,
+                base_url: OPENAI_BASE_URL.to_string(),
+                options: cfg.options,
+                cache_retention: cfg.cache_retention,
+                client: build_http_client(),
+            },
+        }
+        .into_components())
+    }
+}
+
+impl ProviderFactory for OpenAiCompatibleProviderFactory {
     fn kind(&self) -> &'static str {
         "openai-compatible"
     }
     fn deserialize(&self, config: serde_json::Value) -> Result<ProviderComponents, String> {
-        let cfg: OpenAiProviderConfig =
+        let cfg: OpenAiCompatibleProviderConfig =
             serde_json::from_value(config).map_err(|err| err.to_string())?;
-        Ok(OpenAiGenericProvider {
+        Ok(OpenAiCompatibleProvider {
             api_key: cfg.api_key,
             base_url: cfg.base_url,
             options: cfg.options,
-            wire_api: cfg.wire_api,
             cache_retention: cfg.cache_retention,
             client: build_http_client(),
         }

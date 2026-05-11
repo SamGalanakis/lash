@@ -7,8 +7,7 @@ pub struct LashCore {
     pub(crate) modes: Arc<BTreeMap<ModeId, ModePreset>>,
     pub(crate) default_mode: ModeId,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    pub(crate) embed_plugin_ids: Arc<BTreeSet<&'static str>>,
-    pub(crate) embed_plugin_configs: Arc<HashMap<&'static str, Arc<dyn Any + Send + Sync>>>,
+    pub(crate) plugin_factories: Arc<Vec<Arc<dyn PluginFactory>>>,
 }
 
 impl LashCore {
@@ -38,6 +37,7 @@ impl LashCore {
             parent_session_id: None,
             store: None,
             active_plugins: Vec::new(),
+            plugin_factories: Vec::new(),
         }
     }
 
@@ -60,8 +60,6 @@ pub struct LashCoreBuilder {
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     plugin_factories: Vec<Arc<dyn PluginFactory>>,
     plugin_host: Option<PluginHost>,
-    pub(crate) embed_plugin_ids: BTreeSet<&'static str>,
-    pub(crate) embed_plugin_configs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
     trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
@@ -163,16 +161,6 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn register_plugin<P: PluginBinding>(mut self) -> Self {
-        let configs: PluginConfigMap<P> = Arc::new(StdMutex::new(HashMap::new()));
-        self.embed_plugin_ids.insert(P::ID);
-        self.embed_plugin_configs
-            .insert(P::ID, configs.clone() as Arc<dyn Any + Send + Sync>);
-        self.plugin_factories
-            .push(Arc::new(PluginBindingFactory::<P>::new(configs)) as Arc<dyn PluginFactory>);
-        self
-    }
-
     pub fn trace_sink(mut self, trace_sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
         self.trace_sink = trace_sink;
         self
@@ -226,8 +214,8 @@ impl LashCoreBuilder {
             ..SessionPolicy::default()
         };
 
-        let plugin_host = if let Some(plugin_host) = self.plugin_host {
-            plugin_host
+        let plugin_factories = if let Some(plugin_host) = self.plugin_host {
+            plugin_host.factories().to_vec()
         } else {
             let mut factories = Vec::new();
             factories.extend(
@@ -244,8 +232,9 @@ impl LashCoreBuilder {
                     as Arc<dyn PluginFactory>);
             }
             factories.extend(self.plugin_factories);
-            PluginHost::new(factories)
+            PluginHost::new(factories).factories().to_vec()
         };
+        let plugin_host = PluginHost::new(plugin_factories.clone());
 
         let executor = self
             .session_task_executor
@@ -286,8 +275,7 @@ impl LashCoreBuilder {
             modes: Arc::new(self.modes),
             default_mode,
             store_factory: self.store_factory,
-            embed_plugin_ids: Arc::new(self.embed_plugin_ids),
-            embed_plugin_configs: Arc::new(self.embed_plugin_configs),
+            plugin_factories: Arc::new(plugin_factories),
         })
     }
 

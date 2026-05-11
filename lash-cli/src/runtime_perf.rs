@@ -10,18 +10,20 @@ use anyhow::Context;
 use chrono::Utc;
 use lash::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
 use lash::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
+use lash::store;
 use lash::testing::TestProvider;
 use lash::{
-    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, ExecutionMode, InputItem,
-    MessageRole, ModeTurnOptions, PluginFactory, PluginHost, PluginMessage, ProviderHandle,
-    RunMode, SessionAppendNode, SessionGraph, SessionPolicy, SessionStateEnvelope,
-    StandardContextApproach, StandardContextApproachKind, TokenUsage, ToolCall, ToolDefinition,
-    ToolExecutionMode, ToolProvider, ToolResult, TurnContext, TurnInput, TurnOutcome, TurnStop,
-    diff_usage_reports,
+    AppendSessionNodesRequest, BlobRef, ExecutionMode, GcReport, GraphCommitDelta, InputItem,
+    LashRuntime, MessageRole, ObservationalMemoryConfig, PersistedSessionRead, PluginHost,
+    PluginMessage, PluginSpec, ProviderHandle, RollingHistoryConfig, RunMode, RuntimeCommit,
+    RuntimeCommitResult, RuntimePersistence, SessionAppendNode, SessionCheckpoint, SessionGraph,
+    SessionHeadMeta, SessionNodeRecord, SessionPolicy, SessionReadScope, SessionStoreCreateRequest,
+    SessionStoreFactory, StandardContextApproach, TokenUsage, TokioSessionTaskExecutor,
+    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, TurnInput, VacuumReport,
 };
 use lash_embed::usage::{SessionUsageReport, TokenLedgerEntry};
 use lash_mode_rlm::RlmTurnInputExt;
-use lash_provider_openai::OpenAiGenericProvider;
+use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_standard_plugins::{
     DefaultToolPluginOptions, DefaultToolSurfaceProfile, tool_plugin_factories,
 };
@@ -409,56 +411,66 @@ impl RuntimePersistence for RuntimePerfStore {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, store::StoreError> {
+        let RuntimeCommit {
+            session_id,
+            expected_head_revision,
+            config,
+            graph: graph_delta,
+            checkpoint,
+            usage_deltas,
+        } = commit;
         let mut meta_guard = self
             .session_head_meta
             .lock()
             .expect("lock perf session head meta");
         let actual = meta_guard.as_ref().map_or(0, |meta| meta.head_revision);
-        if commit.expected_head_revision.is_some() && commit.expected_head_revision != Some(actual)
-        {
+        if expected_head_revision.is_some() && expected_head_revision != Some(actual) {
             return Err(store::StoreError::HeadRevisionConflict {
-                expected: commit.expected_head_revision,
+                expected: expected_head_revision,
                 actual,
             });
         }
         let mut graph = self.session_graph.lock().expect("lock perf graph");
-        let leaf_node_id = match &commit.graph {
+        let leaf_node_id = match graph_delta {
             GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
             GraphCommitDelta::Append {
                 nodes,
                 leaf_node_id,
             } => {
-                graph.extend_node_records(nodes.iter().cloned());
-                leaf_node_id.clone()
+                graph.extend_node_records(nodes);
+                leaf_node_id
             }
             GraphCommitDelta::ReplaceFull(next) => {
-                *graph = next.clone();
-                next.leaf_node_id.clone()
+                let leaf_node_id = next.leaf_node_id.clone();
+                *graph = next;
+                leaf_node_id
             }
         };
-        if !commit.usage_deltas.is_empty() {
+        if !usage_deltas.is_empty() {
             self.usage_deltas
                 .lock()
                 .expect("lock perf usage deltas")
-                .extend(commit.usage_deltas.iter().cloned());
+                .extend(usage_deltas);
         }
+        let manifest = SessionCheckpoint {
+            turn_state: checkpoint.turn_state,
+            tool_state_ref: checkpoint.tool_state_ref,
+            plugin_snapshot_ref: checkpoint.plugin_snapshot_ref,
+            plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
+            execution_state_ref: checkpoint.execution_state_ref,
+        };
+        let graph_node_count = graph.nodes.len();
+        drop(graph);
         let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
         let checkpoint_ref = BlobRef(format!("perf-checkpoint-{id}"));
-        let manifest = SessionCheckpoint {
-            turn_state: commit.checkpoint.turn_state,
-            tool_state_ref: commit.checkpoint.tool_state_ref,
-            plugin_snapshot_ref: commit.checkpoint.plugin_snapshot_ref,
-            plugin_snapshot_revision: commit.checkpoint.plugin_snapshot_revision,
-            execution_state_ref: commit.checkpoint.execution_state_ref,
-        };
         let head_revision = actual + 1;
         *meta_guard = Some(SessionHeadMeta {
-            session_id: commit.session_id,
+            session_id,
             head_revision,
-            config: commit.config,
+            config,
             checkpoint_ref: Some(checkpoint_ref.clone()),
             leaf_node_id,
-            graph_node_count: graph.nodes.len(),
+            graph_node_count,
             token_ledger: Vec::new(),
         });
         Ok(RuntimeCommitResult {
@@ -1171,7 +1183,7 @@ async fn build_runtime(scenario: RuntimePerfScenario) -> anyhow::Result<Benchmar
         .unwrap_or_else(|| "https://example.invalid/v1".to_string());
     let provider: ProviderHandle = match scenario {
         RuntimePerfScenario::OpenAiCompatStream => ProviderHandle::new(
-            OpenAiGenericProvider::new("test-key", base_url.clone()).into_components(),
+            OpenAiCompatibleProvider::new("test-key", base_url.clone()).into_components(),
         ),
         _ => benchmark_provider(scenario).into_handle(),
     };

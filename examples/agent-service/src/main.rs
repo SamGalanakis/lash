@@ -15,16 +15,13 @@ use bytes::Bytes;
 use lash_embed::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
     TurnBuilder, TurnEvent, TurnInput,
-    persistence::{
-        RuntimePersistence, SessionMeta, SessionStoreCreateRequest, SessionStoreFactory,
-    },
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult},
     tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
-use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiGenericProvider};
+use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -50,7 +47,7 @@ impl AppStateData {
             .core
             .session(chat_id)
             .rlm()
-            .use_plugin::<DemoPlugin>(DemoPluginConfig)?
+            .plugin::<DemoPlugin>(DemoPluginConfig)
             .open()
             .await?;
         self.sessions
@@ -197,18 +194,19 @@ async fn main() -> anyhow_like::Result<()> {
     eprintln!("agent-service trace: {}", trace_path.display());
 
     let provider = ProviderHandle::new(
-        OpenAiGenericProvider::new(api_key, OPENROUTER_BASE_URL)
+        OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL)
             .with_options(ProviderOptions {
                 thinking: ProviderThinkingPolicy { expose: true },
                 ..ProviderOptions::default()
             })
             .into_components(),
     );
-    let store_factory = Arc::new(ChatStoreFactory::new(data_dir.join("lash-sessions")));
+    let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+        data_dir.join("lash-sessions"),
+    ));
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::rlm())
-        .register_plugin::<DemoPlugin>()
         .provider(provider)
         .model(model.clone(), Some(model_variant.clone()))
         .max_context_tokens(200_000)
@@ -580,7 +578,7 @@ struct BoardState {
 }
 
 #[derive(Clone, Debug)]
-struct DemoTurnContext {
+struct DemoTurnInput {
     board: BoardState,
 }
 
@@ -590,20 +588,20 @@ trait BoardTurnExt {
 
 impl BoardTurnExt for TurnBuilder {
     fn with_board(self, board: BoardState) -> Self {
-        self.with_plugin_context::<DemoPlugin>(DemoTurnContext { board })
+        self.with_plugin_input::<DemoPlugin>(DemoTurnInput { board })
     }
 }
 
 impl PluginBinding for DemoPlugin {
     const ID: &'static str = "demo_tic_tac_toe";
     type SessionConfig = DemoPluginConfig;
-    type TurnContext = DemoTurnContext;
+    type Input = DemoTurnInput;
 
     fn factory(_config: &Self::SessionConfig) -> Arc<dyn PluginFactory> {
         Arc::new(DemoPluginFactory)
     }
 
-    fn requires_turn_context(_config: &Self::SessionConfig) -> bool {
+    fn requires_turn_input(_config: &Self::SessionConfig) -> bool {
         true
     }
 }
@@ -632,7 +630,7 @@ impl SessionPlugin for DemoSessionPlugin {
             Box::pin(async move {
                 let Some(input) = ctx
                     .turn_context
-                    .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
+                    .plugin_input::<DemoTurnInput>(DemoPlugin::ID)
                 else {
                     return Ok(Vec::new());
                 };
@@ -657,11 +655,8 @@ impl ToolProvider for DemoTools {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let Some(input) = call
-            .context
-            .plugin_context::<DemoTurnContext>(DemoPlugin::ID)
-        else {
-            return ToolResult::err_fmt("missing board turn context");
+        let Some(input) = call.context.plugin_input::<DemoTurnInput>(DemoPlugin::ID) else {
+            return ToolResult::err_fmt("missing board turn input");
         };
 
         match call.name {
@@ -1230,39 +1225,6 @@ fn add_column_if_missing(
         [],
     )?;
     Ok(())
-}
-
-#[derive(Clone)]
-struct ChatStoreFactory {
-    sessions_dir: PathBuf,
-}
-
-impl ChatStoreFactory {
-    fn new(sessions_dir: PathBuf) -> Self {
-        Self { sessions_dir }
-    }
-}
-
-impl SessionStoreFactory for ChatStoreFactory {
-    fn create_store(
-        &self,
-        request: &SessionStoreCreateRequest,
-    ) -> Result<Arc<dyn RuntimePersistence>, String> {
-        std::fs::create_dir_all(&self.sessions_dir).map_err(|err| err.to_string())?;
-        let path = self.sessions_dir.join(format!("{}.db", request.session_id));
-        let store = Arc::new(lash_sqlite_store::Store::open(&path).map_err(|err| err.to_string())?);
-        store.save_session_meta(SessionMeta {
-            session_id: request.session_id.clone(),
-            session_name: request.session_id.clone(),
-            created_at: now(),
-            model: request.policy.model.clone(),
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string)),
-            parent_session_id: request.parent_session_id.clone(),
-        });
-        Ok(store as Arc<dyn RuntimePersistence>)
-    }
 }
 
 fn now() -> String {

@@ -5,8 +5,13 @@ pub(crate) struct ProviderCliMetadata {
     pub setup_description: &'static str,
 }
 
-pub(crate) const PROVIDER_SETUP_ORDER: &[&str] =
-    &["anthropic", "openai-compatible", "codex", "google_oauth"];
+pub(crate) const PROVIDER_SETUP_ORDER: &[&str] = &[
+    "anthropic",
+    "openai",
+    "openai-compatible",
+    "codex",
+    "google_oauth",
+];
 
 const PROVIDERS: &[ProviderCliMetadata] = &[
     ProviderCliMetadata {
@@ -14,6 +19,12 @@ const PROVIDERS: &[ProviderCliMetadata] = &[
         cli_label: "Anthropic API (Claude)",
         setup_name: "Anthropic API",
         setup_description: "Claude via Anthropic API key",
+    },
+    ProviderCliMetadata {
+        kind: "openai",
+        cli_label: "OpenAI API (API key)",
+        setup_name: "OpenAI API",
+        setup_description: "OpenAI Responses API key",
     },
     ProviderCliMetadata {
         kind: "openai-compatible",

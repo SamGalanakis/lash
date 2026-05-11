@@ -78,7 +78,8 @@ flowchart TD
             <table>
               <thead><tr><th>Provider</th><th>Kind</th><th>Transport / Auth</th></tr></thead>
               <tbody>
-                <tr><td>OpenAI-compatible</td><td><code>openai-compatible</code></td><td>Uses bearer API-key auth and selects an internal wire API: <code>responses</code> or <code>chat-completions</code>. <code>wire_api = auto</code> routes OpenRouter Anthropic/Claude models to Chat Completions and keeps other compatible endpoints on Responses.</td></tr>
+                <tr><td>OpenAI API</td><td><code>openai</code></td><td>Uses bearer API-key auth against <code>https://api.openai.com/v1/responses</code>. Direct OpenAI is Responses-only and owns Responses reasoning replay plus prompt cache fields.</td></tr>
+                <tr><td>OpenAI-compatible</td><td><code>openai-compatible</code></td><td>Uses bearer API-key auth against a caller-provided base URL and posts Chat Completions requests to <code>{base_url}/chat/completions</code>.</td></tr>
                 <tr><td>Codex subscription</td><td><code>codex</code></td><td>Posts to ChatGPT Codex Responses backend with OAuth device-code tokens and Codex-specific headers.</td></tr>
                 <tr><td>Anthropic</td><td><code>anthropic</code></td><td>Posts to <code>/v1/messages</code> with API key, Anthropic version header, and beta flags.</td></tr>
                 <tr><td>Google Gemini / Code Assist</td><td><code>google_oauth</code></td><td>Uses Google OAuth PKCE/manual-code flow and Code Assist generate/stream endpoints.</td></tr>
@@ -86,10 +87,10 @@ flowchart TD
             </table>
           </div>
           <dl class="def-list">
-            <dt>OpenAI-compatible selection</dt>
-            <dd><code>openai-compatible</code> is the public provider kind. Its internal <code>wire_api</code> can be <code>auto</code>, <code>responses</code>, or <code>chat-completions</code>; <code>auto</code> defaults to Responses except for OpenRouter Anthropic/Claude model ids, where message-shaped Chat Completions preserves provider-native caching behavior.</dd>
+            <dt>OpenAI provider split</dt>
+            <dd><code>openai</code> is the direct OpenAI Responses provider and accepts no <code>base_url</code>. <code>openai-compatible</code> is the generic Chat Completions provider and requires a caller-provided <code>base_url</code>.</dd>
             <dt>Responses path</dt>
-            <dd>The Responses path posts to <code>{base_url}/responses</code>, keeps Responses reasoning replay, and uses <code>prompt_cache_key</code> from the Lash session id when cache retention is enabled. Long retention adds <code>prompt_cache_retention</code> where that API supports it.</dd>
+            <dd>The direct OpenAI path posts to <code>https://api.openai.com/v1/responses</code>, keeps Responses reasoning replay, and uses <code>prompt_cache_key</code> from the Lash session id when cache retention is enabled. Long retention adds <code>prompt_cache_retention</code> where that API supports it.</dd>
             <dt>Chat Completions path</dt>
             <dd>The Chat path posts to <code>{base_url}/chat/completions</code>, converts <code>LlmRequest</code> into <code>messages</code>, emits Chat Completions tools, maps structured output to <code>response_format</code>, and preserves OpenRouter reasoning effort through <code>reasoning.effort</code>.</dd>
             <dt>Claude cache markers</dt>
@@ -101,7 +102,7 @@ flowchart TD
             <dt>Provider boundary rule</dt>
             <dd>Wire-specific schema normalization, cache-marker placement, reasoning-detail replay, and token-field interpretation stay inside provider crates. Runtime modes and canonical tool definitions continue to operate on <code>LlmRequest</code>, <code>LlmResponse</code>, and <code>ToolDefinition</code>.</dd>
             <dt>Built-in aggregator</dt>
-            <dd><code>lash-providers-builtin::register_all</code> is the one-call aggregator the CLI and embed hosts use to register the four first-party provider factories (Anthropic, OpenAI-compatible, Codex, Google) with the global provider registry.</dd>
+            <dd><code>lash-providers-builtin::register_all</code> is the one-call aggregator the CLI and embed hosts use to register the five first-party provider factories (Anthropic, OpenAI, OpenAI-compatible, Codex, Google) with the global provider registry.</dd>
           </dl>
         </div>
 

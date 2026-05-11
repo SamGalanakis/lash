@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -9,7 +9,8 @@ use flate2::write::ZlibEncoder;
 use lash::{
     BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
     RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
-    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
+    SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest,
+    SessionStoreFactory, StoreError, VacuumReport,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -195,6 +196,86 @@ struct StoredBlobEnvelope {
 pub struct StoredSessionCheckpoint {
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
+}
+
+/// Explicit first-party factory for one SQLite session database per Lash session.
+///
+/// Hosts opt into this by passing it to `lash_embed::LashCoreBuilder::store_factory`.
+/// The factory never becomes a default: app storage and runtime storage remain
+/// host-owned decisions.
+#[derive(Clone, Debug)]
+pub struct SqliteSessionStoreFactory {
+    root: PathBuf,
+    options: StoreOptions,
+}
+
+impl SqliteSessionStoreFactory {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            options: StoreOptions::default(),
+        }
+    }
+
+    pub fn with_options(root: impl Into<PathBuf>, options: StoreOptions) -> Self {
+        Self {
+            root: root.into(),
+            options,
+        }
+    }
+
+    pub fn path_for_session(&self, session_id: &str) -> PathBuf {
+        self.root.join(safe_session_db_file_name(session_id))
+    }
+}
+
+impl SessionStoreFactory for SqliteSessionStoreFactory {
+    fn create_store(
+        &self,
+        request: &SessionStoreCreateRequest,
+    ) -> Result<Arc<dyn RuntimePersistence>, String> {
+        std::fs::create_dir_all(&self.root).map_err(|err| err.to_string())?;
+        let path = self.path_for_session(&request.session_id);
+        let store =
+            Arc::new(Store::open_with_options(&path, self.options).map_err(|err| err.to_string())?);
+        if store.load_session_meta().is_none() {
+            store.save_session_meta(SessionMeta {
+                session_id: request.session_id.clone(),
+                session_name: request.session_id.clone(),
+                created_at: current_timestamp_string(),
+                model: request.policy.model.clone(),
+                cwd: std::env::current_dir()
+                    .ok()
+                    .and_then(|path| path.to_str().map(str::to_string)),
+                parent_session_id: request.parent_session_id.clone(),
+            });
+        }
+        Ok(store as Arc<dyn RuntimePersistence>)
+    }
+}
+
+fn safe_session_db_file_name(session_id: &str) -> String {
+    let mut safe = session_id
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    safe = safe.trim_matches('_').to_string();
+    if safe.is_empty() {
+        safe.push_str("session");
+    }
+    safe.truncate(80);
+    let hash = format!("{:x}", Sha256::digest(session_id.as_bytes()));
+    format!("{safe}-{}.db", &hash[..16])
+}
+
+fn current_timestamp_string() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("unix:{}", now.as_secs())
 }
 
 fn retained_artifact_refs(checkpoint: &SessionCheckpoint) -> Vec<RetainedArtifactRef> {

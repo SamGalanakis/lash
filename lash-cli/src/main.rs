@@ -147,8 +147,8 @@ fn normalized_cli_args() -> Vec<std::ffi::OsString> {
 #[derive(Parser)]
 #[command(name = "lash-cli", bin_name = "lash", version = APP_VERSION, long_version = LONG_VERSION)]
 struct Args {
-    /// OpenAI-compatible API key (optional — use --provider to configure interactively)
-    #[arg(long, env = "OPENAI_COMPATIBLE_API_KEY")]
+    /// OpenAI API key, or OpenAI-compatible key when paired with --base-url
+    #[arg(long)]
     api_key: Option<String>,
 
     /// Tavily API key for web search

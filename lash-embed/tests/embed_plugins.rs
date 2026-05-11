@@ -8,7 +8,11 @@ use lash_embed::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
 
 fn assistant_prose(result: &lash_embed::turn::TurnOutput) -> String {
-    result.assistant_transcript_text()
+    result
+        .result
+        .assistant_message()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -22,14 +26,14 @@ struct TestPluginConfig {
 }
 
 #[derive(Clone, Debug)]
-struct TestTurnContext {
+struct TestTurnInput {
     label: String,
 }
 
 impl PluginBinding for TestPlugin {
     const ID: &'static str = "test_typed";
     type SessionConfig = TestPluginConfig;
-    type TurnContext = TestTurnContext;
+    type Input = TestTurnInput;
 
     fn factory(config: &Self::SessionConfig) -> Arc<dyn lash::PluginFactory> {
         Arc::new(TestPluginFactory {
@@ -37,7 +41,7 @@ impl PluginBinding for TestPlugin {
         })
     }
 
-    fn requires_turn_context(config: &Self::SessionConfig) -> bool {
+    fn requires_turn_input(config: &Self::SessionConfig) -> bool {
         config.required
     }
 }
@@ -77,7 +81,7 @@ impl lash::SessionPlugin for TestSessionPlugin {
             Box::pin(async move {
                 if let Some(input) = ctx
                     .turn_context
-                    .plugin_context::<TestTurnContext>(TestPlugin::ID)
+                    .plugin_input::<TestTurnInput>(TestPlugin::ID)
                 {
                     prompt_seen
                         .lock()
@@ -102,7 +106,7 @@ impl ToolProvider for TestTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition::raw(
             "typed_probe",
-            "Probe typed turn context.",
+            "Probe typed turn input.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -114,10 +118,7 @@ impl ToolProvider for TestTools {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         assert_eq!(call.name, "typed_probe");
-        let Some(input) = call
-            .context
-            .plugin_context::<TestTurnContext>(TestPlugin::ID)
-        else {
+        let Some(input) = call.context.plugin_input::<TestTurnInput>(TestPlugin::ID) else {
             return ToolResult::err_fmt("missing typed input");
         };
         self.seen
@@ -169,7 +170,6 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
         .into_handle();
     LashCore::builder()
         .install_mode(ModePreset::standard())
-        .register_plugin::<TestPlugin>()
         .provider(provider)
         .max_context_tokens(16_000)
         .build()
@@ -177,7 +177,7 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
 }
 
 #[tokio::test]
-async fn required_turn_context_missing_is_validated_before_execution() {
+async fn required_turn_input_missing_is_validated_before_execution() {
     let config = TestPluginConfig {
         required: true,
         prompt_seen: Arc::new(Mutex::new(Vec::new())),
@@ -186,8 +186,7 @@ async fn required_turn_context_missing_is_validated_before_execution() {
     let core = core_with_responses(vec![response_text("should not run")]);
     let session = core
         .session("required-missing")
-        .use_plugin::<TestPlugin>(config)
-        .expect("use plugin")
+        .plugin::<TestPlugin>(config)
         .open()
         .await
         .expect("session");
@@ -198,14 +197,14 @@ async fn required_turn_context_missing_is_validated_before_execution() {
         .expect_err("missing required context");
     assert!(matches!(
         err,
-        EmbedError::MissingPluginTurnContext {
+        EmbedError::MissingPluginTurnInput {
             plugin_id: TestPlugin::ID
         }
     ));
 }
 
 #[tokio::test]
-async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
+async fn prompt_hook_and_tool_provider_read_typed_turn_input() {
     let prompt_seen = Arc::new(Mutex::new(Vec::new()));
     let tool_seen = Arc::new(Mutex::new(Vec::new()));
     let config = TestPluginConfig {
@@ -216,15 +215,14 @@ async fn prompt_hook_and_tool_provider_read_typed_turn_context() {
     let core = core_with_responses(vec![response_tool_call(), response_text("done")]);
     let session = core
         .session("typed-context")
-        .use_plugin::<TestPlugin>(config)
-        .expect("use plugin")
+        .plugin::<TestPlugin>(config)
         .open()
         .await
         .expect("session");
 
     let result = session
         .turn(TurnInput::text("probe"))
-        .with_plugin_context::<TestPlugin>(TestTurnContext {
+        .with_plugin_input::<TestPlugin>(TestTurnInput {
             label: "page-a".to_string(),
         })
         .run()
@@ -252,12 +250,33 @@ async fn optional_turn_input_can_be_absent() {
     let core = core_with_responses(vec![response_text("ok")]);
     let session = core
         .session("optional-absent")
-        .use_plugin::<TestPlugin>(config)
-        .expect("use plugin")
+        .plugin::<TestPlugin>(config)
         .open()
         .await
         .expect("session");
 
     let result = session.run(TurnInput::text("hello")).await.expect("turn");
     assert_eq!(assistant_prose(&result), "ok");
+}
+
+#[tokio::test]
+async fn sessions_without_typed_plugin_install_do_not_get_inactive_fallback_tools() {
+    let core = core_with_responses(vec![response_text("done")]);
+    let session = core
+        .session("without-typed-plugin")
+        .open()
+        .await
+        .expect("session");
+
+    let definitions = session
+        .tools()
+        .active_definitions()
+        .await
+        .expect("definitions");
+
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition.name != "typed_probe")
+    );
 }

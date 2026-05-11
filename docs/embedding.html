@@ -41,8 +41,9 @@
             <div class="diagram-title">Embed host boundary</div>
             <pre><code>use std::sync::Arc;
 
-use lash::ToolProvider;
-use lash_embed::{LashCore, ModeId, ModePreset, TurnInput};
+use lash_embed::{tools::*, LashCore, ModeId, ModePreset, TurnEvent, TurnInput};
+
+let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new("lash-sessions"));
 
 let core = LashCore::builder()
     .install_mode(ModePreset::standard())
@@ -71,7 +72,7 @@ println!("{assistant_text}");</code></pre>
             <dt><code>LashSession</code></dt>
             <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn configuration: cancellation, mode options, typed plugin context, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
+            <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
           </dl>
         </div>
 
@@ -301,8 +302,8 @@ let result = session
 
         <div class="section">
           <div class="section-header">
-            <h2>Typed Plugin Context</h2>
-            <p>Plugin bindings let an app provide strongly typed session configuration and per-turn context. The binding activates an ordinary core plugin factory; the resulting session plugin registers prompt context, tools, and other capabilities through <code>PluginRegistrar</code>.</p>
+            <h2>Typed Plugin Input</h2>
+            <p>Plugin bindings let an app provide strongly typed session configuration and per-turn input. The binding activates an ordinary core plugin factory for that session; the resulting session plugin registers prompt contributions, tools, and other capabilities through <code>PluginRegistrar</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Plugin and tool pattern</div>
@@ -313,20 +314,20 @@ struct BoardPlugin;
 struct BoardConfig;
 
 #[derive(Clone, Debug)]
-struct BoardTurnContext {
+struct BoardTurnInput {
     board: BoardState,
 }
 
 impl lash_embed::PluginBinding for BoardPlugin {
     const ID: &amp;'static str = "board";
     type SessionConfig = BoardConfig;
-    type TurnContext = BoardTurnContext;
+    type Input = BoardTurnInput;
 
     fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::PluginFactory&gt; {
         Arc::new(BoardPluginFactory)
     }
 
-    fn requires_turn_context(_: &amp;Self::SessionConfig) -&gt; bool {
+    fn requires_turn_input(_: &amp;Self::SessionConfig) -&gt; bool {
         true
     }
 }
@@ -337,7 +338,7 @@ impl lash::SessionPlugin for BoardSessionPlugin {
     fn register(&amp;self, reg: &amp;mut lash::PluginRegistrar) -&gt; Result&lt;(), lash::PluginError&gt; {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
-                let Some(input) = ctx.turn_context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
+                let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
                     return Ok(Vec::new());
                 };
                 Ok(vec![lash::PromptContribution::environment(
@@ -351,41 +352,41 @@ impl lash::SessionPlugin for BoardSessionPlugin {
 }
 
 #[async_trait::async_trait]
-impl lash::ToolProvider for BoardTools {
-    fn definitions(&amp;self) -&gt; Vec&lt;lash::ToolDefinition&gt; {
+impl lash_embed::tools::ToolProvider for BoardTools {
+    fn definitions(&amp;self) -&gt; Vec&lt;lash_embed::tools::ToolDefinition&gt; {
         vec![/* read_board, play_move, app tools */]
     }
 
-    async fn execute(&amp;self, call: lash::ToolCall&lt;'_&gt;) -&gt; lash::ToolResult {
-        let Some(input) = call.context.plugin_context::&lt;BoardTurnContext&gt;(BoardPlugin::ID) else {
-            return lash::ToolResult::err_fmt("missing board context");
+    async fn execute(&amp;self, call: lash_embed::tools::ToolCall&lt;'_&gt;) -&gt; lash_embed::tools::ToolResult {
+        let Some(input) = call.context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
+            return lash_embed::tools::ToolResult::err_fmt("missing board input");
         };
         run_board_tool(call.name, call.args, &amp;input.board)
     }
 }</code></pre>
           </div>
           <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. Embed streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
-          <p>Plugin crates should export a domain extension trait that wraps the generic context primitive:</p>
+          <p>Plugin crates should export a domain extension trait that wraps the generic input primitive:</p>
           <pre><code>trait BoardTurnExt {
     fn with_board(self, board: BoardState) -&gt; Self;
 }
 
 impl BoardTurnExt for lash_embed::TurnBuilder {
     fn with_board(self, board: BoardState) -&gt; Self {
-        self.with_plugin_context::&lt;BoardPlugin&gt;(BoardTurnContext { board })
+        self.with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
     }
 }</code></pre>
-          <p>Register the plugin on the core, activate it on the session, and use the extension method before each run:</p>
+          <p>Install typed plugins on the session and use the extension method before each run:</p>
           <pre><code>let core = LashCore::rlm()
-    .register_plugin::&lt;BoardPlugin&gt;()
     .provider(provider)
     .model(model, None)
+    .max_context_tokens(200_000)
     .build()?;
 
 let session = core
     .session(chat_id)
     .rlm()
-    .use_plugin::&lt;BoardPlugin&gt;(BoardConfig)?
+    .plugin::&lt;BoardPlugin&gt;(BoardConfig)
     .open()
     .await?;
 
@@ -404,7 +405,7 @@ let result = session
           </div>
           <div class="two-col">
             <article class="panel"><h3>App state</h3><p>Own chat tables, account ids, frontend board state, request auth, and transport formats. The example app stores chat messages in SQLite and streams newline-delimited JSON to the browser.</p></article>
-            <article class="panel"><h3>Runtime state</h3><p>Provide <code>.store_factory(...)</code> on <code>LashCoreBuilder</code> or <code>.store(...)</code> on <code>SessionBuilder</code> when sessions need durable runtime state across process restarts.</p></article>
+            <article class="panel"><h3>Runtime state</h3><p>Pass an explicit store factory such as <code>lash_sqlite_store::SqliteSessionStoreFactory::new(...)</code> to <code>LashCoreBuilder::store_factory</code>, or pass a concrete store to <code>SessionBuilder::store</code>, when sessions need durable runtime state across process restarts.</p></article>
           </div>
         </div>
 
@@ -427,7 +428,7 @@ let result = session
         <div class="section">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin context, tools that read turn context, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
+            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal output rendering, and app-owned persistence folded from the stream.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>

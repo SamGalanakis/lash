@@ -716,8 +716,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
 
     let collected = session.turn(TurnInput::text("run groups")).run().await?;
 
-    assert_eq!(collected.assistant_messages(), vec!["first", "second"]);
-    assert_eq!(collected.assistant_transcript_text(), "firstsecond");
+    assert_eq!(assistant_prose(&collected.activities), "firstsecond");
     assert_eq!(collected.result.assistant_message(), Some("second"));
     Ok(())
 }

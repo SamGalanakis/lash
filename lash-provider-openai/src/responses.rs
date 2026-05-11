@@ -24,7 +24,7 @@ pub(crate) struct ResponsesStreamState {
 
 impl ResponsesStreamState {
     pub(crate) fn begin_message(&mut self, item: Option<&Value>) {
-        let meta = item.map(OpenAiGenericProvider::response_text_meta_from_message_item);
+        let meta = item.map(OpenAiCompatibleProvider::response_text_meta_from_message_item);
         let index = self.parts.len();
         self.parts.push(LlmOutputPart::Text {
             text: String::new(),
@@ -35,8 +35,8 @@ impl ResponsesStreamState {
 
     pub(crate) fn finish_message(&mut self, item: Option<&Value>) {
         if let Some(item) = item {
-            let text = OpenAiGenericProvider::message_text_from_item(item);
-            let meta = OpenAiGenericProvider::response_text_meta_from_message_item(item);
+            let text = OpenAiCompatibleProvider::message_text_from_item(item);
+            let meta = OpenAiCompatibleProvider::response_text_meta_from_message_item(item);
             let index = self.ensure_text_part_index();
             if let Some(LlmOutputPart::Text {
                 text: existing,
@@ -250,7 +250,7 @@ impl ResponsesStreamState {
         if parts.is_empty()
             && let Some(final_response) = &self.final_response
         {
-            parts = OpenAiGenericProvider::response_parts_from_value(final_response);
+            parts = OpenAiCompatibleProvider::response_parts_from_value(final_response);
         }
         parts
     }

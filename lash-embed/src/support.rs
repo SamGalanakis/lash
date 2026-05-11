@@ -1,5 +1,4 @@
-pub(crate) use std::any::Any;
-pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap};
+pub(crate) use std::collections::BTreeMap;
 pub(crate) use std::fmt;
 pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 
@@ -25,7 +24,9 @@ pub(crate) use lash::{
 };
 pub(crate) use lash::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};
-pub(crate) use lash::{TurnActivity, TurnActivityId, TurnEvent, TurnInput};
+pub(crate) use lash::{TurnActivity, TurnInput};
+#[cfg(test)]
+pub(crate) use lash::{TurnActivityId, TurnEvent};
 
 pub(crate) use crate::ToolState;
 pub(crate) use crate::control::*;

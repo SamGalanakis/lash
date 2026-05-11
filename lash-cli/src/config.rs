@@ -229,8 +229,12 @@ mod tests {
     #[test]
     fn lash_config_roundtrips_existing_shape() {
         let raw = serde_json::json!({
-            "active_provider": "openai-compatible",
+            "active_provider": "openai",
             "providers": {
+                "openai": {
+                    "type": "openai",
+                    "api_key": "direct-k"
+                },
                 "openai-compatible": {
                     "type": "openai-compatible",
                     "api_key": "k",
@@ -239,10 +243,12 @@ mod tests {
             }
         });
         let cfg: LashConfig = serde_json::from_value(raw).expect("valid config");
-        assert_eq!(cfg.active_provider, "openai-compatible");
+        assert_eq!(cfg.active_provider, "openai");
         let spec = cfg.active_provider_spec();
-        assert_eq!(spec.kind, "openai-compatible");
-        assert_eq!(spec.config["api_key"], serde_json::json!("k"));
+        assert_eq!(spec.kind, "openai");
+        assert_eq!(spec.config["api_key"], serde_json::json!("direct-k"));
+        let compatible = cfg.provider_spec("openai-compatible").expect("compatible");
+        assert_eq!(compatible.config["base_url"], "https://example.com/v1");
     }
 
     #[test]

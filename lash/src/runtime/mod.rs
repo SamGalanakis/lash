@@ -116,6 +116,16 @@ pub enum InputItem {
     ImageRef { id: String },
 }
 
+impl InputItem {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn image_ref(id: impl Into<String>) -> Self {
+        Self::ImageRef { id: id.into() }
+    }
+}
+
 /// Host-provided per-turn input.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
@@ -139,12 +149,12 @@ pub struct TurnInput {
 
 impl TurnInput {
     pub fn text(text: impl Into<String>) -> Self {
-        Self::items(vec![InputItem::Text { text: text.into() }])
+        Self::items([InputItem::text(text)])
     }
 
-    pub fn items(items: Vec<InputItem>) -> Self {
+    pub fn items(items: impl IntoIterator<Item = InputItem>) -> Self {
         Self {
-            items,
+            items: items.into_iter().collect(),
             image_blobs: HashMap::new(),
             mode: None,
             mode_turn_options: None,
@@ -158,11 +168,33 @@ impl TurnInput {
         self.image_blobs.insert(id.into(), bytes);
         self
     }
+
+    pub fn with_image_ref(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
+        let id = id.into();
+        self.items.push(InputItem::image_ref(id.clone()));
+        self.image_blobs.insert(id, bytes);
+        self
+    }
+
+    pub fn with_mode(mut self, mode: RunMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
+    pub fn with_mode_turn_options(mut self, options: crate::ModeTurnOptions) -> Self {
+        self.mode_turn_options = Some(options);
+        self
+    }
+
+    pub fn with_trace_turn_id(mut self, trace_turn_id: impl Into<String>) -> Self {
+        self.trace_turn_id = Some(trace_turn_id.into());
+        self
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct TurnContext {
-    plugin_contexts: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
+    plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
     provider: Option<crate::ProviderHandle>,
     model: Option<String>,
     model_variant: Option<Option<String>>,
@@ -174,11 +206,11 @@ impl TurnContext {
         Self::default()
     }
 
-    pub fn insert_plugin_context<T>(&mut self, plugin_id: &'static str, input: T)
+    pub fn insert_plugin_input<T>(&mut self, plugin_id: &'static str, input: T)
     where
         T: Send + Sync + 'static,
     {
-        self.plugin_contexts.insert(plugin_id, Arc::new(input));
+        self.plugin_inputs.insert(plugin_id, Arc::new(input));
     }
 
     pub fn set_provider(&mut self, provider: crate::ProviderHandle) {
@@ -205,17 +237,17 @@ impl TurnContext {
         })
     }
 
-    pub fn plugin_context<T>(&self, plugin_id: &'static str) -> Option<&T>
+    pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
     where
         T: 'static,
     {
-        self.plugin_contexts
+        self.plugin_inputs
             .get(plugin_id)
             .and_then(|input| input.downcast_ref::<T>())
     }
 
-    pub fn has_plugin_context(&self, plugin_id: &'static str) -> bool {
-        self.plugin_contexts.contains_key(plugin_id)
+    pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
+        self.plugin_inputs.contains_key(plugin_id)
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {
@@ -251,8 +283,8 @@ impl fmt::Debug for TurnContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TurnContext")
             .field(
-                "plugin_contexts",
-                &self.plugin_contexts.keys().collect::<Vec<_>>(),
+                "plugin_inputs",
+                &self.plugin_inputs.keys().collect::<Vec<_>>(),
             )
             .field("has_provider", &self.provider.is_some())
             .field("has_model", &self.model.is_some())

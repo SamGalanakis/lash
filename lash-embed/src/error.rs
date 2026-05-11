@@ -14,15 +14,8 @@ pub enum EmbedError {
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]
     StoreSessionMismatch { loaded: String, requested: String },
-    #[error("plugin binding `{plugin_id}` is not registered on this LashCore")]
-    PluginNotRegistered { plugin_id: &'static str },
-    #[error("missing required turn context for plugin `{plugin_id}`")]
-    MissingPluginTurnContext { plugin_id: &'static str },
-    #[error("plugin binding `{plugin_id}` config error: {message}")]
-    PluginConfig {
-        plugin_id: &'static str,
-        message: String,
-    },
+    #[error("missing required turn input for plugin `{plugin_id}`")]
+    MissingPluginTurnInput { plugin_id: &'static str },
     #[error("runtime session error: {0}")]
     Session(#[from] SessionError),
     #[error("runtime turn error: {0}")]

@@ -1028,8 +1028,10 @@ fn resolve_provider(args: &Args) -> anyhow::Result<ProviderHandle> {
                     "missing API key — set OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY in .env, or pass --api-key"
                 )
             })?;
-            let provider =
-                lash_provider_openai::OpenAiGenericProvider::new(api_key, resolve_base_url(args));
+            let provider = lash_provider_openai::OpenAiCompatibleProvider::new(
+                api_key,
+                resolve_base_url(args),
+            );
             Ok(ProviderHandle::new(provider.into_components()))
         }
         // Any other provider key (e.g. `codex`, `anthropic`) is resolved from

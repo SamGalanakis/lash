@@ -19,7 +19,7 @@ use lash_rlm_types::RlmCreateExtras;
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
 use crate::projected_bindings::{
-    RLM_TURN_CONTEXT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+    RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
 };
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
@@ -152,7 +152,7 @@ impl SessionPlugin for RlmModePlugin {
                 let mut contributions = session.projected_binding_prompt_contributions().await;
                 if let Some(extension) = ctx
                     .turn_context
-                    .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+                    .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
                 {
                     contributions.extend(RlmProjectionExtension::prompt_contributions_for(
                         &extension.bindings,

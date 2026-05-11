@@ -104,7 +104,7 @@ flowchart LR
             <dt><code>LashSession</code></dt>
             <dd>Represents one app conversation. It wraps an <code>Arc&lt;Mutex&lt;LashRuntime&gt;&gt;</code>, exposes <code>run(TurnInput)</code>, <code>turn(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>, and can carry a parent session id for app-level parent/child relationships.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn context, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnActivitySink</code> and returns a rich <code>TurnResult</code> with state, outcome, assistant output, usage, tool calls, execution summary, and errors; <code>.run()</code> returns a <code>TurnOutput</code> with the terminal result and ordered turn activities.</dd>
+            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnActivitySink</code> and returns a rich <code>TurnResult</code> with state, outcome, assistant output, usage, tool calls, execution summary, and errors; <code>.run()</code> returns a <code>TurnOutput</code> with the terminal result and ordered turn activities.</dd>
             <dt><code>TurnInput</code></dt>
             <dd>Core input is text plus image references. Hosts resolve UI syntax such as <code>@path</code> before constructing the turn, either as text markers or as future host-owned attachments.</dd>
             <dt><code>TurnActivity</code></dt>

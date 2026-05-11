@@ -129,7 +129,7 @@ impl ChatStreamState {
         if parts.is_empty()
             && let Some(final_response) = &self.final_response
         {
-            parts = OpenAiGenericProvider::chat_response_parts_from_value(final_response);
+            parts = OpenAiCompatibleProvider::chat_response_parts_from_value(final_response);
         }
         parts
     }

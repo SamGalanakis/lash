@@ -72,9 +72,9 @@ impl ToolContext {
         self.tool_call_id.as_deref()
     }
 
-    /// Shortcut for [`TurnContext::plugin_context`](crate::TurnContext::plugin_context).
-    pub fn plugin_context<T: 'static>(&self, plugin_id: &'static str) -> Option<&T> {
-        self.turn_context.plugin_context::<T>(plugin_id)
+    /// Shortcut for [`TurnContext::plugin_input`](crate::TurnContext::plugin_input).
+    pub fn plugin_input<T: 'static>(&self, plugin_id: &'static str) -> Option<&T> {
+        self.turn_context.plugin_input::<T>(plugin_id)
     }
 
     pub fn with_async_task(

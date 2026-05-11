@@ -642,8 +642,11 @@ mod fork_tests {
 
     fn dummy_provider() -> ProviderHandle {
         ProviderHandle::new(
-            lash_provider_openai::OpenAiGenericProvider::new("test", "https://example.invalid/v1")
-                .into_components(),
+            lash_provider_openai::OpenAiCompatibleProvider::new(
+                "test",
+                "https://example.invalid/v1",
+            )
+            .into_components(),
         )
     }
 

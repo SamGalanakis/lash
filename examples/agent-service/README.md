@@ -26,20 +26,20 @@ attaches a trace sink to `LashCore`, and writes JSONL trace records to stderr
 and `AGENT_SERVICE_TRACE` so provider payloads, RLM response, extracted
 lashlang, terminal output, and tool calls are visible while you run it.
 
-The app installs RLM explicitly with `ModePreset::rlm()`, registers
-`DemoPlugin` on `LashCore`, activates it per chat session with
-`SessionBuilder::use_plugin::<DemoPlugin>(...)`, and lets the plugin provide
+The app installs RLM explicitly with `ModePreset::rlm()`, activates
+`DemoPlugin` per chat session with
+`SessionBuilder::plugin::<DemoPlugin>(...)`, and lets the plugin provide
 its fixed app tools through the normal `ToolProvider` hook.
 
 The plugin demonstrates:
 
 - Typed session activation through `PluginBinding::SessionConfig`.
-- Typed per-turn UI context through `DemoTurnContext`.
-- A required tic-tac-toe board context validated before the turn runs.
+- Typed per-turn UI input through `DemoTurnInput`.
+- A required tic-tac-toe board input validated before the turn runs.
 - A plugin-authored `BoardTurnExt` trait so route code uses `.with_board(...)`
-  instead of the generic `with_plugin_context::<DemoPlugin>(...)` primitive.
+  instead of the generic `with_plugin_input::<DemoPlugin>(...)` primitive.
 - `read_board` and `play_move` app tools provided by the plugin's
-  `ToolProvider`. Their handlers read the same typed turn context used by the
+  `ToolProvider`. Their handlers read the same typed turn input used by the
   prompt hook.
 - Prompt contribution that reflects the current board state.
 - Additive semantic streaming: thinking is shown live from

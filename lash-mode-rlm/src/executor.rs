@@ -17,7 +17,7 @@ use lashlang::{
 use serde_json::{Value, json};
 
 use crate::projected_bindings::{
-    RLM_TURN_CONTEXT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+    RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
 };
 use crate::projection::{RlmHistoryProjection, rlm_history_projection};
 
@@ -273,7 +273,7 @@ fn projected_bindings(
     insert_projected_bindings(&mut bindings, session_bindings)?;
     if let Some(extension) = ctx
         .turn_context()
-        .plugin_context::<RlmProjectionExtension>(RLM_TURN_CONTEXT_PLUGIN_ID)
+        .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
     {
         insert_projected_bindings(&mut bindings, extension.bindings.clone())?;
     }

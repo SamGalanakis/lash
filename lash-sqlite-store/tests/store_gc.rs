@@ -1,11 +1,12 @@
 use lash::{
     ExecutionMode, HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState,
     PersistedTurnState, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, SessionGraph,
-    SessionHead, SessionReadScope, StandardContextApproach, TokenLedgerEntry, TokenUsage,
-    ToolState,
+    SessionHead, SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    StandardContextApproach, TokenLedgerEntry, TokenUsage, ToolState,
 };
 use lash_sqlite_store::{
-    BlobArtifactDescriptor, BuiltinBlobProfile, Store, StoreGcPolicy, StoreOptions,
+    BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
+    StoreOptions,
 };
 
 #[test]
@@ -152,4 +153,115 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
         .expect("commit");
 
     assert!(store.get_blob(&orphan).is_none());
+}
+
+#[test]
+fn sqlite_factory_uses_deterministic_safe_session_paths() {
+    let root = unique_temp_dir("paths");
+    let factory = SqliteSessionStoreFactory::new(&root);
+
+    let first = factory.path_for_session("../weird/session");
+    let second = factory.path_for_session("../weird/session");
+
+    assert_eq!(first, second);
+    assert_eq!(first.parent(), Some(root.as_path()));
+    assert!(
+        first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".db")
+    );
+    assert!(!first.file_name().unwrap().to_string_lossy().contains('/'));
+}
+
+#[tokio::test]
+async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
+    let root = unique_temp_dir("metadata");
+    let factory = SqliteSessionStoreFactory::new(&root);
+    let request = SessionStoreCreateRequest {
+        session_id: "chat/alpha".to_string(),
+        parent_session_id: Some("parent".to_string()),
+        policy: SessionPolicy {
+            model: "first-model".to_string(),
+            ..SessionPolicy::default()
+        },
+    };
+
+    let store = factory.create_store(&request).expect("create store");
+    let meta = store
+        .load_session_meta()
+        .await
+        .expect("load meta")
+        .expect("meta");
+    assert_eq!(meta.session_id, "chat/alpha");
+    assert_eq!(meta.model, "first-model");
+
+    store
+        .save_session_meta(lash::SessionMeta {
+            session_id: "chat/alpha".to_string(),
+            session_name: "Renamed".to_string(),
+            created_at: "original".to_string(),
+            model: "preserved-model".to_string(),
+            cwd: Some("/tmp/original".to_string()),
+            parent_session_id: Some("parent".to_string()),
+        })
+        .await
+        .expect("save meta");
+
+    let reopened = factory
+        .create_store(&SessionStoreCreateRequest {
+            policy: SessionPolicy {
+                model: "second-model".to_string(),
+                ..SessionPolicy::default()
+            },
+            ..request
+        })
+        .expect("reopen store");
+    let reopened_meta = reopened
+        .load_session_meta()
+        .await
+        .expect("load reopened meta")
+        .expect("reopened meta");
+    assert_eq!(reopened_meta.session_name, "Renamed");
+    assert_eq!(reopened_meta.model, "preserved-model");
+    assert_eq!(reopened_meta.created_at, "original");
+}
+
+#[tokio::test]
+async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
+    let root = unique_temp_dir("explicit");
+    let factory: std::sync::Arc<dyn SessionStoreFactory> =
+        std::sync::Arc::new(SqliteSessionStoreFactory::new(&root));
+    let request = SessionStoreCreateRequest {
+        session_id: "explicit".to_string(),
+        parent_session_id: None,
+        policy: SessionPolicy {
+            model: "model".to_string(),
+            ..SessionPolicy::default()
+        },
+    };
+
+    let store = factory.create_store(&request).expect("create store");
+
+    assert!(
+        store
+            .load_session_meta()
+            .await
+            .expect("load meta")
+            .is_some()
+    );
+}
+
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "lash-sqlite-store-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
 }

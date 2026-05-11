@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn info_text_includes_session_id_and_db_path() {
         let provider = ProviderHandle::new(
-            lash_provider_openai::OpenAiGenericProvider::new(
+            lash_provider_openai::OpenAiCompatibleProvider::new(
                 "test",
                 "https://openrouter.ai/api/v1",
             )

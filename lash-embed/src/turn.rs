@@ -85,15 +85,13 @@ impl TurnBuilder {
         )?))
     }
 
-    /// Attach typed per-turn context for an activated plugin binding.
+    /// Attach typed per-turn input for an activated plugin binding.
     ///
     /// This is the generic primitive. Plugin crates should usually wrap it in a
     /// domain extension trait such as `.with_tone(tone)` or `.with_board(board)`
     /// so application code stays typed in its own vocabulary.
-    pub fn with_plugin_context<P: PluginBinding>(mut self, context: P::TurnContext) -> Self {
-        self.input
-            .turn_context
-            .insert_plugin_context(P::ID, context);
+    pub fn with_plugin_input<P: PluginBinding>(mut self, input: P::Input) -> Self {
+        self.input.turn_context.insert_plugin_input(P::ID, input);
         self
     }
 
@@ -131,7 +129,7 @@ impl TurnBuilder {
                 .turn_context
                 .set_model(model.model, model.variant);
         }
-        validate_required_plugin_contexts(&self.active_plugins, &self.input)?;
+        validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
         Ok((self.runtime, self.input, self.cancel))
     }
 
@@ -184,13 +182,13 @@ impl TurnActivitySink for ChannelTurnActivitySink {
         let _ = self.tx.send(Ok(activity)).await;
     }
 }
-fn validate_required_plugin_contexts(
+fn validate_required_plugin_inputs(
     active_plugins: &[ActivePluginBinding],
     input: &TurnInput,
 ) -> Result<()> {
     for plugin in active_plugins {
-        if plugin.requires_turn_context && !input.turn_context.has_plugin_context(plugin.id) {
-            return Err(EmbedError::MissingPluginTurnContext {
+        if plugin.requires_turn_input && !input.turn_context.has_plugin_input(plugin.id) {
+            return Err(EmbedError::MissingPluginTurnInput {
                 plugin_id: plugin.id,
             });
         }
@@ -356,29 +354,6 @@ impl TurnOutput {
 
     pub fn is_success(&self) -> bool {
         self.result.is_success()
-    }
-
-    pub fn assistant_messages(&self) -> Vec<String> {
-        let mut messages: Vec<String> = Vec::new();
-        let mut current_id: Option<TurnActivityId> = None;
-        for activity in &self.activities {
-            let TurnEvent::AssistantProseDelta { text } = &activity.event else {
-                continue;
-            };
-            if current_id.as_ref() == Some(&activity.correlation_id) {
-                if let Some(current) = messages.last_mut() {
-                    current.push_str(text);
-                }
-                continue;
-            }
-            current_id = Some(activity.correlation_id.clone());
-            messages.push(text.clone());
-        }
-        messages
-    }
-
-    pub fn assistant_transcript_text(&self) -> String {
-        self.assistant_messages().concat()
     }
 }
 

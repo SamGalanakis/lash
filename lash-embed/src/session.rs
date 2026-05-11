@@ -9,6 +9,7 @@ pub struct SessionBuilder {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) store: Option<Arc<dyn RuntimePersistence>>,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,
+    pub(crate) plugin_factories: Vec<Arc<dyn PluginFactory>>,
 }
 
 impl SessionBuilder {
@@ -71,34 +72,13 @@ impl SessionBuilder {
         self
     }
 
-    pub fn use_plugin<P: PluginBinding>(mut self, config: P::SessionConfig) -> Result<Self> {
-        if !self.core.embed_plugin_ids.contains(P::ID) {
-            return Err(EmbedError::PluginNotRegistered { plugin_id: P::ID });
-        }
-        let configs = self
-            .core
-            .embed_plugin_configs
-            .get(P::ID)
-            .cloned()
-            .and_then(|configs| {
-                Arc::downcast::<StdMutex<HashMap<String, P::SessionConfig>>>(configs).ok()
-            })
-            .ok_or_else(|| EmbedError::PluginConfig {
-                plugin_id: P::ID,
-                message: "registered config store has an unexpected type".to_string(),
-            })?;
-        configs
-            .lock()
-            .map_err(|_| EmbedError::PluginConfig {
-                plugin_id: P::ID,
-                message: "config lock poisoned".to_string(),
-            })?
-            .insert(self.session_id.clone(), config.clone());
+    pub fn plugin<P: PluginBinding>(mut self, config: P::SessionConfig) -> Self {
         self.active_plugins.push(ActivePluginBinding {
             id: P::ID,
-            requires_turn_context: P::requires_turn_context(&config),
+            requires_turn_input: P::requires_turn_input(&config),
         });
-        Ok(self)
+        self.plugin_factories.push(P::factory(&config));
+        self
     }
 
     pub async fn open(self) -> Result<LashSession> {
@@ -199,7 +179,17 @@ impl SessionBuilder {
         state: PersistedSessionState,
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
-        let runtime = LashRuntime::from_environment(&self.core.env, policy, state, store).await?;
+        let mut env = self.core.env.clone();
+        if !self.plugin_factories.is_empty() {
+            let mut factories = self.core.plugin_factories.as_ref().clone();
+            factories.extend(self.plugin_factories);
+            let mut plugin_host = PluginHost::new(factories);
+            if env.session_task_executor.is_some() {
+                plugin_host = plugin_host.with_background_tasks();
+            }
+            env.plugin_host = Some(Arc::new(plugin_host));
+        }
+        let runtime = LashRuntime::from_environment(&env, policy, state, store).await?;
         let turn_input_injection_bridge = runtime.turn_input_injection_bridge()?;
         let handle = RuntimeHandle::new(runtime);
         Ok(LashSession {
