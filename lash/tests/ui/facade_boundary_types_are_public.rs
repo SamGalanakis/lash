@@ -6,16 +6,24 @@ use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
     LlmResponse, LlmUsage, TokenUsage,
 };
+use lash::model_info::{
+    ModelCatalog, ModelInfo, ResolvedModelSpec, bundled_models_dev_snapshot,
+};
 use lash::persistence::{
-    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeCommit, RuntimeCommitResult,
-    RuntimePersistence, SessionCheckpoint, SessionMeta, SessionNodeRecord, SessionReadScope,
-    StoreError, TokenLedgerEntry, VacuumReport,
+    GcReport, GraphCommitDelta, PersistedSessionRead, PersistedSessionState, RuntimeCommit,
+    RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionMeta, SessionNodeRecord,
+    SessionReadScope, StoreError, TokenLedgerEntry, VacuumReport,
+    load_persisted_session_state, load_persisted_session_state_active_path,
 };
 use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, PluginDirective, PluginHost, PluginSpec,
     PluginSpecBuilder, PluginSpecFactory, ToolCallHookContext, ToolResultHookContext,
 };
-use lash::tools::{ToolActivation, ToolOutputContract};
+use lash::provider::{
+    ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
+    ProviderTimeoutPolicy,
+};
+use lash::tools::{ToolActivation, ToolDiscoveryMetadata, ToolOutputContract};
 
 struct FacadeStore;
 
@@ -136,8 +144,34 @@ fn advanced_builder_accepts_runtime_core_config(
 fn tool_contract_types_are_nameable(
     activation: ToolActivation,
     contract: ToolOutputContract,
+    discovery: ToolDiscoveryMetadata,
 ) {
-    let _ = (activation, contract);
+    let _ = (activation, contract, discovery);
+}
+
+fn provider_reliability_types_are_nameable(
+    reliability: ProviderReliability,
+    builder: ProviderReliabilityBuilder,
+    retry: ProviderRetryPolicy,
+    timeouts: ProviderTimeoutPolicy,
+    rate_limits: ProviderRateLimitPolicy,
+) {
+    let _ = (reliability, builder, retry, timeouts, rate_limits);
+}
+
+fn model_info_types_are_nameable(
+    catalog: ModelCatalog,
+    info: ModelInfo,
+    spec: ResolvedModelSpec,
+) {
+    let _ = (catalog, info, spec, bundled_models_dev_snapshot());
+}
+
+async fn persistence_load_helpers_are_nameable(
+    store: &dyn RuntimePersistence,
+) -> Result<Option<PersistedSessionState>, StoreError> {
+    let _ = load_persisted_session_state_active_path(store, None).await?;
+    load_persisted_session_state(store).await
 }
 
 fn assert_store_object(_: Arc<dyn RuntimePersistence>) {}
@@ -153,4 +187,7 @@ fn main() {
     let _ = direct_payload_types_are_nameable;
     let _ = advanced_builder_accepts_runtime_core_config;
     let _ = tool_contract_types_are_nameable;
+    let _ = provider_reliability_types_are_nameable;
+    let _ = model_info_types_are_nameable;
+    let _ = persistence_load_helpers_are_nameable;
 }

@@ -2714,7 +2714,6 @@ dependencies = [
  "lash-tool-support",
  "serde_json",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

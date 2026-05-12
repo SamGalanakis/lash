@@ -17,8 +17,7 @@ use lash::tools::{
 use lash::tracing::TraceLevel;
 use lash::{PluginStack, SessionSpec};
 use lash_core::{
-    FileAttachmentStore, FsInstructionSource, InstructionLoaderConfig, InstructionSource,
-    PromptLayer, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+    FileAttachmentStore, PromptLayer, SessionPolicy, TokioSessionTaskExecutor, ToolState,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
@@ -34,6 +33,7 @@ use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
 
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
+use crate::instructions::{FsInstructionSource, InstructionLoaderConfig};
 use crate::interactive::run_app;
 use crate::prompt_tool::{CliPromptBridge, cli_ask_plugin_factory};
 use crate::session_bootstrap::{CliSessionOpener, SessionBootstrapSource};
@@ -44,6 +44,7 @@ use crate::{
     parse_model_selection, parse_standard_context_approach, resolve_model_selection,
     resolve_model_variant, validate_model_selection,
 };
+use lash_plugin_prompt_context::InstructionSource;
 
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
 const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";
@@ -102,7 +103,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         } else {
             Some(tavily_key)
         },
-        instruction_source: Some(Arc::clone(&instruction_source)),
     });
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),

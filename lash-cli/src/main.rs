@@ -14,6 +14,7 @@ mod event;
 mod fork;
 mod host_docs;
 mod input_items;
+mod instructions;
 mod interactive;
 mod markdown;
 mod overlay;

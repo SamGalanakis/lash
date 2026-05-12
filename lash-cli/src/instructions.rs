@@ -1,18 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+
+use lash_plugin_prompt_context::InstructionSource;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstructionLoaderConfig {
     pub enabled: bool,
     pub global_filenames: Vec<String>,
     pub local_filenames: Vec<String>,
-    /// Root directory where global instruction files are searched.
-    /// When `None`, the global search is skipped entirely. Host-provided
-    /// (e.g. lash-cli passes `paths::lash_home()`); lash core has no
-    /// opinion on where global files live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_root: Option<PathBuf>,
 }
@@ -28,34 +25,14 @@ impl Default for InstructionLoaderConfig {
     }
 }
 
-/// Loads project instruction files (AGENTS.md, CLAUDE.md) with deduplication.
-///
-/// System-level instructions are computed once at construction (global + ancestor walk).
-/// Context-aware instructions are resolved per file read, walking from the file's
-/// directory up to the project root.
 pub struct InstructionLoader {
-    /// Cached system instructions text (computed once).
     system_text: String,
-    /// Paths already included in system instructions (for dedup).
     system_paths: HashSet<PathBuf>,
-    /// Project root boundary (cwd at construction time).
     project_root: PathBuf,
-    /// Last seen modified time for context-aware instruction files.
-    /// Files are reloaded when mtime changes.
     loaded_context: Mutex<HashMap<PathBuf, Option<SystemTime>>>,
-    /// Loader policy for which instruction files are considered.
     config: InstructionLoaderConfig,
 }
 
-/// Host-provided instruction source for system + context-aware instructions.
-pub trait InstructionSource: Send + Sync {
-    /// Static/system instructions included every turn.
-    fn system_instructions(&self) -> String;
-    /// Additional instructions discovered from file reads in the current turn.
-    fn context_instructions_for_reads(&self, read_paths: &[String]) -> String;
-}
-
-/// Filesystem-backed instruction source (current lash behavior).
 pub struct FsInstructionSource {
     loader: Arc<InstructionLoader>,
 }
@@ -105,7 +82,6 @@ impl Default for InstructionLoader {
 }
 
 impl InstructionLoader {
-    /// Create a new loader. Computes system-level instructions immediately.
     pub fn new() -> Self {
         Self::with_config(InstructionLoaderConfig::default())
     }
@@ -147,16 +123,10 @@ impl InstructionLoader {
         }
     }
 
-    /// Return the cached system-level instructions.
     pub fn system_instructions(&self) -> &str {
         &self.system_text
     }
 
-    /// Resolve context-aware instructions for a file being read.
-    ///
-    /// Walks from `filepath`'s parent directory up to the project root.
-    /// Returns formatted instruction text if a new (not yet loaded) instruction
-    /// file is found, or None.
     pub fn resolve(&self, filepath: &str) -> Option<String> {
         if !self.config.enabled {
             return None;
@@ -164,35 +134,31 @@ impl InstructionLoader {
         let file_path = Path::new(filepath);
         let start_dir = file_path.parent()?;
 
-        // Only resolve within the project root
         if !start_dir.starts_with(&self.project_root) {
             return None;
         }
 
-        // Walk UP from start_dir toward project_root
         let mut dir = start_dir.to_path_buf();
         let mut parts = Vec::new();
 
         loop {
-            if let Some(path) = find_instruction_file(&dir, &self.config.local_filenames) {
-                // Skip if already in system instructions
-                if !self.system_paths.contains(&path) {
-                    let mut loaded = self.loaded_context.lock().unwrap();
-                    let current_mtime = std::fs::metadata(&path)
-                        .ok()
-                        .and_then(|m| m.modified().ok());
-                    let unchanged = loaded
-                        .get(&path)
-                        .is_some_and(|last_seen| *last_seen == current_mtime);
+            if let Some(path) = find_instruction_file(&dir, &self.config.local_filenames)
+                && !self.system_paths.contains(&path)
+            {
+                let mut loaded = self.loaded_context.lock().unwrap();
+                let current_mtime = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                let unchanged = loaded
+                    .get(&path)
+                    .is_some_and(|last_seen| *last_seen == current_mtime);
 
-                    if !unchanged && let Some(text) = load_with_prefix(&path) {
-                        loaded.insert(path, current_mtime);
-                        parts.push(text);
-                    }
+                if !unchanged && let Some(text) = load_with_prefix(&path) {
+                    loaded.insert(path, current_mtime);
+                    parts.push(text);
                 }
             }
 
-            // Stop at project root
             if dir == self.project_root {
                 break;
             }
@@ -210,7 +176,6 @@ impl InstructionLoader {
     }
 }
 
-/// Check for instruction files in priority order. First match wins.
 fn find_instruction_file(dir: &Path, filenames: &[String]) -> Option<PathBuf> {
     filenames
         .iter()
@@ -218,7 +183,6 @@ fn find_instruction_file(dir: &Path, filenames: &[String]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Read a file and prefix with its source path.
 fn load_with_prefix(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let trimmed = content.trim();
@@ -314,7 +278,6 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("AGENTS.md"), "sub instructions").unwrap();
 
-        // Build a loader with project_root = dir, no system paths
         let loader = InstructionLoader {
             system_text: String::new(),
             system_paths: HashSet::new(),
@@ -348,7 +311,7 @@ mod tests {
         let r1 = loader.resolve(file.to_str().unwrap());
         assert!(r1.is_some());
         let r2 = loader.resolve(file.to_str().unwrap());
-        assert!(r2.is_none()); // dedup: already loaded
+        assert!(r2.is_none());
     }
 
     #[test]

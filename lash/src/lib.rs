@@ -53,8 +53,8 @@ pub mod tools {
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
         StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
-        ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
+        ToolAvailabilityConfig, ToolCall, ToolContext, ToolDefinition, ToolDiscoveryMetadata,
+        ToolExecutionMode, ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
@@ -74,7 +74,8 @@ pub mod persistence {
         RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionGraph,
         SessionHead, SessionHeadMeta, SessionMeta, SessionNodeRecord, SessionReadScope,
         SessionReadView, SessionStoreCreateRequest, SessionStoreFactory, StoreError,
-        TokenLedgerEntry, VacuumReport,
+        TokenLedgerEntry, VacuumReport, load_persisted_session_state,
+        load_persisted_session_state_active_path,
     };
 }
 
@@ -135,12 +136,21 @@ pub mod tracing {
 }
 
 pub mod provider {
+    pub use lash_core::provider::{
+        ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder,
+        ProviderRetryPolicy, ProviderTimeoutPolicy,
+    };
     pub use lash_core::{
         AgentModelSelection, LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle,
         ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
         ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
         VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
     };
+}
+
+pub mod model_info {
+    pub use lash_core::model_info::bundled_models_dev_snapshot;
+    pub use lash_core::{ModelCatalog, ModelInfo, ResolvedModelSpec};
 }
 
 pub type ToolState = lash_core::ToolState;

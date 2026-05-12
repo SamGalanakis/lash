@@ -1,7 +1,6 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
-pub mod instructions;
 pub mod llm;
 pub mod model_info;
 pub mod monitor;
@@ -39,8 +38,6 @@ pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
 };
-pub use instructions::InstructionLoaderConfig;
-pub use instructions::{FsInstructionSource, InstructionLoader, InstructionSource};
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentId, AttachmentMeta, AttachmentRef, BaseRenderCache,

@@ -11,6 +11,4 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }

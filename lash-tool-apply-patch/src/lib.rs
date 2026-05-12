@@ -150,7 +150,7 @@ impl ToolProvider for ApplyPatchTool {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
 
-        run_blocking(move || execute_apply_patch_sync(&input, workdir.as_deref())).await
+        run_blocking(move || apply_patch(&input, workdir.as_deref())).await
     }
 }
 
@@ -165,7 +165,7 @@ mod description_tests {
     }
 }
 
-fn execute_apply_patch_sync(input: &str, workdir: Option<&str>) -> ToolResult {
+pub fn apply_patch(input: &str, workdir: Option<&str>) -> ToolResult {
     let patch = match parse_patch(input) {
         Ok(patch) => patch,
         Err(err) => return ToolResult::err_fmt(err),
@@ -969,29 +969,19 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tempfile::TempDir;
 
-    async fn run_patch(dir: &TempDir, input: impl Into<String>) -> ToolResult {
-        lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": input.into()
-            }),
-        )
-        .await
+    fn run_patch(dir: &TempDir, input: impl AsRef<str>) -> ToolResult {
+        apply_patch(input.as_ref(), Some(dir.path().to_str().unwrap()))
     }
 
-    #[tokio::test]
-    async fn add_file_patch_creates_file() {
+    #[test]
+    fn direct_apply_patch_creates_file() {
         let dir = TempDir::new().unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch",
-        )
-        .await;
+        );
         assert!(result.success);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
@@ -999,15 +989,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_modifies_file() {
+    #[test]
+    fn update_file_patch_modifies_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n-    old();\n+    new();\n*** End Patch",
-        )
-        .await;
+        );
         assert!(result.success);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
@@ -1015,28 +1004,26 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn delete_file_patch_removes_file() {
+    #[test]
+    fn delete_file_patch_removes_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("old.txt"), "gone\n").unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
-        )
-        .await;
+        );
         assert!(result.success);
         assert!(!dir.path().join("old.txt").exists());
     }
 
-    #[tokio::test]
-    async fn move_patch_renames_file() {
+    #[test]
+    fn move_patch_renames_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("old.txt"), "line\n").unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n line\n*** End Patch",
-        )
-        .await;
+        );
         assert!(result.success);
         assert!(!dir.path().join("old.txt").exists());
         assert_eq!(
@@ -1045,15 +1032,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn patch_result_uses_workdir_relative_display_paths() {
+    #[test]
+    fn patch_result_uses_workdir_relative_display_paths() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("base.txt"), "old\n").unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: base.txt\n@@\n-old\n+new\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success);
         let diff = result.result["diff"].as_str().expect("diff");
@@ -1067,14 +1053,13 @@ mod tests {
         assert_eq!(result.result["removed"], 1);
     }
 
-    #[tokio::test]
-    async fn add_file_patch_requires_plus_prefixed_lines() {
+    #[test]
+    fn add_file_patch_requires_plus_prefixed_lines() {
         let dir = TempDir::new().unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Add File: hello.txt\nhello\n*** End Patch",
-        )
-        .await;
+        );
         assert!(!result.success);
         assert!(
             result
@@ -1084,14 +1069,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn add_file_patch_can_create_truly_empty_file() {
+    #[test]
+    fn add_file_patch_can_create_truly_empty_file() {
         let dir = TempDir::new().unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Add File: empty.txt\n*** End Patch",
-        )
-        .await;
+        );
         assert!(result.success, "{}", result.result);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("empty.txt")).unwrap(),
@@ -1100,16 +1084,15 @@ mod tests {
         assert_eq!(result.result["files"][0]["path"], "empty.txt");
     }
 
-    #[tokio::test]
-    async fn update_file_patch_allows_first_chunk_without_explicit_marker() {
+    #[test]
+    fn update_file_patch_allows_first_chunk_without_explicit_marker() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("module.py"), "import alpha\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: module.py\n import alpha\n+import beta\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1118,16 +1101,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_accepts_whitespace_padded_headers_and_markers() {
+    #[test]
+    fn update_file_patch_accepts_whitespace_padded_headers_and_markers() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("pad.txt"), "one\n").unwrap();
 
         let result = run_patch(
             &dir,
             " *** Begin Patch\n  *** Update File: pad.txt\n@@\n-one\n+two\n *** End Patch ",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1136,16 +1118,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_supports_pure_addition_chunk() {
+    #[test]
+    fn update_file_patch_supports_pure_addition_chunk() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("notes.txt"), "alpha\nbeta\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: notes.txt\n@@\n+gamma\n+delta\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1154,16 +1135,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_supports_deletion_only_chunk() {
+    #[test]
+    fn update_file_patch_supports_deletion_only_chunk() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("lines.txt"), "line1\nline2\nline3\nline4\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: lines.txt\n@@\n line1\n-line2\n line3\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1172,16 +1152,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_supports_end_of_file_marker() {
+    #[test]
+    fn update_file_patch_supports_end_of_file_marker() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("tail.txt"), "first\nsecond\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: tail.txt\n@@\n first\n-second\n+second updated\n*** End of File\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1190,16 +1169,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_appends_trailing_newline() {
+    #[test]
+    fn update_file_patch_appends_trailing_newline() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("plain.txt"), "just one line").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: plain.txt\n@@\n-just one line\n+first row\n+second row\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1208,23 +1186,22 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn empty_patch_returns_no_files_modified() {
+    #[test]
+    fn empty_patch_returns_no_files_modified() {
         let dir = TempDir::new().unwrap();
-        let result = run_patch(&dir, "*** Begin Patch\n*** End Patch").await;
+        let result = run_patch(&dir, "*** Begin Patch\n*** End Patch");
 
         assert!(!result.success);
         assert_eq!(result.result.as_str(), Some("No files were modified."));
     }
 
-    #[tokio::test]
-    async fn invalid_hunk_header_is_rejected() {
+    #[test]
+    fn invalid_hunk_header_is_rejected() {
         let dir = TempDir::new().unwrap();
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Rename File: nope.txt\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(!result.success);
         assert!(
@@ -1235,14 +1212,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn direct_heredoc_wrapper_is_accepted() {
+    #[test]
+    fn direct_heredoc_wrapper_is_accepted() {
         let dir = TempDir::new().unwrap();
         let result = run_patch(
             &dir,
             "<<EOF\n*** Begin Patch\n*** Add File: tiny.txt\n+ok\n*** End Patch\nEOF",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1251,38 +1227,30 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn apply_patch_accepts_absolute_add_paths() {
+    #[test]
+    fn apply_patch_accepts_absolute_add_paths() {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("hello.txt");
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": format!("*** Begin Patch\n*** Add File: {}\n+hello\n*** End Patch", abs.display())
-            }),
-        )
-        .await;
+        let input = format!(
+            "*** Begin Patch\n*** Add File: {}\n+hello\n*** End Patch",
+            abs.display()
+        );
+        let result = run_patch(&dir, input);
         assert!(result.success, "{}", result.result);
         assert_eq!(std::fs::read_to_string(&abs).unwrap(), "hello\n");
         assert_eq!(result.result["files"][0]["path"], "hello.txt");
     }
 
-    #[tokio::test]
-    async fn apply_patch_accepts_absolute_update_paths() {
+    #[test]
+    fn apply_patch_accepts_absolute_update_paths() {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("main.rs");
         std::fs::write(&abs, "fn main() {\n    old();\n}\n").unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": format!("*** Begin Patch\n*** Update File: {}\n@@ fn main() {{\n-    old();\n+    new();\n*** End Patch", abs.display())
-            }),
-        )
-        .await;
+        let input = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@ fn main() {{\n-    old();\n+    new();\n*** End Patch",
+            abs.display()
+        );
+        let result = run_patch(&dir, input);
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1292,41 +1260,34 @@ mod tests {
         assert_eq!(result.result["files"][0]["path"], "main.rs");
     }
 
-    #[tokio::test]
-    async fn apply_patch_accepts_absolute_delete_paths() {
+    #[test]
+    fn apply_patch_accepts_absolute_delete_paths() {
         let dir = TempDir::new().unwrap();
         let abs = dir.path().join("old.txt");
         std::fs::write(&abs, "gone\n").unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": format!("*** Begin Patch\n*** Delete File: {}\n*** End Patch", abs.display())
-            }),
-        )
-        .await;
+        let input = format!(
+            "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+            abs.display()
+        );
+        let result = run_patch(&dir, input);
 
         assert!(result.success, "{}", result.result);
         assert!(!abs.exists());
         assert_eq!(result.result["files"][0]["path"], "old.txt");
     }
 
-    #[tokio::test]
-    async fn apply_patch_accepts_absolute_move_paths() {
+    #[test]
+    fn apply_patch_accepts_absolute_move_paths() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("old.txt");
         let dest = dir.path().join("nested").join("new.txt");
         std::fs::write(&source, "line\n").unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": format!("*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n line\n*** End Patch", source.display(), dest.display())
-            }),
-        )
-        .await;
+        let input = format!(
+            "*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n@@\n line\n*** End Patch",
+            source.display(),
+            dest.display()
+        );
+        let result = run_patch(&dir, input);
 
         assert!(result.success, "{}", result.result);
         assert!(!source.exists());
@@ -1334,18 +1295,13 @@ mod tests {
         assert_eq!(result.result["files"][0]["path"], "nested/new.txt");
     }
 
-    #[tokio::test]
-    async fn apply_patch_accepts_lenient_heredoc_wrapper() {
+    #[test]
+    fn apply_patch_accepts_lenient_heredoc_wrapper() {
         let dir = TempDir::new().unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\nPATCH"
-            }),
-        )
-        .await;
+        let result = run_patch(
+            &dir,
+            "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\nPATCH",
+        );
         assert!(result.success);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
@@ -1353,19 +1309,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn apply_patch_treats_unified_diff_header_as_plain_context() {
+    #[test]
+    fn apply_patch_treats_unified_diff_header_as_plain_context() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": "*** Begin Patch\n*** Update File: main.rs\n@@ -1,3 +1,3 @@\n-    old();\n+    new();\n*** End Patch"
-            }),
-        )
-        .await;
+        let result = run_patch(
+            &dir,
+            "*** Begin Patch\n*** Update File: main.rs\n@@ -1,3 +1,3 @@\n-    old();\n+    new();\n*** End Patch",
+        );
         assert!(!result.success);
         assert!(
             result
@@ -1375,23 +1326,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_allows_context_label_matching_first_old_line() {
+    #[test]
+    fn update_file_patch_allows_context_label_matching_first_old_line() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("main.rs"),
             "fn main() {\n    println!(\"old\");\n}\n",
         )
         .unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n*** End Patch"
-            }),
-        )
-        .await;
+        let result = run_patch(
+            &dir,
+            "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n*** End Patch",
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1400,23 +1346,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_allows_whitespace_padded_bare_hunk_header() {
+    #[test]
+    fn update_file_patch_allows_whitespace_padded_bare_hunk_header() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("hello.txt"),
             "Hello from apply_patch!\nLine two.\n",
         )
         .unwrap();
-        let result = lash_core::testing::run_tool(
-            &ApplyPatchTool,
-            "apply_patch",
-            &json!({
-                "workdir": dir.path().to_str().unwrap(),
-                "input": "*** Begin Patch\n*** Update File: hello.txt\n@@ \n Hello from apply_patch!\n-Line two.\n+Line two updated by patch.\n+Line three added.\n*** End Patch"
-            }),
-        )
-        .await;
+        let result = run_patch(
+            &dir,
+            "*** Begin Patch\n*** Update File: hello.txt\n@@ \n Hello from apply_patch!\n-Line two.\n+Line two updated by patch.\n+Line three added.\n*** End Patch",
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1425,8 +1366,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn update_file_patch_matches_common_unicode_punctuation() {
+    #[test]
+    fn update_file_patch_matches_common_unicode_punctuation() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("unicode.txt"),
@@ -1437,8 +1378,7 @@ mod tests {
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: unicode.txt\n@@\n-note - uses an en dash - and a nonbreaking hyphen in top-level text\n+normalized replacement\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1447,16 +1387,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn add_file_patch_overwrites_existing_target() {
+    #[test]
+    fn add_file_patch_overwrites_existing_target() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("dupe.txt"), "original\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Add File: dupe.txt\n+replacement\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1465,16 +1404,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn delete_file_patch_rejects_directory_target() {
+    #[test]
+    fn delete_file_patch_rejects_directory_target() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("folder")).unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Delete File: folder\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(!result.success);
         assert!(dir.path().join("folder").is_dir());
@@ -1486,15 +1424,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn delete_missing_file_reports_delete_failure() {
+    #[test]
+    fn delete_missing_file_reports_delete_failure() {
         let dir = TempDir::new().unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(!result.success);
         assert!(
@@ -1505,8 +1442,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn move_patch_overwrites_existing_destination() {
+    #[test]
+    fn move_patch_overwrites_existing_destination() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("renamed").join("dir")).unwrap();
         std::fs::write(dir.path().join("old.txt"), "from\n").unwrap();
@@ -1519,8 +1456,7 @@ mod tests {
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: old.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert!(!dir.path().join("old.txt").exists());
@@ -1531,16 +1467,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn later_hunk_sees_earlier_hunk_changes() {
+    #[test]
+    fn later_hunk_sees_earlier_hunk_changes() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("chain.txt"), "old\n").unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Update File: chain.txt\n@@\n-old\n+mid\n*** Update File: chain.txt\n@@\n-mid\n+new\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(result.success, "{}", result.result);
         assert_eq!(
@@ -1549,15 +1484,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_later_hunk_keeps_earlier_successful_changes() {
+    #[test]
+    fn failed_later_hunk_keeps_earlier_successful_changes() {
         let dir = TempDir::new().unwrap();
 
         let result = run_patch(
             &dir,
             "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch",
-        )
-        .await;
+        );
 
         assert!(!result.success);
         assert_eq!(
