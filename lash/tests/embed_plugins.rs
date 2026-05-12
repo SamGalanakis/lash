@@ -1,10 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
-use lash_core::{
-    LlmOutputPart, LlmResponse, ToolCall, ToolDefinition, ToolProvider, ToolResult, TurnInput,
+use lash::TurnInput;
+use lash::direct::{LlmOutputPart, LlmResponse};
+use lash::plugins::{
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
+use lash::tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
 
 fn assistant_prose(result: &lash::turn::TurnOutput) -> String {
@@ -35,7 +38,7 @@ impl PluginBinding for TestPlugin {
     type SessionConfig = TestPluginConfig;
     type Input = TestTurnInput;
 
-    fn factory(config: &Self::SessionConfig) -> Arc<dyn lash_core::PluginFactory> {
+    fn factory(config: &Self::SessionConfig) -> Arc<dyn PluginFactory> {
         Arc::new(TestPluginFactory {
             config: config.clone(),
         })
@@ -50,15 +53,12 @@ struct TestPluginFactory {
     config: TestPluginConfig,
 }
 
-impl lash_core::PluginFactory for TestPluginFactory {
+impl PluginFactory for TestPluginFactory {
     fn id(&self) -> &'static str {
         TestPlugin::ID
     }
 
-    fn build(
-        &self,
-        _ctx: &lash_core::PluginSessionContext,
-    ) -> Result<Arc<dyn lash_core::SessionPlugin>, lash_core::PluginError> {
+    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(TestSessionPlugin {
             config: self.config.clone(),
         }))
@@ -69,12 +69,12 @@ struct TestSessionPlugin {
     config: TestPluginConfig,
 }
 
-impl lash_core::SessionPlugin for TestSessionPlugin {
+impl SessionPlugin for TestSessionPlugin {
     fn id(&self) -> &'static str {
         TestPlugin::ID
     }
 
-    fn register(&self, reg: &mut lash_core::PluginRegistrar) -> Result<(), lash_core::PluginError> {
+    fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         let prompt_seen = Arc::clone(&self.config.prompt_seen);
         reg.prompt().contribute(Arc::new(move |ctx| {
             let prompt_seen = Arc::clone(&prompt_seen);
