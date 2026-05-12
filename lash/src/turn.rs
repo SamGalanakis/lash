@@ -1,5 +1,7 @@
 use crate::support::*;
 
+pub use lash_core::{AssistantOutput, TurnIssue};
+
 pub struct TurnBuilder {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) active_plugins: Vec<ActivePluginBinding>,

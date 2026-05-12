@@ -53,8 +53,9 @@ pub mod tools {
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
         StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolContext, ToolDefinition, ToolDiscoveryMetadata,
-        ToolExecutionMode, ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
+        ToolAvailabilityConfig, ToolCall, ToolCallRecord, ToolContext, ToolDefinition,
+        ToolDiscoveryMetadata, ToolExecutionMode, ToolOutputContract, ToolProvider, ToolResult,
+        ToolSourceHandle,
     };
 }
 
@@ -94,12 +95,16 @@ pub mod plugins {
         PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginSession,
         PluginSessionContext, PluginSpec, PluginSpecFactory, PluginSurfaceEvent, PromptHookContext,
         SessionPlugin, ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
-        TurnHookContext, TurnResultHookContext,
+        ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext, TurnResultHookContext,
     };
 }
 
 pub mod modes {
     pub use crate::mode::{ModeId, ModePreset};
+}
+
+pub mod messages {
+    pub use lash_core::MessageRole;
 }
 
 pub mod advanced {
