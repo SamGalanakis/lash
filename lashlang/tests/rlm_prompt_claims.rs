@@ -576,8 +576,9 @@ async fn prompt_claim_bare_submit_terminates_with_null() {
 // Prompt claim: "Control flow: statement `if`/`for`; `break` exits the
 // nearest `for`; `continue` skips to the nearest `for`'s next iteration;
 // expression ternary `cond ? yes : no` (there is no expression-form `if`);
-// boolean negation via `!cond` or `not cond`. `submit` is different from
-// `break`: it ends the whole program/turn."
+// boolean negation via `!cond` or `not cond`. There is no `while` loop;
+// use bounded `for` loops over ranges/lists for fill or retry logic.
+// `submit` is different from `break`: it ends the whole program/turn."
 // ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
@@ -661,6 +662,19 @@ async fn prompt_claim_loop_control_requires_loop() {
             } if actual == keyword
         ));
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_while_loop_is_rejected() {
+    let err =
+        parse("while len(items) < 3 { print items }").expect_err("while loops are not supported");
+    assert!(matches!(
+        err,
+        ParseError::UnsupportedLoop {
+            keyword: "while",
+            ..
+        }
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

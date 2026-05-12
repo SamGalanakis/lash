@@ -53,18 +53,20 @@
             <h2>Add The Crates</h2>
             <p>The <code>lash</code> crate is the user-facing facade. Pull in the provider crate you use directly. Add <code>lash-providers-builtin</code> only when your host wants registry-driven provider lookup.</p>
           </div>
+          <p>Lash is not on crates.io yet. Pull the crates straight from the monorepo by git URL:</p>
           <pre><code>[dependencies]
-lash = { path = "path/to/lash" }
-lash-provider-openai = { path = "path/to/lash-provider-openai" }
+lash                 = { git = "https://github.com/SamGalanakis/lash.git" }
+lash-provider-openai = { git = "https://github.com/SamGalanakis/lash.git" }
 anyhow = "1"
-tokio = { version = "1", features = ["full"] }</code></pre>
+tokio  = { version = "1", features = ["full"] }</code></pre>
+          <p>Cargo resolves each <code>name</code> against packages inside that repo. Pin to a commit with <code>rev = "..."</code> or a tag with <code>tag = "..."</code> for reproducible builds.</p>
           <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>TokioSessionTaskExecutor</code> values.</p>
         </div>
 
         <div class="section" id="core-concepts">
           <div class="section-header">
             <h2>Core Concepts</h2>
-            <p>The example below uses five named types. Skim these before reading the code — the rest follows from how they compose.</p>
+            <p>The minimal example below names <code>LashCore</code>, <code>LashSession</code>, <code>TurnInput</code>, <code>TurnBuilder</code>, and <code>ProviderHandle</code>. <code>SessionSpec</code> and <code>PluginStack</code> are the next two types you'll meet in the <a href="./embedding.html">Lash API guide</a>. Skim all of them before reading the code — the rest follows from how they compose.</p>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>

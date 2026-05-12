@@ -19,6 +19,8 @@ pub enum ParseError {
     Unexpected { found: String, span: Span },
     #[error("`{keyword}` can only be used inside a `for` loop")]
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
+    #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges/lists")]
+    UnsupportedLoop { keyword: &'static str, span: Span },
 }
 
 impl ParseError {
@@ -27,7 +29,8 @@ impl ParseError {
             Self::Lex(err) => err.offset(),
             Self::Expected { span, .. }
             | Self::Unexpected { span, .. }
-            | Self::LoopControlOutsideLoop { span, .. } => span.start,
+            | Self::LoopControlOutsideLoop { span, .. }
+            | Self::UnsupportedLoop { span, .. } => span.start,
         }
     }
 }
@@ -80,6 +83,12 @@ impl Parser {
             }
             TokenKind::Ident(name) if name == "continue" && !self.peek_assignment_target() => {
                 self.parse_loop_control("continue")
+            }
+            TokenKind::Ident(name) if name == "while" && !self.peek_assignment_target() => {
+                Err(ParseError::UnsupportedLoop {
+                    keyword: "while",
+                    span: self.peek().span,
+                })
             }
             TokenKind::Ident(_) if self.peek_assignment_target() => self.parse_assign(),
             _ => Ok(Stmt::Expr(self.parse_expr()?)),
@@ -1426,6 +1435,50 @@ mod tests {
                 Stmt::Assign { target: second, .. },
                 Stmt::Submit(Some(Expr::Variable(submitted)))
             ] if first.root == "break" && second.root == "continue" && submitted == "break"
+        ));
+    }
+
+    #[test]
+    fn rejects_while_loop_at_while_keyword() {
+        let source = r#"
+            pool_i = 0
+            while len(final_ids) < 100 && pool_i < len(candidate_pools) {
+              for m in candidate_pools[pool_i].matches {
+                print m
+              }
+            }
+            "#;
+
+        let err = parse(source).expect_err("while loops are not supported");
+        let while_offset = source.find("while").expect("source should contain while");
+        assert_eq!(
+            err,
+            ParseError::UnsupportedLoop {
+                keyword: "while",
+                span: Span {
+                    start: while_offset,
+                    end: while_offset + "while".len(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_loop_words_remain_contextual_identifiers_for_assignment() {
+        let program = parse(
+            r#"
+            while = 1
+            submit while
+            "#,
+        )
+        .expect("contextual identifier should parse");
+
+        assert!(matches!(
+            program.statements.as_slice(),
+            [
+                Stmt::Assign { target, .. },
+                Stmt::Submit(Some(Expr::Variable(submitted)))
+            ] if target.root == "while" && submitted == "while"
         ));
     }
 

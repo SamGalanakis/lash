@@ -62,7 +62,7 @@
         <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. It keeps syntax close to Python where that helps agents, but routes effects through explicit host calls, typed values, and persistent runtime state.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (statements inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The shape of the language, though, is its own: tool calls go through <code>(call name { ... })?</code>, fail-fast unwrap uses Rust-style <code>?</code>, async work uses <code>start call</code> / <code>await</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> / <code>parallel</code> are statement-level keywords. Effects are routed through explicit host calls, typed values, and persistent runtime state.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
@@ -147,7 +147,7 @@ call continue_as {
         <div class="section" id="assignment-and-mutation">
           <div class="section-header">
             <h2>Assignment And Mutation</h2>
-            <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through Python-style alias mutation.</p>
+            <p>Assignments are rooted at named variables. Path assignment mutates the variable's current value through copy-on-write root updates, not through shared-alias mutation — there is no aliasing of inner records or lists.</p>
           </div>
           <dl class="def-list">
             <dt>Supported targets</dt>

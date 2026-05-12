@@ -79,7 +79,7 @@ pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
 - Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
-- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
+- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 "#;
@@ -92,7 +92,7 @@ pub const LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION: &str = r#"### Language
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
 - Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
 - Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
-- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. `submit` is different from `break`: it ends the whole program/turn.
+- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
 - Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 "#;
@@ -908,6 +908,14 @@ mod tests {
         assert!(section.contains("### Builtins"));
         assert!(section.contains("### Common patterns"));
         assert!(section.contains("### Type literals"));
+    }
+
+    #[test]
+    fn execution_section_states_no_while_loop() {
+        let section = rlm_execution_section();
+
+        assert!(section.contains("There is no `while` loop"));
+        assert!(section.contains("use bounded `for` loops over ranges/lists"));
     }
 
     #[test]

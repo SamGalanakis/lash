@@ -1243,4 +1243,33 @@ mod tests {
             assert_eq!(obj.get("glob").and_then(|v| v.as_str()).expect("glob"), "g");
         });
     }
+
+    #[test]
+    fn parse_error_for_unsupported_while_points_at_while() {
+        let source = r#"pool_i = 0
+while len(final_ids) < 100 && pool_i < len(candidate_pools) {
+  for m in candidate_pools[pool_i].matches {
+    print m
+  }
+}"#;
+        let err = match lashlang::compile_source(source) {
+            Ok(_) => panic!("while should not compile"),
+            Err(err) => err,
+        };
+
+        let message = format_parse_error(source, &err);
+        assert!(
+            message.contains("line 2, column 1: unsupported `while` loop"),
+            "{message}"
+        );
+        assert!(
+            message.contains("use bounded `for` loops over ranges/lists"),
+            "{message}"
+        );
+        assert!(message.contains("while len(final_ids) < 100"), "{message}");
+        assert!(
+            !message.contains("expected `:`, found identifier `m`"),
+            "{message}"
+        );
+    }
 }

@@ -188,8 +188,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace feature
 # alongside the lash facade.
-lash      = { path = "..." }
-lash-core = { path = "...", features = ["otel-trace"] }</code></pre>
+lash      = { git = "https://github.com/SamGalanakis/lash.git" }
+lash-core = { git = "https://github.com/SamGalanakis/lash.git", features = ["otel-trace"] }</code></pre>
           <p>With the feature enabled, <code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every Lash event to a span with the event payload attached as attributes. Use it in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;
