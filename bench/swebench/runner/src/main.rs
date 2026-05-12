@@ -984,7 +984,6 @@ fn build_plugin_session(
             DefaultToolBundle::Search,
         ],
         tavily_api_key: None,
-        instruction_source: None,
     })
     .into_factories();
     factories.append(&mut tool_factories);

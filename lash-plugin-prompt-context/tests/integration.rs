@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use lash_core::instructions::InstructionSource;
 use lash_core::plugin::PromptHookContext;
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
 use lash_core::{
     ExecutionMode, PersistedSessionState, PluginHost, PromptSlot, SessionPolicy, SessionReadView,
     SessionSnapshot, SessionStateEnvelope,
 };
-use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
+use lash_plugin_prompt_context::{
+    InstructionSource, PromptContextPluginConfig, PromptContextPluginFactory,
+};
 
 struct StaticInstructionSource {
     text: String,

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use lash_core::instructions::InstructionSource;
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
 use lash_core::{
-    ExecutionMode, FsInstructionSource, PluginStack, StandardContextApproach,
-    ToolOutputBudgetPluginFactory, ToolProvider,
+    ExecutionMode, PluginStack, StandardContextApproach, ToolOutputBudgetPluginFactory,
+    ToolProvider,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
@@ -76,7 +75,6 @@ pub struct DefaultPluginStackOptions {
     pub standard_context_approach: Option<StandardContextApproach>,
     pub bundles: Vec<DefaultToolBundle>,
     pub tavily_api_key: Option<String>,
-    pub instruction_source: Option<Arc<dyn InstructionSource>>,
 }
 
 pub fn default_plugin_stack(mut options: DefaultPluginStackOptions) -> PluginStack {
@@ -112,13 +110,7 @@ pub fn default_plugin_stack(mut options: DefaultPluginStackOptions) -> PluginSta
                 )));
             }
             DefaultToolBundle::Files => {
-                let instruction_source = options
-                    .instruction_source
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(FsInstructionSource::new()));
-                stack.push(Arc::new(ReadFilePluginFactory::new(Some(
-                    instruction_source,
-                ))));
+                stack.push(Arc::new(ReadFilePluginFactory::new()));
                 stack.push(Arc::new(StaticPluginFactory::new(
                     "glob",
                     PluginSpec::new().with_tool_provider(Arc::new(Glob) as Arc<dyn ToolProvider>),

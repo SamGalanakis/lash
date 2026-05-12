@@ -3,15 +3,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
-use lash_core::instructions::InstructionSource;
 use lash_core::plugin::{
-    PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    SessionPlugin,
+    PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash_core::{
-    MessageRole, PluginMessage, ToolCall, ToolDefinition, ToolExecutionMode, ToolImage,
-    ToolProvider, ToolResult,
-};
+use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolImage, ToolProvider, ToolResult};
 
 use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
 
@@ -19,13 +14,10 @@ use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, ru
 #[derive(Default)]
 pub struct ReadFile;
 
-pub struct ReadFilePluginFactory {
-    instruction_source: Option<Arc<dyn InstructionSource>>,
-}
+pub struct ReadFilePluginFactory;
 
 struct ReadFilePlugin {
     provider: Arc<ReadFile>,
-    instruction_source: Option<Arc<dyn InstructionSource>>,
 }
 
 impl ReadFile {
@@ -35,8 +27,14 @@ impl ReadFile {
 }
 
 impl ReadFilePluginFactory {
-    pub fn new(instruction_source: Option<Arc<dyn InstructionSource>>) -> Self {
-        Self { instruction_source }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ReadFilePluginFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -48,7 +46,6 @@ impl PluginFactory for ReadFilePluginFactory {
     fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
         Ok(Arc::new(ReadFilePlugin {
             provider: Arc::new(ReadFile::new()),
-            instruction_source: self.instruction_source.clone(),
         }))
     }
 }
@@ -60,39 +57,7 @@ impl SessionPlugin for ReadFilePlugin {
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         reg.tools()
-            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)?;
-
-        let Some(instruction_source) = self.instruction_source.clone() else {
-            return Ok(());
-        };
-
-        reg.tool_calls().after(Arc::new(move |ctx| {
-            let instruction_source = Arc::clone(&instruction_source);
-            Box::pin(async move {
-                if !ctx.result.success || ctx.tool_name != "read_file" {
-                    return Ok(Vec::new());
-                }
-
-                let Some(path) = ctx.args.get("path").and_then(|value| value.as_str()) else {
-                    return Ok(Vec::new());
-                };
-                if path.is_empty() {
-                    return Ok(Vec::new());
-                }
-
-                let instructions =
-                    instruction_source.context_instructions_for_reads(&[path.to_string()]);
-                if instructions.trim().is_empty() {
-                    return Ok(Vec::new());
-                }
-
-                Ok(vec![PluginDirective::EnqueueMessages {
-                    messages: vec![PluginMessage::text(MessageRole::System, instructions)],
-                }])
-            })
-        }));
-
-        Ok(())
+            .provider(Arc::clone(&self.provider) as Arc<dyn ToolProvider>)
     }
 }
 

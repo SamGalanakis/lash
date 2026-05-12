@@ -3,13 +3,24 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use lash_core::PromptContribution;
-use lash_core::instructions::InstructionSource;
 use lash_core::plugin::{
-    HistoryError, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    TurnContextTransform, TurnTransformContext,
+    HistoryError, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
+    PluginSessionContext, TurnContextTransform, TurnTransformContext,
 };
 use lash_core::session_model::context::PreparedContext;
-use lash_core::{ExecutionMode, Message, MessageRole, Part, PartKind, PruneState, shared_parts};
+use lash_core::{
+    ExecutionMode, Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts,
+};
+
+/// Host-provided source for project instructions.
+///
+/// This is plugin-owned prompt policy, not a core runtime concept. Hosts such
+/// as `lash-cli` decide where instructions come from and pass an implementation
+/// when installing the prompt-context plugin.
+pub trait InstructionSource: Send + Sync {
+    fn system_instructions(&self) -> String;
+    fn context_instructions_for_reads(&self, read_paths: &[String]) -> String;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromptContextPluginConfig {
@@ -87,6 +98,29 @@ impl lash_core::SessionPlugin for PromptContextPlugin {
                     }
                 }
                 Ok(contributions)
+            })
+        }));
+        let instruction_source = Arc::clone(&self.instruction_source);
+        reg.tool_calls().after(Arc::new(move |ctx| {
+            let instruction_source = Arc::clone(&instruction_source);
+            Box::pin(async move {
+                if !ctx.result.success || ctx.tool_name != "read_file" {
+                    return Ok(Vec::new());
+                }
+                let Some(path) = ctx.args.get("path").and_then(|value| value.as_str()) else {
+                    return Ok(Vec::new());
+                };
+                if path.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let instructions =
+                    instruction_source.context_instructions_for_reads(&[path.to_string()]);
+                if instructions.trim().is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![PluginDirective::EnqueueMessages {
+                    messages: vec![PluginMessage::text(MessageRole::System, instructions)],
+                }])
             })
         }));
 
