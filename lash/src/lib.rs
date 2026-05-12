@@ -52,35 +52,48 @@ pub mod tools {
         AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState,
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
-        StartMonitorArgs, StopMonitorArgs, ToolAvailability, ToolAvailabilityConfig, ToolCall,
-        ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult, ToolSourceHandle,
+        StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
+        ToolAvailabilityConfig, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
+        ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
 pub mod direct {
+    pub use lash_core::llm::types::{LlmAttachment, LlmEventSender, LlmOutputPart, LlmUsage};
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
-        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
+        DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole, LlmResponse,
+        TokenUsage,
     };
 }
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, HydratedSessionCheckpoint, PersistedSessionConfig,
-        PersistedSessionState, PersistedTurnState, RuntimePersistence, SessionGraph, SessionHead,
-        SessionHeadMeta, SessionMeta, SessionReadView, SessionStoreCreateRequest,
-        SessionStoreFactory,
+        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
+        PersistedSessionConfig, PersistedSessionRead, PersistedSessionState, PersistedTurnState,
+        RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionGraph,
+        SessionHead, SessionHeadMeta, SessionMeta, SessionNodeRecord, SessionReadScope,
+        SessionReadView, SessionStoreCreateRequest, SessionStoreFactory, StoreError,
+        TokenLedgerEntry, VacuumReport,
     };
 }
 
 pub mod plugins {
     pub use crate::plugin_binding::PluginBinding;
-    pub use lash_core::plugin::StaticPluginFactory;
+    pub use lash_core::PluginDirective;
+    pub use lash_core::plugin::{
+        AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
+        AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
+        AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
+        CheckpointHookContext, PluginSpecBuilder, StaticPluginFactory, ToolCallHookContext,
+        ToolResultHookContext,
+    };
     pub use lash_core::{
         BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginError,
-        PluginFactory, PluginMessage, PluginRegistrar, PluginSession, PluginSessionContext,
-        PluginSpec, PluginSurfaceEvent, SessionPlugin, ToolOutputBudgetConfig,
-        ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+        PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginSession,
+        PluginSessionContext, PluginSpec, PluginSpecFactory, PluginSurfaceEvent, PromptHookContext,
+        SessionPlugin, ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+        TurnHookContext, TurnResultHookContext,
     };
 }
 
@@ -94,8 +107,11 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, EventSink, ExecutionMode, ManagedTaskStatus, ModeSessionExtensionHandle,
-        ModeTurnOptions, PluginMessage, Residency, RewriteTrigger, SessionHandle,
+        AssembledTurn, EmbeddedRuntimeHost, EventSink, ExecutionMode, LashRuntime,
+        ManagedTaskStatus, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
+        NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency, RewriteTrigger,
+        RuntimeCoreConfig, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError,
+        RuntimeHandle, RuntimeObservation, SessionHandle, SessionPolicy, SessionStateEnvelope,
         SessionTurnHandle, StandardContextApproach, TerminationPolicy, TurnContext, TurnFinish,
         TurnOutcome, TurnStop,
     };
