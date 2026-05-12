@@ -42,7 +42,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a session's lashlang scope through <code>RlmProjectedBindings</code>: app hosts apply them via <code>LashSession::rlm_project(bindings)</code>, which under the hood installs <code>rlm_session_projection_extension</code> on the runtime's RLM mode (see <code>lash-mode-rlm/src/projected_bindings.rs</code> and <code>lash/src/session.rs</code>).</p>
+            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: per-turn, apply them via <code>TurnInput::rlm_project(bindings)</code> from <code>lash_mode_rlm::RlmTurnInputExt</code>; per-session, install <code>rlm_session_projection_extension(bindings)</code> as a session-level mode extension (see <code>lash-mode-rlm/src/projected_bindings.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
