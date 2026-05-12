@@ -165,7 +165,6 @@ pub(crate) async fn build_runtime(
         standard_context_approach: standard_context_approach.clone(),
         bundles: profile.bundles,
         tavily_api_key: None,
-        instruction_source: None,
     });
     let mut factories = factories.into_factories();
     factories.push(Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()));

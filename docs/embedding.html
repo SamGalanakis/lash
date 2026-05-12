@@ -33,6 +33,7 @@
         <nav class="sidebar__toc" aria-label="On this page">
           <div class="sidebar__label">On this page</div>
           <ol>
+            <li><a href="#runtime-alongside-model">Runtime Alongside The Model</a></li>
             <li><a href="#core-shape">Core Shape</a></li>
             <li><a href="#session-specs-and-plugins">Session Specs And Plugins</a></li>
             <li><a href="#run-a-turn">Run A Turn</a></li>
@@ -55,10 +56,36 @@
       <header class="hero">
         <div class="eyebrow">lash guide</div>
         <h1>lash<span class="slash">/</span>api</h1>
-        <p><code>lash</code> is the app-facing layer for building Lash into a web service, desktop app, benchmark harness, or product workflow. Your app owns the boundaries — storage, auth, transport, and product state. Lash owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
+        <p>Most agent stacks treat the LLM as the runtime and stitch state around it — a database for memory, a queue for retries, a sandbox for code. <code>lash</code> inverts that. The runtime is the durable end of the pair; the LLM is the variable call. Your app owns the outer boundaries — storage, auth, transport, product state. <code>lash</code> owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
       </header>
 
       <section class="content" id="content">
+        <div class="section" id="runtime-alongside-model">
+          <div class="section-header">
+            <h2>Runtime Alongside The Model</h2>
+            <p>The unit of work is a turn. A turn is a <code>RuntimeCommit</code> against a durable <code>SessionGraph</code> — either the whole turn lands or none of it does. Model output is one event class flowing through that commit, not the thing holding state between events. Two execution modes — <code>standard</code> for native tool calls and <code>rlm</code> for Lashlang programs in a no-syscall VM — share the same containment, trace shape, and commit unit.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Durable session graph</dt>
+            <dd>Conversation records, tool events, mode events, and plugin nodes live in one <code>SessionGraph</code> per session. <code>SessionReadView</code> and <code>ChronologicalProjection</code> read it; nothing else owns persistence.</dd>
+            <dt>Per-turn atomic commit</dt>
+            <dd><code>RuntimeCommit</code> writes graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS on <code>expected_head_revision</code>. Partial turn = no commit.</dd>
+            <dt>Typed plugin capabilities</dt>
+            <dd>Tools see a named <code>ToolContext</code> surface — <code>tasks()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. There is no <code>ToolContext::host()</code> escape hatch.</dd>
+            <dt>Sandboxed code load, ready</dt>
+            <dd>RLM mode runs model-emitted Lashlang programs in a VM with no filesystem, process, or network surface. Every effect crosses <code>ToolHost</code>. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
+            <dt>Subagent capability boundaries</dt>
+            <dd><code>Capability::resolve(parent_policy)</code> returns a constrained <code>SessionSpec</code> for the child. Interactive-only tools are stripped from every subagent surface regardless of capability.</dd>
+            <dt>Semantic event stream</dt>
+            <dd>Identity-bearing <code>TurnActivity</code> items: assistant prose deltas, reasoning deltas, tool start/complete pairs with correlation ids, code-block start/complete, terminal <code>SubmittedValue</code>/<code>ToolValue</code>, per-call and rolling usage. Apps fold this directly into product state.</dd>
+            <dt>Tracing as a first-class sink</dt>
+            <dd>Every provider call across every session emits <code>TraceRecord</code>s through <code>TraceSink</code> implementations. JSONL by default, OTel optional.</dd>
+            <dt>Snapshot and restore seams</dt>
+            <dd>Plugins, tool state, and the Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
+          </dl>
+          <p>What sits outside this crate, on purpose: tenancy boundaries, retention and lifecycle for long-lived artifacts, discovery of agent-authored procedures, a shared coherent image across many sessions. <code>lash</code> is the kernel and runtime; the platform-shaped pieces belong to whatever embeds it.</p>
+        </div>
+
         <div class="section" id="core-shape">
           <div class="section-header">
             <h2>Core Shape</h2>
