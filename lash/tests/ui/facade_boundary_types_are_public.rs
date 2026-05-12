@@ -9,6 +9,7 @@ use lash::direct::{
 use lash::model_info::{
     ModelCatalog, ModelInfo, ResolvedModelSpec, bundled_models_dev_snapshot,
 };
+use lash::messages::MessageRole;
 use lash::persistence::{
     GcReport, GraphCommitDelta, PersistedSessionRead, PersistedSessionState, RuntimeCommit,
     RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionMeta, SessionNodeRecord,
@@ -18,12 +19,16 @@ use lash::persistence::{
 use lash::plugins::{
     AfterToolCallHook, BeforeToolCallHook, PluginDirective, PluginHost, PluginSpec,
     PluginSpecBuilder, PluginSpecFactory, ToolCallHookContext, ToolResultHookContext,
+    ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash::provider::{
     ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder, ProviderRetryPolicy,
     ProviderTimeoutPolicy,
 };
-use lash::tools::{ToolActivation, ToolDiscoveryMetadata, ToolOutputContract};
+use lash::tools::{
+    ToolActivation, ToolCallRecord, ToolDiscoveryMetadata, ToolOutputContract,
+};
+use lash::turn::{AssistantOutput, TurnIssue};
 
 struct FacadeStore;
 
@@ -143,10 +148,33 @@ fn advanced_builder_accepts_runtime_core_config(
 
 fn tool_contract_types_are_nameable(
     activation: ToolActivation,
+    record: ToolCallRecord,
     contract: ToolOutputContract,
     discovery: ToolDiscoveryMetadata,
 ) {
-    let _ = (activation, contract, discovery);
+    let _ = (activation, record, contract, discovery);
+}
+
+fn tool_surface_types_are_nameable(
+    contribution: ToolSurfaceContribution,
+    override_: ToolSurfaceOverride,
+) {
+    let _ = (contribution, override_);
+}
+
+fn message_role_type_is_nameable(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "system",
+    }
+}
+
+fn turn_result_detail_types_are_nameable(
+    output: AssistantOutput,
+    issue: TurnIssue,
+) {
+    let _ = (output, issue);
 }
 
 fn provider_reliability_types_are_nameable(
@@ -187,6 +215,9 @@ fn main() {
     let _ = direct_payload_types_are_nameable;
     let _ = advanced_builder_accepts_runtime_core_config;
     let _ = tool_contract_types_are_nameable;
+    let _ = tool_surface_types_are_nameable;
+    let _ = message_role_type_is_nameable;
+    let _ = turn_result_detail_types_are_nameable;
     let _ = provider_reliability_types_are_nameable;
     let _ = model_info_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
