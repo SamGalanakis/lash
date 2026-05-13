@@ -298,6 +298,8 @@ impl Compiler {
             "keys" => Builtin::Keys,
             "values" => Builtin::Values,
             "contains" => Builtin::Contains,
+            "find" => Builtin::Find,
+            "grep_text" => Builtin::GrepText,
             "starts_with" => Builtin::StartsWith,
             "ends_with" => Builtin::EndsWith,
             "split" => Builtin::Split,
@@ -373,12 +375,30 @@ impl Compiler {
                         self.set_const_slot(slot, None);
                         return;
                     }
+                    if let Expr::Variable(right_name) = right.as_ref() {
+                        let right = self.push_slot(right_name);
+                        self.code.push(Instruction::AddAssignSlot { slot, right });
+                        self.set_const_slot(slot, None);
+                        return;
+                    }
                     self.compile_expr(right);
                     self.code.push(Instruction::AddAssign(slot));
                     self.set_const_slot(slot, None);
                     return;
                 }
-
+                if let Expr::BuiltinCall {
+                    name: builtin_name,
+                    args,
+                } = expr
+                    && builtin_name == "push"
+                    && let [Expr::Variable(first_arg), item] = args.as_slice()
+                    && first_arg == name
+                {
+                    self.compile_expr(item);
+                    self.code.push(Instruction::PushAssign(slot));
+                    self.set_const_slot(slot, None);
+                    return;
+                }
                 if let Some(value) = const_value.clone()
                     && !has_type_literal
                 {
@@ -760,6 +780,8 @@ impl Compiler {
                     "keys" => Builtin::Keys,
                     "values" => Builtin::Values,
                     "contains" => Builtin::Contains,
+                    "find" => Builtin::Find,
+                    "grep_text" => Builtin::GrepText,
                     "starts_with" => Builtin::StartsWith,
                     "ends_with" => Builtin::EndsWith,
                     "split" => Builtin::Split,

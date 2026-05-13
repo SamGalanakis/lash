@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use compact_str::ToCompactString;
+
 use super::instruction::Name;
 use super::*;
 
@@ -138,7 +140,7 @@ pub(crate) fn read_index_ref_direct(target: &Value, index: &Value) -> Result<Val
             let idx = resolve_index(index, value.chars().count())?;
             Ok(idx
                 .and_then(|idx| value.chars().nth(idx))
-                .map(|ch| Value::String(ch.to_string().into()))
+                .map(|ch| Value::String(ch.to_compact_string()))
                 .unwrap_or(Value::Null))
         }
         Value::Record(record) => Ok(record
@@ -267,7 +269,7 @@ pub(crate) fn assign_index(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            Arc::make_mut(values)[idx] = value;
+            values.make_mut()[idx] = value;
             Ok(())
         }
         Value::Record(record) => {
@@ -292,7 +294,7 @@ pub(crate) fn add_assign_index_number(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            add_assign_value_number(&mut Arc::make_mut(values)[idx], right)
+            add_assign_value_number(&mut values.make_mut()[idx], right)
         }
         Value::Record(record) => {
             let key = coerce_string(index)?;
@@ -338,7 +340,7 @@ pub(crate) fn descend_index<'a>(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            Ok(&mut Arc::make_mut(values)[idx])
+            Ok(&mut values.make_mut()[idx])
         }
         Value::Record(record) => {
             let key = coerce_string(index)?;

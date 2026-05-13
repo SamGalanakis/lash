@@ -11,9 +11,9 @@ use crate::provider::ProviderHandle;
 use crate::{ExecutionMode, StandardContextApproach};
 
 pub use lash_sansio::session_model::{
-    CORE_GUIDANCE_SECTION, ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message,
-    MessageRole, Part, PartKind, PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry,
-    PromptTemplateSection, PruneState, SessionEvent, StateSnapshotEvent, TokenUsage, ToolEvent,
+    ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, Part, PartKind,
+    PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+    PruneState, SessionEvent, StateSnapshotEvent, TokenUsage, ToolEvent,
     TurnTerminationPolicyState, default_prompt_template, format_tool_result_content,
     fresh_message_id, make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
     render_transcript_prompt, shared_parts,

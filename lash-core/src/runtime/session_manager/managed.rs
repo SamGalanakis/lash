@@ -86,15 +86,28 @@ impl ManagedSessionCapability {
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?,
         };
         let session_store = match &current.host.session_store_factory {
-            Some(factory) => Some(
-                factory
+            Some(factory) => {
+                let store = factory
                     .create_store(&SessionStoreCreateRequest {
                         session_id: session_id.clone(),
                         parent_session_id: parent_session_id.clone(),
                         policy: policy.clone(),
                     })
-                    .map_err(crate::PluginError::Session)?,
-            ),
+                    .map_err(|message| {
+                        crate::PluginError::Session(child_store_factory_error(
+                            &session_id,
+                            parent_session_id.as_deref(),
+                            message,
+                        ))
+                    })?;
+                validate_child_store_binding(
+                    store.as_ref(),
+                    &session_id,
+                    parent_session_id.as_deref(),
+                )
+                .await?;
+                Some(store)
+            }
             None => None,
         };
         let mut runtime = match (&current.host.session_task_executor, &session_store) {
@@ -296,4 +309,50 @@ impl ManagedSessionCapability {
             .enqueue(vec![input])
             .map_err(crate::PluginError::Session)
     }
+}
+
+fn child_store_guidance(parent_session_id: Option<&str>) -> String {
+    let parent = parent_session_id
+        .map(|id| format!(" for parent session `{id}`"))
+        .unwrap_or_default();
+    format!(
+        "Managed child sessions require a store for the child session id{parent}. \
+         Do not wrap a single pre-opened root store in LashCoreBuilder::store_factory; \
+         pass root-only stores with SessionBuilder::store(...) and configure \
+         LashCoreBuilder::child_store_factory(...) for managed children."
+    )
+}
+
+fn child_store_factory_error(
+    session_id: &str,
+    parent_session_id: Option<&str>,
+    message: String,
+) -> String {
+    format!(
+        "failed to create store for child session `{session_id}`: {message}. {}",
+        child_store_guidance(parent_session_id)
+    )
+}
+
+async fn validate_child_store_binding(
+    store: &dyn crate::RuntimePersistence,
+    session_id: &str,
+    parent_session_id: Option<&str>,
+) -> Result<(), crate::PluginError> {
+    let meta = store.load_session_meta().await.map_err(|err| {
+        crate::PluginError::Session(format!(
+            "failed to inspect store for child session `{session_id}`: {err}. {}",
+            child_store_guidance(parent_session_id)
+        ))
+    })?;
+    if let Some(meta) = meta
+        && meta.session_id != session_id
+    {
+        return Err(crate::PluginError::Session(format!(
+            "configured child session store is already bound to session `{}` and cannot be used for child session `{session_id}`. {}",
+            meta.session_id,
+            child_store_guidance(parent_session_id)
+        )));
+    }
+    Ok(())
 }

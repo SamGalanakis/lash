@@ -1,0 +1,32 @@
+---
+source: lashlang/src/runtime/tests.rs
+expression: compiled_program_snapshot(GOLDEN_CONTRACT_SOURCE)
+---
+compile_stats: total=1 const_folded=1 dynamic=0 refs=0
+slots: [source, history, beta_index, matches, Payload]
+names: [beta_index, matches]
+constants:
+  c0: ","
+  c1: "beta"
+  c2: "beta"
+  c3: {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches"],"type":"object"}}
+instructions:
+  0000: load_name 1:history
+  0001: push_const c0 ","
+  0002: join
+  0003: store_name 0:source
+  0004: load_name 0:source
+  0005: push_const c1 "beta"
+  0006: call_builtin find argc=2
+  0007: store_name 2:beta_index
+  0008: load_name 0:source
+  0009: push_const c2 "beta"
+  0010: call_builtin grep_text argc=2
+  0011: store_name 3:matches
+  0012: push_const c3 {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches"],"type":"object"}}
+  0013: store_name 4:Payload
+  0014: load_name 2:beta_index
+  0015: load_name 3:matches
+  0016: build_record [beta_index, matches]
+  0017: validate_compiled schema#0
+  0018: submit

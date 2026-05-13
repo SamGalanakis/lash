@@ -168,6 +168,7 @@ pub(crate) enum Instruction {
     Validate,
     ValidateCompiled(usize),
     Push,
+    PushAssign(usize),
     Range {
         argc: usize,
     },
@@ -176,6 +177,10 @@ pub(crate) enum Instruction {
     AddAssignNumber {
         slot: usize,
         right: f64,
+    },
+    AddAssignSlot {
+        slot: usize,
+        right: usize,
     },
     AddAssignIndexNumber {
         slot: usize,
@@ -214,6 +219,8 @@ pub(crate) enum Builtin {
     Keys,
     Values,
     Contains,
+    Find,
+    GrepText,
     StartsWith,
     EndsWith,
     Split,
@@ -274,10 +281,12 @@ impl Instruction {
             | Instruction::Validate
             | Instruction::ValidateCompiled(_)
             | Instruction::Push
+            | Instruction::PushAssign(_)
             | Instruction::Range { .. }
             | Instruction::FormatCompiled(_) => InstructionProfileTag::CallBuiltin,
             Instruction::AddAssign(_)
             | Instruction::AddAssignNumber { .. }
+            | Instruction::AddAssignSlot { .. }
             | Instruction::AddAssignIndexNumber { .. } => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
@@ -311,6 +320,8 @@ impl Builtin {
             Builtin::Keys => BuiltinProfileTag::Keys,
             Builtin::Values => BuiltinProfileTag::Values,
             Builtin::Contains => BuiltinProfileTag::Contains,
+            Builtin::Find => BuiltinProfileTag::Find,
+            Builtin::GrepText => BuiltinProfileTag::GrepText,
             Builtin::StartsWith => BuiltinProfileTag::StartsWith,
             Builtin::EndsWith => BuiltinProfileTag::EndsWith,
             Builtin::Split => BuiltinProfileTag::Split,
@@ -375,6 +386,8 @@ pub(crate) enum BuiltinProfileTag {
     Keys,
     Values,
     Contains,
+    Find,
+    GrepText,
     StartsWith,
     EndsWith,
     Split,
@@ -459,6 +472,8 @@ const BUILTIN_PROFILE_NAMES: [&str; BUILTIN_PROFILE_COUNT] = [
     "keys",
     "values",
     "contains",
+    "find",
+    "grep_text",
     "starts_with",
     "ends_with",
     "split",

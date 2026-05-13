@@ -32,22 +32,31 @@ pub(crate) fn lookup_symbol(name: &str) -> Option<Symbol> {
 }
 
 pub(crate) fn intern_symbol(name: &str) -> Symbol {
-    if let Some(symbol) = lookup_symbol(name) {
-        return symbol;
+    intern_symbol_with_name(name).0
+}
+
+pub(crate) fn intern_symbol_with_name(name: &str) -> (Symbol, Arc<str>) {
+    {
+        let table = symbol_table()
+            .read()
+            .expect("symbol table read lock poisoned");
+        if let Some(symbol) = table.lookup.get(name) {
+            return (*symbol, table.names[symbol.0 as usize].clone());
+        }
     }
 
     let mut table = symbol_table()
         .write()
         .expect("symbol table write lock poisoned");
     if let Some(symbol) = table.lookup.get(name) {
-        return *symbol;
+        return (*symbol, table.names[symbol.0 as usize].clone());
     }
 
     let symbol = Symbol(table.names.len() as u32);
     let text: Arc<str> = Arc::<str>::from(name);
     table.names.push(text.clone());
-    table.lookup.insert(text, symbol);
-    symbol
+    table.lookup.insert(text.clone(), symbol);
+    (symbol, text)
 }
 
 pub(crate) fn symbol_name(symbol: Symbol) -> Arc<str> {
@@ -108,13 +117,13 @@ impl Record {
     }
 
     pub fn insert(&mut self, name: String, value: Value) -> Option<Value> {
-        let symbol = intern_symbol(&name);
-        self.insert_symbolized(symbol, Arc::<str>::from(name), value)
+        let (symbol, name) = intern_symbol_with_name(&name);
+        self.insert_symbolized(symbol, name, value)
     }
 
-    pub(crate) fn insert_str(&mut self, name: &str, value: Value) -> Option<Value> {
-        let symbol = intern_symbol(name);
-        self.insert_symbolized(symbol, symbol_name(symbol), value)
+    pub fn insert_str(&mut self, name: &str, value: Value) -> Option<Value> {
+        let (symbol, name) = intern_symbol_with_name(name);
+        self.insert_symbolized(symbol, name, value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {

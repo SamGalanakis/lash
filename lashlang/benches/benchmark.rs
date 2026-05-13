@@ -1,7 +1,7 @@
 #[path = "../examples/bench_support/mod.rs"]
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state};
+use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, State, Value, compile_program,
@@ -41,7 +41,7 @@ fn benchmark_full_block_modes(
 
     group.bench_function(BenchmarkId::new("parse_execute", scenario), |b| {
         b.iter(|| {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let outcome = rt
                 .block_on(execute_with_projected_bindings(
                     black_box(source),
@@ -60,7 +60,7 @@ fn benchmark_full_block_modes(
             .get_or_compile(source)
             .expect("benchmark program should compile");
         b.iter(|| {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let compiled = cache
                 .get_or_compile(black_box(source))
                 .expect("benchmark cache lookup");
@@ -81,7 +81,7 @@ fn benchmark_full_block_modes(
         cache
             .get_or_compile(source)
             .expect("benchmark program should compile");
-        let mut state = seeded_state();
+        let mut state = seeded_state_for(scenario);
         b.iter(|| {
             let compiled = cache
                 .get_or_compile(black_box(source))
@@ -100,7 +100,7 @@ fn benchmark_full_block_modes(
 
     group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
         b.iter(|| {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let outcome = rt
                 .block_on(execute_compiled_with_projected_bindings(
                     black_box(&compiled),
@@ -115,7 +115,7 @@ fn benchmark_full_block_modes(
 
     group.bench_function(BenchmarkId::new("snapshot_execute", scenario), |b| {
         b.iter(|| {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let snapshot = state.snapshot();
             let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
             let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");

@@ -33,7 +33,7 @@ impl RlmSubagentToolsProvider {
     async fn spawn_agent(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
         let agent_name = required_string(args, "agent_name")?;
         let task = required_string(args, "task")?;
-        let capability_name = required_string(args, "capability")?;
+        let capability_name = capability_name_from_args(args, &self.registry)?;
         if self.registry.get(&capability_name).is_none() {
             return Err(unknown_capability_message(&capability_name, &self.registry));
         }
@@ -131,34 +131,35 @@ pub(crate) fn rlm_subagent_tool_definitions(capability_names: &[String]) -> Vec<
 
 pub fn spawn_agent_tool_definition(capability_names: &[String]) -> ToolDefinition {
     let example_capability = example_capability_name(capability_names);
+    let capability_arg = capability_example_arg(capability_names, &example_capability);
     spawn_agent_definition(
         capability_names,
         vec![
             // Schema-first: the highest-leverage shape — bind a typed result.
             format!(
-                r#"typed = (call spawn_agent {{ agent_name: "extract_line", task: "Find the longest line in src/main.rs", capability: "{example_capability}", output: {{ line: "str", length: "int" }} }})?"#
+                r#"typed = (call spawn_agent {{ agent_name: "extract_line", task: "Find the longest line in src/main.rs"{capability_arg}, output: {{ line: "str", length: "int" }} }})?"#
             ),
             // Reusable Type literal for richer shapes.
             r#"Shape = Type { name: str, tags: list[str], status: enum["ok", "err"] }"#.into(),
             format!(
-                r#"signed = (call spawn_agent {{ agent_name: "catalog", task: "Parse the book listing in data/books.json", capability: "{example_capability}", output: Shape }})?"#
+                r#"signed = (call spawn_agent {{ agent_name: "catalog", task: "Parse the book listing in data/books.json"{capability_arg}, output: Shape }})?"#
             ),
             // Canonical fan-out: start N and await generic handles.
             format!(
-                r#"a = start call spawn_agent {{ agent_name: "auth_files", task: "List files under src/auth/ that handle session tokens", capability: "{example_capability}", output: {{ files: "list[str]" }} }}"#
+                r#"a = start call spawn_agent {{ agent_name: "auth_files", task: "List files under src/auth/ that handle session tokens"{capability_arg}, output: {{ files: "list[str]" }} }}"#
             ),
             format!(
-                r#"b = start call spawn_agent {{ agent_name: "db_migrations", task: "Summarise migrations/ schema changes since v3", capability: "{example_capability}", output: {{ summary: "str" }} }}"#
+                r#"b = start call spawn_agent {{ agent_name: "db_migrations", task: "Summarise migrations/ schema changes since v3"{capability_arg}, output: {{ summary: "str" }} }}"#
             ),
             r#"results = parallel { auth: (await a)?, db: (await b)? }"#.into(),
             // seed: pass projected source through to the child as a projected
             // binding; pass plain values as RLM globals on the child.
             format!(
-                r#"answer = (call spawn_agent {{ agent_name: "extract", task: "Solve sub-problem 3 using the bound problem text and the running findings.", capability: "{example_capability}", seed: {{ problem: input.prompt, findings: findings }}, output: {{ value: "int" }} }})?"#
+                r#"answer = (call spawn_agent {{ agent_name: "extract", task: "Solve sub-problem 3 using the bound problem text and the running findings."{capability_arg}, seed: {{ problem: input.prompt, findings: findings }}, output: {{ value: "int" }} }})?"#
             ),
             // Untyped is fine for free-form prose results.
             format!(
-                r#"prose = call spawn_agent {{ agent_name: "audit_endpoints", task: "Skim the routes in api/ and flag any missing auth checks", capability: "{example_capability}" }}"#
+                r#"prose = call spawn_agent {{ agent_name: "audit_endpoints", task: "Skim the routes in api/ and flag any missing auth checks"{capability_arg} }}"#
             ),
         ],
     )
@@ -168,7 +169,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately. Pick `capability` from {cap_list}. {capability_detail} `output` defines the typed return shape. \
+        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
         \n\nA child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason. `agent_name` is auto-normalized."
     );
@@ -184,7 +185,40 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
 
 fn capability_detail_for_tool_description(capability_names: &[String]) -> String {
     if capability_names.len() == 1 {
-        return "Only the listed capability is available in this session.".to_string();
+        return "Only one capability is available in this session, so omit `capability` unless you need to be explicit.".to_string();
     }
-    "Use only the listed capabilities; unavailable capability names are rejected.".to_string()
+    "Pick `capability` from the available list; unavailable capability names are rejected."
+        .to_string()
+}
+
+fn capability_example_arg(capability_names: &[String], example_capability: &str) -> String {
+    if capability_names.len() == 1 {
+        String::new()
+    } else {
+        format!(r#", capability: "{example_capability}""#)
+    }
+}
+
+fn capability_name_from_args(
+    args: &Value,
+    registry: &CapabilityRegistry,
+) -> Result<String, String> {
+    match args.get("capability") {
+        Some(Value::String(capability)) => Ok(capability.clone()),
+        Some(_) => Err("field `capability` must be a string".to_string()),
+        None => {
+            let names = registry.names();
+            match names.as_slice() {
+                [only] => Ok(only.clone()),
+                [] => Err(
+                    "field `capability` is required: no default capability is registered"
+                        .to_string(),
+                ),
+                _ => Err(format!(
+                    "field `capability` is required when multiple capabilities are available: {}",
+                    capability_list_for_description(&names)
+                )),
+            }
+        }
+    }
 }

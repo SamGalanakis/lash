@@ -1163,12 +1163,13 @@ const OOLONG_DECOMPOSITION_GUIDANCE: &str = r#"OOLONG rewards exact aggregation,
 Default pattern:
 1. Inspect metadata first: dataset, task_group, task, answer_type, context_len.
 2. Inspect the question and enough of the context to understand its structure before deciding the strategy. Identify the record boundary and the label/user/date fields before counting.
-3. Cover the full context before final submission. Chunk by observed record boundaries or character ranges, and keep chunks large enough to preserve local evidence instead of making unnecessarily tiny fragments.
-4. For contexts with many records, dispatch independent `spawn_agent` calls with `capability: "default"` over disjoint ranges. Pass `seed: { context: slice(input.context, start, end), question: input.question, metadata: benchmark }`.
-5. Maintain buffers of per-chunk counts, labels, evidence, or partial answers in lashlang data structures. Aggregate those buffers programmatically, then verify totals and tie-breaking before final submission.
-6. Submit only the final answer value. If the required output schema lists choices, submit one of those raw values without prefixes like `Label:` or `Answer:`. If the expected answer is a label or user, submit a string; if it asks for multiple entries, submit an array; if it asks for a count, submit a number.
+3. Cover the full context before final submission. Prefer semantic boundaries over arbitrary ranges: records, lines, sections, examples, turns, rows, or other natural units from the input. If arbitrary ranges are necessary, use overlap and carry stable anchors so boundary cases can be reconciled.
+4. For contexts with many independent units, dispatch focused `spawn_agent` calls with `capability: "default"` over disjoint semantic work where possible. Pass only the needed state, such as `seed: { context: slice(input.context, start, end), question: input.question, metadata: benchmark }`.
+5. Give subagents narrow, auditable tasks. Prefer structured outputs with a list of atomic findings plus a general `notes` field. Each finding should include a stable source anchor, the extracted/classified value, and concise evidence. Use `notes` for assumptions, ambiguity, boundary issues, missing context, or anything the root should review.
+6. The root is responsible for reconciliation. Do not blindly combine subagent answers. Inspect returned evidence and notes, resolve conflicts, deduplicate overlaps, and investigate ambiguity before finalizing. If any partial result reports uncertainty, truncation, boundary risk, missing context, or inconsistent assumptions, run a targeted follow-up before submitting.
+7. Submit only the final answer value. If the required output schema lists choices, submit one of those raw values without prefixes like `Label:` or `Answer:`. If the expected answer is a label or user, submit a string; if it asks for multiple entries, submit an array; if it asks for a count, submit a number.
 
-Avoid copying the whole context into prose or printing whole document lists. Use short slices and compact projections to inspect structure and evidence. If a subtask requires its own multi-step inspection, use `spawn_agent`; if it is a small direct classification, extraction, summarization, or judgment over supplied data, `llm_query` is enough. Use `start call spawn_agent` plus `await`/`list_async_handles` for parallel fan-out when chunks are independent."#;
+Avoid copying the whole context into prose or printing whole document lists. Use short slices and compact projections to inspect structure and evidence. If a subtask requires its own multi-step inspection, use `spawn_agent`; if it is a small direct classification, extraction, summarization, or judgment over supplied data, `llm_query` is enough. Use `start call spawn_agent` plus `await`/`list_async_handles` for parallel fan-out when work is independent. Before final submission, perform one independent check appropriate to the task: search candidate terms, compare totals, validate coverage, inspect edge cases, or re-read the decisive sources."#;
 
 fn build_projected_bindings(
     question: &OolongQuestion,
@@ -1729,7 +1730,7 @@ mod tests {
             dataset: Some("spam".to_string()),
             config: None,
             context_len: Some(1024),
-            context_window_id: Some(1),
+            context_window_id: Some(json!(1)),
             task_group: Some("counting".to_string()),
             task: None,
             answer_type: Some(answer_type.to_string()),

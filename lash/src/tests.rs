@@ -149,6 +149,75 @@ impl lash_core::SessionStoreFactory for ReusableStoreFactory {
     }
 }
 
+struct BoundSessionStore {
+    session_id: String,
+}
+
+#[async_trait]
+impl lash_core::RuntimePersistence for BoundSessionStore {
+    async fn load_session(
+        &self,
+        _scope: lash_core::SessionReadScope,
+    ) -> std::result::Result<Option<lash_core::PersistedSessionRead>, lash_core::store::StoreError>
+    {
+        Ok(None)
+    }
+
+    async fn load_node(
+        &self,
+        _node_id: &str,
+    ) -> std::result::Result<Option<lash_core::SessionNodeRecord>, lash_core::store::StoreError>
+    {
+        Ok(None)
+    }
+
+    async fn commit_runtime_state(
+        &self,
+        _commit: lash_core::RuntimeCommit,
+    ) -> std::result::Result<lash_core::RuntimeCommitResult, lash_core::store::StoreError> {
+        unreachable!("test should fail before committing to the reused child store")
+    }
+
+    async fn save_session_meta(
+        &self,
+        _meta: lash_core::SessionMeta,
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn load_session_meta(
+        &self,
+    ) -> std::result::Result<Option<lash_core::SessionMeta>, lash_core::store::StoreError> {
+        Ok(Some(lash_core::SessionMeta {
+            session_id: self.session_id.clone(),
+            session_name: self.session_id.clone(),
+            created_at: "test".to_string(),
+            model: "mock-model".to_string(),
+            cwd: None,
+            parent_session_id: None,
+        }))
+    }
+
+    async fn tombstone_nodes(
+        &self,
+        _ids: &[String],
+    ) -> std::result::Result<(), lash_core::store::StoreError> {
+        Ok(())
+    }
+
+    async fn vacuum(
+        &self,
+    ) -> std::result::Result<lash_core::VacuumReport, lash_core::store::StoreError> {
+        Ok(lash_core::VacuumReport::default())
+    }
+
+    async fn gc_unreachable(
+        &self,
+    ) -> std::result::Result<lash_core::GcReport, lash_core::store::StoreError> {
+        Ok(lash_core::GcReport::default())
+    }
+}
+
 #[derive(Default)]
 struct RecordingStoreFactory {
     requests: std::sync::Mutex<Vec<lash_core::SessionStoreCreateRequest>>,

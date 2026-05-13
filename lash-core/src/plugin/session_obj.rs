@@ -210,19 +210,23 @@ impl PluginSession {
         if mode == self.execution_mode {
             tools.extend(self.mode_native_tool_definitions());
         }
-        Arc::new(
-            self.resolve_tool_surface(ToolSurfaceContext {
-                session_id: session_id.to_string(),
-                mode: mode.clone(),
-                tools: tools.clone(),
-                tool_access: self.tool_access.clone(),
-                subagent: self.subagent.clone(),
-            })
-            .unwrap_or_else(|err| {
+        match self.resolve_tool_surface(ToolSurfaceContext {
+            session_id: session_id.to_string(),
+            mode: mode.clone(),
+            tools,
+            tool_access: self.tool_access.clone(),
+            subagent: self.subagent.clone(),
+        }) {
+            Ok(surface) => Arc::new(surface),
+            Err(err) => {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                crate::ToolSurface::from_tools(tools, mode)
-            }),
-        )
+                let mut fallback_tools = self.tools.definitions();
+                if mode == self.execution_mode {
+                    fallback_tools.extend(self.mode_native_tool_definitions());
+                }
+                Arc::new(crate::ToolSurface::from_tools(fallback_tools, mode))
+            }
+        }
     }
 
     pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {

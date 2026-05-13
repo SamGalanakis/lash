@@ -165,7 +165,7 @@ pub(crate) async fn execute_builtin(
                 Value::Record(record) => Ok(Value::List(
                     record
                         .keys()
-                        .map(|key| Value::String(key.to_string().into()))
+                        .map(|key| Value::String(key.into()))
                         .collect::<Vec<_>>()
                         .into(),
                 )),
@@ -206,6 +206,8 @@ pub(crate) async fn execute_builtin(
             expect_arg_count("contains", values, 2)?;
             execute_contains_builtin(&values[0], &values[1]).await
         }
+        Builtin::Find => execute_find_builtin(values).await,
+        Builtin::GrepText => execute_grep_text_builtin(values).await,
         Builtin::StartsWith => {
             expect_arg_count("starts_with", values, 2)?;
             let prefix = materialize_projected_async(values[1].clone()).await;
@@ -246,7 +248,7 @@ pub(crate) async fn execute_builtin(
             Ok(Value::List(
                 value
                     .split(needle.as_ref())
-                    .map(|part| Value::String(part.to_string().into()))
+                    .map(|part| Value::String(part.into()))
                     .collect::<Vec<_>>()
                     .into(),
             ))
@@ -263,9 +265,7 @@ pub(crate) async fn execute_builtin(
                 return Ok(value);
             }
             let value = materialize_projected_async(values[0].clone()).await;
-            Ok(Value::String(
-                coerce_string(&value)?.trim().to_string().into(),
-            ))
+            Ok(Value::String(coerce_string(&value)?.trim().into()))
         }
         Builtin::Slice => {
             expect_arg_count("slice", values, 3)?;
@@ -366,7 +366,7 @@ pub(crate) async fn execute_builtin(
         Builtin::Range => execute_range_builtin_async(values).await,
         Builtin::Push => {
             expect_arg_count("push", values, 2)?;
-            execute_push_builtin_async(&values[0], values[1].clone()).await
+            execute_push_builtin_async(values[0].clone(), values[1].clone()).await
         }
         Builtin::Unknown(index) => Err(RuntimeError::UnknownBuiltin {
             name: names[index].text.to_string(),
@@ -436,6 +436,120 @@ pub(crate) fn execute_contains_direct(
     }
 }
 
+pub(crate) async fn execute_find_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
+    if !(values.len() == 2 || values.len() == 3) {
+        return Err(RuntimeError::TypeError {
+            message: format!("`find` takes 2 or 3 arg(s), got {}", values.len()),
+        });
+    }
+
+    let needle = materialize_projected_async(values[1].clone()).await;
+    let start = match values.get(2) {
+        Some(value) => {
+            let value = materialize_projected_async(value.clone()).await;
+            as_non_negative_char_index("find", "start", &value)?
+        }
+        None => 0,
+    };
+
+    if let Value::Projected(value) = &values[0]
+        && let Some(value) = value.find(needle.clone(), start).await
+    {
+        return Ok(value);
+    }
+    let haystack = materialize_projected_async(values[0].clone()).await;
+    execute_find_direct(&haystack, &needle, start)
+}
+
+pub(crate) async fn execute_grep_text_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
+    expect_arg_count("grep_text", values, 2)?;
+    let needle = materialize_projected_async(values[1].clone()).await;
+    if let Value::Projected(value) = &values[0]
+        && let Some(value) = value.grep_text(needle.clone()).await
+    {
+        return Ok(value);
+    }
+    let text = materialize_projected_async(values[0].clone()).await;
+    execute_grep_text_direct(&text, &needle)
+}
+
+pub(crate) fn execute_find_direct(
+    text: &Value,
+    needle: &Value,
+    start: usize,
+) -> Result<Value, RuntimeError> {
+    let text = coerce_string(text)?;
+    let needle = coerce_string(needle)?;
+    Ok(match find_text(text.as_ref(), needle.as_ref(), start) {
+        Some(index) => Value::Number(index as f64),
+        None => Value::Null,
+    })
+}
+
+pub(crate) fn execute_grep_text_direct(
+    text: &Value,
+    needle: &Value,
+) -> Result<Value, RuntimeError> {
+    let text = coerce_string(text)?;
+    let needle = coerce_string(needle)?;
+    grep_text_strings(text.as_ref(), needle.as_ref())
+}
+
+fn grep_text_strings(text: &str, needle: &str) -> Result<Value, RuntimeError> {
+    if needle.is_empty() {
+        return Err(RuntimeError::ValueError {
+            message: "`grep_text` needle must not be empty".to_string(),
+        });
+    }
+
+    let needle_len = needle.chars().count();
+    let needle_value = Value::String(needle.into());
+    let mut matches = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let Some(start) = find_text(line, needle, 0) else {
+            continue;
+        };
+        let mut record = record_with_capacity(5);
+        record.insert_str("line", Value::Number((line_index + 1) as f64));
+        record.insert_str("text", Value::String(line.into()));
+        record.insert_str("match", needle_value.clone());
+        record.insert_str("start", Value::Number(start as f64));
+        record.insert_str("end", Value::Number((start + needle_len) as f64));
+        matches.push(Value::Record(Arc::new(record)));
+    }
+
+    Ok(Value::List(matches.into()))
+}
+
+fn find_text(text: &str, needle: &str, start: usize) -> Option<usize> {
+    let start_byte = if start == 0 {
+        0
+    } else {
+        byte_index_for_char(text, start)?
+    };
+    if needle.is_empty() {
+        return Some(start);
+    }
+    let tail = &text[start_byte..];
+    let match_byte = tail.find(needle)?;
+    Some(start + tail[..match_byte].chars().count())
+}
+
+fn byte_index_for_char(text: &str, target: usize) -> Option<usize> {
+    let mut char_count = 0;
+    for (byte_index, _) in text.char_indices() {
+        if char_count == target {
+            return Some(byte_index);
+        }
+        char_count += 1;
+    }
+    if char_count == target {
+        Some(text.len())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn value_len(value: &Value) -> Option<usize> {
     match value {
         Value::String(value) => Some(value.chars().count()),
@@ -446,7 +560,7 @@ pub(crate) fn value_len(value: &Value) -> Option<usize> {
     }
 }
 
-pub(crate) async fn iterable_values(value: Value) -> Result<Arc<[Value]>, RuntimeError> {
+pub(crate) async fn iterable_values(value: Value) -> Result<ListValue, RuntimeError> {
     match value {
         Value::List(values) => Ok(values),
         Value::Projected(value) => match value.materialize_async().await {
@@ -529,29 +643,31 @@ pub(crate) fn range_bounds(values: &[Value]) -> Result<(i64, i64), RuntimeError>
 }
 
 pub(crate) async fn execute_push_builtin_async(
-    list: &Value,
+    list: Value,
     item: Value,
 ) -> Result<Value, RuntimeError> {
     let item = materialize_projected_async(item).await;
-    if let Value::Projected(value) = list
+    if let Value::Projected(value) = &list
         && let Some(value) = value.push(item.clone()).await
     {
         return Ok(value);
     }
-    let list = materialize_projected_async(list.clone()).await;
-    let Value::List(items) = &list else {
+    let list = materialize_projected_async(list).await;
+    let Value::List(items) = list else {
         return Err(RuntimeError::TypeError {
             message: "`push` requires a list as the first argument".to_string(),
         });
     };
-    let mut values = Vec::with_capacity(items.len() + 1);
-    values.extend(items.iter().cloned());
+    let mut values = items.into_vec();
+    if values.len() == values.capacity() {
+        values.reserve(1);
+    }
     values.push(item);
     Ok(Value::List(values.into()))
 }
 
 pub(crate) fn execute_push_builtin(list: &Value, item: Value) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(execute_push_builtin_async(list, item))
+    futures_executor::block_on(execute_push_builtin_async(list.clone(), item))
 }
 
 pub(crate) fn as_range_bound(value: &Value) -> Result<i64, RuntimeError> {
@@ -819,6 +935,20 @@ pub(crate) fn as_slice_bound(value: &Value) -> Result<Option<isize>, RuntimeErro
     }
 }
 
+fn as_non_negative_char_index(
+    builtin: &str,
+    arg_name: &str,
+    value: &Value,
+) -> Result<usize, RuntimeError> {
+    let number = as_number(value)?;
+    if !number.is_finite() || number.fract() != 0.0 || number < 0.0 || number > usize::MAX as f64 {
+        return Err(RuntimeError::TypeError {
+            message: format!("`{builtin}` {arg_name} must be a non-negative integer"),
+        });
+    }
+    Ok(number as usize)
+}
+
 pub(crate) async fn as_slice_bound_async(value: &Value) -> Result<Option<isize>, RuntimeError> {
     let value = match value {
         Value::Projected(projected) => match projected.slice_bound().await {
@@ -926,7 +1056,7 @@ pub(crate) fn error_value(message: String) -> Value {
     Value::Record(Arc::new(record))
 }
 
-pub(crate) fn value_type_name(value: &Value) -> &'static str {
+pub(crate) fn value_type_name(value: &Value) -> &str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "bool",

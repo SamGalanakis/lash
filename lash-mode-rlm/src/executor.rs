@@ -193,9 +193,11 @@ async fn execute_code_inner(
     };
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
+    let tool_result_projectors = tool_result_projectors(&ctx);
     let host = HostBridge {
         ctx,
         observe_projection: state.observe_projection.clone(),
+        tool_result_projectors,
         observations: Mutex::new(Vec::new()),
         observation_truncation: Mutex::new(Vec::new()),
         printed_images: Mutex::new(Vec::new()),
@@ -295,12 +297,19 @@ fn insert_projected_bindings(
     Ok(())
 }
 
+fn tool_result_projectors(ctx: &ModeExecutionContext) -> Vec<crate::RlmToolResultProjector> {
+    ctx.turn_context()
+        .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
+        .map(|extension| extension.tool_result_projectors.clone())
+        .unwrap_or_default()
+}
+
 struct HistoryProjectedValue {
     projection: Arc<RlmHistoryProjection>,
 }
 
 impl ProjectedHostValue for HistoryProjectedValue {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         "list"
     }
 
@@ -352,6 +361,7 @@ fn projected_index(index: &FlowValue, len: usize) -> Result<Option<usize>, ()> {
 struct HostBridge {
     ctx: ModeExecutionContext,
     observe_projection: ToolOutputBudgetConfig,
+    tool_result_projectors: Vec<crate::RlmToolResultProjector>,
     observations: Mutex<Vec<String>>,
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
     printed_images: Mutex<Vec<AttachmentRef>>,
@@ -367,12 +377,12 @@ impl ToolHost for HostBridge {
             .ctx
             .call_tool(
                 uuid::Uuid::new_v4().to_string(),
-                name,
+                name.clone(),
                 self.tool_payload(&args).await,
                 index,
             )
             .await;
-        self.consume_reply(reply)
+        self.consume_reply(&name, reply)
     }
 
     async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<FlowValue, ToolHostError>> {
@@ -400,7 +410,8 @@ impl ToolHost for HostBridge {
         }
         replies
             .into_iter()
-            .map(|reply| self.consume_reply(reply))
+            .zip(calls)
+            .map(|(reply, call)| self.consume_reply(&call.name, reply))
             .collect()
     }
 
@@ -409,11 +420,11 @@ impl ToolHost for HostBridge {
             .ctx
             .start_tool_call(
                 uuid::Uuid::new_v4().to_string(),
-                name,
+                name.clone(),
                 self.tool_payload(&args).await,
             )
             .await;
-        self.consume_reply(reply)
+        self.consume_reply(&name, reply)
     }
 
     async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
@@ -424,7 +435,7 @@ impl ToolHost for HostBridge {
                 flow_to_json_value(&handle).await,
             )
             .await;
-        self.consume_reply(reply)
+        self.consume_reply("await_handle", reply)
     }
 
     async fn cancel_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
@@ -435,7 +446,7 @@ impl ToolHost for HostBridge {
                 flow_to_json_value(&handle).await,
             )
             .await;
-        self.consume_reply(reply)
+        self.consume_reply("cancel_handle", reply)
     }
 
     async fn print(&self, value: FlowValue) -> Result<(), ToolHostError> {
@@ -486,7 +497,17 @@ impl HostBridge {
         payload
     }
 
-    fn consume_reply(&self, reply: ModeToolReply) -> Result<FlowValue, ToolHostError> {
+    fn consume_reply(
+        &self,
+        tool_name: &str,
+        reply: ModeToolReply,
+    ) -> Result<FlowValue, ToolHostError> {
+        let projected_tool_name = reply
+            .record
+            .as_ref()
+            .map(|record| record.tool.as_str())
+            .unwrap_or(tool_name)
+            .to_string();
         if let Some(record) = reply.record {
             self.tool_calls
                 .lock()
@@ -500,6 +521,11 @@ impl HostBridge {
                 .extend(reply.images.clone());
         }
         if reply.success {
+            for projector in &self.tool_result_projectors {
+                if let Some(value) = projector(&projected_tool_name, &reply.value) {
+                    return Ok(value);
+                }
+            }
             Ok(lift_tool_result_to_flow_value(
                 reply.value,
                 reply.images,
@@ -956,6 +982,7 @@ fn clear_dir(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct NoopHost;
@@ -976,8 +1003,34 @@ mod tests {
 
     struct TestProjectedValue(Vec<FlowValue>);
 
+    #[derive(Default)]
+    struct SnapshotProjectedToolText {
+        materialize_count: AtomicUsize,
+        render_count: AtomicUsize,
+    }
+
+    impl ProjectedHostValue for SnapshotProjectedToolText {
+        fn type_name(&self) -> &str {
+            "string"
+        }
+
+        fn render(&self) -> ProjectedFuture<'_, String> {
+            Box::pin(async {
+                self.render_count.fetch_add(1, Ordering::SeqCst);
+                "rendered tool text".to_string()
+            })
+        }
+
+        fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
+            Box::pin(async {
+                self.materialize_count.fetch_add(1, Ordering::SeqCst);
+                FlowValue::String("materialized tool text".into())
+            })
+        }
+    }
+
     impl ProjectedHostValue for TestProjectedValue {
-        fn type_name(&self) -> &'static str {
+        fn type_name(&self) -> &str {
             "list"
         }
 
@@ -1194,6 +1247,44 @@ mod tests {
                     .contains("read-only projected binding")
             );
         });
+    }
+
+    #[test]
+    fn executor_snapshot_does_not_materialize_projected_tool_result_globals() {
+        let projected = Arc::new(SnapshotProjectedToolText::default());
+        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut snapshot = state.rlm.snapshot();
+        snapshot.globals.insert(
+            "m".to_string(),
+            FlowValue::Projected(ProjectedValue::custom(
+                "search.matches[0].text",
+                projected.clone(),
+            )),
+        );
+        state.rlm = FlowState::from_snapshot(snapshot);
+
+        let bytes = state
+            .snapshot_execution_state()
+            .expect("executor snapshot")
+            .expect("snapshot bytes");
+
+        assert_eq!(projected.render_count.load(Ordering::SeqCst), 0);
+        assert_eq!(projected.materialize_count.load(Ordering::SeqCst), 0);
+        let outer: Value = serde_json::from_slice(&bytes).expect("snapshot json");
+        let vars = outer
+            .get("vars")
+            .and_then(Value::as_str)
+            .expect("vars string");
+        assert!(!vars.contains("rendered tool text"));
+        assert!(!vars.contains("materialized tool text"));
+        assert!(vars.contains("__lashlang_snapshot_projected__"));
+        assert!(vars.contains("search.matches[0].text"));
+
+        let restored = restore_runtime(vars).expect("restore runtime");
+        assert!(matches!(
+            restored.snapshot().globals.get("m"),
+            Some(FlowValue::Projected(_))
+        ));
     }
 
     #[test]

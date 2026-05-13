@@ -107,6 +107,8 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `range(end)` / `range(start, end)` — integer list, end-exclusive
 - `push(list, item)` — new list with one item appended
 - `split(s, sep)` / `join(list, sep)` — string split/join
+- `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
+- `grep_text(s, needle)` — literal in-memory line search; `needle` must be non-empty; returns one record per matching line: `{ line: int, text: str, match: str, start: int, end: int }`, where `line` is 1-based, `text` is the line without its line ending, and `start`/`end` are zero-based character offsets within that line's `text` with `end` exclusive
 - `trim(s)` — strip whitespace
 - `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
 - `keys(record)` / `values(record)`
@@ -126,6 +128,8 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `range(end)` / `range(start, end)` — integer list, end-exclusive
 - `push(list, item)` — new list with one item appended
 - `split(s, sep)` / `join(list, sep)` — string split/join
+- `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
+- `grep_text(s, needle)` — literal in-memory line search; `needle` must be non-empty; returns one record per matching line: `{ line: int, text: str, match: str, start: int, end: int }`, where `line` is 1-based, `text` is the line without its line ending, and `start`/`end` are zero-based character offsets within that line's `text` with `end` exclusive
 - `trim(s)` — strip whitespace
 - `starts_with(s, prefix)` / `ends_with(s, suffix)` / `contains(haystack, needle)`
 - `keys(record)` / `values(record)`
@@ -866,6 +870,22 @@ fn validate_finish_value(value: &Value, schema: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rlm_execution_section_default_prompt_is_golden() {
+        insta::assert_snapshot!("rlm_execution_section_default", rlm_execution_section());
+    }
+
+    #[test]
+    fn rlm_execution_section_no_images_prompt_is_golden() {
+        insta::assert_snapshot!(
+            "rlm_execution_section_no_images",
+            rlm_execution_section_with_features(RlmPromptFeatures {
+                images: false,
+                ..RlmPromptFeatures::default()
+            })
+        );
+    }
 
     #[test]
     fn execution_section_does_not_advertise_unregistered_peer_capability() {

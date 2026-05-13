@@ -301,16 +301,6 @@ pub fn render_core_guidance(prompt: &PromptContext) -> String {
     bullets.join("\n")
 }
 
-/// Back-compat constant for callers that render the full interactive
-/// guidance block outside the prompt template (tests, docs). Matches
-/// the *interactive* path of [`render_core_guidance`] (i.e. includes
-/// the "Ask only when progress is blocked" line that autonomous runs
-/// filter out). Prefer [`render_core_guidance`] in any new call site.
-pub const CORE_GUIDANCE_SECTION: &str = r#"- Be concise. Avoid filler, hedging, and performative tone.
-- Take initiative when the user's intent is clear. Ask only when progress is blocked.
-- Do not restate a conclusion you already stated. Once a fix location is identified, act on it in the same turn.
-- Prefer the simplest correct solution over cleverness or unnecessary abstraction."#;
-
 fn grouped_contributions<'a>(
     prompt: &'a PromptContext,
 ) -> HashMap<PromptSlot, Vec<&'a PromptContribution>> {

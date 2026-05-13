@@ -1,0 +1,148 @@
+---
+source: lashlang/src/runtime/tests.rs
+expression: "serde_json::to_string_pretty(&program).expect(\"program should serialize\")"
+---
+{
+  "statements": [
+    {
+      "Assign": {
+        "target": {
+          "root": "source"
+        },
+        "expr": {
+          "BuiltinCall": {
+            "name": "join",
+            "args": [
+              {
+                "Variable": "history"
+              },
+              {
+                "String": ","
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "Assign": {
+        "target": {
+          "root": "beta_index"
+        },
+        "expr": {
+          "BuiltinCall": {
+            "name": "find",
+            "args": [
+              {
+                "Variable": "source"
+              },
+              {
+                "String": "beta"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "Assign": {
+        "target": {
+          "root": "matches"
+        },
+        "expr": {
+          "BuiltinCall": {
+            "name": "grep_text",
+            "args": [
+              {
+                "Variable": "source"
+              },
+              {
+                "String": "beta"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "Assign": {
+        "target": {
+          "root": "Payload"
+        },
+        "expr": {
+          "TypeLiteral": {
+            "Object": [
+              {
+                "name": "beta_index",
+                "ty": {
+                  "Union": [
+                    "Int",
+                    "Null"
+                  ]
+                },
+                "optional": false
+              },
+              {
+                "name": "matches",
+                "ty": {
+                  "List": "Dict"
+                },
+                "optional": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "Submit": {
+        "BuiltinCall": {
+          "name": "validate",
+          "args": [
+            {
+              "Record": [
+                [
+                  "beta_index",
+                  {
+                    "Variable": "beta_index"
+                  }
+                ],
+                [
+                  "matches",
+                  {
+                    "Variable": "matches"
+                  }
+                ]
+              ]
+            },
+            {
+              "Variable": "Payload"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "statement_spans": [
+    {
+      "start": 1,
+      "end": 28
+    },
+    {
+      "start": 29,
+      "end": 62
+    },
+    {
+      "start": 63,
+      "end": 98
+    },
+    {
+      "start": 99,
+      "end": 165
+    },
+    {
+      "start": 166,
+      "end": 242
+    }
+  ]
+}

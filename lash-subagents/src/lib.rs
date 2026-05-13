@@ -208,6 +208,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn single_capability_spawn_can_omit_capability_field() {
+        let registry = CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
+            "explore",
+            lash_core::SessionSpec::inherit().mode(ExecutionMode::new("rlm")),
+        )));
+        let rlm_spawn = rlm::spawn_agent_tool_definition(&registry.names());
+
+        assert!(
+            !rlm_spawn
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .expect("required fields")
+                .iter()
+                .any(|field| field.as_str() == Some("capability")),
+            "single-capability spawn should not require explicit capability"
+        );
+        assert!(
+            rlm_spawn
+                .examples
+                .iter()
+                .all(|example| !example.contains("capability:")),
+            "single-capability examples should not teach redundant capability args"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         struct SnapshotManager {
@@ -408,6 +435,34 @@ submit result
         assert!(
             prompt.contains("- `chunk`:"),
             "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rlm_spawn_defaults_single_capability_when_omitted() {
+        let (outcome, prompt) = run_seed_probe(
+            r#"```lashlang
+result = (call spawn_agent {
+  agent_name: "seed_probe",
+  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  seed: { chunk: ["a", "b"] },
+  output: Type { len: int }
+})?
+submit result
+```"#,
+            TurnInput::text("spawn a child with the default capability"),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+                value: json!({ "len": 2 })
+            })
+        );
+        assert!(
+            prompt.contains("Subagent agent_name: seed_probe"),
+            "child prompt did not render subagent authority:\n{prompt}"
         );
     }
 

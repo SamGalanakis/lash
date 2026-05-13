@@ -21,3 +21,4 @@ uuid = { workspace = true, features = ["v4"] }
 lash-core = { path = "../lash-core", features = ["testing"] }
 lash-sansio = { path = "../lash-sansio" }
 lash-mode-standard = { path = "../lash-mode-standard" }
+insta = "1"

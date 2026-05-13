@@ -11,10 +11,10 @@ pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use runtime::{
     CompileStats, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
-    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ProfileReport, ProfileStat,
-    ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedRead,
-    ProjectedValue, Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost, ToolHostCall,
-    ToolHostError, Value, compile_program, compile_source, execute_compiled,
+    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ListValue, ProfileReport,
+    ProfileStat, ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+    ProjectedRead, ProjectedValue, Record, RuntimeError, RuntimeFailure, Snapshot, State, ToolHost,
+    ToolHostCall, ToolHostError, Value, compile_program, compile_source, execute_compiled,
     execute_compiled_traced, execute_compiled_traced_with_projected_bindings,
     execute_compiled_traced_with_scratch,
     execute_compiled_traced_with_scratch_and_projected_bindings,

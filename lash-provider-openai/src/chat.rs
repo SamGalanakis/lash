@@ -459,7 +459,7 @@ impl OpenAiCompatibleProvider {
             state.provider_usage = Some(usage.clone());
             merge_usage(&mut state.usage, &usage_from_response_value(&event));
         }
-        state.final_response = Some(event.clone());
+        state.final_response_raw = Some(raw.to_string());
         let Some(choices) = event.get("choices").and_then(Value::as_array) else {
             return Ok(());
         };
@@ -468,10 +468,7 @@ impl OpenAiCompatibleProvider {
                 && !usage.is_null()
             {
                 state.provider_usage = Some(usage.clone());
-                merge_usage(
-                    &mut state.usage,
-                    &usage_from_response_value(&json!({ "usage": usage })),
-                );
+                merge_usage(&mut state.usage, &usage_from_usage_value(usage));
             }
             let Some(delta) = choice.get("delta") else {
                 continue;
@@ -546,7 +543,7 @@ pub(crate) struct ChatStreamState {
     pub(crate) usage: LlmUsage,
     pub(crate) provider_usage: Option<Value>,
     pub(crate) tool_calls: HashMap<usize, ChatStreamingToolCall>,
-    pub(crate) final_response: Option<Value>,
+    pub(crate) final_response_raw: Option<String>,
 }
 
 impl ChatStreamState {
@@ -657,9 +654,12 @@ impl ChatStreamState {
             });
         }
         if parts.is_empty()
-            && let Some(final_response) = &self.final_response
+            && let Some(final_response) = self
+                .final_response_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         {
-            parts = OpenAiCompatibleProvider::chat_response_parts_from_value(final_response);
+            parts = OpenAiCompatibleProvider::chat_response_parts_from_value(&final_response);
         }
         parts
     }
