@@ -29,9 +29,10 @@ use super::{
     add_values, as_number, assign_path, error_value, eval_binary_values, eval_binary_values_async,
     eval_compare_values_async, eval_number_binary_values, eval_number_compare_values,
     eval_number_numeric_binary_value, eval_pure_expr, execute_builtin, execute_compiled_format,
-    execute_compiled_format_direct, execute_join_builtin, execute_len_builtin, execute_len_direct,
-    execute_push_builtin, execute_range_builtin, is_async_handle_record, is_truthy,
-    is_truthy_async, iterable_values, materialize_value, range_bounds, read_field_direct,
+    execute_compiled_format_direct, execute_join_builtin_async, execute_len_builtin,
+    execute_len_direct, execute_push_builtin_async, execute_range_builtin_async,
+    is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
+    materialize_projected_async, materialize_value, range_bounds_async, read_field_direct,
     read_field_ref_direct, read_index_direct, success, unwrap_tool_result, unwrap_type_value,
 };
 
@@ -452,7 +453,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::Unary(op) => {
                 let value = self.pop_stack()?;
                 let value = match op {
-                    UnaryOp::Negate => Value::Number(-as_number(&value)?),
+                    UnaryOp::Negate => {
+                        let value = materialize_projected_async(value).await;
+                        Value::Number(-as_number(&value)?)
+                    }
                     UnaryOp::Not => Value::Bool(match &value {
                         Value::Projected(_) => !is_truthy_async(&value).await,
                         _ => !is_truthy(&value),
@@ -606,7 +610,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let sep = self.pop_stack()?;
                 let items = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_join_builtin(&items, &sep)?;
+                let value = execute_join_builtin_async(&items, &sep).await?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Join, start.elapsed().as_nanos());
                 }
@@ -616,7 +620,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let schema = self.pop_stack()?;
                 let value = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_validate_builtin(value, &schema)?;
+                let value = execute_validate_builtin(
+                    materialize_projected_async(value).await,
+                    &materialize_projected_async(schema).await,
+                )?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Validate, start.elapsed().as_nanos());
                 }
@@ -625,7 +632,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::ValidateCompiled(schema) => {
                 let value = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_compiled_validate(value, &self.chunk.compiled_schemas[schema])?;
+                let value = execute_compiled_validate(
+                    materialize_projected_async(value).await,
+                    &self.chunk.compiled_schemas[schema],
+                )?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Validate, start.elapsed().as_nanos());
                 }
@@ -635,7 +645,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let item = self.pop_stack()?;
                 let list = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_push_builtin(&list, item)?;
+                let value = execute_push_builtin_async(&list, item).await?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Push, start.elapsed().as_nanos());
                 }
@@ -644,7 +654,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::Range { argc } => {
                 let start_index = self.stack_drain_start(argc)?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_range_builtin(&self.stack[start_index..])?;
+                let value = execute_range_builtin_async(&self.stack[start_index..]).await?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Range, start.elapsed().as_nanos());
                 }
@@ -779,7 +789,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::BeginRangeIter { binding, argc } => {
                 let start_index = self.stack_drain_start(argc)?;
-                let (start, end) = range_bounds(&self.stack[start_index..])?;
+                let (start, end) = range_bounds_async(&self.stack[start_index..]).await?;
                 self.stack.truncate(start_index);
                 self.iter_stack.push(IterState {
                     cursor: IterCursor::Range { next: start, end },

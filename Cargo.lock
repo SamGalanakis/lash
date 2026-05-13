@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "bench-oolong"
-version = "0.2.118"
+version = "0.2.119"
 dependencies = [
  "anyhow",
  "async-trait",
