@@ -1,6 +1,6 @@
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state};
+use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
 use lashlang::{ExecutionOutcome, ExecutionScratch, ProfileReport, compile_program, parse};
 use std::env;
 
@@ -45,7 +45,7 @@ fn main() {
         let compiled = compile_program(&program);
 
         for _ in 0..iterations {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(*scenario);
             let (outcome, run_profile) = rt
                 .block_on(
                     lashlang::profile_compiled_with_scratch_and_projected_bindings(

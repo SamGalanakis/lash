@@ -1,6 +1,6 @@
 mod bench_support;
 
-use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state};
+use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State, compile_program,
     compile_source, execute_compiled_with_scratch_and_projected_bindings, parse, prewarm,
@@ -136,7 +136,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             let program = parse(source).expect("benchmark program should parse");
             let compiled = compile_program(&program);
             for _ in 0..iterations {
-                let mut state = seeded_state();
+                let mut state = seeded_state_for(scenario);
                 let outcome = rt
                     .block_on(execute_compiled_with_scratch_and_projected_bindings(
                         &compiled,
@@ -164,7 +164,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
         }
         Mode::Block => {
             for _ in 0..iterations {
-                let mut state = seeded_state();
+                let mut state = seeded_state_for(scenario);
                 let compiled =
                     compile_source(std::hint::black_box(source)).expect("compile should succeed");
                 let outcome = rt
@@ -186,7 +186,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             reset_alloc_counters();
             started = Instant::now();
             for _ in 0..iterations {
-                let mut state = seeded_state();
+                let mut state = seeded_state_for(scenario);
                 let compiled = cache
                     .get_or_compile(std::hint::black_box(source))
                     .expect("cached compile should succeed");
@@ -206,7 +206,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             cache
                 .get_or_compile(source)
                 .expect("benchmark program should compile");
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             reset_alloc_counters();
             started = Instant::now();
             for _ in 0..iterations {
@@ -226,7 +226,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             }
         }
         Mode::ColdOnce => {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
             let outcome = rt
@@ -244,7 +244,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             prewarm();
             reset_alloc_counters();
             started = Instant::now();
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let compiled =
                 compile_source(std::hint::black_box(source)).expect("compile should succeed");
             let outcome = rt
@@ -259,7 +259,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             expect_finished(outcome);
         }
         Mode::CachedColdOnce => {
-            let mut state = seeded_state();
+            let mut state = seeded_state_for(scenario);
             let compiled = cache
                 .get_or_compile(std::hint::black_box(source))
                 .expect("cached compile should succeed");
@@ -278,7 +278,7 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
             let program = parse(source).expect("benchmark program should parse");
             let compiled = compile_program(&program);
             for _ in 0..iterations {
-                let mut state = seeded_state();
+                let mut state = seeded_state_for(scenario);
                 let snapshot = state.snapshot();
                 let encoded = serde_json::to_vec(&snapshot).expect("snapshot encode");
                 let decoded = serde_json::from_slice(&encoded).expect("snapshot decode");

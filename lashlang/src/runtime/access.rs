@@ -268,7 +268,7 @@ pub(crate) fn assign_index(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            Arc::make_mut(values)[idx] = value;
+            values.make_mut()[idx] = value;
             Ok(())
         }
         Value::Record(record) => {
@@ -293,7 +293,7 @@ pub(crate) fn add_assign_index_number(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            add_assign_value_number(&mut Arc::make_mut(values)[idx], right)
+            add_assign_value_number(&mut values.make_mut()[idx], right)
         }
         Value::Record(record) => {
             let key = coerce_string(index)?;
@@ -339,7 +339,7 @@ pub(crate) fn descend_index<'a>(
     match target {
         Value::List(values) => {
             let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            Ok(&mut Arc::make_mut(values)[idx])
+            Ok(&mut values.make_mut()[idx])
         }
         Value::Record(record) => {
             let key = coerce_string(index)?;

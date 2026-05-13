@@ -24,16 +24,17 @@ use super::schema::{execute_compiled_validate, execute_validate_builtin};
 use super::value::ProjectedValue;
 use super::{
     Builtin, COOPERATIVE_YIELD_INSTRUCTION_BUDGET, Chunk, ExecutionOutcome, ExecutionScratch,
-    Instruction, InstructionProfileTag, LASH_TYPE_KEY, Name, ProfileAccumulator, ProfileReport,
-    ProjectedBindings, RuntimeError, RuntimeFailure, ToolHost, Value, add_assign_index_number,
-    add_values, as_number, assign_path, error_value, eval_binary_values, eval_binary_values_async,
-    eval_compare_values_async, eval_number_binary_values, eval_number_compare_values,
-    eval_number_numeric_binary_value, eval_pure_expr, execute_builtin, execute_compiled_format,
-    execute_compiled_format_direct, execute_join_builtin_async, execute_len_builtin,
-    execute_len_direct, execute_push_builtin_async, execute_range_builtin_async,
-    is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
-    materialize_projected_async, materialize_value, range_bounds_async, read_field_direct,
-    read_field_ref_direct, read_index_direct, success, unwrap_tool_result, unwrap_type_value,
+    Instruction, InstructionProfileTag, LASH_TYPE_KEY, ListValue, Name, ProfileAccumulator,
+    ProfileReport, ProjectedBindings, RuntimeError, RuntimeFailure, ToolHost, Value,
+    add_assign_index_number, add_values, as_number, assign_path, error_value, eval_binary_values,
+    eval_binary_values_async, eval_compare_values_async, eval_number_binary_values,
+    eval_number_compare_values, eval_number_numeric_binary_value, eval_pure_expr, execute_builtin,
+    execute_compiled_format, execute_compiled_format_direct, execute_join_builtin_async,
+    execute_len_builtin, execute_len_direct, execute_push_builtin_async,
+    execute_range_builtin_async, is_async_handle_record, is_truthy, is_truthy_async,
+    iterable_values, materialize_projected_async, materialize_value, range_bounds_async,
+    read_field_direct, read_field_ref_direct, read_index_direct, success, unwrap_tool_result,
+    unwrap_type_value,
 };
 
 #[derive(Clone)]
@@ -234,6 +235,11 @@ enum VmEffect {
 struct VmTrap {
     error: RuntimeError,
     instruction_ip: usize,
+}
+
+enum AddAssignRight {
+    Number(f64),
+    Value(Value),
 }
 
 impl<'a, H: ToolHost> Vm<'a, H> {
@@ -645,11 +651,46 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let item = self.pop_stack()?;
                 let list = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_push_builtin_async(&list, item).await?;
+                let value = execute_push_builtin_async(list, item).await?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Push, start.elapsed().as_nanos());
                 }
                 self.stack.push(value);
+            }
+            Instruction::PushAssign(slot) => {
+                let item = materialize_projected_async(self.pop_stack()?).await;
+                let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+                let current =
+                    self.slots
+                        .get_mut(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        })?;
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                if let Value::List(items) = current {
+                    let values = items.make_mut();
+                    if values.len() == values.capacity() {
+                        values.reserve(1);
+                    }
+                    values.push(item);
+                    let value = Value::List(items.clone());
+                    if let Some(start) = start {
+                        self.record_builtin_profile(Builtin::Push, start.elapsed().as_nanos());
+                    }
+                    self.record_assignment(slot);
+                    self.last_value = Some(value);
+                    return Ok(VmStep::Continue);
+                }
+                let current = current.clone();
+                let value = execute_push_builtin_async(current, item).await?;
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Push, start.elapsed().as_nanos());
+                }
+                self.slots
+                    .assign(slot, value.clone(), &self.chunk.slot_names)?;
+                self.record_assignment(slot);
+                self.last_value = Some(value);
             }
             Instruction::Range { argc } => {
                 let start_index = self.stack_drain_start(argc)?;
@@ -729,6 +770,39 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
+            Instruction::AddAssignSlot { slot, right } => {
+                let slot_name = &self.chunk.slot_names[slot];
+                let right = match self.load_slot(right)? {
+                    Value::Number(value) => AddAssignRight::Number(*value),
+                    value => AddAssignRight::Value(value.clone()),
+                };
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+                let value = {
+                    let left = self.slots.get_mut(slot).ok_or_else(|| {
+                        RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        }
+                    })?;
+                    match (left, right) {
+                        (Value::Number(left), AddAssignRight::Number(right)) => {
+                            *left += right;
+                            Value::Number(*left)
+                        }
+                        (left, AddAssignRight::Number(right)) => {
+                            let value = add_values(left.clone(), Value::Number(right))?;
+                            *left = value.clone();
+                            value
+                        }
+                        (left, AddAssignRight::Value(right)) => {
+                            let value = add_values(left.clone(), right)?;
+                            *left = value.clone();
+                            value
+                        }
+                    }
+                };
+                self.record_assignment(slot);
+                self.last_value = Some(value);
+            }
             Instruction::AddAssignIndexNumber { slot, right } => {
                 let index = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
@@ -747,20 +821,25 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let item = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
                 self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
-                let current = self.slots.get(slot).cloned().ok_or_else(|| {
-                    RuntimeError::UndefinedVariable {
-                        name: slot_name.text.to_string(),
+                let current =
+                    self.slots
+                        .get_mut(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        })?;
+                if let Value::List(items) = current {
+                    let values = items.make_mut();
+                    if values.len() == values.capacity() {
+                        values.reserve(1);
                     }
-                })?;
-                let value = match current {
-                    Value::List(items) => {
-                        let mut values = Vec::with_capacity(items.len() + 1);
-                        values.extend(items.iter().cloned());
-                        values.push(item);
-                        Value::List(values.into())
-                    }
-                    other => add_values(other, Value::List(vec![item].into()))?,
-                };
+                    values.push(item);
+                    let value = Value::List(items.clone());
+                    self.record_assignment(slot);
+                    self.last_value = Some(value);
+                    return Ok(VmStep::Continue);
+                }
+                let current = current.clone();
+                let value = add_values(current, Value::List(vec![item].into()))?;
                 self.slots
                     .assign(slot, value.clone(), &self.chunk.slot_names)?;
                 self.record_assignment(slot);
@@ -1794,7 +1873,7 @@ pub(crate) struct IterState {
 }
 
 enum IterCursor {
-    List { values: Arc<[Value]>, index: usize },
+    List { values: ListValue, index: usize },
     Range { next: i64, end: i64 },
 }
 

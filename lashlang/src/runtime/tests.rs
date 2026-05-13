@@ -269,6 +269,7 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::Validate => "validate".to_string(),
         Instruction::ValidateCompiled(schema) => format!("validate_compiled schema#{schema}"),
         Instruction::Push => "push".to_string(),
+        Instruction::PushAssign(slot) => format!("push_assign {slot}:{}", slot_name(chunk, slot)),
         Instruction::Range { argc } => format!("range argc={argc}"),
         Instruction::FormatCompiled(template) => {
             format!(
@@ -283,6 +284,11 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
                 slot_name(chunk, slot)
             )
         }
+        Instruction::AddAssignSlot { slot, right } => format!(
+            "add_assign_slot {slot}:{} {right}:{}",
+            slot_name(chunk, slot),
+            slot_name(chunk, right)
+        ),
         Instruction::AddAssignIndexNumber { slot, right } => format!(
             "add_assign_index_number {slot}:{} {right}",
             slot_name(chunk, slot)

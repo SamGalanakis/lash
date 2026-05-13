@@ -168,6 +168,7 @@ pub(crate) enum Instruction {
     Validate,
     ValidateCompiled(usize),
     Push,
+    PushAssign(usize),
     Range {
         argc: usize,
     },
@@ -176,6 +177,10 @@ pub(crate) enum Instruction {
     AddAssignNumber {
         slot: usize,
         right: f64,
+    },
+    AddAssignSlot {
+        slot: usize,
+        right: usize,
     },
     AddAssignIndexNumber {
         slot: usize,
@@ -276,10 +281,12 @@ impl Instruction {
             | Instruction::Validate
             | Instruction::ValidateCompiled(_)
             | Instruction::Push
+            | Instruction::PushAssign(_)
             | Instruction::Range { .. }
             | Instruction::FormatCompiled(_) => InstructionProfileTag::CallBuiltin,
             Instruction::AddAssign(_)
             | Instruction::AddAssignNumber { .. }
+            | Instruction::AddAssignSlot { .. }
             | Instruction::AddAssignIndexNumber { .. } => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,

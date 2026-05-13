@@ -33,6 +33,46 @@ use super::{
 /// is the JSON-Schema representation of the type.
 pub const LASH_TYPE_KEY: &str = "$lash_type";
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListValue {
+    values: Arc<Vec<Value>>,
+}
+
+impl ListValue {
+    pub fn into_vec(self) -> Vec<Value> {
+        match Arc::try_unwrap(self.values) {
+            Ok(values) => values,
+            Err(values) => values.as_ref().clone(),
+        }
+    }
+
+    pub(crate) fn make_mut(&mut self) -> &mut Vec<Value> {
+        Arc::make_mut(&mut self.values)
+    }
+}
+
+impl std::ops::Deref for ListValue {
+    type Target = [Value];
+
+    fn deref(&self) -> &Self::Target {
+        self.values.as_slice()
+    }
+}
+
+impl From<Vec<Value>> for ListValue {
+    fn from(values: Vec<Value>) -> Self {
+        Self {
+            values: Arc::new(values),
+        }
+    }
+}
+
+impl FromIterator<Value> for ListValue {
+    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageValue {
     pub id: String,
@@ -115,7 +155,7 @@ pub enum Value {
     Number(f64),
     String(CompactString),
     Image(ImageValue),
-    List(Arc<[Value]>),
+    List(ListValue),
     Record(Arc<Record>),
     Projected(ProjectedValue),
 }

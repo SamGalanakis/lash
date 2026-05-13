@@ -21,6 +21,14 @@ SCENARIOS = [
     "loop_control",
     "indexed_assignment",
     "projected_values",
+    "large_data",
+    "cache_pressure",
+    "projected_operations",
+    "type_system_stress",
+    "wrapped_error_paths",
+    "tool_control_surface",
+    "snapshot_projected_state",
+    "continue_as_seed_surface",
 ]
 
 PERF_MODES = [

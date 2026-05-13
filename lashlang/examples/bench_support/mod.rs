@@ -1,7 +1,7 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record,
-    State, ToolHost, ToolHostCall, ToolHostError, Value,
+    ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedRead,
+    ProjectedValue, Record, State, ToolHost, ToolHostCall, ToolHostError, Value,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -16,6 +16,14 @@ pub enum Scenario {
     LoopControl,
     IndexedAssignment,
     ProjectedValues,
+    LargeData,
+    CachePressure,
+    ProjectedOperations,
+    TypeSystemStress,
+    WrappedErrorPaths,
+    ToolControlSurface,
+    SnapshotProjectedState,
+    ContinueAsSeedSurface,
 }
 
 impl Scenario {
@@ -28,6 +36,14 @@ impl Scenario {
         Self::LoopControl,
         Self::IndexedAssignment,
         Self::ProjectedValues,
+        Self::LargeData,
+        Self::CachePressure,
+        Self::ProjectedOperations,
+        Self::TypeSystemStress,
+        Self::WrappedErrorPaths,
+        Self::ToolControlSurface,
+        Self::SnapshotProjectedState,
+        Self::ContinueAsSeedSurface,
     ];
 
     #[allow(dead_code)]
@@ -41,13 +57,21 @@ impl Scenario {
             "loop_control" => Self::LoopControl,
             "indexed_assignment" => Self::IndexedAssignment,
             "projected_values" => Self::ProjectedValues,
+            "large_data" => Self::LargeData,
+            "cache_pressure" => Self::CachePressure,
+            "projected_operations" => Self::ProjectedOperations,
+            "type_system_stress" => Self::TypeSystemStress,
+            "wrapped_error_paths" => Self::WrappedErrorPaths,
+            "tool_control_surface" => Self::ToolControlSurface,
+            "snapshot_projected_state" => Self::SnapshotProjectedState,
+            "continue_as_seed_surface" => Self::ContinueAsSeedSurface,
             _ => return None,
         })
     }
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, or all"
+        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, or all"
     }
 }
 
@@ -62,11 +86,24 @@ impl fmt::Display for Scenario {
             Self::LoopControl => "loop_control",
             Self::IndexedAssignment => "indexed_assignment",
             Self::ProjectedValues => "projected_values",
+            Self::LargeData => "large_data",
+            Self::CachePressure => "cache_pressure",
+            Self::ProjectedOperations => "projected_operations",
+            Self::TypeSystemStress => "type_system_stress",
+            Self::WrappedErrorPaths => "wrapped_error_paths",
+            Self::ToolControlSurface => "tool_control_surface",
+            Self::SnapshotProjectedState => "snapshot_projected_state",
+            Self::ContinueAsSeedSurface => "continue_as_seed_surface",
         })
     }
 }
 
+#[allow(dead_code)]
 pub fn seeded_state() -> State {
+    seeded_state_for(Scenario::Baseline)
+}
+
+pub fn seeded_state_for(scenario: Scenario) -> State {
     let mut globals = Record::default();
     globals.insert(
         "history".to_string(),
@@ -88,6 +125,9 @@ pub fn seeded_state() -> State {
             record.into()
         }),
     );
+    if matches!(scenario, Scenario::SnapshotProjectedState) {
+        globals.insert("snap".to_string(), snapshot_projected_record());
+    }
     State::from_snapshot(lashlang::Snapshot { globals })
 }
 
@@ -339,22 +379,264 @@ summary = {
 submit summary
 "#
         }
+        Scenario::LargeData => {
+            r#"
+items = range(0, 512)
+groups = {}
+total = 0
+evens = []
+odds = []
+for item in items {
+  key = format("bucket_{0}", item % 16)
+  groups[key] = groups[key] + 1
+  total = total + item
+  if item % 2 == 0 {
+    evens = push(evens, item)
+  } else {
+    odds = push(odds, item)
+  }
+}
+lines = []
+for key in keys(groups) {
+  lines = push(lines, format("{0}:{1}", key, groups[key]))
+}
+payload = {
+  count: len(items),
+  total: total,
+  groups: groups,
+  evens: len(evens),
+  odds: len(odds),
+  summary: join(lines, "|")
+}
+submit validate(payload, Type {
+  count: int,
+  total: int,
+  groups: dict,
+  evens: int,
+  odds: int,
+  summary: str
+})
+"#
+        }
+        Scenario::CachePressure => {
+            r#"
+seed = {
+  user: ctx.user,
+  attempt: ctx.attempt,
+  history_len: len(history),
+  labels: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+}
+a0 = format("{0}:{1}", seed.labels[0], seed.attempt)
+a1 = format("{0}:{1}", seed.labels[1], seed.history_len)
+a2 = format("{0}:{1}", seed.labels[2], len(a0))
+a3 = format("{0}:{1}", seed.labels[3], len(a1))
+a4 = format("{0}:{1}", seed.labels[4], len(a2))
+a5 = format("{0}:{1}", seed.labels[5], len(a3))
+r0 = { name: "r0", value: a0, next: a1 }
+r1 = { name: "r1", value: a1, next: a2 }
+r2 = { name: "r2", value: a2, next: a3 }
+r3 = { name: "r3", value: a3, next: a4 }
+r4 = { name: "r4", value: a4, next: a5 }
+r5 = { name: "r5", value: a5, next: a0 }
+TypeA = Type { name: str, value: str, next: str }
+validated = [
+  validate(r0, TypeA),
+  validate(r1, TypeA),
+  validate(r2, TypeA),
+  validate(r3, TypeA),
+  validate(r4, TypeA),
+  validate(r5, TypeA)
+]
+submit join([
+  validated[0].value,
+  validated[1].value,
+  validated[2].value,
+  validated[3].value,
+  validated[4].value,
+  validated[5].value
+], "|")
+"#
+        }
+        Scenario::ProjectedOperations => {
+            r#"
+summary = {
+  len: len(proj.items),
+  empty: empty(proj.items),
+  keys: keys(proj.record),
+  values: values(proj.record),
+  contains: contains(proj.items, "beta"),
+  starts: starts_with(proj.text, "alpha"),
+  ends: ends_with(proj.text, "delta"),
+  split_count: len(split(proj.text, " ")),
+  join: join(proj.items, ","),
+  trim: trim(proj.padded),
+  slice_text: slice(proj.text, 6, 10),
+  slice_list: slice(proj.items, 1, 3),
+  pushed: push(proj.items, "epsilon"),
+  as_int: to_int(proj.number),
+  as_float: to_float(proj.number),
+  parsed: json_parse(proj.json),
+  first: proj.items[0],
+  field: proj.record.topic
+}
+submit summary
+"#
+        }
+        Scenario::TypeSystemStress => {
+            r#"
+Meta = Type {
+  source: str,
+  attempt: int,
+  tags: list[enum["alpha", "beta", "gamma", "delta"]],
+  optional_note: str?
+}
+Item = Type {
+  id: int,
+  title: str,
+  score: float,
+  active: bool,
+  meta: Meta,
+  maybe: str | int | null
+}
+items = []
+for i in range(0, 64) {
+  raw = {
+    id: i,
+    title: format("item-{0}", i),
+    score: i / 2,
+    active: i % 2 == 0,
+    meta: {
+      source: ctx.user,
+      attempt: ctx.attempt,
+      tags: ["alpha", "beta", "gamma"]
+    },
+    maybe: i % 3 == 0 ? null : format("v{0}", i)
+  }
+  items = push(items, validate(raw, Item))
+}
+submit {
+  count: len(items),
+  first: items[0].title,
+  last: items[63].title,
+  tags: join(items[1].meta.tags, ",")
+}
+"#
+        }
+        Scenario::WrappedErrorPaths => {
+            r#"
+missing = call missing_tool { value: "x" }
+boom = call boom { reason: "explicit" }
+ok = call echo { value: "still-running" }
+probe = call exec_command { cmd: "test -f Cargo.lock", allow_nonzero_exit: true }
+submit {
+  missing_ok: missing.ok,
+  missing_error: contains(missing.error, "unknown tool"),
+  boom_ok: boom.ok,
+  boom_error: contains(boom.error, "explicit failure"),
+  ok_value: ok.value,
+  probe_exit: probe.value.exit_code,
+  probe_done: probe.value.done
+}
+"#
+        }
+        Scenario::ToolControlSurface => {
+            r#"
+first = start call spawn_agent { agent_name: "chunk_1", task: "inspect auth", capability: "explore" }
+second = start call spawn_agent { agent_name: "chunk_2", task: "inspect api", capability: "explore" }
+llm = start call llm_query { prompt: "summarize benchmark", model: "gpt-5.4-mini" }
+monitor = start call monitor { command: "tail -f app.log", description: "app log", timeout_ms: 1000 }
+handles = (call list_async_handles {})?
+tasks = (call tasks_list {})?
+stopped = (call tasks_stop { task_id: "monitor:app-log" })?
+results = parallel {
+  first: await first
+  second: await second
+  llm: await llm
+  monitor: await monitor
+}
+cancel second
+submit {
+  first: results.first.value.claim,
+  second: results.second.value.claim,
+  llm: results.llm.value.text,
+  monitor: results.monitor.value.description,
+  subagents: len(keys(handles.subagent)),
+  tasks: len(tasks.tasks),
+  stopped: stopped.run_state
+}
+"#
+        }
+        Scenario::SnapshotProjectedState => {
+            r#"
+head = slice(snap.projected.body, 0, 16)
+materialized = to_string(snap.projected.body)
+nested_head = snap.mixed.nested.projected_title
+snap.mixed.count = snap.mixed.count + 1
+submit {
+  id: snap.id,
+  normal_title: snap.normal.title,
+  head: head,
+  materialized_len: len(materialized),
+  nested_head: nested_head,
+  count: snap.mixed.count,
+  tags: join(snap.normal.tags, ",")
+}
+"#
+        }
+        Scenario::ContinueAsSeedSurface => {
+            r#"
+agent = start call spawn_agent { agent_name: "carry", task: "inspect carry-forward", capability: "explore" }
+handles = (call list_async_handles {})?
+handoff = (call continue_as {
+  task: "continue from compact state",
+  seed: {
+    projected_problem: proj.text,
+    nested_projected: { body: proj.json },
+    computed_summary: format("{0}:{1}", ctx.user, len(history)),
+    live_agent: handles.subagent.chunk_1,
+    started_agent: agent
+  }
+})?
+submit {
+  session_id: handoff.session_id,
+  task: handoff.task,
+  seed_keys: handoff.seed_keys,
+  projected_count: handoff.projected_count,
+  global_count: handoff.global_count,
+  handle_count: handoff.handle_count
+}
+"#
+        }
     }
 }
 
 pub fn projected_bindings(scenario: Scenario) -> ProjectedBindings {
     let mut bindings = ProjectedBindings::new();
-    if !matches!(scenario, Scenario::ProjectedValues) {
+    if !matches!(
+        scenario,
+        Scenario::ProjectedValues | Scenario::ProjectedOperations | Scenario::ContinueAsSeedSurface
+    ) {
         return bindings;
     }
-    bindings.insert(
-        "history",
-        ProjectedValue::custom("history", Arc::new(ProjectedList::history())),
-    );
-    bindings.insert(
-        "docs",
-        ProjectedValue::scalar("docs", projected_docs_record()),
-    );
+    match scenario {
+        Scenario::ProjectedValues => {
+            bindings.insert(
+                "history",
+                ProjectedValue::custom("history", Arc::new(ProjectedList::history())),
+            );
+            bindings.insert(
+                "docs",
+                ProjectedValue::scalar("docs", projected_docs_record()),
+            );
+        }
+        Scenario::ProjectedOperations | Scenario::ContinueAsSeedSurface => {
+            bindings.insert(
+                "proj",
+                ProjectedValue::scalar("proj", projected_operations_record()),
+            );
+        }
+        _ => {}
+    }
     bindings
 }
 
@@ -375,9 +657,112 @@ fn projected_docs_record() -> Value {
     Value::Record(Arc::new(record))
 }
 
+fn snapshot_projected_record() -> Value {
+    let mut projected = Record::default();
+    projected.insert(
+        "body".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "snap.projected.body",
+            Arc::new(ProjectedText::new(
+                "snapshot_body",
+                "projected body stays lazy across snapshot markers",
+            )),
+        )),
+    );
+
+    let mut normal = Record::default();
+    normal.insert("title".to_string(), Value::String("Snapshot Rules".into()));
+    normal.insert(
+        "tags".to_string(),
+        Value::List(
+            vec![
+                Value::String("snapshot".into()),
+                Value::String("projected".into()),
+                Value::String("mixed".into()),
+            ]
+            .into(),
+        ),
+    );
+
+    let mut nested = Record::default();
+    nested.insert(
+        "projected_title".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "snap.mixed.nested.projected_title",
+            Arc::new(ProjectedText::new("nested_title", "Nested Projection")),
+        )),
+    );
+
+    let mut mixed = Record::default();
+    mixed.insert("count".to_string(), Value::Number(7.0));
+    mixed.insert("nested".to_string(), Value::Record(Arc::new(nested)));
+
+    let mut root = Record::default();
+    root.insert("id".to_string(), Value::String("snapshot-mixed".into()));
+    root.insert("normal".to_string(), Value::Record(Arc::new(normal)));
+    root.insert("projected".to_string(), Value::Record(Arc::new(projected)));
+    root.insert("mixed".to_string(), Value::Record(Arc::new(mixed)));
+    Value::Record(Arc::new(root))
+}
+
+fn projected_operations_record() -> Value {
+    let mut record = Record::default();
+    record.insert(
+        "items".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "proj.items",
+            Arc::new(ProjectedList {
+                name: "items",
+                values: vec![
+                    Value::String("alpha".into()),
+                    Value::String("beta".into()),
+                    Value::String("gamma".into()),
+                    Value::String("delta".into()),
+                ]
+                .into(),
+            }),
+        )),
+    );
+    record.insert(
+        "text".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "proj.text",
+            Arc::new(ProjectedText::new("text", "alpha beta gamma delta")),
+        )),
+    );
+    record.insert(
+        "padded".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "proj.padded",
+            Arc::new(ProjectedText::new("padded", "  alpha  ")),
+        )),
+    );
+    record.insert(
+        "json".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "proj.json",
+            Arc::new(ProjectedText::new("json", "{\"ok\":true,\"count\":4}")),
+        )),
+    );
+    record.insert(
+        "number".to_string(),
+        Value::Projected(ProjectedValue::scalar("proj.number", Value::Number(4.0))),
+    );
+    record.insert(
+        "record".to_string(),
+        Value::Projected(ProjectedValue::scalar("proj.record", {
+            let mut inner = Record::default();
+            inner.insert("topic".to_string(), Value::String("bench".into()));
+            inner.insert("count".to_string(), Value::Number(4.0));
+            Value::Record(Arc::new(inner))
+        })),
+    );
+    Value::Record(Arc::new(record))
+}
+
 struct ProjectedList {
     name: &'static str,
-    values: Arc<[Value]>,
+    values: ListValue,
 }
 
 impl ProjectedList {
@@ -602,8 +987,224 @@ impl ToolHost for BenchHost {
 fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
     match name {
         "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
+        "boom" => Err(ToolHostError::new("explicit failure for benchmark")),
+        "exec_command" => {
+            let mut record = Record::default();
+            record.insert("status".to_string(), Value::String("completed".into()));
+            record.insert("done".to_string(), Value::Bool(true));
+            record.insert("running".to_string(), Value::Bool(false));
+            record.insert("exit_code".to_string(), Value::Number(1.0));
+            record.insert(
+                "output".to_string(),
+                Value::String(
+                    format!(
+                        "ran: {}",
+                        args.get("cmd")
+                            .and_then(|value| match value {
+                                Value::String(text) => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .unwrap_or("")
+                    )
+                    .into(),
+                ),
+            );
+            Ok(Value::Record(Arc::new(record)))
+        }
+        "llm_query" => {
+            let mut record = Record::default();
+            record.insert(
+                "text".to_string(),
+                Value::String("benchmark summary".into()),
+            );
+            record.insert("tokens".to_string(), Value::Number(42.0));
+            Ok(Value::Record(Arc::new(record)))
+        }
+        "spawn_agent" => {
+            let name = args
+                .get("agent_name")
+                .and_then(|value| match value {
+                    Value::String(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("agent");
+            let mut record = Record::default();
+            record.insert(
+                "claim".to_string(),
+                Value::String(format!("done:{name}").into()),
+            );
+            record.insert("agent_name".to_string(), Value::String(name.into()));
+            Ok(Value::Record(Arc::new(record)))
+        }
+        "monitor" => {
+            let mut record = Record::default();
+            record.insert(
+                "task_id".to_string(),
+                Value::String("monitor:app-log".into()),
+            );
+            record.insert("kind".to_string(), Value::String("monitor".into()));
+            record.insert("run_state".to_string(), Value::String("running".into()));
+            record.insert(
+                "description".to_string(),
+                args.get("description")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("monitor".into())),
+            );
+            Ok(Value::Record(Arc::new(record)))
+        }
+        "list_async_handles" => Ok(async_handles_record()),
+        "tasks_list" => Ok(tasks_list_record()),
+        "tasks_stop" => {
+            let mut record = Record::default();
+            record.insert(
+                "task_id".to_string(),
+                args.get("task_id")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("task".into())),
+            );
+            record.insert("kind".to_string(), Value::String("monitor".into()));
+            record.insert("run_state".to_string(), Value::String("cancelled".into()));
+            Ok(Value::Record(Arc::new(record)))
+        }
+        "continue_as" => Ok(continue_as_record(args)),
         _ => Err(unknown_tool(name)),
     }
+}
+
+fn continue_as_record(args: &Record) -> Value {
+    let seed = args.get("seed").and_then(Value::as_record);
+    let mut seed_keys = Vec::new();
+    let mut projected_count = 0usize;
+    let mut global_count = 0usize;
+    let mut handle_count = 0usize;
+    if let Some(seed) = seed {
+        for (key, value) in seed.iter() {
+            seed_keys.push(Value::String(key.into()));
+            if matches!(value, Value::Projected(_)) {
+                projected_count += 1;
+            } else {
+                global_count += 1;
+            }
+            handle_count += count_handles(value);
+        }
+    }
+
+    let mut record = Record::default();
+    record.insert("ok".to_string(), Value::Bool(true));
+    record.insert(
+        "session_id".to_string(),
+        Value::String("handoff:bench".into()),
+    );
+    record.insert(
+        "task".to_string(),
+        args.get("task")
+            .cloned()
+            .unwrap_or_else(|| Value::String("continue".into())),
+    );
+    record.insert("seed_keys".to_string(), Value::List(seed_keys.into()));
+    record.insert(
+        "projected_count".to_string(),
+        Value::Number(projected_count as f64),
+    );
+    record.insert(
+        "global_count".to_string(),
+        Value::Number(global_count as f64),
+    );
+    record.insert(
+        "handle_count".to_string(),
+        Value::Number(handle_count as f64),
+    );
+    Value::Record(Arc::new(record))
+}
+
+fn count_handles(value: &Value) -> usize {
+    match value {
+        Value::Record(record) => {
+            let current = matches!(
+                (
+                    record.get("__handle__"),
+                    record.get("id").or_else(|| record.get("tool"))
+                ),
+                (Some(Value::String(kind)), Some(_)) if kind.as_str() == "task"
+            ) as usize;
+            current + record.values().map(count_handles).sum::<usize>()
+        }
+        Value::List(items) => items.iter().map(count_handles).sum(),
+        _ => 0,
+    }
+}
+
+fn async_handles_record() -> Value {
+    let mut chunk_1 = Record::default();
+    chunk_1.insert("__handle__".to_string(), Value::String("task".into()));
+    chunk_1.insert("id".to_string(), Value::String("subagent:chunk_1".into()));
+    chunk_1.insert("tool".to_string(), Value::String("spawn_agent".into()));
+    chunk_1.insert("value".to_string(), spawn_agent_value("chunk_1"));
+
+    let mut chunk_2 = Record::default();
+    chunk_2.insert("__handle__".to_string(), Value::String("task".into()));
+    chunk_2.insert("id".to_string(), Value::String("subagent:chunk_2".into()));
+    chunk_2.insert("tool".to_string(), Value::String("spawn_agent".into()));
+    chunk_2.insert("value".to_string(), spawn_agent_value("chunk_2"));
+
+    let mut subagent = Record::default();
+    subagent.insert("chunk_1".to_string(), Value::Record(Arc::new(chunk_1)));
+    subagent.insert("chunk_2".to_string(), Value::Record(Arc::new(chunk_2)));
+
+    let mut out = Record::default();
+    out.insert(
+        "monitor".to_string(),
+        Value::Record(Arc::new(Record::default())),
+    );
+    out.insert("subagent".to_string(), Value::Record(Arc::new(subagent)));
+    out.insert(
+        "tool".to_string(),
+        Value::Record(Arc::new(Record::default())),
+    );
+    Value::Record(Arc::new(out))
+}
+
+fn tasks_list_record() -> Value {
+    let mut monitor = Record::default();
+    monitor.insert(
+        "task_id".to_string(),
+        Value::String("monitor:app-log".into()),
+    );
+    monitor.insert("kind".to_string(), Value::String("monitor".into()));
+    monitor.insert("label".to_string(), Value::String("app log".into()));
+    monitor.insert("run_state".to_string(), Value::String("running".into()));
+
+    let mut subagent = Record::default();
+    subagent.insert(
+        "task_id".to_string(),
+        Value::String("subagent:chunk_1".into()),
+    );
+    subagent.insert("kind".to_string(), Value::String("subagent".into()));
+    subagent.insert("label".to_string(), Value::String("chunk_1".into()));
+    subagent.insert("run_state".to_string(), Value::String("idle".into()));
+
+    let mut out = Record::default();
+    out.insert(
+        "tasks".to_string(),
+        Value::List(
+            vec![
+                Value::Record(Arc::new(monitor)),
+                Value::Record(Arc::new(subagent)),
+            ]
+            .into(),
+        ),
+    );
+    Value::Record(Arc::new(out))
+}
+
+fn spawn_agent_value(name: &str) -> Value {
+    let mut record = Record::default();
+    record.insert(
+        "claim".to_string(),
+        Value::String(format!("done:{name}").into()),
+    );
+    record.insert("agent_name".to_string(), Value::String(name.into()));
+    Value::Record(Arc::new(record))
 }
 
 fn unknown_tool(name: &str) -> ToolHostError {
@@ -613,14 +1214,11 @@ fn unknown_tool(name: &str) -> ToolHostError {
 impl BenchHost {
     fn task_handle(name: &str, args: &Record) -> Result<Value, ToolHostError> {
         match name {
-            "echo" => {
+            "echo" | "llm_query" | "spawn_agent" | "monitor" | "continue_as" => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("task".into()));
                 record.insert("tool".to_string(), Value::String(name.to_string().into()));
-                record.insert(
-                    "value".to_string(),
-                    args.get("value").cloned().unwrap_or(Value::Null),
-                );
+                record.insert("value".to_string(), bench_call(name, args)?);
                 Ok(Value::Record(Arc::new(record)))
             }
             _ => Err(unknown_tool(name)),

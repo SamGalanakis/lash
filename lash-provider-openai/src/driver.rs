@@ -464,10 +464,7 @@ async fn drive_streaming_chat(
     let parts = state.parts();
     if !has_response_content(&parts) {
         return Err(empty_response_error(
-            state
-                .final_response_raw
-                .clone()
-                .unwrap_or_default(),
+            state.final_response_raw.clone().unwrap_or_default(),
         ));
     }
     if let Some(tx) = &stream_events {

@@ -366,7 +366,7 @@ pub(crate) async fn execute_builtin(
         Builtin::Range => execute_range_builtin_async(values).await,
         Builtin::Push => {
             expect_arg_count("push", values, 2)?;
-            execute_push_builtin_async(&values[0], values[1].clone()).await
+            execute_push_builtin_async(values[0].clone(), values[1].clone()).await
         }
         Builtin::Unknown(index) => Err(RuntimeError::UnknownBuiltin {
             name: names[index].text.to_string(),
@@ -560,7 +560,7 @@ pub(crate) fn value_len(value: &Value) -> Option<usize> {
     }
 }
 
-pub(crate) async fn iterable_values(value: Value) -> Result<Arc<[Value]>, RuntimeError> {
+pub(crate) async fn iterable_values(value: Value) -> Result<ListValue, RuntimeError> {
     match value {
         Value::List(values) => Ok(values),
         Value::Projected(value) => match value.materialize_async().await {
@@ -643,29 +643,31 @@ pub(crate) fn range_bounds(values: &[Value]) -> Result<(i64, i64), RuntimeError>
 }
 
 pub(crate) async fn execute_push_builtin_async(
-    list: &Value,
+    list: Value,
     item: Value,
 ) -> Result<Value, RuntimeError> {
     let item = materialize_projected_async(item).await;
-    if let Value::Projected(value) = list
+    if let Value::Projected(value) = &list
         && let Some(value) = value.push(item.clone()).await
     {
         return Ok(value);
     }
-    let list = materialize_projected_async(list.clone()).await;
-    let Value::List(items) = &list else {
+    let list = materialize_projected_async(list).await;
+    let Value::List(items) = list else {
         return Err(RuntimeError::TypeError {
             message: "`push` requires a list as the first argument".to_string(),
         });
     };
-    let mut values = Vec::with_capacity(items.len() + 1);
-    values.extend(items.iter().cloned());
+    let mut values = items.into_vec();
+    if values.len() == values.capacity() {
+        values.reserve(1);
+    }
     values.push(item);
     Ok(Value::List(values.into()))
 }
 
 pub(crate) fn execute_push_builtin(list: &Value, item: Value) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(execute_push_builtin_async(list, item))
+    futures_executor::block_on(execute_push_builtin_async(list.clone(), item))
 }
 
 pub(crate) fn as_range_bound(value: &Value) -> Result<i64, RuntimeError> {
