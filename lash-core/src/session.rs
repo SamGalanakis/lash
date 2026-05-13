@@ -280,21 +280,25 @@ impl Session {
         if self.include_base_tools && mode == self.plugins().execution_mode() {
             tools.extend(self.plugins().mode_native_tool_definitions());
         }
-        let fallback_tools = tools.clone();
-        let surface = Arc::new(
-            self.plugins()
-                .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
-                    session_id: session_id.to_string(),
-                    mode: mode.clone(),
-                    tools,
-                    tool_access: self.plugins().tool_access().clone(),
-                    subagent: self.plugins().subagent_authority().cloned(),
-                })
-                .unwrap_or_else(|err| {
-                    tracing::warn!("failed to resolve tool surface: {err}");
-                    crate::ToolSurface::from_tools(fallback_tools, mode.clone())
-                }),
-        );
+        let surface = match self
+            .plugins()
+            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+                session_id: session_id.to_string(),
+                mode: mode.clone(),
+                tools,
+                tool_access: self.plugins().tool_access().clone(),
+                subagent: self.plugins().subagent_authority().cloned(),
+            }) {
+            Ok(surface) => Arc::new(surface),
+            Err(err) => {
+                tracing::warn!("failed to resolve tool surface: {err}");
+                let mut fallback_tools = self.tools().definitions();
+                if self.include_base_tools && mode == self.plugins().execution_mode() {
+                    fallback_tools.extend(self.plugins().mode_native_tool_definitions());
+                }
+                Arc::new(crate::ToolSurface::from_tools(fallback_tools, mode.clone()))
+            }
+        };
         let input = crate::ModeBuildInput {
             mode: mode.clone(),
             tool_surface: Arc::clone(&surface),

@@ -275,7 +275,7 @@ fn complete_buffered_chat(
             })
             .collect::<String>();
         parsed_parts = Some(parts);
-        state.final_response = Some(value);
+        state.final_response_raw = Some(text.clone());
     }
     let parts = parsed_parts.unwrap_or_else(|| state.parts());
     if !has_response_content(&parts) {
@@ -465,9 +465,8 @@ async fn drive_streaming_chat(
     if !has_response_content(&parts) {
         return Err(empty_response_error(
             state
-                .final_response
-                .as_ref()
-                .map(Value::to_string)
+                .final_response_raw
+                .clone()
                 .unwrap_or_default(),
         ));
     }

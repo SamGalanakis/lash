@@ -61,7 +61,10 @@ pub(crate) fn parse_i64(value: Option<&Value>) -> i64 {
 }
 
 pub(crate) fn usage_from_response_value(value: &Value) -> lash_core::llm::types::LlmUsage {
-    let usage = value.get("usage").unwrap_or(&Value::Null);
+    usage_from_usage_value(value.get("usage").unwrap_or(&Value::Null))
+}
+
+pub(crate) fn usage_from_usage_value(usage: &Value) -> lash_core::llm::types::LlmUsage {
     let cached_tokens = parse_i64(
         usage
             .get("input_tokens_details")

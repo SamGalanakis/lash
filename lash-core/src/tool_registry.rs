@@ -405,7 +405,15 @@ impl ToolRegistry {
 #[async_trait::async_trait]
 impl ToolProvider for ToolRegistry {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.export_state().definitions()
+        let state = self
+            .state
+            .read()
+            .expect("tool registry state lock poisoned");
+        state
+            .tools
+            .values()
+            .map(|entry| entry.definition.clone())
+            .collect()
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
