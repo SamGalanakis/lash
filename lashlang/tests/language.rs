@@ -69,6 +69,14 @@ impl ToolHost for TestHost {
         }
     }
 
+    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+        self.call(name, args).await
+    }
+
+    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
+        Ok(handle)
+    }
+
     async fn print(&self, value: Value) -> Result<(), ToolHostError> {
         self.observations
             .lock()
@@ -140,6 +148,134 @@ async fn parser_accepts_semicolons_as_statement_separators() {
     .expect("program should parse");
 
     assert_eq!(program.statements.len(), 3);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn start_is_contextual_not_reserved() {
+    let host = TestHost::default().with_file("a.txt", "async");
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            start = 1
+            for start in range(3) {
+              last = start
+            }
+            rec = { start: last }
+            h = start call read_file { path: "a.txt" }
+            submit { value: start, field: rec.start, awaited: (await h)? }
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("contextual start program should run"),
+    );
+
+    let record = value.as_record().expect("record");
+    assert_eq!(record["value"], Value::Number(1.0));
+    assert_eq!(record["field"], Value::Number(2.0));
+    assert_eq!(record["awaited"], Value::String("async".to_string().into()));
+
+    let err = runtime_error("submit start()").await;
+    assert!(matches!(err, RuntimeError::UnknownBuiltin { name } if name == "start"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn range_supports_python_style_steps() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            stepped = []
+            for i in range(5, 0, -2) {
+              stepped = push(stepped, i)
+            }
+            submit {
+              up: range(0, 5, 2),
+              down: range(5, 0, -2),
+              empty_up: range(5, 0, 2),
+              empty_down: range(0, 5, -2),
+              iterated: stepped
+            }
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("stepped ranges should run"),
+    );
+
+    let record = value.as_record().expect("record");
+    assert_eq!(
+        record["up"],
+        Value::List(vec![Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)].into())
+    );
+    assert_eq!(
+        record["down"],
+        Value::List(vec![Value::Number(5.0), Value::Number(3.0), Value::Number(1.0)].into())
+    );
+    assert_eq!(record["empty_up"], Value::List(Vec::new().into()));
+    assert_eq!(record["empty_down"], Value::List(Vec::new().into()));
+    assert_eq!(record["iterated"], record["down"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integer_division_helpers_use_mathematical_rounding() {
+    let host = TestHost::default();
+    let mut state = State::new();
+    let value = finished(
+        execute(
+            r#"
+            items = range(10)
+            stride = ceil_div(len(items), 3)
+            starts = []
+            for i in range(0, len(items), stride) {
+              starts = push(starts, i)
+            }
+            submit {
+              ceil_pos: ceil_div(10, 3),
+              floor_pos: floor_div(10, 3),
+              ceil_neg: ceil_div(-10, 3),
+              floor_neg: floor_div(-10, 3),
+              starts: starts
+            }
+            "#,
+            &mut state,
+            &host,
+        )
+        .await
+        .expect("division helpers should run"),
+    );
+
+    let record = value.as_record().expect("record");
+    assert_eq!(record["ceil_pos"], Value::Number(4.0));
+    assert_eq!(record["floor_pos"], Value::Number(3.0));
+    assert_eq!(record["ceil_neg"], Value::Number(-3.0));
+    assert_eq!(record["floor_neg"], Value::Number(-4.0));
+    assert_eq!(
+        record["starts"],
+        Value::List(vec![Value::Number(0.0), Value::Number(4.0), Value::Number(8.0)].into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_helper_errors_are_rejected() {
+    for source in [
+        "submit range(0, 5, 0)",
+        "submit range(0, 5, 1.5)",
+        "submit range(1000001, 0, -1)",
+        "submit ceil_div(1.5, 1)",
+        "submit floor_div(1, 0)",
+        "submit ceil_div(\"1\", 1)",
+    ] {
+        let err = runtime_error(source).await;
+        assert!(matches!(
+            err,
+            RuntimeError::TypeError { .. } | RuntimeError::ValueError { .. }
+        ));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

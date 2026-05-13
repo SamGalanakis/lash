@@ -364,6 +364,10 @@ pub(crate) async fn execute_builtin(
             )
         }
         Builtin::Range => execute_range_builtin_async(values).await,
+        Builtin::CeilDiv => execute_integer_div_builtin_async("ceil_div", values, f64::ceil).await,
+        Builtin::FloorDiv => {
+            execute_integer_div_builtin_async("floor_div", values, f64::floor).await
+        }
         Builtin::Push => {
             expect_arg_count("push", values, 2)?;
             execute_push_builtin_async(values[0].clone(), values[1].clone()).await
@@ -604,16 +608,16 @@ pub(crate) fn execute_join_builtin(items: &Value, sep: &Value) -> Result<Value, 
 }
 
 pub(crate) fn execute_range_builtin(values: &[Value]) -> Result<Value, RuntimeError> {
-    let (start, end) = range_bounds(values)?;
-    build_range(start, end)
+    let (start, end, step) = range_bounds(values)?;
+    build_range(start, end, step)
 }
 
 pub(crate) async fn execute_range_builtin_async(values: &[Value]) -> Result<Value, RuntimeError> {
-    let (start, end) = range_bounds_async(values).await?;
-    build_range(start, end)
+    let (start, end, step) = range_bounds_async(values).await?;
+    build_range(start, end, step)
 }
 
-pub(crate) async fn range_bounds_async(values: &[Value]) -> Result<(i64, i64), RuntimeError> {
+pub(crate) async fn range_bounds_async(values: &[Value]) -> Result<(i64, i64, i64), RuntimeError> {
     let mut materialized = Vec::with_capacity(values.len());
     for value in values {
         let value = match value {
@@ -628,18 +632,28 @@ pub(crate) async fn range_bounds_async(values: &[Value]) -> Result<(i64, i64), R
     range_bounds(&materialized)
 }
 
-pub(crate) fn range_bounds(values: &[Value]) -> Result<(i64, i64), RuntimeError> {
-    let (start, end) = match values {
-        [end] => (0, as_range_bound(end)?),
-        [start, end] => (as_range_bound(start)?, as_range_bound(end)?),
+pub(crate) fn range_bounds(values: &[Value]) -> Result<(i64, i64, i64), RuntimeError> {
+    let (start, end, step) = match values {
+        [end] => (0, as_range_bound(end)?, 1),
+        [start, end] => (as_range_bound(start)?, as_range_bound(end)?, 1),
+        [start, end, step] => (
+            as_range_bound(start)?,
+            as_range_bound(end)?,
+            as_range_bound(step)?,
+        ),
         _ => {
             return Err(RuntimeError::TypeError {
-                message: format!("`range` takes 1 or 2 arg(s), got {}", values.len()),
+                message: format!("`range` takes 1, 2, or 3 arg(s), got {}", values.len()),
             });
         }
     };
-    validate_range_len(start, end)?;
-    Ok((start, end))
+    if step == 0 {
+        return Err(RuntimeError::ValueError {
+            message: "`range` step must not be 0".to_string(),
+        });
+    }
+    validate_range_len(start, end, step)?;
+    Ok((start, end, step))
 }
 
 pub(crate) async fn execute_push_builtin_async(
@@ -691,30 +705,100 @@ pub(crate) fn as_range_bound(value: &Value) -> Result<i64, RuntimeError> {
     Ok(*number as i64)
 }
 
-pub(crate) fn build_range(start: i64, end: i64) -> Result<Value, RuntimeError> {
-    if start >= end {
+pub(crate) fn build_range(start: i64, end: i64, step: i64) -> Result<Value, RuntimeError> {
+    if range_len(start, end, step)? == 0 {
         return Ok(Value::List(Vec::new().into()));
     }
-    Ok(Value::List(
-        (start..end)
-            .map(|value| Value::Number(value as f64))
-            .collect::<Vec<_>>()
-            .into(),
-    ))
+    let mut items = Vec::new();
+    let mut value = start;
+    if step > 0 {
+        while value < end {
+            items.push(Value::Number(value as f64));
+            value = value.saturating_add(step);
+        }
+    } else {
+        while value > end {
+            items.push(Value::Number(value as f64));
+            value = value.saturating_add(step);
+        }
+    }
+    Ok(Value::List(items.into()))
 }
 
-pub(crate) fn validate_range_len(start: i64, end: i64) -> Result<(), RuntimeError> {
-    const MAX_RANGE_ITEMS: i64 = 1_000_000;
-    if start >= end {
-        return Ok(());
-    }
-    let len = end as i128 - start as i128;
-    if len > MAX_RANGE_ITEMS as i128 {
+pub(crate) fn validate_range_len(start: i64, end: i64, step: i64) -> Result<(), RuntimeError> {
+    const MAX_RANGE_ITEMS: i128 = 1_000_000;
+    if range_len(start, end, step)? > MAX_RANGE_ITEMS {
         return Err(RuntimeError::ValueError {
             message: format!("`range` would create more than {MAX_RANGE_ITEMS} items"),
         });
     }
     Ok(())
+}
+
+fn range_len(start: i64, end: i64, step: i64) -> Result<i128, RuntimeError> {
+    if step == 0 {
+        return Err(RuntimeError::ValueError {
+            message: "`range` step must not be 0".to_string(),
+        });
+    }
+    if (step > 0 && start >= end) || (step < 0 && start <= end) {
+        return Ok(0);
+    }
+    let distance = if step > 0 {
+        end as i128 - start as i128
+    } else {
+        start as i128 - end as i128
+    };
+    let step = (step as i128).abs();
+    Ok((distance + step - 1) / step)
+}
+
+pub(crate) fn execute_integer_div_builtin(
+    name: &'static str,
+    values: &[Value],
+    round: impl FnOnce(f64) -> f64,
+) -> Result<Value, RuntimeError> {
+    expect_arg_count(name, values, 2)?;
+    let dividend = as_integer_div_arg(name, "dividend", &values[0])?;
+    let divisor = as_integer_div_arg(name, "divisor", &values[1])?;
+    if divisor == 0.0 {
+        return Err(RuntimeError::ValueError {
+            message: format!("`{name}` divisor must not be 0"),
+        });
+    }
+    Ok(Value::Number(round(dividend / divisor)))
+}
+
+async fn execute_integer_div_builtin_async(
+    name: &'static str,
+    values: &[Value],
+    round: impl FnOnce(f64) -> f64,
+) -> Result<Value, RuntimeError> {
+    expect_arg_count(name, values, 2)?;
+    let dividend = materialize_projected_async(values[0].clone()).await;
+    let divisor = materialize_projected_async(values[1].clone()).await;
+    execute_integer_div_builtin(name, &[dividend, divisor], round)
+}
+
+fn as_integer_div_arg(
+    builtin: &'static str,
+    arg_name: &'static str,
+    value: &Value,
+) -> Result<f64, RuntimeError> {
+    let Value::Number(number) = value else {
+        return Err(RuntimeError::TypeError {
+            message: format!(
+                "`{builtin}` {arg_name} must be a finite integer, got {}",
+                value_type_name(value)
+            ),
+        });
+    };
+    if !number.is_finite() || number.fract() != 0.0 {
+        return Err(RuntimeError::TypeError {
+            message: format!("`{builtin}` {arg_name} must be a finite integer"),
+        });
+    }
+    Ok(*number)
 }
 
 pub(crate) fn eval_binary_values(

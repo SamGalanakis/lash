@@ -19,7 +19,8 @@ use lash::{
     },
     plugins::{PluginFactory, PluginHost, PluginSpec, StaticPluginFactory},
     prompt::{
-        PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
+        PromptBuiltin, PromptLayer, PromptSlot, PromptTemplate, PromptTemplateEntry,
+        PromptTemplateSection,
     },
     provider::{ProviderHandle, ProviderOptions},
     tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
@@ -40,7 +41,6 @@ use lash_subagents::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 const STATE_ROOT: &str = ".benchmarks/oolong";
@@ -463,25 +463,22 @@ async fn main() -> anyhow::Result<()> {
 
     let started_at = Utc::now();
     let started_instant = std::time::Instant::now();
-    let semaphore = Arc::new(Semaphore::new(args.batch_size.max(1)));
     let provider = Arc::new(provider);
     let args_shared = Arc::new(args.clone());
     let output_dir_shared = Arc::new(output_dir.clone());
     let predictions_path_shared = Arc::new(predictions_path.clone());
     let total = pending.len();
+    let concurrency = args.batch_size.max(1);
     let mut join_set = JoinSet::new();
-    for (index, question) in pending.into_iter().enumerate() {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .context("acquire benchmark slot")?;
+    let mut pending_iter = pending.into_iter().enumerate();
+    while join_set.len() < concurrency {
+        let Some((index, question)) = pending_iter.next() else {
+            break;
+        };
         let provider = provider.clone();
         let args = args_shared.clone();
         let output_dir = output_dir_shared.clone();
-        let predictions_path = predictions_path_shared.clone();
         join_set.spawn(async move {
-            let _permit = permit;
             let result = run_question(
                 output_dir.as_ref(),
                 provider.as_ref(),
@@ -489,15 +486,13 @@ async fn main() -> anyhow::Result<()> {
                 question,
             )
             .await;
-            if let Ok(row) = &result {
-                let _ = append_response_row(predictions_path.as_ref(), row);
-            }
             (index, result)
         });
     }
 
     let mut indexed_results = Vec::<(usize, QuestionResult)>::new();
     let mut completed_count = 0usize;
+    let mut fatal_provider_error: Option<QuestionResult> = None;
     while let Some(joined) = join_set.join_next().await {
         let (index, result) = joined.context("benchmark task panicked")?;
         let result = match result {
@@ -507,6 +502,7 @@ async fn main() -> anyhow::Result<()> {
                 return Err(err);
             }
         };
+        append_response_row(predictions_path_shared.as_ref(), &result)?;
         completed_count += 1;
         eprintln!(
             "  [{}/{}] {} dataset={} task={} correct={} status={} t={:.1}s iters={}",
@@ -520,7 +516,33 @@ async fn main() -> anyhow::Result<()> {
             result.elapsed_seconds,
             result.iterations,
         );
+        if fatal_provider_failure(&result) {
+            eprintln!(
+                "fatal provider failure on {}: {}",
+                result.question_id,
+                result.failure_reason.as_deref().unwrap_or("provider_error"),
+            );
+            fatal_provider_error = Some(result.clone());
+            indexed_results.push((index, result));
+            join_set.abort_all();
+            break;
+        }
         indexed_results.push((index, result));
+        if let Some((next_index, next_question)) = pending_iter.next() {
+            let provider = provider.clone();
+            let args = args_shared.clone();
+            let output_dir = output_dir_shared.clone();
+            join_set.spawn(async move {
+                let result = run_question(
+                    output_dir.as_ref(),
+                    provider.as_ref(),
+                    args.as_ref(),
+                    next_question,
+                )
+                .await;
+                (next_index, result)
+            });
+        }
     }
     indexed_results.sort_by_key(|(idx, _)| *idx);
     let results = indexed_results
@@ -584,6 +606,13 @@ async fn main() -> anyhow::Result<()> {
     eprintln!();
     eprintln!("Evaluate with:");
     eprintln!("  bench/oolong/evaluate.sh {}", output_dir.display());
+    if let Some(result) = fatal_provider_error {
+        bail!(
+            "aborted OOLONG run after fatal provider failure on {}: {}",
+            result.question_id,
+            result.failure_reason.as_deref().unwrap_or("provider_error")
+        );
+    }
     Ok(())
 }
 
@@ -1053,7 +1082,9 @@ fn build_plugin_host(execution_mode: ExecutionMode, args: &Args) -> PluginHost {
 }
 
 fn child_session_spec(args: &Args, execution_mode: ExecutionMode) -> SessionSpec {
-    let mut spec = SessionSpec::inherit().mode(execution_mode);
+    let mut spec = SessionSpec::inherit()
+        .mode(execution_mode)
+        .prompt_layer(oolong_child_prompt_layer());
     if let Some(child_model) = args.child_model.as_ref() {
         spec = spec.model(child_model, args.child_variant.clone());
     } else if let Some(child_variant) = args.child_variant.as_ref() {
@@ -1063,6 +1094,44 @@ fn child_session_spec(args: &Args, execution_mode: ExecutionMode) -> SessionSpec
         spec = spec.max_turns(max_turns);
     }
     spec
+}
+
+fn oolong_child_prompt_layer() -> PromptLayer {
+    PromptLayer::with_template(PromptTemplate::new(vec![
+        PromptTemplateSection::untitled(vec![
+            PromptTemplateEntry::text(
+                "You are an OOLONG subagent working on the specific task supplied by the parent. You inherit no parent variables, no parent history, and no parent projected bindings. Use only the variables listed in this prompt's Environment section and any values explicitly described in the task.",
+            ),
+            PromptTemplateEntry::slot(PromptSlot::Intro),
+        ]),
+        PromptTemplateSection::titled(
+            "Execution",
+            vec![
+                PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Execution),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Subagent Scope",
+            vec![PromptTemplateEntry::text(
+                "Do not assume `input`, `benchmark`, or any parent globals exist unless they appear in Environment. If you need context, question text, metadata, chunks, records, or prior findings, read the seeded variable names the parent provided. Complete the assigned subproblem and submit only the requested value.",
+            )],
+        ),
+        PromptTemplateSection::titled(
+            "Guidance",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::ProjectInstructions),
+                PromptTemplateEntry::slot(PromptSlot::Guidance),
+            ],
+        ),
+        PromptTemplateSection::titled(
+            "Environment",
+            vec![
+                PromptTemplateEntry::slot(PromptSlot::RuntimeContext),
+                PromptTemplateEntry::slot(PromptSlot::Environment),
+            ],
+        ),
+    ]))
 }
 
 fn rlm_config(args: &Args) -> RlmModePluginConfig {
@@ -1272,6 +1341,25 @@ fn turn_completed(outcome: &TurnOutcome) -> bool {
         outcome,
         TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
     )
+}
+
+fn fatal_provider_failure(result: &QuestionResult) -> bool {
+    fatal_provider_failure_reason(&result.done_reason, result.failure_reason.as_deref())
+}
+
+fn fatal_provider_failure_reason(done_reason: &str, failure_reason: Option<&str>) -> bool {
+    if done_reason != "provider_error" {
+        return false;
+    }
+    let haystack = failure_reason.unwrap_or_default().to_ascii_lowercase();
+    haystack.contains("key limit exceeded")
+        || haystack.contains("daily limit")
+        || haystack.contains("insufficient_quota")
+        || haystack.contains("usage_limit_reached")
+        || haystack.contains("usage_not_included")
+        || haystack.contains("quota")
+        || haystack.contains("unauthorized")
+        || haystack.contains("forbidden")
 }
 
 fn turn_status_label(outcome: &TurnOutcome) -> &'static str {
@@ -1781,5 +1869,45 @@ mod tests {
             schema["enum"],
             json!(["more common than", "less common than", "same frequency as"])
         );
+    }
+
+    #[test]
+    fn oolong_child_prompt_does_not_claim_parent_bindings_exist() {
+        let rendered = oolong_child_prompt_layer()
+            .template
+            .expect("child prompt template")
+            .render(&lash_core::PromptContext {
+                execution_prompt: "EXECUTION".to_string(),
+                ..Default::default()
+            });
+
+        assert!(rendered.contains("You inherit no parent variables"));
+        assert!(rendered.contains("Do not assume `input`, `benchmark`, or any parent globals exist"));
+        assert!(!rendered.contains("The context is available as `input.context`"));
+        assert!(!rendered.contains("metadata as `benchmark`"));
+    }
+
+    #[test]
+    fn fatal_provider_failure_detects_quota_and_auth_errors() {
+        assert!(fatal_provider_failure_reason(
+            "provider_error",
+            Some("OpenAI-compatible chat request failed with 403: Key limit exceeded (daily limit)")
+        ));
+        assert!(fatal_provider_failure_reason(
+            "provider_error",
+            Some("insufficient_quota")
+        ));
+        assert!(fatal_provider_failure_reason(
+            "provider_error",
+            Some("forbidden")
+        ));
+        assert!(!fatal_provider_failure_reason(
+            "provider_error",
+            Some("Too Many Requests")
+        ));
+        assert!(!fatal_provider_failure_reason(
+            "tool_error",
+            Some("Key limit exceeded")
+        ));
     }
 }

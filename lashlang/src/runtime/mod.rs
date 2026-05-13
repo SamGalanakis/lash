@@ -48,7 +48,7 @@ pub use record::Record;
 pub(crate) use record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 #[allow(unused_imports)]
 pub(crate) use schema::{
-    CompiledSchema, compile_schema_value, execute_compiled_validate, execute_validate_builtin,
+    ValidationPlan, compile_schema_value, execute_validate_builtin, execute_validation_plan,
 };
 #[allow(unused_imports)]
 pub(crate) use vm::*;

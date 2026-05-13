@@ -62,7 +62,7 @@
         <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (statements inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The shape of the language, though, is its own: tool calls go through <code>(call name { ... })?</code>, fail-fast unwrap uses Rust-style <code>?</code>, async work uses <code>start call</code> / <code>await</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> / <code>parallel</code> are statement-level keywords. Effects are routed through explicit host calls, typed values, and persistent runtime state.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (statements inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The shape of the language, though, is its own: tool calls go through <code>(call name { ... })?</code>, fail-fast unwrap uses Rust-style <code>?</code>, async work uses the contextual <code>start call</code> form plus <code>await</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> / <code>parallel</code> are statement-level keywords. Effects are routed through explicit host calls, typed values, and persistent runtime state.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
@@ -307,7 +307,8 @@ submit { a: results.one, b: results.two }</code></pre>
               <tbody>
                 <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length/emptiness for strings, lists, records, and projected lists. <code>len(null)</code> is <code>0</code>.</td></tr>
                 <tr><td><code>slice(x, start, end)</code></td><td>Substring or sublist. <code>null</code> bounds mean start/end; negative bounds count from the end.</td></tr>
-                <tr><td><code>range(end)</code>, <code>range(start, end)</code></td><td>Integer lists with an exclusive end bound.</td></tr>
+                <tr><td><code>range(end)</code>, <code>range(start, end)</code>, <code>range(start, end, step)</code></td><td>Integer lists with an exclusive end bound. <code>step</code> may be positive or negative, but not <code>0</code>.</td></tr>
+                <tr><td><code>ceil_div(a, b)</code>, <code>floor_div(a, b)</code></td><td>Finite-integer division helpers for chunk/count math; <code>b</code> must not be <code>0</code>.</td></tr>
                 <tr><td><code>push(list, item)</code></td><td>Returns a new list with <code>item</code> appended.</td></tr>
                 <tr><td><code>split</code>, <code>join</code>, <code>trim</code></td><td>Common string shaping helpers.</td></tr>
                 <tr><td><code>find(s, needle, start?)</code></td><td>Returns the zero-based character index of the first literal match, or <code>null</code>. <code>start</code> defaults to <code>0</code> and is a non-negative character index. An empty <code>needle</code> returns <code>start</code> when it is in bounds.</td></tr>

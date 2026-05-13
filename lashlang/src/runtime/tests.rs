@@ -211,6 +211,24 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::ResultUnwrap => "result_unwrap".to_string(),
         Instruction::Unary(op) => format!("unary {op:?}"),
         Instruction::Binary(op) => format!("binary {op:?}"),
+        Instruction::SlotNumberBinary { slot, op, right } => format!(
+            "slot_number_binary {slot}:{} {op:?} {right}",
+            slot_name(chunk, slot)
+        ),
+        Instruction::SlotNumberCompare { slot, op, right } => format!(
+            "slot_number_compare {slot}:{} {op:?} {right}",
+            slot_name(chunk, slot)
+        ),
+        Instruction::SlotNumberBinaryCompare {
+            slot,
+            binary_op,
+            binary_right,
+            compare_op,
+            compare_right,
+        } => format!(
+            "slot_number_binary_compare {slot}:{} {binary_op:?} {binary_right} {compare_op:?} {compare_right}",
+            slot_name(chunk, slot)
+        ),
         Instruction::ToBool => "to_bool".to_string(),
         Instruction::Jump(target) => format!("jump {target}"),
         Instruction::JumpIfFalse(target) => format!("jump_if_false {target}"),
@@ -277,6 +295,21 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
                 format_template_snapshot(chunk, template)
             )
         }
+        Instruction::FormatCompiledSlotNumber { template, slot } => format!(
+            "format_compiled_slot_number {} {slot}:{}",
+            format_template_snapshot(chunk, template),
+            slot_name(chunk, slot)
+        ),
+        Instruction::FormatCompiledSlotNumberBinary {
+            template,
+            slot,
+            op,
+            right,
+        } => format!(
+            "format_compiled_slot_number_binary {} {slot}:{} {op:?} {right}",
+            format_template_snapshot(chunk, template),
+            slot_name(chunk, slot)
+        ),
         Instruction::AddAssign(slot) => format!("add_assign {slot}:{}", slot_name(chunk, slot)),
         Instruction::AddAssignNumber { slot, right } => {
             format!(
@@ -292,6 +325,11 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::AddAssignIndexNumber { slot, right } => format!(
             "add_assign_index_number {slot}:{} {right}",
             slot_name(chunk, slot)
+        ),
+        Instruction::AddAssignIndexSlotNumber { slot, index, right } => format!(
+            "add_assign_index_slot_number {slot}:{} {index}:{} {right}",
+            slot_name(chunk, slot),
+            slot_name(chunk, index)
         ),
         Instruction::AppendAssign(slot) => {
             format!("append_assign {slot}:{}", slot_name(chunk, slot))
@@ -408,6 +446,8 @@ fn builtin_snapshot(chunk: &Chunk, builtin: Builtin) -> String {
         Builtin::Format => "format".to_string(),
         Builtin::Validate => "validate".to_string(),
         Builtin::Range => "range".to_string(),
+        Builtin::CeilDiv => "ceil_div".to_string(),
+        Builtin::FloorDiv => "floor_div".to_string(),
         Builtin::Push => "push".to_string(),
         Builtin::Unknown(index) => format!("unknown({})", name_text(chunk, index)),
     }
@@ -936,7 +976,11 @@ async fn builtin_success_matrix_is_covered() {
           fmt: format("x={},y={}", 1, true),
           range_end: range(3),
           range_pair: range(-2, 2),
+          range_step: range(0, 5, 2),
+          range_step_down: range(5, 0, -2),
           range_empty: range(2, 2),
+          ceil_div: ceil_div(10, 3),
+          floor_div: floor_div(-10, 3),
           pushed: push(base, 3),
           base_after_push: base,
           valid: validate(
@@ -1027,6 +1071,16 @@ async fn builtin_success_matrix_is_covered() {
         )
     );
     assert_eq!(record["range_empty"], Value::List(Vec::new().into()));
+    assert_eq!(
+        record["range_step"],
+        Value::List(vec![Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)].into())
+    );
+    assert_eq!(
+        record["range_step_down"],
+        Value::List(vec![Value::Number(5.0), Value::Number(3.0), Value::Number(1.0)].into())
+    );
+    assert_eq!(record["ceil_div"], Value::Number(4.0));
+    assert_eq!(record["floor_div"], Value::Number(-4.0));
     assert_eq!(
         record["pushed"],
         Value::List(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)].into())
@@ -1122,10 +1176,16 @@ async fn builtin_error_matrix_is_covered() {
             "validate",
         ),
         ("submit range()", "range"),
-        ("submit range(1, 2, 3)", "range"),
+        ("submit range(1, 2, 3, 4)", "range"),
         ("submit range(\"3\")", "range"),
         ("submit range(1.5)", "range"),
+        ("submit range(0, 5, 0)", "range"),
         ("submit range(0, 1000001)", "range"),
+        ("submit range(1000001, 0, -1)", "range"),
+        ("submit ceil_div()", "ceil_div"),
+        ("submit ceil_div(1.5, 1)", "ceil_div"),
+        ("submit ceil_div(1, 0)", "ceil_div"),
+        ("submit floor_div(\"1\", 1)", "floor_div"),
         ("submit push(1, 2)", "push"),
         ("submit push([1])", "push"),
         ("submit no_such_builtin()", "no_such_builtin"),
@@ -1226,6 +1286,66 @@ async fn validate_union_rejects_value_matching_no_variant() {
     assert!(
         message.contains("$.email"),
         "error should point at the failing field: {message}",
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn validate_static_and_dynamic_type_paths_share_error_text() {
+    let static_err = exec(r#"submit validate({ email: 42 }, Type { email: str | null })"#)
+        .await
+        .expect_err("static Type literal should reject number");
+    let dynamic_err = exec(
+        r#"
+Schema = (call echo { value: Type { email: str | null } })?
+submit validate({ email: 42 }, Schema)
+"#,
+    )
+    .await
+    .expect_err("runtime Type value should reject number");
+
+    assert_eq!(static_err, dynamic_err);
+    assert_eq!(
+        dynamic_err,
+        RuntimeError::ValueError {
+            message: "validation failed: $.email: expected one of [string, null], got number"
+                .to_string()
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn validate_object_type_accepts_image_descriptors() {
+    let program = crate::parse(
+        r#"
+submit validate(img, Type {
+  type: str,
+  id: str,
+  label: str,
+  size: int,
+  width: int | null,
+  height: int | null
+})
+"#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    state.globals.insert_str(
+        "img",
+        Value::Image(ImageValue::new("img-1", "chart.png", 1234, Some(640), None)),
+    );
+
+    let outcome = execute_program(&program, &mut state, &Host)
+        .await
+        .expect("image descriptor validation should succeed");
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Finished(Value::Image(ImageValue::new(
+            "img-1",
+            "chart.png",
+            1234,
+            Some(640),
+            None
+        )))
     );
 }
 
@@ -2379,6 +2499,13 @@ async fn projected_host_values_can_override_all_lazy_receiver_operations() {
     )
     .await;
     assert_override_uses_hook("submit range(p, 4)", "p", Value::Number(1.0), "range_bound").await;
+    assert_override_uses_hook(
+        "submit range(0, p, 2)",
+        "p",
+        Value::Number(4.0),
+        "range_bound",
+    )
+    .await;
     assert_override_uses_hook("submit p ? 1 : 2", "p", Value::Number(1.0), "truthy").await;
 }
 

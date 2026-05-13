@@ -14,7 +14,7 @@ use crate::ast::{BinaryOp, UnaryOp};
 use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
-use super::schema::CompiledSchema;
+use super::schema::ValidationPlan;
 use super::{CompileStats, ProfileReport, ProfileStat, Value};
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ pub(crate) struct Chunk {
     pub(crate) slot_names: Vec<Name>,
     pub(crate) key_lists: Vec<Box<[usize]>>,
     pub(crate) format_templates: Vec<CompiledFormatTemplate>,
-    pub(crate) compiled_schemas: Vec<CompiledSchema>,
+    pub(crate) compiled_schemas: Vec<ValidationPlan>,
     pub(crate) parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
     pub(crate) named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
     pub(crate) pure_parallel_sets: Vec<Box<[PureExpr]>>,
@@ -122,6 +122,23 @@ pub(crate) enum Instruction {
     ResultUnwrap,
     Unary(UnaryOp),
     Binary(BinaryOp),
+    SlotNumberBinary {
+        slot: usize,
+        op: BinaryOp,
+        right: f64,
+    },
+    SlotNumberCompare {
+        slot: usize,
+        op: BinaryOp,
+        right: f64,
+    },
+    SlotNumberBinaryCompare {
+        slot: usize,
+        binary_op: BinaryOp,
+        binary_right: f64,
+        compare_op: BinaryOp,
+        compare_right: f64,
+    },
     ToBool,
     Jump(usize),
     JumpIfFalse(usize),
@@ -173,6 +190,16 @@ pub(crate) enum Instruction {
         argc: usize,
     },
     FormatCompiled(usize),
+    FormatCompiledSlotNumber {
+        template: usize,
+        slot: usize,
+    },
+    FormatCompiledSlotNumberBinary {
+        template: usize,
+        slot: usize,
+        op: BinaryOp,
+        right: f64,
+    },
     AddAssign(usize),
     AddAssignNumber {
         slot: usize,
@@ -184,6 +211,11 @@ pub(crate) enum Instruction {
     },
     AddAssignIndexNumber {
         slot: usize,
+        right: f64,
+    },
+    AddAssignIndexSlotNumber {
+        slot: usize,
+        index: usize,
         right: f64,
     },
     AppendAssign(usize),
@@ -234,6 +266,8 @@ pub(crate) enum Builtin {
     Format,
     Validate,
     Range,
+    CeilDiv,
+    FloorDiv,
     Push,
     Unknown(usize),
 }
@@ -257,7 +291,10 @@ impl Instruction {
                 InstructionProfileTag::ResultUnwrap
             }
             Instruction::Unary(_) => InstructionProfileTag::Unary,
-            Instruction::Binary(_) => InstructionProfileTag::Binary,
+            Instruction::Binary(_)
+            | Instruction::SlotNumberBinary { .. }
+            | Instruction::SlotNumberCompare { .. }
+            | Instruction::SlotNumberBinaryCompare { .. } => InstructionProfileTag::Binary,
             Instruction::ToBool => InstructionProfileTag::ToBool,
             Instruction::Jump(_) => InstructionProfileTag::Jump,
             Instruction::JumpIfFalse(_)
@@ -283,11 +320,16 @@ impl Instruction {
             | Instruction::Push
             | Instruction::PushAssign(_)
             | Instruction::Range { .. }
-            | Instruction::FormatCompiled(_) => InstructionProfileTag::CallBuiltin,
+            | Instruction::FormatCompiled(_)
+            | Instruction::FormatCompiledSlotNumber { .. }
+            | Instruction::FormatCompiledSlotNumberBinary { .. } => {
+                InstructionProfileTag::CallBuiltin
+            }
             Instruction::AddAssign(_)
             | Instruction::AddAssignNumber { .. }
             | Instruction::AddAssignSlot { .. }
-            | Instruction::AddAssignIndexNumber { .. } => InstructionProfileTag::AddAssign,
+            | Instruction::AddAssignIndexNumber { .. }
+            | Instruction::AddAssignIndexSlotNumber { .. } => InstructionProfileTag::AddAssign,
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
             Instruction::Submit => InstructionProfileTag::Submit,
@@ -335,6 +377,8 @@ impl Builtin {
             Builtin::Format => BuiltinProfileTag::Format,
             Builtin::Validate => BuiltinProfileTag::Validate,
             Builtin::Range => BuiltinProfileTag::Range,
+            Builtin::CeilDiv => BuiltinProfileTag::CeilDiv,
+            Builtin::FloorDiv => BuiltinProfileTag::FloorDiv,
             Builtin::Push => BuiltinProfileTag::Push,
             Builtin::Unknown(_) => BuiltinProfileTag::Unknown,
         }
@@ -401,6 +445,8 @@ pub(crate) enum BuiltinProfileTag {
     Format,
     Validate,
     Range,
+    CeilDiv,
+    FloorDiv,
     Push,
     Unknown,
 }
@@ -487,6 +533,8 @@ const BUILTIN_PROFILE_NAMES: [&str; BUILTIN_PROFILE_COUNT] = [
     "format",
     "validate",
     "range",
+    "ceil_div",
+    "floor_div",
     "push",
     "unknown",
 ];

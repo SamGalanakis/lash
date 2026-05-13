@@ -748,6 +748,14 @@ async fn prompt_claim_builtin_range_and_push_build_lists() {
         run(&host, "submit range(3, 3)"),
         Value::List(Vec::new().into())
     );
+    assert_eq!(
+        run(&host, "submit range(0, 5, 2)"),
+        Value::List(vec![Value::Number(0.0), Value::Number(2.0), Value::Number(4.0)].into())
+    );
+    assert_eq!(
+        run(&host, "submit range(5, 0, -2)"),
+        Value::List(vec![Value::Number(5.0), Value::Number(3.0), Value::Number(1.0)].into())
+    );
 
     let value = run(
         &host,
@@ -771,6 +779,61 @@ async fn prompt_claim_builtin_range_and_push_build_lists() {
             ]
             .into()
         )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_start_is_contextual() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(
+            &host,
+            r#"
+            start = 1
+            for start in range(3) {
+              last = start
+            }
+            submit { value: start, field: { start: last }.start }
+            "#,
+        ),
+        {
+            let mut record = Record::default();
+            record.insert("value".to_string(), Value::Number(1.0));
+            record.insert("field".to_string(), Value::Number(2.0));
+            Value::Record(record.into())
+        }
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_integer_division_helpers_support_chunk_math() {
+    let host = MockHost::default();
+    let value = run(
+        &host,
+        r#"
+        items = range(10)
+        step = ceil_div(len(items), 3)
+        starts = []
+        for i in range(0, len(items), step) {
+          starts = push(starts, i)
+        }
+        submit {
+          ceil_pos: ceil_div(10, 3),
+          floor_pos: floor_div(10, 3),
+          ceil_neg: ceil_div(-10, 3),
+          floor_neg: floor_div(-10, 3),
+          starts: starts
+        }
+        "#,
+    );
+    let record = value.as_record().expect("record");
+    assert_eq!(record["ceil_pos"], Value::Number(4.0));
+    assert_eq!(record["floor_pos"], Value::Number(3.0));
+    assert_eq!(record["ceil_neg"], Value::Number(-3.0));
+    assert_eq!(record["floor_neg"], Value::Number(-4.0));
+    assert_eq!(
+        record["starts"],
+        Value::List(vec![Value::Number(0.0), Value::Number(4.0), Value::Number(8.0)].into())
     );
 }
 
@@ -1090,6 +1153,8 @@ async fn prompt_mentions_every_builtin_we_document() {
         "format",
         "validate",
         "range",
+        "ceil_div",
+        "floor_div",
         "push",
     ];
     // Call each builtin with a shape guaranteed to succeed — we don't
@@ -1120,6 +1185,8 @@ async fn prompt_mentions_every_builtin_we_document() {
             "validate",
         ),
         (r#"submit range(1)"#, "range"),
+        (r#"submit ceil_div(3, 2)"#, "ceil_div"),
+        (r#"submit floor_div(3, 2)"#, "floor_div"),
         (r#"submit push([], "x")"#, "push"),
     ];
     assert_eq!(smoke.len(), DOCUMENTED.len());

@@ -23,14 +23,14 @@ use crate::ast::{
 use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
-use super::schema::{CompiledSchema, compile_schema_value};
+use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
     Builtin, Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep,
     CompiledFormatTemplate, Instruction, LASH_TYPE_KEY, Name, NamedBranchChunk,
     NamedParallelCallBranch, ParallelCallBranch, PureExpr, RuntimeError, Value, as_number,
-    compile_format_template, eval_binary_values, execute_range_builtin, is_comparison_binary_op,
-    is_numeric_binary_op, is_truthy, read_field_direct, read_index_direct, transient_name,
-    unwrap_type_value,
+    compile_format_template, eval_binary_values, execute_integer_div_builtin,
+    execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op, is_truthy,
+    read_field_direct, read_index_direct, transient_name, unwrap_type_value,
 };
 
 pub(crate) struct Compiler {
@@ -42,7 +42,7 @@ pub(crate) struct Compiler {
     slots: Rc<RefCell<SlotTable>>,
     key_lists: Vec<Box<[usize]>>,
     format_templates: Vec<CompiledFormatTemplate>,
-    compiled_schemas: Vec<CompiledSchema>,
+    compiled_schemas: Vec<ValidationPlan>,
     parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
     named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
     pure_parallel_sets: Vec<Box<[PureExpr]>>,
@@ -313,6 +313,8 @@ impl Compiler {
             "format" => Builtin::Format,
             "validate" => Builtin::Validate,
             "range" => Builtin::Range,
+            "ceil_div" => Builtin::CeilDiv,
+            "floor_div" => Builtin::FloorDiv,
             "push" => Builtin::Push,
             _ => Builtin::Unknown(self.push_name(name)),
         }
@@ -429,9 +431,18 @@ impl Compiler {
                     && left_index.as_ref() == index
                     && let Some(Value::Number(right)) = self.fold_compile_time_expr(right)
                 {
-                    self.compile_expr(index);
-                    self.code
-                        .push(Instruction::AddAssignIndexNumber { slot, right });
+                    if let Expr::Variable(index_name) = index {
+                        let index = self.push_slot(index_name);
+                        self.code.push(Instruction::AddAssignIndexSlotNumber {
+                            slot,
+                            index,
+                            right,
+                        });
+                    } else {
+                        self.compile_expr(index);
+                        self.code
+                            .push(Instruction::AddAssignIndexNumber { slot, right });
+                    }
                     self.set_const_slot(slot, None);
                     return;
                 }
@@ -795,11 +806,19 @@ impl Compiler {
                     "format" => Builtin::Format,
                     "validate" => Builtin::Validate,
                     "range" => Builtin::Range,
+                    "ceil_div" => Builtin::CeilDiv,
+                    "floor_div" => Builtin::FloorDiv,
                     "push" => Builtin::Push,
                     _ => return None,
                 };
                 match builtin {
                     Builtin::Range => execute_range_builtin(&values).ok(),
+                    Builtin::CeilDiv => {
+                        execute_integer_div_builtin("ceil_div", &values, f64::ceil).ok()
+                    }
+                    Builtin::FloorDiv => {
+                        execute_integer_div_builtin("floor_div", &values, f64::floor).ok()
+                    }
                     _ => {
                         let _ = values;
                         None
@@ -874,6 +893,28 @@ impl Compiler {
         if name == "format"
             && let Some((Expr::String(template), value_args)) = args.split_first()
         {
+            if let [Expr::Variable(slot_name)] = value_args {
+                let template = self.push_format_template(template, value_args.len());
+                let slot = self.push_slot(slot_name);
+                self.code
+                    .push(Instruction::FormatCompiledSlotNumber { template, slot });
+                return;
+            }
+            if let [Expr::Binary { left, op, right }] = value_args
+                && is_numeric_binary_op(*op)
+                && let (Expr::Variable(slot_name), Some(Value::Number(right))) =
+                    (left.as_ref(), self.fold_compile_time_expr(right))
+            {
+                let template = self.push_format_template(template, value_args.len());
+                let slot = self.push_slot(slot_name);
+                self.code.push(Instruction::FormatCompiledSlotNumberBinary {
+                    template,
+                    slot,
+                    op: *op,
+                    right,
+                });
+                return;
+            }
             for arg in value_args {
                 self.compile_expr(arg);
             }
@@ -911,7 +952,7 @@ impl Compiler {
                 self.compile_expr(&args[1]);
                 self.code.push(Instruction::Push);
             }
-            ("range", 1 | 2) => {
+            ("range", 1..=3) => {
                 for arg in args {
                     self.compile_expr(arg);
                 }
@@ -1055,6 +1096,55 @@ impl Compiler {
                     self.patch_jump(jump_to_end, self.code.len());
                 }
                 _ => {
+                    if is_comparison_binary_op(*op) {
+                        if let (
+                            Expr::Binary {
+                                left: inner_left,
+                                op: binary_op,
+                                right: inner_right,
+                            },
+                            Some(Value::Number(compare_right)),
+                        ) = (left.as_ref(), self.fold_compile_time_expr(right))
+                            && is_numeric_binary_op(*binary_op)
+                            && let (Expr::Variable(name), Some(Value::Number(binary_right))) = (
+                                inner_left.as_ref(),
+                                self.fold_compile_time_expr(inner_right),
+                            )
+                        {
+                            let slot = self.push_slot(name);
+                            self.code.push(Instruction::SlotNumberBinaryCompare {
+                                slot,
+                                binary_op: *binary_op,
+                                binary_right,
+                                compare_op: *op,
+                                compare_right,
+                            });
+                            return;
+                        }
+                        if let (Expr::Variable(name), Some(Value::Number(right))) =
+                            (left.as_ref(), self.fold_compile_time_expr(right))
+                        {
+                            let slot = self.push_slot(name);
+                            self.code.push(Instruction::SlotNumberCompare {
+                                slot,
+                                op: *op,
+                                right,
+                            });
+                            return;
+                        }
+                    }
+                    if is_numeric_binary_op(*op)
+                        && let (Expr::Variable(name), Some(Value::Number(right))) =
+                            (left.as_ref(), self.fold_compile_time_expr(right))
+                    {
+                        let slot = self.push_slot(name);
+                        self.code.push(Instruction::SlotNumberBinary {
+                            slot,
+                            op: *op,
+                            right,
+                        });
+                        return;
+                    }
                     self.compile_expr(left);
                     self.compile_expr(right);
                     self.code.push(Instruction::Binary(*op));

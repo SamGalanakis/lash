@@ -1,5 +1,5 @@
 use super::{
-    RuntimeError, Value,
+    ImageValue, RuntimeError, Value,
     record::{Symbol, intern_symbol},
     unwrap_type_value,
 };
@@ -8,41 +8,85 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(crate) struct CompiledSchema {
-    kind: CompiledSchemaKind,
+pub(crate) struct ValidationPlan {
+    kind: ValidationPlanKind,
 }
 
 #[derive(Clone)]
-enum CompiledSchemaKind {
+enum ValidationPlanKind {
     Any,
-    Type(SchemaType),
-    Enum(Box<[Value]>),
-    List(Box<CompiledSchema>),
-    Object {
-        required: Box<[CompiledSchemaField]>,
-        properties: Box<[CompiledSchemaField]>,
-    },
-    /// Union of alternative shapes (`str | null`, `int | str`, …).
-    /// A value matches the union if it matches any of the variants.
-    Union(Box<[CompiledSchema]>),
+    Primitive(PrimitiveMask),
+    Enum(Box<[Arc<str>]>),
+    List(Box<ValidationPlan>),
+    Object(Box<[ValidationFieldPlan]>),
+    Union(Box<[ValidationPlan]>),
 }
 
 #[derive(Clone)]
-struct CompiledSchemaField {
+struct ValidationFieldPlan {
     symbol: Symbol,
     name: Arc<str>,
-    schema: CompiledSchema,
+    required: bool,
+    plan: ValidationPlan,
 }
 
-#[derive(Clone, Copy)]
-enum SchemaType {
-    String,
-    Number,
-    Integer,
-    Boolean,
-    Array,
-    Object,
-    Null,
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PrimitiveMask(u16);
+
+impl PrimitiveMask {
+    const STRING: Self = Self(1 << 0);
+    const NUMBER: Self = Self(1 << 1);
+    const INTEGER: Self = Self(1 << 2);
+    const BOOLEAN: Self = Self(1 << 3);
+    const ARRAY: Self = Self(1 << 4);
+    const OBJECT: Self = Self(1 << 5);
+    const NULL: Self = Self(1 << 6);
+
+    fn from_schema_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "string" => Self::STRING,
+            "number" => Self::NUMBER,
+            "integer" => Self::INTEGER,
+            "boolean" => Self::BOOLEAN,
+            "array" => Self::ARRAY,
+            "object" => Self::OBJECT,
+            "null" => Self::NULL,
+            _ => return None,
+        })
+    }
+
+    fn schema_name(self) -> &'static str {
+        match self {
+            Self::STRING => "string",
+            Self::NUMBER => "number",
+            Self::INTEGER => "integer",
+            Self::BOOLEAN => "boolean",
+            Self::ARRAY => "array",
+            Self::OBJECT => "object",
+            Self::NULL => "null",
+            _ => "value",
+        }
+    }
+
+    fn matches(self, value: &Value) -> bool {
+        let value_mask = match value {
+            Value::String(_) => Self::STRING.0,
+            Value::Number(number) if number.is_finite() && number.fract() == 0.0 => {
+                Self::NUMBER.0 | Self::INTEGER.0
+            }
+            Value::Number(number) if number.is_finite() => Self::NUMBER.0,
+            Value::Bool(_) => Self::BOOLEAN.0,
+            Value::List(_) => Self::ARRAY.0,
+            Value::Record(_) | Value::Image(_) => Self::OBJECT.0,
+            Value::Null => Self::NULL.0,
+            Value::Projected(value) => match value.value_type_name() {
+                "list" => Self::ARRAY.0,
+                _ => Self::OBJECT.0,
+            },
+            Value::Number(_) => 0,
+        };
+        self.0 & value_mask != 0
+    }
 }
 
 pub(crate) fn execute_validate_builtin(
@@ -52,293 +96,319 @@ pub(crate) fn execute_validate_builtin(
     let schema = unwrap_type_value(schema).ok_or_else(|| RuntimeError::TypeError {
         message: "`validate` requires a Type literal as the second argument".to_string(),
     })?;
-    execute_validate_schema(value, schema)
+    let plan = compile_schema_value(schema);
+    execute_validation_plan(value, &plan)
 }
 
-fn execute_validate_schema(value: Value, schema: &Value) -> Result<Value, RuntimeError> {
-    validate_value_against_schema(&value, schema).map_err(|message| RuntimeError::ValueError {
-        message: format!("validation failed: {message}"),
-    })?;
-    Ok(value)
-}
-
-pub(crate) fn execute_compiled_validate(
+pub(crate) fn execute_validation_plan(
     value: Value,
-    schema: &CompiledSchema,
+    plan: &ValidationPlan,
 ) -> Result<Value, RuntimeError> {
+    if plan.accepts(&value) {
+        return Ok(value);
+    }
+
     let mut path = SmallVec::<[PathSegment<'_>; 8]>::new();
-    validate_compiled_schema_node(&value, schema, &mut path).map_err(|message| {
-        RuntimeError::ValueError {
-            message: format!("validation failed: {message}"),
-        }
-    })?;
-    Ok(value)
+    let message = plan.describe_failure(&value, &mut path);
+    Err(RuntimeError::ValueError {
+        message: format!("validation failed: {message}"),
+    })
 }
 
-pub(crate) fn compile_schema_value(schema: &Value) -> CompiledSchema {
+pub(crate) fn compile_schema_value(schema: &Value) -> ValidationPlan {
     let Some(schema_obj) = schema.as_record() else {
-        return CompiledSchema {
-            kind: CompiledSchemaKind::Any,
+        return ValidationPlan {
+            kind: ValidationPlanKind::Any,
         };
     };
 
     if let Some(Value::List(variants)) = schema_obj.get("anyOf") {
-        let compiled: Box<[CompiledSchema]> = variants
-            .iter()
-            .map(compile_schema_value)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        return CompiledSchema {
-            kind: CompiledSchemaKind::Union(compiled),
+        return ValidationPlan {
+            kind: ValidationPlanKind::Union(
+                variants
+                    .iter()
+                    .map(compile_schema_value)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
         };
     }
 
     if let Some(Value::List(allowed)) = schema_obj.get("enum") {
-        return CompiledSchema {
-            kind: CompiledSchemaKind::Enum(allowed.iter().cloned().collect::<Vec<_>>().into()),
-        };
-    }
-
-    let schema_type = match schema_obj.get("type") {
-        Some(Value::String(expected)) => SchemaType::from_schema_name(expected.as_str()),
-        _ => None,
-    };
-
-    match schema_type {
-        Some(SchemaType::Array) => {
-            let item_schema =
-                schema_obj
-                    .get("items")
-                    .map(compile_schema_value)
-                    .unwrap_or(CompiledSchema {
-                        kind: CompiledSchemaKind::Any,
-                    });
-            CompiledSchema {
-                kind: CompiledSchemaKind::List(Box::new(item_schema)),
-            }
-        }
-        Some(SchemaType::Object) => {
-            let required = match schema_obj.get("required") {
-                Some(Value::List(required)) => required
+        return ValidationPlan {
+            kind: ValidationPlanKind::Enum(
+                allowed
                     .iter()
-                    .filter_map(|field| match field {
-                        Value::String(name) => Some(CompiledSchemaField {
-                            symbol: intern_symbol(name.as_str()),
-                            name: Arc::<str>::from(name.as_str()),
-                            schema: CompiledSchema {
-                                kind: CompiledSchemaKind::Any,
-                            },
-                        }),
+                    .filter_map(|value| match value {
+                        Value::String(value) => Some(Arc::<str>::from(value.as_str())),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
-                _ => Box::default(),
-            };
-            let properties = match schema_obj.get("properties") {
-                Some(Value::Record(properties)) => properties
-                    .entries
-                    .iter()
-                    .map(|entry| CompiledSchemaField {
-                        symbol: entry.symbol,
-                        name: entry.name.clone(),
-                        schema: compile_schema_value(&entry.value),
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-                _ => Box::default(),
-            };
-            CompiledSchema {
-                kind: CompiledSchemaKind::Object {
-                    required,
-                    properties,
-                },
+            ),
+        };
+    }
+
+    let schema_type = match schema_obj.get("type") {
+        Some(Value::String(expected)) => PrimitiveMask::from_schema_name(expected.as_str()),
+        _ => None,
+    };
+
+    match schema_type {
+        Some(PrimitiveMask::ARRAY) => {
+            let item_plan =
+                schema_obj
+                    .get("items")
+                    .map(compile_schema_value)
+                    .unwrap_or(ValidationPlan {
+                        kind: ValidationPlanKind::Any,
+                    });
+            ValidationPlan {
+                kind: ValidationPlanKind::List(Box::new(item_plan)),
             }
         }
-        Some(kind) => CompiledSchema {
-            kind: CompiledSchemaKind::Type(kind),
+        Some(PrimitiveMask::OBJECT) => ValidationPlan {
+            kind: ValidationPlanKind::Object(compile_object_fields(schema_obj)),
         },
-        None => CompiledSchema {
-            kind: CompiledSchemaKind::Any,
+        Some(kind) => ValidationPlan {
+            kind: ValidationPlanKind::Primitive(kind),
+        },
+        None => ValidationPlan {
+            kind: ValidationPlanKind::Any,
         },
     }
 }
 
-fn validate_value_against_schema(value: &Value, schema: &Value) -> Result<(), String> {
-    let mut path = "$".to_string();
-    validate_schema_node(value, schema, &mut path)
+impl ValidationPlan {
+    fn accepts(&self, value: &Value) -> bool {
+        match &self.kind {
+            ValidationPlanKind::Any => true,
+            ValidationPlanKind::Primitive(expected) => expected.matches(value),
+            ValidationPlanKind::Enum(allowed) => {
+                let Value::String(value) = value else {
+                    return false;
+                };
+                allowed.iter().any(|candidate| candidate.as_ref() == value)
+            }
+            ValidationPlanKind::List(item_plan) => {
+                let Value::List(items) = value else {
+                    return false;
+                };
+                items.iter().all(|item| item_plan.accepts(item))
+            }
+            ValidationPlanKind::Object(fields) => match value {
+                Value::Record(record) => fields.iter().all(|field| {
+                    record
+                        .get_symbol(field.symbol)
+                        .map_or(!field.required, |field_value| {
+                            field.plan.accepts(field_value)
+                        })
+                }),
+                Value::Image(image) => fields.iter().all(|field| {
+                    image_field_value(image, field.name.as_ref())
+                        .map_or(!field.required, |field_value| {
+                            field.plan.accepts(&field_value)
+                        })
+                }),
+                _ => false,
+            },
+            ValidationPlanKind::Union(variants) => {
+                variants.iter().any(|variant| variant.accepts(value))
+            }
+        }
+    }
+
+    fn describe_failure<'a>(
+        &'a self,
+        value: &Value,
+        path: &mut SmallVec<[PathSegment<'a>; 8]>,
+    ) -> String {
+        match &self.kind {
+            ValidationPlanKind::Any => format!(
+                "{}: expected any, got {}",
+                format_schema_path(path),
+                schema_value_type_name(value)
+            ),
+            ValidationPlanKind::Primitive(expected) => {
+                describe_primitive_failure(value, *expected, path)
+            }
+            ValidationPlanKind::Enum(allowed) => {
+                if !PrimitiveMask::STRING.matches(value) {
+                    return describe_primitive_failure(value, PrimitiveMask::STRING, path);
+                }
+                let allowed = allowed
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "{}: expected one of [{allowed}], got {value}",
+                    format_schema_path(path)
+                )
+            }
+            ValidationPlanKind::List(item_plan) => {
+                if !PrimitiveMask::ARRAY.matches(value) {
+                    return describe_primitive_failure(value, PrimitiveMask::ARRAY, path);
+                }
+                let Value::List(items) = value else {
+                    return describe_primitive_failure(value, PrimitiveMask::ARRAY, path);
+                };
+                for (index, item) in items.iter().enumerate() {
+                    path.push(PathSegment::Index(index));
+                    if !item_plan.accepts(item) {
+                        let message = item_plan.describe_failure(item, path);
+                        path.pop();
+                        return message;
+                    }
+                    path.pop();
+                }
+                describe_primitive_failure(value, PrimitiveMask::ARRAY, path)
+            }
+            ValidationPlanKind::Object(fields) => {
+                if !PrimitiveMask::OBJECT.matches(value) {
+                    return describe_primitive_failure(value, PrimitiveMask::OBJECT, path);
+                }
+                for field in fields.iter() {
+                    let field_value = plan_field_value(value, field);
+                    let Some(field_value) = field_value else {
+                        if field.required {
+                            return format!(
+                                "{}: missing required field `{}`",
+                                format_schema_path(path),
+                                field.name
+                            );
+                        }
+                        continue;
+                    };
+                    if !field.plan.accepts(field_value.as_ref()) {
+                        path.push(PathSegment::Field(field.name.as_ref()));
+                        let message = field.plan.describe_failure(field_value.as_ref(), path);
+                        path.pop();
+                        return message;
+                    }
+                }
+                describe_primitive_failure(value, PrimitiveMask::OBJECT, path)
+            }
+            ValidationPlanKind::Union(variants) => format!(
+                "{}: expected one of [{}], got {}",
+                format_schema_path(path),
+                variants
+                    .iter()
+                    .map(ValidationPlan::describe)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                schema_value_type_name(value)
+            ),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match &self.kind {
+            ValidationPlanKind::Any => "any".to_string(),
+            ValidationPlanKind::Primitive(kind) => kind.schema_name().to_string(),
+            ValidationPlanKind::Enum(values) => format!(
+                "enum[{}]",
+                values
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ValidationPlanKind::List(_) => "array".to_string(),
+            ValidationPlanKind::Object(_) => "object".to_string(),
+            ValidationPlanKind::Union(variants) => variants
+                .iter()
+                .map(ValidationPlan::describe)
+                .collect::<Vec<_>>()
+                .join(" | "),
+        }
+    }
+}
+
+fn compile_object_fields(schema_obj: &super::Record) -> Box<[ValidationFieldPlan]> {
+    let required_symbols = match schema_obj.get("required") {
+        Some(Value::List(required)) => required
+            .iter()
+            .filter_map(|field| match field {
+                Value::String(name) => Some((intern_symbol(name.as_str()), name.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    let mut fields = match schema_obj.get("properties") {
+        Some(Value::Record(properties)) => properties
+            .entries
+            .iter()
+            .map(|entry| ValidationFieldPlan {
+                symbol: entry.symbol,
+                name: entry.name.clone(),
+                required: required_symbols
+                    .iter()
+                    .any(|(symbol, _)| *symbol == entry.symbol),
+                plan: compile_schema_value(&entry.value),
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+
+    for (symbol, name) in required_symbols {
+        if fields.iter().any(|field| field.symbol == symbol) {
+            continue;
+        }
+        fields.push(ValidationFieldPlan {
+            symbol,
+            name: Arc::<str>::from(name),
+            required: true,
+            plan: ValidationPlan {
+                kind: ValidationPlanKind::Any,
+            },
+        });
+    }
+
+    fields.into_boxed_slice()
+}
+
+enum FieldValue<'a> {
+    Borrowed(&'a Value),
+    Owned(Value),
+}
+
+impl AsRef<Value> for FieldValue<'_> {
+    fn as_ref(&self) -> &Value {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+fn plan_field_value<'a>(value: &'a Value, field: &ValidationFieldPlan) -> Option<FieldValue<'a>> {
+    match value {
+        Value::Record(record) => record.get_symbol(field.symbol).map(FieldValue::Borrowed),
+        Value::Image(image) => image_field_value(image, field.name.as_ref()).map(FieldValue::Owned),
+        _ => None,
+    }
+}
+
+fn describe_primitive_failure(
+    value: &Value,
+    expected: PrimitiveMask,
+    path: &[PathSegment<'_>],
+) -> String {
+    format!(
+        "{}: expected {}, got {}",
+        format_schema_path(path),
+        expected.schema_name(),
+        schema_value_type_name(value)
+    )
 }
 
 #[derive(Clone, Copy)]
 enum PathSegment<'a> {
     Field(&'a str),
     Index(usize),
-}
-
-impl SchemaType {
-    fn from_schema_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "string" => Self::String,
-            "number" => Self::Number,
-            "integer" => Self::Integer,
-            "boolean" => Self::Boolean,
-            "array" => Self::Array,
-            "object" => Self::Object,
-            "null" => Self::Null,
-            _ => return None,
-        })
-    }
-
-    fn schema_name(self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Number => "number",
-            Self::Integer => "integer",
-            Self::Boolean => "boolean",
-            Self::Array => "array",
-            Self::Object => "object",
-            Self::Null => "null",
-        }
-    }
-
-    fn matches(self, value: &Value) -> bool {
-        match self {
-            Self::String => matches!(value, Value::String(_)),
-            Self::Number => matches!(value, Value::Number(number) if number.is_finite()),
-            Self::Integer => {
-                matches!(value, Value::Number(number) if number.is_finite() && number.fract() == 0.0)
-            }
-            Self::Boolean => matches!(value, Value::Bool(_)),
-            Self::Array => matches!(value, Value::List(_)),
-            Self::Object => matches!(value, Value::Record(_)),
-            Self::Null => matches!(value, Value::Null),
-        }
-    }
-}
-
-fn validate_compiled_schema_type(
-    value: &Value,
-    expected: SchemaType,
-    path: &[PathSegment<'_>],
-) -> Result<(), String> {
-    if expected.matches(value) {
-        return Ok(());
-    }
-    Err(format!(
-        "{}: expected {}, got {}",
-        format_schema_path(path),
-        expected.schema_name(),
-        schema_value_type_name(value)
-    ))
-}
-
-fn validate_compiled_schema_node<'a>(
-    value: &Value,
-    schema: &'a CompiledSchema,
-    path: &mut SmallVec<[PathSegment<'a>; 8]>,
-) -> Result<(), String> {
-    match &schema.kind {
-        CompiledSchemaKind::Any => Ok(()),
-        CompiledSchemaKind::Union(variants) => {
-            // Union matches if any variant matches. We report the
-            // first-variant error when nothing matches, which is
-            // consistent with how a reader would debug "this didn't
-            // fit any of the shapes I declared".
-            for variant in variants.iter() {
-                if validate_compiled_schema_node(value, variant, path).is_ok() {
-                    return Ok(());
-                }
-            }
-            Err(format!(
-                "{}: expected one of [{}], got {}",
-                format_schema_path(path),
-                variants
-                    .iter()
-                    .map(describe_compiled_schema)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                schema_value_type_name(value)
-            ))
-        }
-        CompiledSchemaKind::Type(expected) => validate_compiled_schema_type(value, *expected, path),
-        CompiledSchemaKind::Enum(allowed) => {
-            validate_compiled_schema_type(value, SchemaType::String, path)?;
-            if allowed.iter().any(|candidate| candidate == value) {
-                return Ok(());
-            }
-            let allowed = allowed
-                .iter()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "{}: expected one of [{allowed}], got {value}",
-                format_schema_path(path)
-            ))
-        }
-        CompiledSchemaKind::List(items_schema) => {
-            validate_compiled_schema_type(value, SchemaType::Array, path)?;
-            let Value::List(items) = value else {
-                return Ok(());
-            };
-            for (index, item) in items.iter().enumerate() {
-                path.push(PathSegment::Index(index));
-                validate_compiled_schema_node(item, items_schema, path)?;
-                path.pop();
-            }
-            Ok(())
-        }
-        CompiledSchemaKind::Object {
-            required,
-            properties,
-        } => {
-            validate_compiled_schema_type(value, SchemaType::Object, path)?;
-            let Value::Record(record) = value else {
-                return Ok(());
-            };
-            for field in required.iter() {
-                if record.get_symbol(field.symbol).is_none() {
-                    return Err(format!(
-                        "{}: missing required field `{}`",
-                        format_schema_path(path),
-                        field.name
-                    ));
-                }
-            }
-            for field in properties.iter() {
-                if let Some(field_value) = record.get_symbol(field.symbol) {
-                    path.push(PathSegment::Field(field.name.as_ref()));
-                    validate_compiled_schema_node(field_value, &field.schema, path)?;
-                    path.pop();
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Short human-readable label for a compiled schema, used in union
-/// error messages ("expected one of [string, null]").
-fn describe_compiled_schema(schema: &CompiledSchema) -> String {
-    match &schema.kind {
-        CompiledSchemaKind::Any => "any".to_string(),
-        CompiledSchemaKind::Type(kind) => kind.schema_name().to_string(),
-        CompiledSchemaKind::Enum(values) => format!(
-            "enum[{}]",
-            values
-                .iter()
-                .map(Value::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        CompiledSchemaKind::List(_) => "array".to_string(),
-        CompiledSchemaKind::Object { .. } => "object".to_string(),
-        CompiledSchemaKind::Union(variants) => variants
-            .iter()
-            .map(describe_compiled_schema)
-            .collect::<Vec<_>>()
-            .join(" | "),
-    }
 }
 
 fn format_schema_path(path: &[PathSegment<'_>]) -> String {
@@ -357,97 +427,6 @@ fn format_schema_path(path: &[PathSegment<'_>]) -> String {
     formatted
 }
 
-fn validate_schema_node(value: &Value, schema: &Value, path: &mut String) -> Result<(), String> {
-    let Some(schema_obj) = schema.as_record() else {
-        return Ok(());
-    };
-
-    if let Some(Value::List(variants)) = schema_obj.get("anyOf") {
-        for variant in variants.iter() {
-            let mut scratch = path.clone();
-            if validate_schema_node(value, variant, &mut scratch).is_ok() {
-                return Ok(());
-            }
-        }
-        return Err(format!(
-            "{path}: value does not match any variant of the union",
-        ));
-    }
-
-    if let Some(Value::String(expected)) = schema_obj.get("type")
-        && !matches_schema_type(value, expected)
-    {
-        return Err(format!(
-            "{path}: expected {expected}, got {}",
-            schema_value_type_name(value)
-        ));
-    }
-
-    if let Some(Value::List(allowed)) = schema_obj.get("enum")
-        && !allowed.iter().any(|candidate| candidate == value)
-    {
-        let allowed = allowed
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!("{path}: expected one of [{allowed}], got {value}"));
-    }
-
-    if let Some(Value::Record(properties)) = schema_obj.get("properties")
-        && matches!(value, Value::Record(_) | Value::Image(_))
-    {
-        if let Some(Value::List(required)) = schema_obj.get("required") {
-            for field in required.iter().filter_map(|field| match field {
-                Value::String(name) => Some(name.as_str()),
-                _ => None,
-            }) {
-                if schema_record_field(value, field).is_none() {
-                    return Err(format!("{path}: missing required field `{field}`"));
-                }
-            }
-        }
-
-        for entry in properties.entries.iter() {
-            if let Some(field_value) = schema_record_field(value, entry.name.as_ref()) {
-                let base_len = path.len();
-                path.push('.');
-                path.push_str(entry.name.as_ref());
-                validate_schema_node(&field_value, &entry.value, path)?;
-                path.truncate(base_len);
-            }
-        }
-    }
-
-    if let Some(items_schema) = schema_obj.get("items")
-        && let Value::List(items) = value
-    {
-        for (index, item) in items.iter().enumerate() {
-            let base_len = path.len();
-            write!(path, "[{index}]").expect("string writes should not fail");
-            validate_schema_node(item, items_schema, path)?;
-            path.truncate(base_len);
-        }
-    }
-
-    Ok(())
-}
-
-fn matches_schema_type(value: &Value, expected: &str) -> bool {
-    match expected {
-        "string" => matches!(value, Value::String(_)),
-        "number" => matches!(value, Value::Number(number) if number.is_finite()),
-        "integer" => {
-            matches!(value, Value::Number(number) if number.is_finite() && number.fract() == 0.0)
-        }
-        "boolean" => matches!(value, Value::Bool(_)),
-        "array" => matches!(value, Value::List(_) | Value::Projected(_)),
-        "object" => matches!(value, Value::Record(_) | Value::Image(_)),
-        "null" => matches!(value, Value::Null),
-        _ => true,
-    }
-}
-
 fn schema_value_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -464,28 +443,24 @@ fn schema_value_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn schema_record_field(value: &Value, field: &str) -> Option<Value> {
-    match value {
-        Value::Record(record) => record.get(field).cloned(),
-        Value::Image(image) => match field {
-            "type" => Some(Value::String("image".into())),
-            "id" => Some(Value::String(image.id.clone().into())),
-            "label" => Some(Value::String(image.label.clone().into())),
-            "size" => Some(Value::Number(image.size as f64)),
-            "width" => Some(
-                image
-                    .width
-                    .map(|width| Value::Number(width as f64))
-                    .unwrap_or(Value::Null),
-            ),
-            "height" => Some(
-                image
-                    .height
-                    .map(|height| Value::Number(height as f64))
-                    .unwrap_or(Value::Null),
-            ),
-            _ => None,
-        },
+fn image_field_value(image: &ImageValue, field: &str) -> Option<Value> {
+    match field {
+        "type" => Some(Value::String("image".into())),
+        "id" => Some(Value::String(image.id.clone().into())),
+        "label" => Some(Value::String(image.label.clone().into())),
+        "size" => Some(Value::Number(image.size as f64)),
+        "width" => Some(
+            image
+                .width
+                .map(|width| Value::Number(width as f64))
+                .unwrap_or(Value::Null),
+        ),
+        "height" => Some(
+            image
+                .height
+                .map(|height| Value::Number(height as f64))
+                .unwrap_or(Value::Null),
+        ),
         _ => None,
     }
 }

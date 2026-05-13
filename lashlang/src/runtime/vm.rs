@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::{FutureExt as _, future::join_all};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::ast::UnaryOp;
@@ -20,7 +21,9 @@ use crate::ast::UnaryOp;
 use super::host::{ToolHostCall, ToolHostError};
 use super::instruction::{NamedParallelCallBranch, ParallelCallBranch};
 use super::record::{Record, record_with_capacity};
-use super::schema::{execute_compiled_validate, execute_validate_builtin};
+use super::schema::{
+    ValidationPlan, compile_schema_value, execute_validate_builtin, execute_validation_plan,
+};
 use super::value::ProjectedValue;
 use super::{
     Builtin, COOPERATIVE_YIELD_INSTRUCTION_BUDGET, Chunk, ExecutionOutcome, ExecutionScratch,
@@ -29,12 +32,12 @@ use super::{
     add_assign_index_number, add_values, as_number, assign_path, error_value, eval_binary_values,
     eval_binary_values_async, eval_compare_values_async, eval_number_binary_values,
     eval_number_compare_values, eval_number_numeric_binary_value, eval_pure_expr, execute_builtin,
-    execute_compiled_format, execute_compiled_format_direct, execute_join_builtin_async,
-    execute_len_builtin, execute_len_direct, execute_push_builtin_async,
-    execute_range_builtin_async, is_async_handle_record, is_truthy, is_truthy_async,
-    iterable_values, materialize_projected_async, materialize_value, range_bounds_async,
-    read_field_direct, read_field_ref_direct, read_index_direct, success, unwrap_tool_result,
-    unwrap_type_value,
+    execute_compiled_format, execute_compiled_format_direct,
+    execute_compiled_format_one_number_direct, execute_join_builtin_async, execute_len_builtin,
+    execute_len_direct, execute_push_builtin_async, execute_range_builtin_async,
+    is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
+    materialize_projected_async, materialize_value, range_bounds_async, read_field_direct,
+    read_field_ref_direct, read_index_direct, success, unwrap_tool_result, unwrap_type_value,
 };
 
 #[derive(Clone)]
@@ -206,6 +209,7 @@ pub(crate) struct Vm<'a, H> {
     assigned: Option<Vec<bool>>,
     iter_stack: Vec<IterState>,
     profile: Option<ProfileAccumulator>,
+    validation_plans: FxHashMap<usize, (Arc<Record>, ValidationPlan)>,
 }
 
 enum VmStep {
@@ -242,6 +246,13 @@ enum AddAssignRight {
     Value(Value),
 }
 
+fn validation_plan_cache_entry(schema: &Value) -> Option<(usize, Arc<Record>)> {
+    match schema {
+        Value::Record(record) => Some((Arc::as_ptr(record) as usize, record.clone())),
+        _ => None,
+    }
+}
+
 impl<'a, H: ToolHost> Vm<'a, H> {
     pub(crate) fn new(
         chunk: &'a Chunk,
@@ -260,6 +271,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             assigned: in_parallel_branch.then(|| vec![false; chunk.slot_names.len()]),
             iter_stack: Vec::new(),
             profile: None,
+            validation_plans: FxHashMap::default(),
         }
     }
 
@@ -281,11 +293,31 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             assigned: in_parallel_branch.then(|| vec![false; chunk.slot_names.len()]),
             iter_stack: std::mem::take(&mut scratch.iter_stack),
             profile: None,
+            validation_plans: FxHashMap::default(),
         }
     }
 
     pub(crate) fn enable_profile(&mut self) {
         self.profile = Some(ProfileAccumulator::default());
+    }
+
+    fn execute_dynamic_validate(
+        &mut self,
+        value: Value,
+        schema: &Value,
+    ) -> Result<Value, RuntimeError> {
+        let Some(schema) = unwrap_type_value(schema) else {
+            return execute_validate_builtin(value, schema);
+        };
+        let Some((key, schema_record)) = validation_plan_cache_entry(schema) else {
+            let plan = compile_schema_value(schema);
+            return execute_validation_plan(value, &plan);
+        };
+        let plan = self
+            .validation_plans
+            .entry(key)
+            .or_insert_with(|| (schema_record, compile_schema_value(schema)));
+        execute_validation_plan(value, &plan.1)
     }
 
     pub(crate) async fn run(&mut self) -> Result<ExecutionOutcome, RuntimeError> {
@@ -489,6 +521,60 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 };
                 self.stack.push(value);
             }
+            Instruction::SlotNumberBinary { slot, op, right } => {
+                let value = match self.load_slot(slot)? {
+                    Value::Number(left) => {
+                        Value::Number(eval_number_numeric_binary_value(*left, op, right))
+                    }
+                    left => {
+                        eval_binary_values_async(left.clone(), op, Value::Number(right)).await?
+                    }
+                };
+                self.stack.push(value);
+            }
+            Instruction::SlotNumberCompare { slot, op, right } => {
+                let value = match self.load_slot(slot)? {
+                    Value::Number(left) => {
+                        Value::Bool(eval_number_compare_values(*left, op, right))
+                    }
+                    left => Value::Bool(
+                        eval_compare_values_async(left.clone(), op, Value::Number(right)).await?,
+                    ),
+                };
+                self.stack.push(value);
+            }
+            Instruction::SlotNumberBinaryCompare {
+                slot,
+                binary_op,
+                binary_right,
+                compare_op,
+                compare_right,
+            } => {
+                let value = match self.load_slot(slot)? {
+                    Value::Number(left) => {
+                        let value =
+                            eval_number_numeric_binary_value(*left, binary_op, binary_right);
+                        Value::Bool(eval_number_compare_values(value, compare_op, compare_right))
+                    }
+                    left => {
+                        let value = eval_binary_values_async(
+                            left.clone(),
+                            binary_op,
+                            Value::Number(binary_right),
+                        )
+                        .await?;
+                        Value::Bool(
+                            eval_compare_values_async(
+                                value,
+                                compare_op,
+                                Value::Number(compare_right),
+                            )
+                            .await?,
+                        )
+                    }
+                };
+                self.stack.push(value);
+            }
             Instruction::ToBool => {
                 let value = self.pop_stack()?;
                 let truthy = match &value {
@@ -626,10 +712,9 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 let schema = self.pop_stack()?;
                 let value = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_validate_builtin(
-                    materialize_projected_async(value).await,
-                    &materialize_projected_async(schema).await,
-                )?;
+                let schema = materialize_projected_async(schema).await;
+                let value = self
+                    .execute_dynamic_validate(materialize_projected_async(value).await, &schema)?;
                 if let Some(start) = start {
                     self.record_builtin_profile(Builtin::Validate, start.elapsed().as_nanos());
                 }
@@ -638,7 +723,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             Instruction::ValidateCompiled(schema) => {
                 let value = self.pop_stack()?;
                 let start = self.profile.as_ref().map(|_| Instant::now());
-                let value = execute_compiled_validate(
+                let value = execute_validation_plan(
                     materialize_projected_async(value).await,
                     &self.chunk.compiled_schemas[schema],
                 )?;
@@ -719,6 +804,57 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
                 }
                 self.stack.truncate(self.stack.len() - template.argc);
+                self.stack.push(value);
+            }
+            Instruction::FormatCompiledSlotNumber { template, slot } => {
+                let template = &self.chunk.format_templates[template];
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = match self.load_slot(slot)? {
+                    Value::Number(value) => {
+                        execute_compiled_format_one_number_direct(template, *value)?
+                    }
+                    value => {
+                        if matches!(value, Value::Projected(_)) {
+                            execute_compiled_format(template, std::slice::from_ref(value)).await?
+                        } else {
+                            execute_compiled_format_direct(template, std::slice::from_ref(value))?
+                        }
+                    }
+                };
+                let value = Value::String(value.into());
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
+                }
+                self.stack.push(value);
+            }
+            Instruction::FormatCompiledSlotNumberBinary {
+                template,
+                slot,
+                op,
+                right,
+            } => {
+                let template = &self.chunk.format_templates[template];
+                let start = self.profile.as_ref().map(|_| Instant::now());
+                let value = match self.load_slot(slot)? {
+                    Value::Number(left) => execute_compiled_format_one_number_direct(
+                        template,
+                        eval_number_numeric_binary_value(*left, op, right),
+                    )?,
+                    left => {
+                        let value =
+                            eval_binary_values_async(left.clone(), op, Value::Number(right))
+                                .await?;
+                        if matches!(value, Value::Projected(_)) {
+                            execute_compiled_format(template, &[value]).await?
+                        } else {
+                            execute_compiled_format_direct(template, &[value])?
+                        }
+                    }
+                };
+                let value = Value::String(value.into());
+                if let Some(start) = start {
+                    self.record_builtin_profile(Builtin::Format, start.elapsed().as_nanos());
+                }
                 self.stack.push(value);
             }
             Instruction::AddAssign(slot) => {
@@ -817,6 +953,20 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 self.record_assignment(slot);
                 self.last_value = Some(value);
             }
+            Instruction::AddAssignIndexSlotNumber { slot, index, right } => {
+                let index = self.load_slot(index)?.clone();
+                let slot_name = &self.chunk.slot_names[slot];
+                self.slots.ensure_assignable(slot, &self.chunk.slot_names)?;
+                let root =
+                    self.slots
+                        .get_mut(slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: slot_name.text.to_string(),
+                        })?;
+                let value = add_assign_index_number(root, &index, right)?;
+                self.record_assignment(slot);
+                self.last_value = Some(value);
+            }
             Instruction::AppendAssign(slot) => {
                 let item = self.pop_stack()?;
                 let slot_name = &self.chunk.slot_names[slot];
@@ -868,10 +1018,14 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             Instruction::BeginRangeIter { binding, argc } => {
                 let start_index = self.stack_drain_start(argc)?;
-                let (start, end) = range_bounds_async(&self.stack[start_index..]).await?;
+                let (start, end, step) = range_bounds_async(&self.stack[start_index..]).await?;
                 self.stack.truncate(start_index);
                 self.iter_stack.push(IterState {
-                    cursor: IterCursor::Range { next: start, end },
+                    cursor: IterCursor::Range {
+                        next: start,
+                        end,
+                        step,
+                    },
                     binding,
                     restore: self.slots.capture_temporary(binding),
                 });
@@ -1874,7 +2028,7 @@ pub(crate) struct IterState {
 
 enum IterCursor {
     List { values: ListValue, index: usize },
-    Range { next: i64, end: i64 },
+    Range { next: i64, end: i64, step: i64 },
 }
 
 impl IterCursor {
@@ -1885,12 +2039,12 @@ impl IterCursor {
                 *index += 1;
                 Some(value)
             }
-            Self::Range { next, end } => {
-                if *next >= *end {
+            Self::Range { next, end, step } => {
+                if (*step > 0 && *next >= *end) || (*step < 0 && *next <= *end) {
                     return None;
                 }
                 let value = *next;
-                *next += 1;
+                *next = (*next).saturating_add(*step);
                 Some(Value::Number(value as f64))
             }
         }

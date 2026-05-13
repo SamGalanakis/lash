@@ -457,6 +457,9 @@ impl Parser {
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 self.bump();
+                if name == "start" && matches!(self.peek_kind(), TokenKind::Call) {
+                    return Ok(Expr::StartToolCall(self.parse_call_expr()?));
+                }
                 if name == "Type" && matches!(self.peek_kind(), TokenKind::LBrace) {
                     let ty = self.parse_type_object()?;
                     return Ok(Expr::TypeLiteral(Box::new(ty)));
@@ -489,10 +492,6 @@ impl Parser {
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
             TokenKind::Call => Ok(Expr::ToolCall(self.parse_call_expr()?)),
-            TokenKind::Start => {
-                self.bump();
-                Ok(Expr::StartToolCall(self.parse_call_expr()?))
-            }
             TokenKind::Parallel => {
                 self.bump();
                 let branches = self.parse_parallel_branches()?;
@@ -878,7 +877,6 @@ fn keyword_key_name(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::For => "for",
         TokenKind::In => "in",
         TokenKind::Parallel => "parallel",
-        TokenKind::Start => "start",
         TokenKind::Await => "await",
         TokenKind::Cancel => "cancel",
         TokenKind::Submit => "submit",
@@ -907,7 +905,6 @@ fn token_can_start_expr(kind: &TokenKind) -> bool {
             | TokenKind::LBracket
             | TokenKind::LBrace
             | TokenKind::Call
-            | TokenKind::Start
             | TokenKind::Parallel
             | TokenKind::Await
             | TokenKind::Minus
@@ -952,7 +949,6 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::For => "`for`".to_string(),
         TokenKind::In => "`in`".to_string(),
         TokenKind::Parallel => "`parallel`".to_string(),
-        TokenKind::Start => "`start`".to_string(),
         TokenKind::Await => "`await`".to_string(),
         TokenKind::Cancel => "`cancel`".to_string(),
         TokenKind::Submit => "`submit`".to_string(),
@@ -1787,7 +1783,6 @@ mod tests {
             TokenKind::For,
             TokenKind::In,
             TokenKind::Parallel,
-            TokenKind::Start,
             TokenKind::Await,
             TokenKind::Cancel,
             TokenKind::Submit,

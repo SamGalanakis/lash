@@ -422,6 +422,33 @@ pub(crate) fn execute_compiled_format_direct(
     Ok(output)
 }
 
+pub(crate) fn execute_compiled_format_one_number_direct(
+    template: &CompiledFormatTemplate,
+    value: f64,
+) -> Result<String, RuntimeError> {
+    if let Some(message) = &template.error {
+        return Err(RuntimeError::ValueError {
+            message: message.clone(),
+        });
+    }
+
+    let mut output = String::with_capacity(template.min_capacity);
+    for part in template.parts.iter() {
+        match part {
+            CompiledFormatPart::Literal(literal) => output.push_str(literal),
+            CompiledFormatPart::Arg(0) => {
+                write_number(&mut output, value).expect("string writes should not fail");
+            }
+            CompiledFormatPart::Arg(slot) => {
+                return Err(RuntimeError::ValueError {
+                    message: format!("format slot `{slot}` is out of range"),
+                });
+            }
+        }
+    }
+    Ok(output)
+}
+
 pub(crate) fn clamp_slice_bounds(
     start: Option<isize>,
     end: Option<isize>,

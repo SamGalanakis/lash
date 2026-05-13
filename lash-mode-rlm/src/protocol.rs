@@ -104,7 +104,8 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `len(x)` — length of string/list/record (0 for null); use `image.size` for images
 - `empty(x)` — true if length is 0
 - `slice(s, start, end)` — substring or sublist
-- `range(end)` / `range(start, end)` — integer list, end-exclusive
+- `range(end)` / `range(start, end)` / `range(start, end, step)` — integer list, end-exclusive; positive or negative `step`, never `0`
+- `ceil_div(a, b)` / `floor_div(a, b)` — integer division helpers for chunk/count math; divisor must not be `0`
 - `push(list, item)` — new list with one item appended
 - `split(s, sep)` / `join(list, sep)` — string split/join
 - `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
@@ -125,7 +126,8 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 - `len(x)` — length of string/list/record (0 for null)
 - `empty(x)` — true if length is 0
 - `slice(s, start, end)` — substring or sublist
-- `range(end)` / `range(start, end)` — integer list, end-exclusive
+- `range(end)` / `range(start, end)` / `range(start, end, step)` — integer list, end-exclusive; positive or negative `step`, never `0`
+- `ceil_div(a, b)` / `floor_div(a, b)` — integer division helpers for chunk/count math; divisor must not be `0`
 - `push(list, item)` — new list with one item appended
 - `split(s, sep)` / `join(list, sep)` — string split/join
 - `find(s, needle, start?)` — zero-based character index of the first literal match, or `null`; `start` defaults to `0` and is a non-negative character index; an empty `needle` returns `start` when it is in bounds
