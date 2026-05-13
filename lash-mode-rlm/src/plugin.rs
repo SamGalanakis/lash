@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
 use lash_core::llm::types::{
@@ -256,6 +257,14 @@ impl RlmModeSession {
         RlmProjectionExtension::prompt_contributions_for(&bindings)
     }
 
+    async fn protected_projected_binding_names(&self) -> BTreeSet<String> {
+        self.session_projected_bindings
+            .lock()
+            .await
+            .names()
+            .collect()
+    }
+
     fn soft_warn_directives(
         &self,
         ctx: CheckpointHookContext,
@@ -309,18 +318,17 @@ impl ModeSessionPlugin for RlmModeSession {
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
-        let read_view = state.read_view();
-        let projected_globals = crate::project_rlm_globals_from_events(read_view.active_events());
+        let protected_names = self.protected_projected_binding_names().await;
         if let Some(snapshot) = state.execution_state_snapshot().map(|bytes| bytes.to_vec()) {
             execution.restore_execution_state(&snapshot)?;
-            execution.prune_projected_globals(&projected_globals);
+            execution.prune_protected_globals(&protected_names);
         }
         for event in state.read_view().active_events() {
             if let lash_core::SessionEventRecord::Mode(event) = event
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, &projected_globals)?;
+                execution.patch_globals(&patch, &protected_names)?;
             }
         }
         Ok(())
@@ -335,8 +343,8 @@ impl ModeSessionPlugin for RlmModeSession {
         let execution = execution
             .as_mut()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
-        let projected_globals = serde_json::Map::new();
-        execution.prune_projected_globals(&projected_globals);
+        let protected_names = self.protected_projected_binding_names().await;
+        execution.prune_protected_globals(&protected_names);
         for node in nodes {
             if let lash_core::SessionAppendNode::Event {
                 event: lash_core::SessionEventRecord::Mode(event),
@@ -344,7 +352,7 @@ impl ModeSessionPlugin for RlmModeSession {
                 && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
                     crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, &projected_globals)?;
+                execution.patch_globals(&patch, &protected_names)?;
             }
         }
         Ok(())
@@ -476,6 +484,17 @@ impl ModeSessionPlugin for RlmModeSession {
         let args = forced_continue_as_args(&ctx, request, threshold, observed_tokens).await?;
         let seed = lash_rlm_types::classify_seed(&args)
             .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
+        let referenced_handles =
+            crate::control_tools::collect_seed_async_handle_ids(args.get("seed"));
+        let referenced_handles_vec = referenced_handles.iter().cloned().collect::<Vec<_>>();
+        ctx.host
+            .validate_async_handles_visible(&ctx.session_id, &referenced_handles_vec)
+            .await
+            .map_err(|err| {
+                PluginError::Session(format!(
+                    "forced continue_as async handle validation failed: {err}"
+                ))
+            })?;
         let task = args
             .get("task")
             .and_then(serde_json::Value::as_str)
@@ -523,6 +542,26 @@ impl ModeSessionPlugin for RlmModeSession {
         )
         .await
         .map_err(PluginError::Session)?;
+        if let Err(err) = ctx
+            .host
+            .transfer_async_handles(&ctx.session_id, &session_id, &referenced_handles_vec)
+            .await
+        {
+            let _ = ctx.host.close_session(&session_id).await;
+            return Err(PluginError::Session(format!(
+                "forced continue_as async handle transfer failed: {err}"
+            )));
+        }
+        if let Err(err) = ctx
+            .host
+            .cancel_unreferenced_async_handles(&ctx.session_id, &referenced_handles_vec)
+            .await
+        {
+            let _ = ctx.host.close_session(&session_id).await;
+            return Err(PluginError::Session(format!(
+                "forced continue_as async handle cleanup failed after successor creation: {err}"
+            )));
+        }
         Ok(Some(ModeLlmCallAction::Handoff { session_id }))
     }
 
@@ -647,7 +686,7 @@ async fn forced_continue_as_args(
 
 fn forced_continue_as_instruction(threshold: usize, observed_tokens: usize) -> String {
     format!(
-        "Context budget is above the forced continuation threshold ({observed_tokens} observed, threshold {threshold}). Produce fresh-context continuation arguments as JSON matching the provided schema. Set out the task at hand in `task`. Put only necessary state in `seed`. Leave bulky logs, transcripts, raw command output, and repeated context behind. Prefer variable names, file paths, projected references, and compact summaries over copying large values. Omit `seed` when no extra state is needed."
+        "Context budget is above the forced continuation threshold ({observed_tokens} observed, threshold {threshold}). Produce fresh-context continuation arguments as JSON matching the provided schema. Set out the task at hand in `task`. Put only necessary state in `seed`, including only live async handles the successor must await. Live handles omitted from `seed` are not carried forward. Leave bulky logs, transcripts, raw command output, and repeated context behind. Prefer variable names, file paths, projected references, and compact summaries over copying large values. Omit `seed` when no extra state is needed."
     )
 }
 

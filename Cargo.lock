@@ -383,6 +383,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-oolong"
+version = "0.2.118"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dirs 6.0.0",
+ "dotenvy",
+ "lash",
+ "lash-cli",
+ "lash-core",
+ "lash-export",
+ "lash-llm-tools",
+ "lash-mode-rlm",
+ "lash-provider-openai",
+ "lash-providers-builtin",
+ "lash-rlm-types",
+ "lash-sqlite-store",
+ "lash-subagents",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bench-swebench"
 version = "0.2.119"
 dependencies = [
@@ -2702,6 +2729,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

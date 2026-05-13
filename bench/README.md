@@ -10,4 +10,5 @@
 - [continual-learning-bench](./continual-learning-bench/README.md): Thin local wrapper for running Lash as a cached system inside `pgasawa/continual-learning-bench`.
 - [longmemeval-rlm](./longmemeval-rlm/README.md): Native Rust LongMemEval harness that evaluates Lash as an RLM system over the full structured history, closer to `rawwerks/longmemeval-rlm`.
 - [longbench-v2](./longbench-v2/README.md): LongBench-style benchmark harness for running Lash over LongBench/LongBench-v2 style datasets and exporting official-eval-friendly prediction files.
+- [oolong](./oolong/README.md): Native Rust OOLONG harness that evaluates Lash RLM on long-context aggregation tasks, defaulting to the RLM-paper `trec_coarse` 131K / 50-task setup.
 - [longcot](./longcot/README.md): Native Rust LongCoT harness — 2,500 long-horizon chain-of-thought problems (logic / cs / chemistry / chess / math) run through Lash's RLM mode. Defaults to GPT-5.2.

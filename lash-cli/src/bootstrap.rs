@@ -130,13 +130,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
     plugin_stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
     plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
-    plugin_stack.push(Arc::new(
-        lash_mode_standard::BuiltinStandardModePluginFactory,
-    ));
-    plugin_stack.push(Arc::new(
-        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-    ));
-    plugin_stack.push(Arc::new(LlmToolsPluginFactory));
+    plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     plugin_stack.push(Arc::new(
         SubagentsPluginFactory::new(capability_registry, Arc::clone(&subagent_host))
             .with_session_spec(SessionSpec::inherit()),
@@ -765,6 +759,14 @@ mod tests {
         .into_iter()
         .map(|factory| factory.id())
         .collect()
+    }
+
+    #[test]
+    fn cli_surface_stack_does_not_install_mode_factories() {
+        let ids = plugin_factory_ids_for_autonomous(false);
+
+        assert!(!ids.contains(&"mode_standard"));
+        assert!(!ids.contains(&"mode_rlm"));
     }
 
     #[test]

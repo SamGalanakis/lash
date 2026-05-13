@@ -139,16 +139,22 @@ impl PluginFactory for SubagentsPluginFactory {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
 
     use crate::shared::{build_session_policy, build_spawn_create_request};
     use async_trait::async_trait;
-    use lash_core::PersistedSessionState;
+    use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
     use lash_core::plugin::runtime_host::{
         DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
         SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
     };
     use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
+    use lash_core::{
+        BackgroundRuntimeHost, ExecutionMode, LashRuntime, PersistedSessionState, PluginFactory,
+        PluginHost, RuntimeCoreConfig, RuntimeServices, SessionPolicy, TokioSessionTaskExecutor,
+    };
     use lash_core::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
+    use lash_mode_rlm::RlmTurnInputExt;
     use serde_json::json;
 
     #[test]
@@ -374,6 +380,202 @@ mod tests {
             "explore runs in RLM so typed output uses native submit"
         );
         assert!(structured_request.tool_access.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rlm_spawn_seed_is_visible_to_child_executor_and_prompt() {
+        let (outcome, prompt) = run_seed_probe(
+            r#"```lashlang
+result = (call spawn_agent {
+  agent_name: "seed_probe",
+  capability: "default",
+  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  seed: { chunk: ["a", "b"] },
+  output: Type { len: int }
+})?
+submit result
+```"#,
+            TurnInput::text("spawn a child with a seeded chunk"),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+                value: json!({ "len": 2 })
+            })
+        );
+        assert!(
+            prompt.contains("- `chunk`:"),
+            "child prompt did not advertise seeded `chunk` variable:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rlm_spawn_seed_derived_from_projected_binding_is_visible_to_child_prompt() {
+        let input = TurnInput::text("spawn a child with a chunk from projected input")
+            .rlm_project(
+                lash_mode_rlm::RlmProjectedBindings::new()
+                    .bind_json(
+                        "input",
+                        json!({
+                            "context": "Header\nDate: Jan 01, 2026 || Instance: A\nDate: Jan 02, 2026 || Instance: B\n",
+                        }),
+                    )
+                    .expect("bind input"),
+            )
+            .expect("project input");
+        let (outcome, prompt) = run_seed_probe(
+            r#"```lashlang
+ctx = to_string(input.context)
+lines = split(ctx, "\n")
+data = []
+for line in lines {
+  if starts_with(line, "Date: ") {
+    data = push(data, line)
+  }
+}
+chunk = slice(data, 0, 2)
+result = (call spawn_agent {
+  agent_name: "seed_probe",
+  capability: "default",
+  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+  seed: { chunk: chunk },
+  output: Type { len: int }
+})?
+submit result
+```"#,
+            input,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            lash_core::TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue {
+                value: json!({ "len": 2 })
+            })
+        );
+        assert!(
+            prompt.contains("- `chunk`:"),
+            "child prompt did not advertise projected-derived seeded `chunk` variable:\n{prompt}"
+        );
+    }
+
+    async fn run_seed_probe(
+        parent_response: &'static str,
+        input: TurnInput,
+    ) -> (lash_core::TurnOutcome, String) {
+        let captured_child_prompt: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&captured_child_prompt);
+        let provider = lash_core::testing::TestProvider::builder()
+            .kind("seed-probe")
+            .default_model("seed-probe-model")
+            .complete(move |request| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    let prompt = request_text(&request);
+                    let is_child = prompt.contains("Subagent agent_name: seed_probe");
+                    if is_child {
+                        *captured.lock().expect("captured prompt") = Some(prompt);
+                        Ok(LlmResponse {
+                            full_text: "```lashlang\nsubmit { len: len(chunk) }\n```".to_string(),
+                            parts: vec![LlmOutputPart::Text {
+                                text: "```lashlang\nsubmit { len: len(chunk) }\n```".to_string(),
+                                response_meta: None,
+                            }],
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(LlmResponse {
+                            full_text: parent_response.to_string(),
+                            parts: vec![LlmOutputPart::Text {
+                                text: parent_response.to_string(),
+                                response_meta: None,
+                            }],
+                            ..Default::default()
+                        })
+                    }
+                }
+            })
+            .build();
+
+        let subagent_host = Arc::new(LocalSubagentHost::default());
+        let factories: Vec<Arc<dyn PluginFactory>> = vec![
+            Arc::new(lash_mode_rlm::BuiltinRlmModePluginFactory::default()),
+            Arc::new(SubagentsPluginFactory::new(
+                Arc::new(
+                    CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
+                        "default",
+                        lash_core::SessionSpec::inherit().mode(ExecutionMode::new("rlm")),
+                    ))),
+                ),
+                subagent_host,
+            )),
+        ];
+        let plugins = PluginHost::new(factories)
+            .with_background_tasks()
+            .build_session("root", ExecutionMode::new("rlm"), None, None)
+            .expect("plugin session");
+        let host = BackgroundRuntimeHost::new(
+            lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+            Arc::new(TokioSessionTaskExecutor::default()),
+        );
+        let policy = SessionPolicy {
+            provider: provider.into_handle(),
+            model: "seed-probe-model".to_string(),
+            execution_mode: ExecutionMode::new("rlm"),
+            max_context_tokens: Some(64_000),
+            max_turns: Some(4),
+            ..SessionPolicy::default()
+        };
+        let mut runtime = LashRuntime::from_background_state(
+            policy.clone(),
+            host,
+            RuntimeServices::new(plugins),
+            PersistedSessionState {
+                session_id: "root".to_string(),
+                policy,
+                ..PersistedSessionState::default()
+            },
+        )
+        .await
+        .expect("runtime");
+
+        let turn = runtime
+            .run_turn_assembled(input, tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("turn");
+
+        let prompt = captured_child_prompt
+            .lock()
+            .expect("captured prompt")
+            .clone()
+            .expect("child prompt was captured");
+        (turn.outcome, prompt)
+    }
+
+    fn request_text(request: &LlmRequest) -> String {
+        let mut out = String::new();
+        for message in &request.messages {
+            let role = match message.role {
+                LlmRole::System => "system",
+                LlmRole::User => "user",
+                LlmRole::Assistant => "assistant",
+            };
+            out.push_str(role);
+            out.push('\n');
+            for block in message.blocks.iter() {
+                match block {
+                    LlmContentBlock::Text { text, .. } => out.push_str(text),
+                    LlmContentBlock::ToolCall { input_json, .. } => out.push_str(input_json),
+                    LlmContentBlock::ToolResult { content, .. } => out.push_str(content),
+                    LlmContentBlock::Reasoning { text, .. } => out.push_str(text),
+                    LlmContentBlock::Image { .. } => {}
+                }
+                out.push('\n');
+            }
+        }
+        out
     }
 
     #[tokio::test]

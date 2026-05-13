@@ -994,7 +994,7 @@ fn build_plugin_session(
         TierExecutionMode::Inherit,
     ))));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-    factories.push(Arc::new(LlmToolsPluginFactory));
+    factories.push(Arc::new(LlmToolsPluginFactory::default()));
     factories.push(Arc::new(
         SubagentsPluginFactory::new(registry, subagent_host)
             .with_session_spec(SessionSpec::inherit()),

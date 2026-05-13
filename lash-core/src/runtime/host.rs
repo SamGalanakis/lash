@@ -128,6 +128,20 @@ pub trait SessionTaskExecutor: Send + Sync {
 
     /// Look up a single task's metadata.
     async fn get_managed(&self, session_id: &str, task_id: &str) -> Option<ManagedTaskStatus>;
+
+    /// Move still-registered tasks from one session scope to another.
+    async fn transfer_managed(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        task_ids: &[String],
+    ) -> Result<(), PluginError>;
+
+    /// Cancel every live task in a session scope and return updated snapshots.
+    async fn cancel_all_managed(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ManagedTaskStatus>, PluginError>;
 }
 
 /// Tokio-backed session task executor shared across runtime sessions.
@@ -356,6 +370,76 @@ impl SessionTaskExecutor for TokioSessionTaskExecutor {
             .get(session_id)
             .and_then(|tasks| tasks.get(task_id))
             .map(|record| record.status.clone())
+    }
+
+    async fn transfer_managed(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        task_ids: &[String],
+    ) -> Result<(), PluginError> {
+        if from_session_id == to_session_id || task_ids.is_empty() {
+            return Ok(());
+        }
+        let mut managed = self.managed.lock().await;
+        for task_id in task_ids {
+            if managed
+                .get(to_session_id)
+                .and_then(|tasks| tasks.get(task_id))
+                .is_some_and(|record| !record.status.run_state.is_terminal())
+            {
+                return Err(PluginError::Session(format!(
+                    "background task `{task_id}` already exists in successor session"
+                )));
+            }
+        }
+
+        let mut moved = Vec::new();
+        if let Some(from_tasks) = managed.get_mut(from_session_id) {
+            for task_id in task_ids {
+                if let Some(record) = from_tasks.remove(task_id) {
+                    moved.push((task_id.clone(), record));
+                }
+            }
+            if from_tasks.is_empty() {
+                managed.remove(from_session_id);
+            }
+        }
+        if moved.is_empty() {
+            return Ok(());
+        }
+        let to_tasks = managed.entry(to_session_id.to_string()).or_default();
+        for (task_id, record) in moved {
+            to_tasks.insert(task_id, record);
+        }
+        Ok(())
+    }
+
+    async fn cancel_all_managed(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ManagedTaskStatus>, PluginError> {
+        let live_task_ids = {
+            let managed = self.managed.lock().await;
+            managed
+                .get(session_id)
+                .map(|tasks| {
+                    tasks
+                        .values()
+                        .filter(|record| !record.status.run_state.is_terminal())
+                        .map(|record| record.status.id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let mut out = Vec::new();
+        for task_id in live_task_ids {
+            self.cancel_managed(session_id, &task_id).await?;
+            if let Some(status) = self.get_managed(session_id, &task_id).await {
+                out.push(status);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -618,5 +702,54 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let status = executor.get_managed("s1", "sub").await.expect("status");
         assert_eq!(status.run_state, ManagedRunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn transfer_managed_moves_live_task_visibility() {
+        let executor = TokioSessionTaskExecutor::default();
+        executor
+            .register_external("s1", spec("monitor:one", ManagedTaskKind::Monitor), None)
+            .await
+            .expect("register");
+
+        executor
+            .transfer_managed("s1", "s2", &["monitor:one".to_string()])
+            .await
+            .expect("transfer");
+
+        assert!(executor.list_managed("s1").await.is_empty());
+        let tasks = executor.list_managed("s2").await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "monitor:one");
+        assert_eq!(tasks[0].run_state, ManagedRunState::Running);
+    }
+
+    #[tokio::test]
+    async fn cancel_all_managed_cancels_each_live_task() {
+        let executor = TokioSessionTaskExecutor::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        for id in ["a", "b"] {
+            let calls_inner = Arc::clone(&calls);
+            let cancel: ManagedTaskCancel = Arc::new(move || {
+                let calls = Arc::clone(&calls_inner);
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+            executor
+                .register_external("s1", spec(id, ManagedTaskKind::Other), Some(cancel))
+                .await
+                .expect("register");
+        }
+
+        let statuses = executor.cancel_all_managed("s1").await.expect("cancel all");
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.run_state == ManagedRunState::Cancelled)
+        );
     }
 }

@@ -152,6 +152,34 @@ impl ToolTaskControl {
             .transition_background_task_live_state(session_id, task_id, run_state)
             .await;
     }
+
+    pub async fn validate_async_handles_visible(
+        &self,
+        handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        self.host
+            .validate_async_handles_visible(&self.session_id, handle_ids)
+            .await
+    }
+
+    pub async fn transfer_async_handles_to_session(
+        &self,
+        successor_session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        self.host
+            .transfer_async_handles(&self.session_id, successor_session_id, handle_ids)
+            .await
+    }
+
+    pub async fn cancel_unreferenced_async_handles(
+        &self,
+        keep_handle_ids: &[String],
+    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+        self.host
+            .cancel_unreferenced_async_handles(&self.session_id, keep_handle_ids)
+            .await
+    }
 }
 
 impl ToolContext {

@@ -242,6 +242,11 @@ impl ManagedSessionCapability {
             )));
         }
         self.registry.lock().await.remove(session_id);
+        {
+            let mut continuations = self.active_handoff_continuations.lock().await;
+            continuations.remove(session_id);
+            continuations.retain(|_, successor| successor != session_id);
+        }
         usage
             .child_sources
             .lock()

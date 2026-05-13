@@ -17,3 +17,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
+tokio-util = { workspace = true, features = ["rt"] }

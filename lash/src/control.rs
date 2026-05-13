@@ -279,6 +279,17 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
+    async fn cancel_all_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+        let writer = self.runtime.writer();
+        let runtime = writer.lock().await;
+        let session_id = runtime.session_id().to_string();
+        let manager = runtime.session_manager()?;
+        manager
+            .cancel_all_background_tasks(&session_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn snapshot_execution_state(&self) -> Result<Option<Vec<u8>>> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
@@ -611,6 +622,10 @@ impl BackgroundTasks {
     pub async fn cancel(&self, task_id: &str) -> Result<ManagedTaskStatus> {
         self.control.cancel_background_task(task_id).await
     }
+
+    pub async fn cancel_all(&self) -> Result<Vec<ManagedTaskStatus>> {
+        self.control.cancel_all_background_tasks().await
+    }
 }
 
 #[derive(Clone)]
@@ -671,6 +686,10 @@ impl StateControl {
 
     pub async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
         self.control.cancel_background_task(task_id).await
+    }
+
+    pub async fn cancel_all_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+        self.control.cancel_all_background_tasks().await
     }
 
     pub async fn snapshot_execution(&self) -> Result<Option<Vec<u8>>> {

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 impl BackgroundTaskCapability {
@@ -202,6 +203,145 @@ impl BackgroundTaskCapability {
             .await
             .unwrap_or(status);
         Ok(updated)
+    }
+
+    pub(in crate::runtime::session_manager) async fn cancel_all_background_tasks(
+        &self,
+        current: &CurrentSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        session_id: &str,
+    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+        let tasks = self.list_background_tasks(current, session_id).await?;
+        let mut cancelled = Vec::new();
+        for task in tasks {
+            if task.run_state.is_terminal() {
+                continue;
+            }
+            cancelled.push(
+                self.cancel_background_task(current, Arc::clone(&host), session_id, &task.id)
+                    .await?,
+            );
+        }
+        Ok(cancelled)
+    }
+
+    pub(in crate::runtime::session_manager) async fn validate_async_handles_visible(
+        &self,
+        current: &CurrentSessionCapability,
+        managed: &ManagedSessionCapability,
+        session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), crate::PluginError> {
+        if handle_ids.is_empty() {
+            return Ok(());
+        }
+        let requested = handle_ids.iter().cloned().collect::<HashSet<_>>();
+        let mut visible = HashSet::new();
+        if let Some(map) = self
+            .async_handle_map_for_session(current, managed, session_id)
+            .await
+        {
+            visible.extend(crate::session::async_handles::live_session_async_handle_ids(&map));
+        }
+        if let Some(executor) = &current.host.session_task_executor {
+            let scope_key = self.background_scope_key(session_id);
+            for task in executor.list_managed(&scope_key).await {
+                if !task.run_state.is_terminal() {
+                    visible.insert(task.id);
+                }
+            }
+        }
+        if let Some(missing) = requested.iter().find(|id| !visible.contains(*id)) {
+            return Err(crate::PluginError::Session(format!(
+                "async handle `{missing}` is not live or visible in this session"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(in crate::runtime::session_manager) async fn transfer_async_handles(
+        &self,
+        current: &CurrentSessionCapability,
+        managed: &ManagedSessionCapability,
+        from_session_id: &str,
+        to_session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), crate::PluginError> {
+        if handle_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = handle_ids.iter().cloned().collect::<HashSet<_>>();
+        let from_map = self
+            .async_handle_map_for_session(current, managed, from_session_id)
+            .await;
+        let to_map = self
+            .async_handle_map_for_session(current, managed, to_session_id)
+            .await;
+        if let (Some(from_map), Some(to_map)) = (from_map, to_map) {
+            crate::session::async_handles::transfer_session_async_handles(&from_map, &to_map, &ids)
+                .map_err(crate::PluginError::Session)?;
+        }
+        if let Some(executor) = &current.host.session_task_executor {
+            executor
+                .transfer_managed(
+                    &self.background_scope_key(from_session_id),
+                    &self.background_scope_key(to_session_id),
+                    handle_ids,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::runtime::session_manager) async fn cancel_unreferenced_async_handles(
+        &self,
+        current: &CurrentSessionCapability,
+        managed: &ManagedSessionCapability,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        session_id: &str,
+        keep_handle_ids: &[String],
+    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+        let keep = keep_handle_ids.iter().cloned().collect::<HashSet<_>>();
+        if let Some(map) = self
+            .async_handle_map_for_session(current, managed, session_id)
+            .await
+        {
+            crate::session::async_handles::cancel_unreferenced_session_async_handles(&map, &keep)
+                .await
+                .map_err(crate::PluginError::Session)?;
+        }
+        let tasks = self.list_background_tasks(current, session_id).await?;
+        let mut cancelled = Vec::new();
+        for task in tasks {
+            if task.run_state.is_terminal() || keep.contains(&task.id) {
+                continue;
+            }
+            cancelled.push(
+                self.cancel_background_task(current, Arc::clone(&host), session_id, &task.id)
+                    .await?,
+            );
+        }
+        Ok(cancelled)
+    }
+
+    async fn async_handle_map_for_session(
+        &self,
+        current: &CurrentSessionCapability,
+        managed: &ManagedSessionCapability,
+        session_id: &str,
+    ) -> Option<crate::session::AsyncToolHandleMap> {
+        if session_id == current.session_id {
+            return current.async_tool_handles.clone();
+        }
+        let runtime_handle = {
+            let registry = managed.registry.lock().await;
+            registry.get(session_id).cloned()
+        }?;
+        let runtime = runtime_handle.runtime.lock().await;
+        runtime
+            .session
+            .as_ref()
+            .map(|session| session.async_tool_handle_map())
     }
 
     async fn ensure_known_background_session(

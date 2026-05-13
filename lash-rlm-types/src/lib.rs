@@ -111,9 +111,12 @@ impl RlmGlobalsPatchPluginBody {
 }
 
 pub fn apply_globals_patch(
-    _globals: &mut serde_json::Map<String, serde_json::Value>,
-    _patch: &RlmGlobalsPatchPluginBody,
+    globals: &mut serde_json::Map<String, serde_json::Value>,
+    patch: &RlmGlobalsPatchPluginBody,
 ) {
+    for (key, value) in &patch.set_default {
+        globals.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -290,18 +293,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_ignores_executor_defaults_and_derives_trajectory_from_mode_events() {
+    fn projection_applies_global_defaults_and_derives_trajectory_from_mode_events() {
         let first = RlmGlobalsPatchPluginBody {
             set_default: serde_json::Map::from_iter([(
                 "executor_only".to_string(),
-                serde_json::json!("ignored by projection"),
+                serde_json::json!("kept by projection"),
             )]),
         };
         let second = RlmGlobalsPatchPluginBody {
-            set_default: serde_json::Map::from_iter([(
-                "diary".to_string(),
-                serde_json::json!("ignored by projection"),
-            )]),
+            set_default: serde_json::Map::from_iter([
+                ("diary".to_string(), serde_json::json!(["kept"])),
+                (
+                    "executor_only".to_string(),
+                    serde_json::json!("not overwritten"),
+                ),
+            ]),
         };
         let entry = RlmTrajectoryEntry {
             id: "step-1".to_string(),
@@ -316,7 +322,14 @@ mod tests {
             RlmModeEvent::RlmGlobalsPatch(second),
         ]);
 
-        assert!(projection.globals.is_empty());
+        assert_eq!(
+            projection.globals.get("executor_only"),
+            Some(&serde_json::json!("kept by projection"))
+        );
+        assert_eq!(
+            projection.globals.get("diary"),
+            Some(&serde_json::json!(["kept"]))
+        );
         assert_eq!(projection.trajectory, vec![entry]);
     }
 }
