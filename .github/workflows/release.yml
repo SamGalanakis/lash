@@ -16,7 +16,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  LASH_CI_ZIG_VERSION: 0.15.1
 
 jobs:
   validate-release-ref:
@@ -81,9 +80,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.LASH_CI_ZIG_VERSION }}
+        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2

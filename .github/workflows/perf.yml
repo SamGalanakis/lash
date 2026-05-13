@@ -14,7 +14,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  LASH_CI_ZIG_VERSION: 0.15.1
 
 jobs:
   runtime-perf:
@@ -29,9 +28,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.LASH_CI_ZIG_VERSION }}
+        uses: ./.github/actions/setup-ci-zig
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
