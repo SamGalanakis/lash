@@ -260,7 +260,7 @@ fn build_plugin_session(
                 ..lash_mode_rlm::RlmModePluginConfig::default()
             },
         )),
-        Arc::new(LlmToolsPluginFactory),
+        Arc::new(LlmToolsPluginFactory::default()),
         Arc::new(StaticPluginFactory::new(
             "clbench_async_handles",
             PluginSpec::new().with_tool_provider(Arc::new(ClbenchAsyncHandlesTool)),

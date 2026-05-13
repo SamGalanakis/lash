@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -98,22 +98,19 @@ impl RlmExecutionState {
         Ok(())
     }
 
-    pub fn prune_projected_globals(
-        &mut self,
-        projected_globals: &serde_json::Map<String, serde_json::Value>,
-    ) {
-        prune_projected_bindings(&mut self.rlm, projected_globals);
+    pub fn prune_protected_globals(&mut self, protected_names: &BTreeSet<String>) {
+        prune_protected_bindings(&mut self.rlm, protected_names);
     }
 
     pub fn patch_globals(
         &mut self,
         patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
-        projected_globals: &serde_json::Map<String, serde_json::Value>,
+        protected_names: &BTreeSet<String>,
     ) -> Result<(), SessionError> {
         if patch.is_empty() {
             return Ok(());
         }
-        apply_global_defaults(&mut self.rlm, patch, projected_globals)
+        apply_global_defaults(&mut self.rlm, patch, protected_names)
             .map_err(SessionError::Protocol)?;
         self.dirty = true;
         Ok(())
@@ -703,14 +700,14 @@ fn restore_runtime(data: &str) -> Result<FlowState, String> {
 fn apply_global_defaults(
     rlm: &mut FlowState,
     patch: &lash_rlm_types::RlmGlobalsPatchPluginBody,
-    projected_globals: &serde_json::Map<String, Value>,
+    protected_names: &BTreeSet<String>,
 ) -> Result<(), String> {
     if patch.set_default.is_empty() {
         return Ok(());
     }
     let mut snapshot = rlm.snapshot();
     for (key, value) in &patch.set_default {
-        if is_reserved_projected_binding(key) || projected_globals.contains_key(key) {
+        if is_reserved_global_name(key) || protected_names.contains(key) {
             return Err(format!(
                 "`{key}` is a read-only projected host binding; choose a different Lashlang variable name for `set_default`"
             ));
@@ -725,21 +722,18 @@ fn apply_global_defaults(
     Ok(())
 }
 
-fn is_reserved_projected_binding(key: &str) -> bool {
+fn is_reserved_global_name(key: &str) -> bool {
     key == "history"
 }
 
 fn prune_reserved_projected_bindings(rlm: &mut FlowState) {
-    prune_projected_bindings(rlm, &serde_json::Map::new());
+    prune_protected_bindings(rlm, &BTreeSet::new());
 }
 
-fn prune_projected_bindings(
-    rlm: &mut FlowState,
-    projected_globals: &serde_json::Map<String, serde_json::Value>,
-) {
+fn prune_protected_bindings(rlm: &mut FlowState, protected_names: &BTreeSet<String>) {
     prune_projected_binding_names(
         rlm,
-        std::iter::once("history").chain(projected_globals.keys().map(String::as_str)),
+        std::iter::once("history").chain(protected_names.iter().map(String::as_str)),
     );
 }
 
@@ -1029,7 +1023,7 @@ mod tests {
             state
                 .patch_globals(
                     &lash_rlm_types::RlmGlobalsPatchPluginBody { set_default },
-                    &serde_json::Map::new(),
+                    &BTreeSet::new(),
                 )
                 .expect("patch diary");
 
@@ -1082,8 +1076,7 @@ mod tests {
     #[test]
     fn set_default_initializes_once_and_does_not_mutate_projected_globals() {
         let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-        let mut projected = serde_json::Map::new();
-        projected.insert("current_query".to_string(), serde_json::json!("host"));
+        let projected = BTreeSet::from_iter(["current_query".to_string()]);
 
         state
             .patch_globals(
@@ -1126,8 +1119,7 @@ mod tests {
     #[test]
     fn set_default_rejects_projected_host_bindings() {
         let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
-        let projected =
-            serde_json::Map::from_iter([("current_query".to_string(), serde_json::json!("host"))]);
+        let projected = BTreeSet::from_iter(["current_query".to_string()]);
 
         let err = state
             .patch_globals(
@@ -1150,7 +1142,7 @@ mod tests {
                         serde_json::json!([]),
                     )]),
                 },
-                &serde_json::Map::new(),
+                &BTreeSet::new(),
             )
             .expect_err("history default should fail");
         assert!(err.to_string().contains("read-only projected host binding"));

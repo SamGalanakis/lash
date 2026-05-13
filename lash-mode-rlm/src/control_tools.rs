@@ -7,6 +7,7 @@ use lash_core::{
     ToolExecutionMode, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 pub(crate) struct RlmControlToolsProvider;
 
@@ -22,6 +23,13 @@ impl RlmControlToolsProvider {
         // via the existing `RlmGlobalsPatch` plumbing.
         let seed =
             lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
+        let referenced_handles = collect_seed_async_handle_ids(args.get("seed"));
+        let referenced_handles_vec = referenced_handles.iter().cloned().collect::<Vec<_>>();
+        context
+            .tasks()
+            .validate_async_handles_visible(&referenced_handles_vec)
+            .await
+            .map_err(|err| format!("continue_as async handle validation failed: {err}"))?;
 
         let current_snapshot = context
             .session_snapshot()
@@ -40,6 +48,30 @@ impl RlmControlToolsProvider {
             },
         )
         .await?;
+        if let Err(err) = context
+            .tasks()
+            .transfer_async_handles_to_session(&successor_session_id, &referenced_handles_vec)
+            .await
+        {
+            let _ = context
+                .sessions()
+                .close_session(&successor_session_id)
+                .await;
+            return Err(format!("continue_as async handle transfer failed: {err}"));
+        }
+        if let Err(err) = context
+            .tasks()
+            .cancel_unreferenced_async_handles(&referenced_handles_vec)
+            .await
+        {
+            let _ = context
+                .sessions()
+                .close_session(&successor_session_id)
+                .await;
+            return Err(format!(
+                "continue_as async handle cleanup failed after successor creation: {err}"
+            ));
+        }
 
         Ok(ContinueAsResult {
             value: json!({
@@ -72,7 +104,7 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `list_async_handles`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `continue_as` succeeds.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
@@ -80,6 +112,41 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
         r#"call continue_as { task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } }"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
+pub(crate) fn collect_seed_async_handle_ids(seed: Option<&Value>) -> BTreeSet<String> {
+    fn visit(value: &Value, out: &mut BTreeSet<String>) {
+        if let Some(id) = value
+            .get("__handle__")
+            .and_then(Value::as_str)
+            .filter(|kind| *kind == "task")
+            .and_then(|_| value.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+        {
+            out.insert(id);
+        }
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    visit(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for value in map.values() {
+                    visit(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    if let Some(seed) = seed {
+        visit(seed, &mut out);
+    }
+    out
 }
 
 pub fn continue_as_input_schema() -> Value {
@@ -195,6 +262,7 @@ fn finalise_tool_result(result: Result<ContinueAsResult, String>) -> ToolResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
     use lash_core::plugin::runtime_host::{
@@ -209,6 +277,10 @@ mod tests {
     struct BatonManager {
         snapshot: PersistedSessionState,
         created: Mutex<Vec<SessionCreateRequest>>,
+        closed: Mutex<Vec<String>>,
+        visible_handles: Mutex<BTreeSet<String>>,
+        transferred: Mutex<Vec<(String, String, Vec<String>)>>,
+        cleanup_keep: Mutex<Vec<Vec<String>>>,
     }
 
     #[async_trait]
@@ -251,7 +323,11 @@ mod tests {
             })
         }
 
-        async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+        async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
+            self.closed
+                .lock()
+                .expect("closed")
+                .push(session_id.to_string());
             Ok(())
         }
     }
@@ -278,7 +354,46 @@ mod tests {
         }
     }
 
-    impl TaskHost for BatonManager {}
+    #[async_trait]
+    impl TaskHost for BatonManager {
+        async fn validate_async_handles_visible(
+            &self,
+            _session_id: &str,
+            handle_ids: &[String],
+        ) -> Result<(), PluginError> {
+            let visible = self.visible_handles.lock().expect("visible handles");
+            if let Some(missing) = handle_ids.iter().find(|id| !visible.contains(*id)) {
+                return Err(PluginError::Session(format!("missing {missing}")));
+            }
+            Ok(())
+        }
+
+        async fn transfer_async_handles(
+            &self,
+            from_session_id: &str,
+            to_session_id: &str,
+            handle_ids: &[String],
+        ) -> Result<(), PluginError> {
+            self.transferred.lock().expect("transferred").push((
+                from_session_id.to_string(),
+                to_session_id.to_string(),
+                handle_ids.to_vec(),
+            ));
+            Ok(())
+        }
+
+        async fn cancel_unreferenced_async_handles(
+            &self,
+            _session_id: &str,
+            keep_handle_ids: &[String],
+        ) -> Result<Vec<lash_core::ManagedTaskStatus>, PluginError> {
+            self.cleanup_keep
+                .lock()
+                .expect("cleanup keep")
+                .push(keep_handle_ids.to_vec());
+            Ok(Vec::new())
+        }
+    }
     impl MonitorHost for BatonManager {}
     impl SessionGraphHost for BatonManager {}
     impl DirectCompletionHost for BatonManager {}
@@ -327,6 +442,7 @@ mod tests {
                 ..PersistedSessionState::default()
             },
             created: Mutex::new(Vec::new()),
+            ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
         let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
@@ -419,6 +535,7 @@ mod tests {
                 ..PersistedSessionState::default()
             },
             created: Mutex::new(Vec::new()),
+            ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
         let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
@@ -476,5 +593,102 @@ mod tests {
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].0, "proj");
         assert_eq!(snapshot.entries[0].1, json!("carry-over"));
+    }
+
+    #[tokio::test]
+    async fn continue_as_transfers_handles_found_recursively_in_seed() {
+        let manager = Arc::new(BatonManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
+                    model: "model".to_string(),
+                    max_context_tokens: Some(200_000),
+                    ..SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            created: Mutex::new(Vec::new()),
+            visible_handles: Mutex::new(BTreeSet::from_iter(["h1".to_string(), "h2".to_string()])),
+            ..BatonManager::default()
+        });
+        let provider = RlmControlToolsProvider;
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+
+        let result = provider
+            .execute(ToolCall {
+                name: "continue_as",
+                args: &json!({
+                    "task": "continue with background work",
+                    "seed": {
+                        "one": { "__handle__": "task", "id": "h1", "tool": "slow" },
+                        "nested": [{ "h": { "__handle__": "task", "id": "h2", "tool": "slow" } }]
+                    }
+                }),
+                context: &context,
+                progress: None,
+            })
+            .await;
+
+        assert!(result.success, "{:?}", result.result);
+        let successor = result
+            .result
+            .get("session_id")
+            .and_then(Value::as_str)
+            .expect("successor")
+            .to_string();
+        assert_eq!(
+            *manager.transferred.lock().expect("transferred"),
+            vec![(
+                "test-session".to_string(),
+                successor,
+                vec!["h1".to_string(), "h2".to_string()]
+            )]
+        );
+        assert_eq!(
+            *manager.cleanup_keep.lock().expect("cleanup keep"),
+            vec![vec!["h1".to_string(), "h2".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn continue_as_rejects_unknown_seed_handle_before_creating_successor() {
+        let manager = Arc::new(BatonManager {
+            snapshot: PersistedSessionState {
+                policy: SessionPolicy {
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
+                    model: "model".to_string(),
+                    max_context_tokens: Some(200_000),
+                    ..SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            created: Mutex::new(Vec::new()),
+            ..BatonManager::default()
+        });
+        let provider = RlmControlToolsProvider;
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+
+        let result = provider
+            .execute(ToolCall {
+                name: "continue_as",
+                args: &json!({
+                    "task": "continue",
+                    "seed": { "h": { "__handle__": "task", "id": "missing", "tool": "slow" } }
+                }),
+                context: &context,
+                progress: None,
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(manager.created.lock().expect("created").is_empty());
+        assert!(manager.transferred.lock().expect("transferred").is_empty());
+        assert!(
+            manager
+                .cleanup_keep
+                .lock()
+                .expect("cleanup keep")
+                .is_empty()
+        );
     }
 }

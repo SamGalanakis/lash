@@ -115,6 +115,7 @@ pub(crate) fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value
 }
 
 pub(crate) async fn read_index(target: Value, index: Value) -> Result<Value, RuntimeError> {
+    let index = materialize_projected_async(index).await;
     match target {
         Value::Projected(value) => value.get_index(&index).await,
         other => read_index_direct(other, index),

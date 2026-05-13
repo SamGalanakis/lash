@@ -7,12 +7,12 @@ use crate::PluginMessage;
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, ToolProvider};
 
-mod async_handles;
+pub(crate) mod async_handles;
 mod execution_context;
 mod monitor_handles;
 mod tool_execution;
 
-use async_handles::AsyncToolHandleMap;
+pub(crate) use async_handles::AsyncToolHandleMap;
 pub use execution_context::ModeExecutionContext;
 pub use tool_execution::{ModeToolBatchItem, ModeToolReply};
 

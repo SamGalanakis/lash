@@ -278,6 +278,50 @@ pub trait ProjectedHostValue: Send + Sync {
         Box::pin(async { Vec::new() })
     }
 
+    fn values(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn starts_with(&self, _prefix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn ends_with(&self, _suffix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn split(&self, _needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn join(&self, _sep: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn trim(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn slice(
+        &self,
+        _start: Option<isize>,
+        _end: Option<isize>,
+    ) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn push(&self, _item: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn to_number(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
+    fn json_parse(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Missing })
+    }
+
     fn render(&self) -> ProjectedFuture<'_, String> {
         Box::pin(async { format!("<{}>", self.type_name()) })
     }
@@ -386,6 +430,76 @@ impl ProjectedValue {
                 _ => Vec::new(),
             },
             ProjectedKind::Custom(value) => value.keys().await,
+        }
+    }
+
+    pub(crate) async fn values(&self) -> Option<Value> {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => match value.as_ref() {
+                Value::Record(record) => Some(Value::List(
+                    record.values().cloned().collect::<Vec<_>>().into(),
+                )),
+                Value::Null => Some(Value::List(Vec::new().into())),
+                _ => None,
+            },
+            ProjectedKind::Custom(value) => match value.values().await {
+                ProjectedRead::Value(value) => Some(value),
+                ProjectedRead::Missing => None,
+            },
+        }
+    }
+
+    pub(crate) async fn starts_with(&self, prefix: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.starts_with(prefix))
+            .await
+    }
+
+    pub(crate) async fn ends_with(&self, suffix: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.ends_with(suffix))
+            .await
+    }
+
+    pub(crate) async fn split(&self, needle: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.split(needle)).await
+    }
+
+    pub(crate) async fn join(&self, sep: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.join(sep)).await
+    }
+
+    pub(crate) async fn trim(&self) -> Option<Value> {
+        self.custom_read_or_missing(ProjectedHostValue::trim).await
+    }
+
+    pub(crate) async fn slice(&self, start: Option<isize>, end: Option<isize>) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.slice(start, end))
+            .await
+    }
+
+    pub(crate) async fn push(&self, item: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.push(item)).await
+    }
+
+    pub(crate) async fn to_number(&self) -> Option<Value> {
+        self.custom_read_or_missing(ProjectedHostValue::to_number)
+            .await
+    }
+
+    pub(crate) async fn json_parse(&self) -> Option<Value> {
+        self.custom_read_or_missing(ProjectedHostValue::json_parse)
+            .await
+    }
+
+    async fn custom_read_or_missing<'a>(
+        &'a self,
+        op: impl FnOnce(&'a dyn ProjectedHostValue) -> ProjectedFuture<'a, ProjectedRead>,
+    ) -> Option<Value> {
+        match &self.kind {
+            ProjectedKind::Scalar(_) => None,
+            ProjectedKind::Custom(value) => match op(value.as_ref()).await {
+                ProjectedRead::Value(value) => Some(value),
+                ProjectedRead::Missing => None,
+            },
         }
     }
 

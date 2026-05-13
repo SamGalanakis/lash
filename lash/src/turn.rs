@@ -119,6 +119,16 @@ impl TurnBuilder {
         })
     }
 
+    /// Run the turn while also sending raw session events to `events`.
+    ///
+    /// Most applications should use [`TurnBuilder::collect_with`] for semantic
+    /// turn activity. Benchmarks and diagnostics use this when they need the
+    /// same session-event stream as the lower-level runtime trace.
+    pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
+        let (runtime, input, cancel) = self.prepare()?;
+        stream_prepared_turn(&runtime, input, Some(events), None, cancel).await
+    }
+
     pub(crate) fn prepare(mut self) -> Result<(RuntimeHandle, TurnInput, CancellationToken)> {
         if let Some(options) = self.mode_turn_options {
             self.input.mode_turn_options = Some(options);

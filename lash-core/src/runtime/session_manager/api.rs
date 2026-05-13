@@ -196,6 +196,58 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
             .cancel_background_task(&self.current, Arc::new(self.clone()), session_id, task_id)
             .await
     }
+
+    async fn cancel_all_background_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+        self.background
+            .cancel_all_background_tasks(&self.current, Arc::new(self.clone()), session_id)
+            .await
+    }
+
+    async fn validate_async_handles_visible(
+        &self,
+        session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), crate::PluginError> {
+        self.background
+            .validate_async_handles_visible(&self.current, &self.managed, session_id, handle_ids)
+            .await
+    }
+
+    async fn transfer_async_handles(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), crate::PluginError> {
+        self.background
+            .transfer_async_handles(
+                &self.current,
+                &self.managed,
+                from_session_id,
+                to_session_id,
+                handle_ids,
+            )
+            .await
+    }
+
+    async fn cancel_unreferenced_async_handles(
+        &self,
+        session_id: &str,
+        keep_handle_ids: &[String],
+    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+        self.background
+            .cancel_unreferenced_async_handles(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                keep_handle_ids,
+            )
+            .await
+    }
 }
 
 #[async_trait::async_trait]

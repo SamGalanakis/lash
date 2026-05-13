@@ -825,7 +825,7 @@ fn build_plugin_session(
             },
             ..RlmModePluginConfig::default()
         })),
-        Arc::new(LlmToolsPluginFactory),
+        Arc::new(LlmToolsPluginFactory::default()),
         Arc::new(StaticPluginFactory::new(
             "longcot_async_handles",
             PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),

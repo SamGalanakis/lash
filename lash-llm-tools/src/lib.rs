@@ -9,7 +9,24 @@ use lash_core::{
 };
 use serde_json::{Value, json};
 
-pub struct LlmToolsPluginFactory;
+#[derive(Clone, Debug, Default)]
+pub struct LlmToolsPluginFactory {
+    model: Option<String>,
+    model_variant: Option<String>,
+}
+
+impl LlmToolsPluginFactory {
+    pub fn with_model(mut self, model: impl Into<String>, model_variant: Option<String>) -> Self {
+        self.model = Some(model.into());
+        self.model_variant = model_variant;
+        self
+    }
+
+    pub fn with_model_variant(mut self, model_variant: impl Into<String>) -> Self {
+        self.model_variant = Some(model_variant.into());
+        self
+    }
+}
 
 impl PluginFactory for LlmToolsPluginFactory {
     fn id(&self) -> &'static str {
@@ -21,8 +38,12 @@ impl PluginFactory for LlmToolsPluginFactory {
         ctx: &PluginSessionContext,
     ) -> Result<Arc<dyn lash_core::SessionPlugin>, PluginError> {
         let is_rlm = ctx.execution_mode == lash_core::ExecutionMode::new("rlm");
-        let provider: Option<Arc<dyn ToolProvider>> =
-            is_rlm.then(|| Arc::new(LlmToolsProvider) as Arc<dyn ToolProvider>);
+        let provider: Option<Arc<dyn ToolProvider>> = is_rlm.then(|| {
+            Arc::new(LlmToolsProvider {
+                model: self.model.clone(),
+                model_variant: self.model_variant.clone(),
+            }) as Arc<dyn ToolProvider>
+        });
 
         PluginSpecFactory::new(
             "llm_tools",
@@ -38,7 +59,10 @@ impl PluginFactory for LlmToolsPluginFactory {
     }
 }
 
-struct LlmToolsProvider;
+struct LlmToolsProvider {
+    model: Option<String>,
+    model_variant: Option<String>,
+}
 
 impl LlmToolsProvider {
     async fn llm_query(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
@@ -49,6 +73,8 @@ impl LlmToolsProvider {
             .session_model()
             .await
             .map_err(|err| format!("failed to read current session model: {err}"))?;
+        let model = self.model.clone().unwrap_or(session_model.model);
+        let model_variant = self.model_variant.clone().or(session_model.model_variant);
         let response_schema = llm_query_response_schema(output_schema.as_ref());
         let prompt = llm_query_prompt(&task, &inputs, output_schema.as_ref());
 
@@ -61,8 +87,8 @@ impl LlmToolsProvider {
         let completion = context
             .direct_completion(
                 DirectRequest {
-                    model: session_model.model,
-                    model_variant: session_model.model_variant,
+                    model,
+                    model_variant,
                     messages: vec![
                         DirectMessage {
                             role: DirectRole::System,
@@ -440,7 +466,10 @@ mod tests {
 
     #[test]
     fn llm_definitions_include_llm_query_only() {
-        let provider = LlmToolsProvider;
+        let provider = LlmToolsProvider {
+            model: None,
+            model_variant: None,
+        };
         let names = provider
             .definitions()
             .into_iter()
@@ -520,7 +549,10 @@ mod tests {
                 r#"{"kind":"value","value":{"root_cause":"missing config","confidence":0.8},"error":null}"#
                     .to_string(),
         });
-        let provider = LlmToolsProvider;
+        let provider = LlmToolsProvider {
+            model: None,
+            model_variant: None,
+        };
         let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
@@ -566,6 +598,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_query_uses_configured_model_override() {
+        let manager = Arc::new(DirectCompletionManager {
+            snapshot: PersistedSessionState {
+                policy: lash_core::SessionPolicy {
+                    model: "root-model".to_string(),
+                    model_variant: Some("medium".to_string()),
+                    execution_mode: lash_core::ExecutionMode::new("rlm"),
+                    ..lash_core::SessionPolicy::default()
+                },
+                ..PersistedSessionState::default()
+            },
+            requests: Mutex::new(Vec::new()),
+            response_text: r#"{"kind":"value","value":"done","error":null}"#.to_string(),
+        });
+        let provider = LlmToolsProvider {
+            model: Some("gpt-5.5".to_string()),
+            model_variant: Some("low".to_string()),
+        };
+        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+
+        let args = json!({ "task": "answer directly" });
+        let result = provider
+            .execute(ToolCall {
+                name: "llm_query",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
+            .await;
+
+        assert!(result.success, "{:?}", result.result);
+        let requests = manager.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let (request, usage_source) = &requests[0];
+        assert_eq!(usage_source, "llm_query");
+        assert_eq!(request.model, "gpt-5.5");
+        assert_eq!(request.model_variant.as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
     async fn llm_query_error_result_fails_tool_call() {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: PersistedSessionState {
@@ -579,7 +651,10 @@ mod tests {
             response_text: r#"{"kind":"error","value":null,"error":"missing required evidence"}"#
                 .to_string(),
         });
-        let provider = LlmToolsProvider;
+        let provider = LlmToolsProvider {
+            model: None,
+            model_variant: None,
+        };
         let context = lash_core::testing::mock_tool_context_with_host(manager);
 
         let args = json!({ "task": "answer from missing evidence" });

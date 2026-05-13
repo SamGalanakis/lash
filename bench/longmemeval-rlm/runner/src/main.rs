@@ -765,7 +765,7 @@ fn build_plugin_session(
     subagent_models.insert("peer".to_string(), session_policy.model.clone());
     let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
     let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-    factories.push(Arc::new(LlmToolsPluginFactory));
+    factories.push(Arc::new(LlmToolsPluginFactory::default()));
     factories.push(Arc::new(
         SubagentsPluginFactory::new(registry, subagent_host)
             .with_session_spec(SessionSpec::inherit()),

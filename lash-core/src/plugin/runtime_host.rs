@@ -195,6 +195,42 @@ pub trait TaskHost: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
+    async fn cancel_all_background_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+        let tasks = self.list_background_tasks(session_id).await?;
+        let mut cancelled = Vec::new();
+        for task in tasks {
+            if task.run_state.is_terminal() {
+                continue;
+            }
+            cancelled.push(self.cancel_background_task(session_id, &task.id).await?);
+        }
+        Ok(cancelled)
+    }
+    async fn validate_async_handles_visible(
+        &self,
+        _session_id: &str,
+        _handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn transfer_async_handles(
+        &self,
+        _from_session_id: &str,
+        _to_session_id: &str,
+        _handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn cancel_unreferenced_async_handles(
+        &self,
+        _session_id: &str,
+        _keep_handle_ids: &[String],
+    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait::async_trait]

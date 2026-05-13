@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde_json::json;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use super::Session;
 use super::execution_context::ModeExecutionContext;
 use super::tool_execution::ModeToolReply;
 use crate::tool_dispatch::{ToolDispatchOutcome, dispatch_tool_call_with_execution_context};
@@ -12,10 +13,10 @@ use crate::{SandboxMessage, ToolCallRecord, ToolContext};
 
 const ASYNC_TOOL_HANDLE_KIND: &str = "task";
 
-pub(super) type AsyncToolHandleMap = Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>;
+pub(crate) type AsyncToolHandleMap = Arc<StdMutex<HashMap<String, AsyncToolHandleEntry>>>;
 
 #[derive(Clone)]
-pub(super) struct AsyncToolHandleEntry {
+pub(crate) struct AsyncToolHandleEntry {
     pub(super) state: Arc<StdMutex<AsyncToolHandleState>>,
     pub(super) done_notify: Arc<Notify>,
     pub(super) progress_notify: Arc<Notify>,
@@ -63,6 +64,114 @@ impl AsyncToolHandleEntry {
             cancellation: CancellationToken::new(),
             metadata,
         }
+    }
+}
+
+pub(crate) fn live_session_async_handle_ids(map: &AsyncToolHandleMap) -> HashSet<String> {
+    map.lock()
+        .expect("async tool handle map lock")
+        .iter()
+        .filter_map(|(id, entry)| {
+            if entry.metadata.namespace == AsyncToolHandleNamespace::Monitor {
+                return None;
+            }
+            let is_live = entry
+                .state
+                .lock()
+                .expect("async tool state lock")
+                .terminal
+                .is_none();
+            is_live.then(|| id.clone())
+        })
+        .collect()
+}
+
+pub(crate) fn transfer_session_async_handles(
+    from: &AsyncToolHandleMap,
+    to: &AsyncToolHandleMap,
+    ids: &HashSet<String>,
+) -> Result<(), String> {
+    if ids.is_empty() || Arc::ptr_eq(from, to) {
+        return Ok(());
+    }
+    let mut from_guard = from.lock().map_err(|_| "async handle map lock poisoned")?;
+    let mut to_guard = to.lock().map_err(|_| "async handle map lock poisoned")?;
+    for id in ids {
+        if to_guard.contains_key(id) {
+            return Err(format!("async handle `{id}` already exists in successor"));
+        }
+    }
+    for id in ids {
+        if let Some(entry) = from_guard.remove(id) {
+            to_guard.insert(id.clone(), entry);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn cancel_unreferenced_session_async_handles(
+    map: &AsyncToolHandleMap,
+    keep: &HashSet<String>,
+) -> Result<(), String> {
+    let entries = {
+        let guard = map.lock().map_err(|_| "async handle map lock poisoned")?;
+        guard
+            .iter()
+            .filter_map(|(id, entry)| {
+                if keep.contains(id)
+                    || entry.metadata.namespace == AsyncToolHandleNamespace::Monitor
+                {
+                    return None;
+                }
+                let is_live = entry
+                    .state
+                    .lock()
+                    .expect("async tool state lock")
+                    .terminal
+                    .is_none();
+                is_live.then(|| (id.clone(), entry.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (_id, entry) in entries {
+        cancel_session_async_handle_entry(&entry).await;
+    }
+    Ok(())
+}
+
+async fn cancel_session_async_handle_entry(entry: &AsyncToolHandleEntry) {
+    entry.cancellation.cancel();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        entry.done_notify.notified(),
+    )
+    .await;
+    let join_handle = {
+        let mut guard = entry.state.lock().expect("async tool state lock");
+        if guard.terminal.is_none() {
+            guard.join_handle.take()
+        } else {
+            None
+        }
+    };
+    if let Some(handle) = join_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+    {
+        let mut guard = entry.state.lock().expect("async tool state lock");
+        if guard.terminal.is_none() {
+            guard.terminal = Some(AsyncToolTerminal::Cancelled);
+        }
+    }
+    entry.progress_notify.notify_waiters();
+    entry.done_notify.notify_waiters();
+}
+
+impl Session {
+    pub(crate) fn async_tool_handle_map(&self) -> AsyncToolHandleMap {
+        Arc::clone(&self.async_tool_handles)
     }
 }
 
@@ -330,33 +439,7 @@ impl ModeExecutionContext {
             return self.cancel_monitor_handle(&handle_id).await;
         }
 
-        entry.cancellation.cancel();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            entry.done_notify.notified(),
-        )
-        .await;
-        let join_handle = {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.join_handle.take()
-            } else {
-                None
-            }
-        };
-        if let Some(handle) = join_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
-
-        {
-            let mut guard = entry.state.lock().expect("async tool state lock");
-            if guard.terminal.is_none() {
-                guard.terminal = Some(AsyncToolTerminal::Cancelled);
-            }
-        }
-        entry.progress_notify.notify_waiters();
-        entry.done_notify.notify_waiters();
+        cancel_session_async_handle_entry(&entry).await;
         self.flush_async_tool_messages(&entry);
 
         ModeToolReply::success(serde_json::Value::Null)
