@@ -1,0 +1,50 @@
+name: Setup CI Zig
+description: Install the repo-pinned Zig toolchain and verify the resolved version.
+
+runs:
+  using: composite
+  steps:
+    - name: Load toolchain version
+      id: toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        version=""
+        while IFS='=' read -r key value; do
+          case "$key" in
+            ''|\#*) continue ;;
+            LASH_CI_ZIG_VERSION)
+              version="$value"
+              echo "$key=$value" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::.github/ci-toolchain.env contains unsupported key: $key"
+              exit 1
+              ;;
+          esac
+        done < .github/ci-toolchain.env
+
+        if [[ -z "$version" ]]; then
+          echo "::error::.github/ci-toolchain.env must define LASH_CI_ZIG_VERSION"
+          exit 1
+        fi
+
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ steps.toolchain.outputs.version }}
+
+    - name: Verify Zig version
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        expected="${{ steps.toolchain.outputs.version }}"
+        actual="$(zig version)"
+        if [[ "$actual" != "$expected" ]]; then
+          echo "::error::Expected Zig $expected, got $actual"
+          exit 1
+        fi
