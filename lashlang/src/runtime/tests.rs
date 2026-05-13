@@ -1092,6 +1092,86 @@ fn projected_list_bindings(name: &str, list: Arc<TestProjectedValue>) -> Project
     projected
 }
 
+struct ProjectedFixture {
+    value: Value,
+    materialize_count: AtomicUsize,
+}
+
+impl ProjectedFixture {
+    fn new(value: Value) -> Arc<Self> {
+        Arc::new(Self {
+            value,
+            materialize_count: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl ProjectedHostValue for ProjectedFixture {
+    fn type_name(&self) -> &'static str {
+        value_type_name(&self.value)
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async {
+            self.materialize_count.fetch_add(1, Ordering::SeqCst);
+            self.value.clone()
+        })
+    }
+}
+
+fn projected_value_binding(name: &str, value: Value) -> ProjectedBindings {
+    let mut projected = ProjectedBindings::new();
+    projected.insert(name, ProjectedValue::scalar(name.to_string(), value));
+    projected
+}
+
+fn projected_custom_binding(name: &str, value: Arc<dyn ProjectedHostValue>) -> ProjectedBindings {
+    let mut projected = ProjectedBindings::new();
+    projected.insert(name, ProjectedValue::custom(name.to_string(), value));
+    projected
+}
+
+async fn exec_with_global_state(
+    name: &str,
+    value: Value,
+    source: &str,
+) -> Result<(Value, State), RuntimeError> {
+    let program = crate::parse(source).expect("program should parse");
+    let mut state = State::new();
+    state.globals.insert(name.to_string(), value);
+    let outcome = execute_compiled(&compile_program(&program), &mut state, &Host).await?;
+    match outcome {
+        ExecutionOutcome::Finished(value) => Ok((value, state)),
+        ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+    }
+}
+
+async fn assert_projected_parity(name: &str, value: Value, source: &str) {
+    let (normal, _) = exec_with_global_state(name, value.clone(), source)
+        .await
+        .expect("normal global should run");
+    let projected = projected_value_binding(name, value.clone());
+    let (projected_scalar, _) = exec_with_projected(source, &projected)
+        .await
+        .expect("scalar projected binding should run");
+    assert_eq!(
+        to_json(&projected_scalar),
+        to_json(&normal),
+        "scalar projected binding diverged for `{source}`"
+    );
+
+    let custom_value = ProjectedFixture::new(value);
+    let projected = projected_custom_binding(name, custom_value);
+    let (projected_custom, _) = exec_with_projected(source, &projected)
+        .await
+        .expect("custom projected binding should run");
+    assert_eq!(
+        to_json(&projected_custom),
+        to_json(&normal),
+        "custom projected binding diverged for `{source}`"
+    );
+}
+
 #[test]
 fn projected_bindings_reject_duplicate_checked_insertions() {
     let mut projected = ProjectedBindings::new();
@@ -1211,6 +1291,431 @@ async fn print_projected_uses_render_and_submit_materializes() {
 
     assert_eq!(list.render_count.load(Ordering::SeqCst), 1);
     assert_eq!(list.materialize_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_values_match_normal_values_for_language_operations() {
+    assert_projected_parity(
+        "input",
+        from_json(serde_json::json!({
+            "context": "  alpha,beta,gamma  ",
+            "items": ["red", "green", "blue"],
+            "record": { "a": 1, "b": 2 },
+            "n": "42",
+            "json": "{\"ok\":true}",
+            "start": 1,
+            "end": 4
+        })),
+        r#"
+        out = {
+          exact_smoke: slice(input.context, 2, 7),
+          field: input.record.a,
+          index: input.items[input.start],
+          len_context: len(input.context),
+          empty_items: empty(input.items),
+          keys_record: keys(input.record),
+          values_record: values(input.record),
+          contains_text: contains(input.context, "beta"),
+          contains_list: contains(input.items, "green"),
+          contains_record: contains(input.record, "a"),
+          starts: starts_with(trim(input.context), "alpha"),
+          ends: ends_with(trim(input.context), "gamma"),
+          split: split(trim(input.context), ","),
+          joined: join(input.items, "|"),
+          trimmed: trim(input.context),
+          list_slice: slice(input.items, 0, 2),
+          pushed: push(input.items, "yellow"),
+          as_int: to_int(input.n),
+          as_float: to_float(input.n),
+          parsed: json_parse(input.json),
+          plus: input.record.a + 1,
+          neg: -input.record.a,
+          cmp: input.record.a < input.record.b,
+          truthy: input.record.a ? "yes" : "no",
+          formatted: format("ctx={}", input.context),
+          text: to_string(input.record)
+        }
+        submit out
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_values_match_normal_values_for_ranges_validation_and_iteration() {
+    assert_projected_parity(
+        "input",
+        from_json(serde_json::json!({
+            "start": 2,
+            "end": 5,
+            "item": { "name": "pkg", "version": "1.0" }
+        })),
+        r#"
+        total = 0
+        for i in range(input.start, input.end) {
+          total = total + i
+        }
+        submit {
+          range_values: range(input.start, input.end),
+          total: total,
+          validated: validate(input.item, Type { name: str, version: str })
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_empty_rejects_scalar_like_normal_empty() {
+    let normal = exec_with_global_state("n", Value::Number(1.0), "submit empty(n)")
+        .await
+        .expect_err("normal scalar empty should fail");
+    let projected = projected_value_binding("n", Value::Number(1.0));
+    let projected_err = exec_with_projected("submit empty(n)", &projected)
+        .await
+        .expect_err("projected scalar empty should fail");
+    assert_eq!(projected_err, normal);
+}
+
+struct OverrideProjectedValue {
+    value: Value,
+    calls: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl OverrideProjectedValue {
+    fn new(value: Value) -> Arc<Self> {
+        Arc::new(Self {
+            value,
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn push_call(&self, name: &'static str) {
+        self.calls.lock().expect("calls lock").push(name);
+    }
+
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+}
+
+impl ProjectedHostValue for OverrideProjectedValue {
+    fn type_name(&self) -> &'static str {
+        value_type_name(&self.value)
+    }
+
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async {
+            self.push_call("len");
+            value_len(&self.value)
+        })
+    }
+
+    fn empty(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("empty");
+            value_len(&self.value)
+                .map(|len| ProjectedRead::Value(Value::Bool(len == 0)))
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn truthy(&self) -> ProjectedFuture<'_, bool> {
+        Box::pin(async {
+            self.push_call("truthy");
+            is_truthy(&self.value)
+        })
+    }
+
+    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("get_index");
+            read_index_ref_direct(&self.value, &index)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn get_field(&self, field: Arc<str>) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("get_field");
+            let field = Name {
+                symbol: intern_symbol(field.as_ref()),
+                text: field,
+            };
+            read_field_ref_direct(&self.value, &field)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn contains(&self, needle: Value) -> ProjectedFuture<'_, bool> {
+        Box::pin(async move {
+            self.push_call("contains");
+            execute_contains_direct(&self.value, &needle).expect("contains override")
+        })
+    }
+
+    fn keys(&self) -> ProjectedFuture<'_, Vec<String>> {
+        Box::pin(async {
+            self.push_call("keys");
+            match &self.value {
+                Value::Record(record) => record.keys().map(ToString::to_string).collect(),
+                _ => Vec::new(),
+            }
+        })
+    }
+
+    fn values(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("values");
+            match &self.value {
+                Value::Record(record) => ProjectedRead::Value(Value::List(
+                    record.values().cloned().collect::<Vec<_>>().into(),
+                )),
+                _ => ProjectedRead::Missing,
+            }
+        })
+    }
+
+    fn starts_with(&self, prefix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("starts_with");
+            let value = coerce_string(&self.value).expect("string receiver");
+            let prefix = coerce_string(&prefix).expect("string prefix");
+            ProjectedRead::Value(Value::Bool(value.starts_with(prefix.as_ref())))
+        })
+    }
+
+    fn ends_with(&self, suffix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("ends_with");
+            let value = coerce_string(&self.value).expect("string receiver");
+            let suffix = coerce_string(&suffix).expect("string suffix");
+            ProjectedRead::Value(Value::Bool(value.ends_with(suffix.as_ref())))
+        })
+    }
+
+    fn split(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("split");
+            let value = coerce_string(&self.value).expect("string receiver");
+            let needle = coerce_string(&needle).expect("string needle");
+            ProjectedRead::Value(Value::List(
+                value
+                    .split(needle.as_ref())
+                    .map(|part| Value::String(part.to_string().into()))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        })
+    }
+
+    fn join(&self, sep: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("join");
+            execute_join_builtin(&self.value, &sep)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn trim(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("trim");
+            let value = coerce_string(&self.value).expect("string receiver");
+            ProjectedRead::Value(Value::String(value.trim().to_string().into()))
+        })
+    }
+
+    fn slice(
+        &self,
+        start: Option<isize>,
+        end: Option<isize>,
+    ) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("slice");
+            match &self.value {
+                Value::String(value) => {
+                    ProjectedRead::Value(Value::String(slice_string(value, start, end).into()))
+                }
+                Value::List(items) => {
+                    let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
+                        return ProjectedRead::Value(Value::List(Vec::new().into()));
+                    };
+                    ProjectedRead::Value(Value::List(items[start..end].to_vec().into()))
+                }
+                _ => ProjectedRead::Missing,
+            }
+        })
+    }
+
+    fn push(&self, item: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("push");
+            execute_push_builtin(&self.value, item)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn to_number(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("to_number");
+            as_number(&self.value)
+                .map(Value::Number)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn json_parse(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("json_parse");
+            let value = coerce_string(&self.value).expect("json text");
+            serde_json::from_str::<serde_json::Value>(&value)
+                .map(from_json)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn slice_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("slice_bound");
+            as_slice_bound(&self.value)
+                .map(|bound| {
+                    ProjectedRead::Value(match bound {
+                        Some(value) => Value::Number(value as f64),
+                        None => Value::Null,
+                    })
+                })
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn range_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            self.push_call("range_bound");
+            as_range_bound(&self.value)
+                .map(|value| ProjectedRead::Value(Value::Number(value as f64)))
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async {
+            self.push_call("materialize");
+            self.value.clone()
+        })
+    }
+}
+
+async fn assert_override_uses_hook(
+    source: &str,
+    name: &'static str,
+    value: Value,
+    expected_hook: &'static str,
+) {
+    let projected_value = OverrideProjectedValue::new(value);
+    let mut projected = ProjectedBindings::new();
+    projected.insert(
+        name,
+        ProjectedValue::custom(name, projected_value.clone() as Arc<dyn ProjectedHostValue>),
+    );
+    exec_with_projected(source, &projected)
+        .await
+        .expect("override projected operation should run");
+    let calls = projected_value.calls();
+    assert!(
+        calls.contains(&expected_hook),
+        "expected `{expected_hook}` override for `{source}`, got {calls:?}"
+    );
+    assert!(
+        !calls.contains(&"materialize"),
+        "`{source}` should use override hooks without materializing, got {calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projected_host_values_can_override_all_lazy_receiver_operations() {
+    let record = from_json(serde_json::json!({ "a": 1, "b": 2 }));
+    let list = from_json(serde_json::json!(["a", "b", "c"]));
+
+    assert_override_uses_hook("submit p.a", "p", record.clone(), "get_field").await;
+    assert_override_uses_hook("submit p[1]", "p", list.clone(), "get_index").await;
+    assert_override_uses_hook("submit len(p)", "p", list.clone(), "len").await;
+    assert_override_uses_hook("submit empty(p)", "p", list.clone(), "empty").await;
+    assert_override_uses_hook("submit keys(p)", "p", record.clone(), "keys").await;
+    assert_override_uses_hook("submit values(p)", "p", record.clone(), "values").await;
+    assert_override_uses_hook(r#"submit contains(p, "b")"#, "p", list.clone(), "contains").await;
+    assert_override_uses_hook(
+        r#"submit starts_with(p, "al")"#,
+        "p",
+        Value::String("alpha".into()),
+        "starts_with",
+    )
+    .await;
+    assert_override_uses_hook(
+        r#"submit ends_with(p, "ha")"#,
+        "p",
+        Value::String("alpha".into()),
+        "ends_with",
+    )
+    .await;
+    assert_override_uses_hook(
+        r#"submit split(p, ",")"#,
+        "p",
+        Value::String("a,b".into()),
+        "split",
+    )
+    .await;
+    assert_override_uses_hook(r#"submit join(p, "|")"#, "p", list.clone(), "join").await;
+    assert_override_uses_hook(
+        "submit trim(p)",
+        "p",
+        Value::String("  alpha  ".into()),
+        "trim",
+    )
+    .await;
+    assert_override_uses_hook(
+        "submit slice(p, 1, 3)",
+        "p",
+        Value::String("alpha".into()),
+        "slice",
+    )
+    .await;
+    assert_override_uses_hook("submit push(p, \"d\")", "p", list, "push").await;
+    assert_override_uses_hook(
+        "submit to_int(p)",
+        "p",
+        Value::String("42".into()),
+        "to_number",
+    )
+    .await;
+    assert_override_uses_hook(
+        "submit to_float(p)",
+        "p",
+        Value::String("42.5".into()),
+        "to_number",
+    )
+    .await;
+    assert_override_uses_hook(
+        "submit json_parse(p)",
+        "p",
+        Value::String("{\"ok\":true}".into()),
+        "json_parse",
+    )
+    .await;
+    assert_override_uses_hook(
+        "submit slice(\"abcdef\", p, null)",
+        "p",
+        Value::Number(2.0),
+        "slice_bound",
+    )
+    .await;
+    assert_override_uses_hook("submit range(p, 4)", "p", Value::Number(1.0), "range_bound").await;
+    assert_override_uses_hook("submit p ? 1 : 2", "p", Value::Number(1.0), "truthy").await;
 }
 
 #[tokio::test(flavor = "current_thread")]

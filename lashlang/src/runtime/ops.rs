@@ -144,7 +144,15 @@ pub(crate) async fn execute_builtin(
                 Value::String(value) => Ok(Value::Bool(value.is_empty())),
                 Value::List(values) => Ok(Value::Bool(values.is_empty())),
                 Value::Record(record) => Ok(Value::Bool(record.is_empty())),
-                Value::Projected(value) => Ok(Value::Bool(value.is_empty().await)),
+                Value::Projected(value) => {
+                    value
+                        .empty()
+                        .await
+                        .map(Value::Bool)
+                        .ok_or_else(|| RuntimeError::TypeError {
+                            message: "`empty` requires a string, list, record, or null".to_string(),
+                        })
+                }
                 Value::Null => Ok(Value::Bool(true)),
                 _ => Err(RuntimeError::TypeError {
                     message: "`empty` requires a string, list, record, or null".to_string(),
@@ -178,6 +186,11 @@ pub(crate) async fn execute_builtin(
         }
         Builtin::Values => {
             expect_arg_count("values", values, 1)?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.values().await
+            {
+                return Ok(value);
+            }
             let value = materialize_projected_async(values[0].clone()).await;
             match &value {
                 Value::Record(record) => Ok(Value::List(
@@ -195,24 +208,39 @@ pub(crate) async fn execute_builtin(
         }
         Builtin::StartsWith => {
             expect_arg_count("starts_with", values, 2)?;
-            let value = materialize_projected_async(values[0].clone()).await;
             let prefix = materialize_projected_async(values[1].clone()).await;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.starts_with(prefix.clone()).await
+            {
+                return Ok(value);
+            }
+            let value = materialize_projected_async(values[0].clone()).await;
             let value = coerce_string(&value)?;
             let prefix = coerce_string(&prefix)?;
             Ok(Value::Bool(value.starts_with(prefix.as_ref())))
         }
         Builtin::EndsWith => {
             expect_arg_count("ends_with", values, 2)?;
-            let value = materialize_projected_async(values[0].clone()).await;
             let suffix = materialize_projected_async(values[1].clone()).await;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.ends_with(suffix.clone()).await
+            {
+                return Ok(value);
+            }
+            let value = materialize_projected_async(values[0].clone()).await;
             let value = coerce_string(&value)?;
             let suffix = coerce_string(&suffix)?;
             Ok(Value::Bool(value.ends_with(suffix.as_ref())))
         }
         Builtin::Split => {
             expect_arg_count("split", values, 2)?;
-            let value = materialize_projected_async(values[0].clone()).await;
             let needle = materialize_projected_async(values[1].clone()).await;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.split(needle.clone()).await
+            {
+                return Ok(value);
+            }
+            let value = materialize_projected_async(values[0].clone()).await;
             let value = coerce_string(&value)?;
             let needle = coerce_string(&needle)?;
             Ok(Value::List(
@@ -229,6 +257,11 @@ pub(crate) async fn execute_builtin(
         }
         Builtin::Trim => {
             expect_arg_count("trim", values, 1)?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.trim().await
+            {
+                return Ok(value);
+            }
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::String(
                 coerce_string(&value)?.trim().to_string().into(),
@@ -236,11 +269,14 @@ pub(crate) async fn execute_builtin(
         }
         Builtin::Slice => {
             expect_arg_count("slice", values, 3)?;
+            let start = as_slice_bound_async(&values[1]).await?;
+            let end = as_slice_bound_async(&values[2]).await?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.slice(start, end).await
+            {
+                return Ok(value);
+            }
             let target = materialize_projected_async(values[0].clone()).await;
-            let start = materialize_projected_async(values[1].clone()).await;
-            let end = materialize_projected_async(values[2].clone()).await;
-            let start = as_slice_bound(&start)?;
-            let end = as_slice_bound(&end)?;
             match &target {
                 Value::String(value) => Ok(Value::String(slice_string(value, start, end).into())),
                 Value::List(items) => {
@@ -265,20 +301,37 @@ pub(crate) async fn execute_builtin(
         }
         Builtin::ToInt => {
             expect_arg_count("to_int", values, 1)?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.to_number().await
+            {
+                return Ok(Value::Number(as_number(&value)?.trunc()));
+            }
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::Number(as_number(&value)?.trunc()))
         }
         Builtin::ToFloat => {
             expect_arg_count("to_float", values, 1)?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.to_number().await
+            {
+                return Ok(Value::Number(as_number(&value)?));
+            }
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::Number(as_number(&value)?))
         }
         Builtin::JsonParse => {
             expect_arg_count("json_parse", values, 1)?;
+            if let Value::Projected(value) = &values[0]
+                && let Some(value) = value.json_parse().await
+            {
+                return Ok(value);
+            }
             let value = materialize_projected_async(values[0].clone()).await;
-            let parsed: serde_json::Value = serde_json::from_str(&coerce_string(&value)?)
-                .map_err(|err| RuntimeError::ValueError {
-                    message: format!("invalid json: {err}"),
+            let parsed: serde_json::Value =
+                serde_json::from_str(&coerce_string(&value)?).map_err(|err| {
+                    RuntimeError::ValueError {
+                        message: format!("invalid json: {err}"),
+                    }
                 })?;
             Ok(from_json(parsed))
         }
@@ -408,8 +461,13 @@ pub(crate) async fn execute_join_builtin_async(
     items: &Value,
     sep: &Value,
 ) -> Result<Value, RuntimeError> {
-    let items = materialize_projected_async(items.clone()).await;
     let sep = materialize_projected_async(sep.clone()).await;
+    if let Value::Projected(value) = items
+        && let Some(value) = value.join(sep.clone()).await
+    {
+        return Ok(value);
+    }
+    let items = materialize_projected_async(items.clone()).await;
     let Value::List(items) = &items else {
         return Err(RuntimeError::TypeError {
             message: "`join` requires a list as the first argument".to_string(),
@@ -444,7 +502,14 @@ pub(crate) async fn execute_range_builtin_async(values: &[Value]) -> Result<Valu
 pub(crate) async fn range_bounds_async(values: &[Value]) -> Result<(i64, i64), RuntimeError> {
     let mut materialized = Vec::with_capacity(values.len());
     for value in values {
-        materialized.push(materialize_projected_async(value.clone()).await);
+        let value = match value {
+            Value::Projected(projected) => match projected.range_bound().await {
+                Some(value) => value,
+                None => projected.materialize_async().await,
+            },
+            other => other.clone(),
+        };
+        materialized.push(value);
     }
     range_bounds(&materialized)
 }
@@ -467,8 +532,13 @@ pub(crate) async fn execute_push_builtin_async(
     list: &Value,
     item: Value,
 ) -> Result<Value, RuntimeError> {
-    let list = materialize_projected_async(list.clone()).await;
     let item = materialize_projected_async(item).await;
+    if let Value::Projected(value) = list
+        && let Some(value) = value.push(item.clone()).await
+    {
+        return Ok(value);
+    }
+    let list = materialize_projected_async(list.clone()).await;
     let Value::List(items) = &list else {
         return Err(RuntimeError::TypeError {
             message: "`push` requires a list as the first argument".to_string(),
@@ -749,6 +819,17 @@ pub(crate) fn as_slice_bound(value: &Value) -> Result<Option<isize>, RuntimeErro
     }
 }
 
+pub(crate) async fn as_slice_bound_async(value: &Value) -> Result<Option<isize>, RuntimeError> {
+    let value = match value {
+        Value::Projected(projected) => match projected.slice_bound().await {
+            Some(value) => value,
+            None => projected.materialize_async().await,
+        },
+        other => other.clone(),
+    };
+    as_slice_bound(&value)
+}
+
 pub(crate) fn compare_numbers(
     left: Value,
     right: Value,
@@ -802,13 +883,13 @@ pub(crate) fn is_truthy(value: &Value) -> bool {
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
         Value::Image(_) | Value::List(_) | Value::Record(_) => true,
-        Value::Projected(value) => !futures_executor::block_on(value.is_empty()),
+        Value::Projected(value) => futures_executor::block_on(value.truthy()),
     }
 }
 
 pub(crate) async fn is_truthy_async(value: &Value) -> bool {
     match value {
-        Value::Projected(value) => !value.is_empty().await,
+        Value::Projected(value) => value.truthy().await,
         other => is_truthy(other),
     }
 }

@@ -21,9 +21,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::{
-    Name, Record, RuntimeError, execute_contains_direct, from_json, read_field_ref_direct,
-    read_index_ref_direct, stringify_value_async, to_json_blocking, value_len, value_type_name,
-    write_number,
+    Name, Record, RuntimeError, as_number, as_slice_bound, coerce_string, execute_contains_direct,
+    execute_join_builtin, execute_push_builtin, from_json, is_truthy as value_truthy,
+    materialize_projected_async, read_field_ref_direct, read_index_ref_direct,
+    stringify_value_async, to_json_blocking, value_len, value_type_name, write_number,
 };
 
 /// Marker key that wraps a Type literal at its outermost level so a host-side
@@ -255,75 +256,210 @@ pub trait ProjectedHostValue: Send + Sync {
     fn type_name(&self) -> &'static str;
 
     fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async { None })
+        Box::pin(async { value_len(&self.materialize().await) })
     }
 
     fn is_empty(&self) -> ProjectedFuture<'_, bool> {
         Box::pin(async { self.len().await.unwrap_or(0) == 0 })
     }
 
-    fn get_index(&self, _index: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn empty(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async { ProjectedRead::Value(Value::Bool(self.is_empty().await)) })
     }
 
-    fn get_field(&self, _field: Arc<str>) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn truthy(&self) -> ProjectedFuture<'_, bool> {
+        Box::pin(async { value_truthy(&self.materialize().await) })
     }
 
-    fn contains(&self, _needle: Value) -> ProjectedFuture<'_, bool> {
-        Box::pin(async { false })
+    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            read_index_ref_direct(&self.materialize().await, &index)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn get_field(&self, field: Arc<str>) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let field = Name {
+                symbol: intern_symbol(field.as_ref()),
+                text: field,
+            };
+            read_field_ref_direct(&self.materialize().await, &field)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn contains(&self, needle: Value) -> ProjectedFuture<'_, bool> {
+        Box::pin(async move {
+            execute_contains_direct(&self.materialize().await, &needle).unwrap_or(false)
+        })
     }
 
     fn keys(&self) -> ProjectedFuture<'_, Vec<String>> {
-        Box::pin(async { Vec::new() })
+        Box::pin(async {
+            match self.materialize().await {
+                Value::Record(record) => record.keys().map(ToString::to_string).collect(),
+                _ => Vec::new(),
+            }
+        })
     }
 
     fn values(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+        Box::pin(async {
+            match self.materialize().await {
+                Value::Record(record) => ProjectedRead::Value(Value::List(
+                    record.values().cloned().collect::<Vec<_>>().into(),
+                )),
+                Value::Null => ProjectedRead::Value(Value::List(Vec::new().into())),
+                _ => ProjectedRead::Missing,
+            }
+        })
     }
 
-    fn starts_with(&self, _prefix: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn starts_with(&self, prefix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let value = self.materialize().await;
+            let Ok(value) = coerce_string(&value) else {
+                return ProjectedRead::Missing;
+            };
+            let Ok(prefix) = coerce_string(&prefix) else {
+                return ProjectedRead::Missing;
+            };
+            ProjectedRead::Value(Value::Bool(value.starts_with(prefix.as_ref())))
+        })
     }
 
-    fn ends_with(&self, _suffix: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn ends_with(&self, suffix: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let value = self.materialize().await;
+            let Ok(value) = coerce_string(&value) else {
+                return ProjectedRead::Missing;
+            };
+            let Ok(suffix) = coerce_string(&suffix) else {
+                return ProjectedRead::Missing;
+            };
+            ProjectedRead::Value(Value::Bool(value.ends_with(suffix.as_ref())))
+        })
     }
 
-    fn split(&self, _needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn split(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let value = self.materialize().await;
+            let Ok(value) = coerce_string(&value) else {
+                return ProjectedRead::Missing;
+            };
+            let Ok(needle) = coerce_string(&needle) else {
+                return ProjectedRead::Missing;
+            };
+            ProjectedRead::Value(Value::List(
+                value
+                    .split(needle.as_ref())
+                    .map(|part| Value::String(part.to_string().into()))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        })
     }
 
-    fn join(&self, _sep: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn join(&self, sep: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            execute_join_builtin(&self.materialize().await, &sep)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
     }
 
     fn trim(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+        Box::pin(async {
+            let value = self.materialize().await;
+            let Ok(value) = coerce_string(&value) else {
+                return ProjectedRead::Missing;
+            };
+            ProjectedRead::Value(Value::String(value.trim().to_string().into()))
+        })
     }
 
     fn slice(
         &self,
-        _start: Option<isize>,
-        _end: Option<isize>,
+        start: Option<isize>,
+        end: Option<isize>,
     ) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+        Box::pin(async move {
+            match self.materialize().await {
+                Value::String(value) => ProjectedRead::Value(Value::String(
+                    super::slice_string(&value, start, end).into(),
+                )),
+                Value::List(items) => {
+                    let Some((start, end)) = super::clamp_slice_bounds(start, end, items.len())
+                    else {
+                        return ProjectedRead::Value(Value::List(Vec::new().into()));
+                    };
+                    ProjectedRead::Value(Value::List(items[start..end].to_vec().into()))
+                }
+                _ => ProjectedRead::Missing,
+            }
+        })
     }
 
-    fn push(&self, _item: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+    fn push(&self, item: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            execute_push_builtin(&self.materialize().await, item)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
     }
 
     fn to_number(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+        Box::pin(async {
+            as_number(&self.materialize().await)
+                .map(Value::Number)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
     }
 
     fn json_parse(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async { ProjectedRead::Missing })
+        Box::pin(async {
+            let value = self.materialize().await;
+            let Ok(text) = coerce_string(&value) else {
+                return ProjectedRead::Missing;
+            };
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map(from_json)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn slice_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            as_slice_bound(&self.materialize().await)
+                .map(|bound| match bound {
+                    Some(value) => Value::Number(value as f64),
+                    None => Value::Null,
+                })
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn range_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async {
+            super::as_range_bound(&self.materialize().await)
+                .map(|bound| Value::Number(bound as f64))
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
     }
 
     fn render(&self) -> ProjectedFuture<'_, String> {
-        Box::pin(async { format!("<{}>", self.type_name()) })
+        Box::pin(async {
+            stringify_value_async(&self.materialize().await)
+                .await
+                .unwrap_or_default()
+        })
     }
 
     fn materialize(&self) -> ProjectedFuture<'_, Value>;
@@ -389,17 +525,29 @@ impl ProjectedValue {
         }
     }
 
-    pub(crate) async fn is_empty(&self) -> bool {
+    pub(crate) async fn empty(&self) -> Option<bool> {
         match &self.kind {
-            ProjectedKind::Scalar(value) => value_len(value).unwrap_or(0) == 0,
-            ProjectedKind::Custom(value) => value.is_empty().await,
+            ProjectedKind::Scalar(value) => value_len(value).map(|len| len == 0),
+            ProjectedKind::Custom(value) => match value.empty().await {
+                ProjectedRead::Value(Value::Bool(value)) => Some(value),
+                ProjectedRead::Value(value) => Some(value_truthy(&value)),
+                ProjectedRead::Missing => None,
+            },
+        }
+    }
+
+    pub(crate) async fn truthy(&self) -> bool {
+        match &self.kind {
+            ProjectedKind::Scalar(value) => value_truthy(value),
+            ProjectedKind::Custom(value) => value.truthy().await,
         }
     }
 
     pub(crate) async fn get_index(&self, index: &Value) -> Result<Value, RuntimeError> {
+        let index = materialize_projected_async(index.clone()).await;
         match &self.kind {
-            ProjectedKind::Scalar(value) => read_index_ref_direct(value, index),
-            ProjectedKind::Custom(value) => match value.get_index(index.clone()).await {
+            ProjectedKind::Scalar(value) => read_index_ref_direct(value, &index),
+            ProjectedKind::Custom(value) => match value.get_index(index).await {
                 ProjectedRead::Missing => Ok(Value::Null),
                 ProjectedRead::Value(value) => Ok(value),
             },
@@ -460,7 +608,8 @@ impl ProjectedValue {
     }
 
     pub(crate) async fn split(&self, needle: Value) -> Option<Value> {
-        self.custom_read_or_missing(|value| value.split(needle)).await
+        self.custom_read_or_missing(|value| value.split(needle))
+            .await
     }
 
     pub(crate) async fn join(&self, sep: Value) -> Option<Value> {
@@ -487,6 +636,16 @@ impl ProjectedValue {
 
     pub(crate) async fn json_parse(&self) -> Option<Value> {
         self.custom_read_or_missing(ProjectedHostValue::json_parse)
+            .await
+    }
+
+    pub(crate) async fn slice_bound(&self) -> Option<Value> {
+        self.custom_read_or_missing(ProjectedHostValue::slice_bound)
+            .await
+    }
+
+    pub(crate) async fn range_bound(&self) -> Option<Value> {
+        self.custom_read_or_missing(ProjectedHostValue::range_bound)
             .await
     }
 

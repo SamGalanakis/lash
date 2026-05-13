@@ -33,8 +33,7 @@ use super::{
     execute_len_direct, execute_push_builtin_async, execute_range_builtin_async,
     is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
     materialize_projected_async, materialize_value, range_bounds_async, read_field_direct,
-    read_field_ref_direct, read_index_direct, success, unwrap_tool_result,
-    unwrap_type_value,
+    read_field_ref_direct, read_index_direct, success, unwrap_tool_result, unwrap_type_value,
 };
 
 #[derive(Clone)]

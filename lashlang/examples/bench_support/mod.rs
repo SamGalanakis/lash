@@ -449,10 +449,6 @@ impl ProjectedHostValue for ProjectedText {
         Box::pin(async { Some(self.text.chars().count()) })
     }
 
-    fn is_empty(&self) -> ProjectedFuture<'_, bool> {
-        Box::pin(async { self.text.is_empty() })
-    }
-
     fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
         Box::pin(async move {
             let Some(index) = resolve_index(&index, self.text.chars().count()) else {
