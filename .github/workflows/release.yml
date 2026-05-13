@@ -55,12 +55,6 @@ jobs:
             linker: aarch64-linux-gnu-gcc
             apt_packages: protobuf-compiler gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
             brew_packages: ""
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset_name: lash-macos-x86_64.tar.gz
-            linker: ""
-            apt_packages: ""
-            brew_packages: protobuf llvm
           - os: macos-14
             target: aarch64-apple-darwin
             asset_name: lash-macos-aarch64.tar.gz
