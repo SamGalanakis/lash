@@ -488,7 +488,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1305,9 +1305,9 @@ dependencies = [
 
 [[package]]
 name = "fff-grep"
-version = "0.6.4"
+version = "0.6.2-nightly.a677d64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88283e24a45f87707db72788a5e41d662df75d445e81fb34d197e04f2b2d443f"
+checksum = "7012271523fc16ab6eabcf6911570ed29b0904b8889630396a1a3666b2994df1"
 dependencies = [
  "bstr",
  "memchr",
@@ -1329,18 +1329,18 @@ dependencies = [
 
 [[package]]
 name = "fff-query-parser"
-version = "0.6.4"
+version = "0.6.2-nightly.a677d64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab582f40d563f533ef3c7fe893fb936a42111ffb41517d3aa01a6e49dbdc1564"
+checksum = "eb455721b327e8cbe86e011edc99d3ea0aa2089ddd8e1031e41ac7c565841de7"
 dependencies = [
  "zlob",
 ]
 
 [[package]]
 name = "fff-search"
-version = "0.6.4"
+version = "0.6.2-nightly.a677d64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37c18af8dea8c5f50db9c4178caad1acfabdfa587487206b0dd8e319eef048c5"
+checksum = "1bae1c7bc06a46d04d847267c9fb51ebf93270ca41175625bf6b785b297a7ef4"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -2119,15 +2119,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -6453,9 +6444,9 @@ dependencies = [
 
 [[package]]
 name = "zlob"
-version = "1.3.3"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f3522fa9701b74ec72758aedb96da278f6e0533bc16b6a79090bfb465d4661"
+checksum = "07934fb13f0f4e14281bab6b0e984cfc03891d2cf5b0a8bd0ab14fd240e21106"
 dependencies = [
  "bindgen",
  "bitflags 2.11.1",
