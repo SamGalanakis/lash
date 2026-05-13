@@ -12,7 +12,8 @@ fff-zlob = ["fff-search/zlob"]
 lash-core = { path = "../lash-core", default-features = false }
 lash-tool-support = { path = "../lash-tool-support" }
 async-trait = { workspace = true }
-fff-search = { version = "0.6.2-nightly.a677d64", default-features = false }
+# Keep this exact until fff-search/zlob publish a Zig-compatible replacement.
+fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
 regex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
