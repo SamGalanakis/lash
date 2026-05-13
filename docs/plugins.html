@@ -262,6 +262,7 @@ impl ToolProvider for UpdatePlanTool {
     pub context: &amp;'a ToolContext,                // Explicit session/tool capabilities
     pub progress: Option&lt;&amp;'a ProgressSender&gt;,    // For streaming progress updates
 }</code></pre>
+          <p>Tools receive plain JSON arguments. In RLM mode, host-projected Lashlang values are materialized by the mode's before-tool hook before schema validation and before <code>execute()</code>; ordinary tool code should not know about the internal projection marker. Projection-aware RLM control tools preserve only root <code>seed</code> entries when they intentionally carry a projected source into a child or successor session.</p>
           <p><code>context.plugin_input::&lt;MyPlugin&gt;("plugin_id")</code> reads typed per-turn input passed via <code>TurnBuilder::with_plugin_input</code> (see the <a href="./embedding.html">Lash API guide</a>'s "Typed Plugin Input" section for the matching <code>PluginBinding</code> pattern).</p>
         </div>
 

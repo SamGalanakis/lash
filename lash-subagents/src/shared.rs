@@ -12,7 +12,7 @@ use lash_core::{
     InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSpec, SessionStartPoint,
     ToolContext, ToolDefinition, ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnInput,
 };
-use lash_rlm_types::{ClassifiedSeed, RlmTermination, unwrap_projected_arg};
+use lash_rlm_types::{ClassifiedSeed, RlmTermination};
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityContext, CapabilityRegistry};
@@ -149,7 +149,6 @@ pub(crate) fn render_task_prompt(task: &str, output_schema: Option<&Value>) -> S
 
 pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
-        .map(unwrap_projected_arg)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())

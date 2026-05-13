@@ -216,6 +216,8 @@ submit format("seen={} total={} label={}", join(seen, ","), total, label)</code>
             <dd>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</dd>
             <dt>Reserved names</dt>
             <dd><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</dd>
+            <dt>Tool arguments</dt>
+            <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then its before-tool hook materializes those markers before ordinary tools validate or execute. Tool implementations should parse <code>ToolCall.args</code> as plain JSON. The only preserved markers are root entries under <code>seed:</code> for projection-aware RLM control tools such as <code>continue_as</code> and RLM <code>spawn_agent</code>, where the marker means "re-project this value in the successor".</dd>
           </dl>
         </div>
 
