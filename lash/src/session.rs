@@ -78,6 +78,12 @@ impl SessionBuilder {
         self
     }
 
+    /// Use a specific persistence store for this root session.
+    ///
+    /// This is the right API for a host-owned, pre-opened session database.
+    /// Managed child sessions never reuse this store; configure
+    /// `LashCoreBuilder::child_store_factory` when child sessions should also
+    /// persist.
     pub fn store(mut self, store: Arc<dyn RuntimePersistence>) -> Self {
         self.store = Some(store);
         self

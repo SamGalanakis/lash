@@ -22,9 +22,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::{
     Name, Record, RuntimeError, as_number, as_slice_bound, coerce_string, execute_contains_direct,
-    execute_join_builtin, execute_push_builtin, from_json, is_truthy as value_truthy,
-    materialize_projected_async, read_field_ref_direct, read_index_ref_direct,
-    stringify_value_async, to_json_blocking, value_len, value_type_name, write_number,
+    execute_find_direct, execute_grep_text_direct, execute_join_builtin, execute_push_builtin,
+    from_json, is_truthy as value_truthy, materialize_projected_async, read_field_ref_direct,
+    read_index_ref_direct, stringify_value_async, to_json_blocking, value_len, value_type_name,
+    write_number,
 };
 
 /// Marker key that wraps a Type literal at its outermost level so a host-side
@@ -253,7 +254,7 @@ pub enum ProjectedRead {
 }
 
 pub trait ProjectedHostValue: Send + Sync {
-    fn type_name(&self) -> &'static str;
+    fn type_name(&self) -> &str;
 
     fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
         Box::pin(async { value_len(&self.materialize().await) })
@@ -294,6 +295,22 @@ pub trait ProjectedHostValue: Send + Sync {
     fn contains(&self, needle: Value) -> ProjectedFuture<'_, bool> {
         Box::pin(async move {
             execute_contains_direct(&self.materialize().await, &needle).unwrap_or(false)
+        })
+    }
+
+    fn find(&self, needle: Value, start: usize) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            execute_find_direct(&self.materialize().await, &needle, start)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn grep_text(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            execute_grep_text_direct(&self.materialize().await, &needle)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
         })
     }
 
@@ -356,7 +373,7 @@ pub trait ProjectedHostValue: Send + Sync {
             ProjectedRead::Value(Value::List(
                 value
                     .split(needle.as_ref())
-                    .map(|part| Value::String(part.to_string().into()))
+                    .map(|part| Value::String(part.into()))
                     .collect::<Vec<_>>()
                     .into(),
             ))
@@ -377,7 +394,7 @@ pub trait ProjectedHostValue: Send + Sync {
             let Ok(value) = coerce_string(&value) else {
                 return ProjectedRead::Missing;
             };
-            ProjectedRead::Value(Value::String(value.trim().to_string().into()))
+            ProjectedRead::Value(Value::String(value.trim().into()))
         })
     }
 
@@ -480,6 +497,17 @@ impl ProjectedValue {
         }
     }
 
+    pub(crate) fn unavailable_after_restore(
+        name: impl Into<Arc<str>>,
+        type_name: impl Into<Arc<str>>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            name: name.clone(),
+            kind: ProjectedKind::Custom(Arc::new(UnavailableProjectedValue::new(name, type_name))),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -569,6 +597,16 @@ impl ProjectedValue {
             ProjectedKind::Scalar(value) => execute_contains_direct(value, needle),
             ProjectedKind::Custom(value) => Ok(value.contains(needle.clone()).await),
         }
+    }
+
+    pub(crate) async fn find(&self, needle: Value, start: usize) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.find(needle, start))
+            .await
+    }
+
+    pub(crate) async fn grep_text(&self, needle: Value) -> Option<Value> {
+        self.custom_read_or_missing(|value| value.grep_text(needle))
+            .await
     }
 
     pub(crate) async fn keys(&self) -> Vec<String> {
@@ -681,6 +719,41 @@ impl ProjectedValue {
     }
 }
 
+struct UnavailableProjectedValue {
+    name: Arc<str>,
+    type_name: Arc<str>,
+}
+
+impl UnavailableProjectedValue {
+    fn new(name: Arc<str>, type_name: impl Into<Arc<str>>) -> Self {
+        Self {
+            name,
+            type_name: type_name.into(),
+        }
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "projected host value `{}` ({}) is unavailable after snapshot restore; rerun the producing tool to recreate it",
+            self.name, self.type_name
+        )
+    }
+}
+
+impl ProjectedHostValue for UnavailableProjectedValue {
+    fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async { self.message() })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async { Value::String(self.message().into()) })
+    }
+}
+
 impl fmt::Debug for ProjectedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProjectedValue")
@@ -697,7 +770,7 @@ impl PartialEq for ProjectedValue {
 }
 
 impl ProjectedValue {
-    pub(crate) fn value_type_name(&self) -> &'static str {
+    pub(crate) fn value_type_name(&self) -> &str {
         match &self.kind {
             ProjectedKind::Scalar(value) => value_type_name(value),
             ProjectedKind::Custom(value) => value.type_name(),

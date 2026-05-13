@@ -140,11 +140,25 @@ impl LashCoreBuilder {
         self
     }
 
+    /// Configure a factory that can create a persistence store for any root
+    /// session opened from this core.
+    ///
+    /// The factory must honor `SessionStoreCreateRequest::session_id` and
+    /// return a store for that specific session. Do not use this to wrap one
+    /// pre-opened root store; pass root-only stores with
+    /// `LashCore::session(...).store(store)` instead.
     pub fn store_factory(mut self, store_factory: Arc<dyn SessionStoreFactory>) -> Self {
         self.store_factory = Some(store_factory);
         self
     }
 
+    /// Configure the persistence factory used by managed child sessions, such
+    /// as local subagents.
+    ///
+    /// Child factories must return a distinct store bound to the requested
+    /// child session id. Hosts that pass an explicit root store with
+    /// `SessionBuilder::store` should set this when child sessions need
+    /// persistence.
     pub fn child_store_factory(mut self, store_factory: Arc<dyn SessionStoreFactory>) -> Self {
         self.child_store_factory = Some(store_factory);
         self

@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use compact_str::ToCompactString;
+
 use super::instruction::Name;
 use super::*;
 
@@ -137,7 +139,7 @@ pub(crate) fn read_index_ref_direct(target: &Value, index: &Value) -> Result<Val
             let idx = resolve_index(index, value.chars().count())?;
             Ok(idx
                 .and_then(|idx| value.chars().nth(idx))
-                .map(|ch| Value::String(ch.to_string().into()))
+                .map(|ch| Value::String(ch.to_compact_string()))
                 .unwrap_or(Value::Null))
         }
         Value::Record(record) => Ok(record

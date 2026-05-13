@@ -1,3 +1,4 @@
+use compact_str::ToCompactString;
 use lashlang::{
     ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record,
     State, ToolHost, ToolHostCall, ToolHostError, Value,
@@ -133,6 +134,8 @@ submit summary
 source = join(history, ",")
 tokens = split(source, ",")
 trimmed_user = trim(format(" {0} ", ctx.user))
+beta_index = find(source, "beta")
+line_matches = grep_text(join(tokens, "\n"), "a")
 count = len(tokens)
 empty_tail = empty(slice(tokens, count, count))
 predicates = [
@@ -184,7 +187,8 @@ state = {
   predicates: predicates,
   comparisons: comparisons,
   numeric: numeric,
-  parsed: parsed
+  parsed: parsed,
+  line_matches: line_matches
 }
 state.tags[1] = "beta"
 for token in state.tags {
@@ -226,6 +230,8 @@ submit {
   lookup: named.lookup?,
   summary: named.summary,
   values: values(state.counts),
+  beta_index: beta_index,
+  line_matches: line_matches,
   first_two: slice(state.tags, null, 2),
   validated: validated,
   stringified: to_string(validated)
@@ -307,6 +313,9 @@ submit { counts: counts, state: state, summary: join(summary, ",") }
 first = history[0]
 second = history[1]
 body_head = docs.body[0]
+body_match_index = find(docs.body, "markdown")
+body_matches = grep_text(docs.body, "markdown")
+second_matches = grep_text(second.content, "response")
 if docs.body {
   body_truthy = true
 } else {
@@ -321,6 +330,9 @@ summary = {
   doc_title: docs.title,
   doc_summary: docs.summary,
   body_head: body_head,
+  body_match_index: body_match_index,
+  body_matches: body_matches,
+  second_matches: second_matches,
   body_truthy: body_truthy,
   body_text: docs.body
 }
@@ -383,7 +395,7 @@ impl ProjectedList {
 }
 
 impl ProjectedHostValue for ProjectedList {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         "list"
     }
 
@@ -441,7 +453,7 @@ impl ProjectedText {
 }
 
 impl ProjectedHostValue for ProjectedText {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         "string"
     }
 
@@ -457,7 +469,30 @@ impl ProjectedHostValue for ProjectedText {
             self.text
                 .chars()
                 .nth(index)
-                .map(|ch| ProjectedRead::Value(Value::String(ch.to_string().into())))
+                .map(|ch| ProjectedRead::Value(Value::String(ch.to_compact_string())))
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn find(&self, needle: Value, start: usize) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Value::String(needle) = needle else {
+                return ProjectedRead::Missing;
+            };
+            ProjectedRead::Value(match find_text(&self.text, &needle, start) {
+                Some(index) => Value::Number(index as f64),
+                None => Value::Null,
+            })
+        })
+    }
+
+    fn grep_text(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            let Value::String(needle) = needle else {
+                return ProjectedRead::Missing;
+            };
+            grep_text_records(&self.text, &needle)
+                .map(ProjectedRead::Value)
                 .unwrap_or(ProjectedRead::Missing)
         })
     }
@@ -467,8 +502,56 @@ impl ProjectedHostValue for ProjectedText {
     }
 
     fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async move { Value::String(self.text.to_string().into()) })
+        Box::pin(async move { Value::String(self.text.as_ref().into()) })
     }
+}
+
+fn grep_text_records(text: &str, needle: &str) -> Option<Value> {
+    if needle.is_empty() {
+        return None;
+    }
+
+    let needle_len = needle.chars().count();
+    let needle_value = Value::String(needle.into());
+    let mut matches = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let Some(start) = find_text(line, needle, 0) else {
+            continue;
+        };
+        let mut record = Record::with_capacity(5);
+        record.insert_str("line", Value::Number((line_index + 1) as f64));
+        record.insert_str("text", Value::String(line.into()));
+        record.insert_str("match", needle_value.clone());
+        record.insert_str("start", Value::Number(start as f64));
+        record.insert_str("end", Value::Number((start + needle_len) as f64));
+        matches.push(Value::Record(Arc::new(record)));
+    }
+    Some(Value::List(matches.into()))
+}
+
+fn find_text(text: &str, needle: &str, start: usize) -> Option<usize> {
+    let start_byte = if start == 0 {
+        0
+    } else {
+        byte_index_for_char(text, start)?
+    };
+    if needle.is_empty() {
+        return Some(start);
+    }
+    let tail = &text[start_byte..];
+    let match_byte = tail.find(needle)?;
+    Some(start + tail[..match_byte].chars().count())
+}
+
+fn byte_index_for_char(text: &str, target: usize) -> Option<usize> {
+    let mut char_count = 0;
+    for (byte_index, _) in text.char_indices() {
+        if char_count == target {
+            return Some(byte_index);
+        }
+        char_count += 1;
+    }
+    (char_count == target).then_some(text.len())
 }
 
 fn resolve_index(index: &Value, len: usize) -> Option<usize> {

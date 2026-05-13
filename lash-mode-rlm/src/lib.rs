@@ -17,7 +17,7 @@ pub use control_tools::{continue_as_tool_definition, rlm_seed_initial_nodes};
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
 pub use projected_bindings::{
-    RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension,
+    RlmProjectedBindings, RlmToolResultProjector, RlmTurnInputExt, rlm_session_projection_extension,
 };
 pub use projection::{
     RlmHistoryProjection, decode_rlm_mode_event, project_rlm_globals_from_events,

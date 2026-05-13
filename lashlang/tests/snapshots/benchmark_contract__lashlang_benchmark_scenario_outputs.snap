@@ -1,0 +1,140 @@
+---
+source: lashlang/tests/benchmark_contract.rs
+expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs should serialize\")"
+---
+{
+  "async_await": "alpha,beta,gamma",
+  "baseline": "user=sam;attempt=3;active=alpha:1,gamma:3;total=6;count=3;seen=3;indexes=4",
+  "direct_unwrap": "alpha,alpha:beta",
+  "general_parallel": "alpha:3|beta:3",
+  "indexed_assignment": {
+    "counts": {
+      "alpha": 3,
+      "beta": 2,
+      "delta": 1,
+      "gamma": 2
+    },
+    "state": {
+      "groups": {
+        "alpha": {
+          "count": 3
+        },
+        "beta": {
+          "count": 2
+        },
+        "delta": {
+          "count": 1
+        },
+        "gamma": {
+          "count": 2
+        }
+      }
+    },
+    "summary": "alpha:3,beta:2,gamma:2,delta:1"
+  },
+  "language_surface": {
+    "awaited": "awaited",
+    "beta_index": 6,
+    "direct": "sam",
+    "first_two": [
+      "alpha",
+      "beta"
+    ],
+    "line_matches": [
+      {
+        "end": 1,
+        "line": 1,
+        "match": "a",
+        "start": 0,
+        "text": "alpha"
+      },
+      {
+        "end": 4,
+        "line": 2,
+        "match": "a",
+        "start": 3,
+        "text": "beta"
+      },
+      {
+        "end": 2,
+        "line": 3,
+        "match": "a",
+        "start": 1,
+        "text": "gamma"
+      }
+    ],
+    "lookup": "alpha,beta,gamma",
+    "positional": [
+      "left:alpha",
+      {
+        "ok": true,
+        "value": "beta"
+      },
+      3
+    ],
+    "stringified": "{\"choice\":\"yes\",\"counts\":{\"alpha\":1,\"beta\":1,\"delta\":1,\"gamma\":1},\"kept\":[\"alpha\",\"gamma\"],\"maybe\":null,\"tags\":[\"alpha\",\"beta\",\"gamma\",\"delta\"],\"user\":\"sam\"}",
+    "summary": "sam:3",
+    "validated": {
+      "choice": "yes",
+      "counts": {
+        "alpha": 1,
+        "beta": 1,
+        "delta": 1,
+        "gamma": 1
+      },
+      "kept": [
+        "alpha",
+        "gamma"
+      ],
+      "maybe": null,
+      "tags": [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta"
+      ],
+      "user": "sam"
+    },
+    "values": [
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "loop_control": {
+    "kept": 43,
+    "outer": "restored",
+    "skipped": 32
+  },
+  "projected_values": {
+    "body_head": "l",
+    "body_match_index": 5,
+    "body_matches": [
+      {
+        "end": 13,
+        "line": 1,
+        "match": "markdown",
+        "start": 5,
+        "text": "lazy markdown body"
+      }
+    ],
+    "body_text": "lazy markdown body",
+    "body_truthy": true,
+    "doc_summary": "Rules for editing workflow JSON drafts.",
+    "doc_title": "Authoring Rules",
+    "first_content": "alpha request",
+    "first_role": "user",
+    "history_len": 3,
+    "second_content": "beta response",
+    "second_matches": [
+      {
+        "end": 13,
+        "line": 1,
+        "match": "response",
+        "start": 5,
+        "text": "beta response"
+      }
+    ]
+  }
+}

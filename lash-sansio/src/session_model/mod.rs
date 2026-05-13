@@ -7,9 +7,9 @@ pub use message::{
     render_prompt, render_transcript_prompt, shared_parts,
 };
 pub use prompt::{
-    CORE_GUIDANCE_SECTION, MAIN_AGENT_INTRO, PromptBuiltin, PromptLayer, PromptSlot,
-    PromptSlotLayer, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    ResolvedPromptLayer, default_prompt_template, resolve_prompt_layers,
+    MAIN_AGENT_INTRO, PromptBuiltin, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, ResolvedPromptLayer, default_prompt_template,
+    resolve_prompt_layers,
 };
 
 use std::collections::HashMap;

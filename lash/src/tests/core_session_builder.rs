@@ -473,6 +473,50 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
 }
 
 #[tokio::test]
+async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> {
+    let reused_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(BoundSessionStore {
+        session_id: "root-store".to_string(),
+    });
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model("mock-model", None)
+        .max_context_tokens(200_000)
+        .store_factory(Arc::new(ReusableStoreFactory {
+            store: reused_store,
+        }))
+        .build()?;
+    let session = core.session("root-store").open().await?;
+
+    let err = session
+        .control()
+        .children()
+        .create_session(SessionCreateRequest {
+            session_id: Some("child-needs-own-store".to_string()),
+            relation: lash_core::SessionRelation::Child {
+                parent_session_id: "root-store".to_string(),
+            },
+            start: lash_core::SessionStartPoint::Empty,
+            policy: None,
+            plugin_mode: lash_core::SessionPluginMode::InheritCurrent,
+            initial_nodes: Vec::new(),
+            first_turn_input: None,
+            tool_access: lash_core::SessionToolAccess::default(),
+            subagent: None,
+            context_surface: lash_core::SessionContextSurface::default(),
+            mode_extras: lash_core::ModeExtras::default(),
+            usage_source: None,
+        })
+        .await
+        .expect_err("reused root store should not open a child session");
+    let message = err.to_string();
+
+    assert!(message.contains("configured child session store is already bound"));
+    assert!(message.contains("SessionBuilder::store"));
+    assert!(message.contains("LashCoreBuilder::child_store_factory"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()> {
     let factory = Arc::new(RecordingStoreFactory::default());
     let explicit_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());

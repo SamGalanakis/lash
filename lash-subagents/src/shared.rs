@@ -217,6 +217,10 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
         .iter()
         .map(|name| Value::String(name.clone()))
         .collect();
+    let mut required = vec!["agent_name", "task"];
+    if capability_names.len() != 1 {
+        required.push("capability");
+    }
     json!({
         "type": "object",
         "properties": {
@@ -230,7 +234,7 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
                 "description": "Optional record of state to seed into the child. Each entry's kind is preserved automatically: if its lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), the child receives it as a read-only projected binding; otherwise it lands as a regular RLM global. Computed values default to global. Children inherit nothing else from the parent — pass everything they need explicitly."
             }
         },
-        "required": ["agent_name", "task", "capability"],
+        "required": required,
         "additionalProperties": false
     })
 }

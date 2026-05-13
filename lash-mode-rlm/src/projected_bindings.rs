@@ -16,6 +16,9 @@ pub struct RlmProjectedBindings {
     bindings: ProjectedBindings,
 }
 
+pub type RlmToolResultProjector =
+    Arc<dyn Fn(&str, &serde_json::Value) -> Option<FlowValue> + Send + Sync + 'static>;
+
 impl RlmProjectedBindings {
     pub fn new() -> Self {
         Self::default()
@@ -90,11 +93,29 @@ impl RlmProjectedBindings {
 #[derive(Clone, Default)]
 pub(crate) struct RlmProjectionExtension {
     pub(crate) bindings: RlmProjectedBindings,
+    pub(crate) tool_result_projectors: Vec<RlmToolResultProjector>,
 }
 
 impl RlmProjectionExtension {
     pub(crate) fn new(bindings: RlmProjectedBindings) -> Self {
-        Self { bindings }
+        Self {
+            bindings,
+            tool_result_projectors: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_projector(projector: RlmToolResultProjector) -> Self {
+        Self {
+            bindings: RlmProjectedBindings::new(),
+            tool_result_projectors: vec![projector],
+        }
+    }
+
+    fn merge(mut self, other: Self) -> Result<Self, ProjectedBindingError> {
+        self.bindings = self.bindings.merge(other.bindings)?;
+        self.tool_result_projectors
+            .extend(other.tool_result_projectors);
+        Ok(self)
     }
 
     pub(crate) fn prompt_contributions_for(
@@ -148,6 +169,13 @@ pub trait RlmTurnInputExt {
     fn rlm_project(self, bindings: RlmProjectedBindings) -> Result<Self, ProjectedBindingError>
     where
         Self: Sized;
+
+    fn rlm_project_tool_results(
+        self,
+        projector: RlmToolResultProjector,
+    ) -> Result<Self, ProjectedBindingError>
+    where
+        Self: Sized;
 }
 
 impl RlmTurnInputExt for TurnInput {
@@ -155,19 +183,46 @@ impl RlmTurnInputExt for TurnInput {
         mut self,
         bindings: RlmProjectedBindings,
     ) -> Result<Self, ProjectedBindingError> {
-        let bindings = if let Some(existing) = self
+        let extension = if let Some(existing) = self
             .turn_context
             .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
             .cloned()
         {
-            existing.bindings.clone().merge(bindings)?
+            existing
+                .clone()
+                .merge(RlmProjectionExtension::new(bindings))?
         } else {
-            bindings
+            RlmProjectionExtension::new(bindings)
         };
-        self.turn_context.insert_plugin_input(
-            RLM_TURN_INPUT_PLUGIN_ID,
-            RlmProjectionExtension::new(bindings),
-        );
+        self.turn_context
+            .insert_plugin_input(RLM_TURN_INPUT_PLUGIN_ID, extension);
+        self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
+            self.turn_context
+                .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
+                .expect("RLM projection was just inserted")
+                .bindings
+                .clone(),
+        )));
+        Ok(self)
+    }
+
+    fn rlm_project_tool_results(
+        mut self,
+        projector: RlmToolResultProjector,
+    ) -> Result<Self, ProjectedBindingError> {
+        let extension = if let Some(existing) = self
+            .turn_context
+            .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
+            .cloned()
+        {
+            existing
+                .clone()
+                .merge(RlmProjectionExtension::with_projector(projector))?
+        } else {
+            RlmProjectionExtension::with_projector(projector)
+        };
+        self.turn_context
+            .insert_plugin_input(RLM_TURN_INPUT_PLUGIN_ID, extension);
         self.mode_extension = Some(ModeTurnExtensionHandle::new(RlmProjectionExtension::new(
             self.turn_context
                 .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)

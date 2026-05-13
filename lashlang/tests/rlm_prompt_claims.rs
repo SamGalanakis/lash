@@ -820,6 +820,33 @@ async fn prompt_claim_builtin_starts_ends_contains() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_builtin_find_and_grep_text() {
+    let host = MockHost::default();
+    assert_eq!(
+        run(&host, r#"submit find("alpha beta", "beta")"#),
+        Value::Number(6.0)
+    );
+    assert_eq!(run(&host, r#"submit find("alpha", "z")"#), Value::Null);
+
+    let Value::List(matches) = run(
+        &host,
+        r#"submit grep_text("one\nmatch here\r\nmatch again\n", "match")"#,
+    ) else {
+        panic!("list");
+    };
+    assert_eq!(matches.len(), 2);
+    let first = matches[0].as_record().expect("match record");
+    assert_eq!(first["line"], Value::Number(2.0));
+    assert_eq!(
+        first["text"],
+        Value::String("match here".to_string().into())
+    );
+    assert_eq!(first["match"], Value::String("match".to_string().into()));
+    assert_eq!(first["start"], Value::Number(0.0));
+    assert_eq!(first["end"], Value::Number(5.0));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_builtin_keys_and_values() {
     let host = MockHost::default();
     let Value::List(keys) = run(&host, "submit keys({a: 1, b: 2})") else {
@@ -1049,6 +1076,8 @@ async fn prompt_mentions_every_builtin_we_document() {
         "split",
         "join",
         "trim",
+        "find",
+        "grep_text",
         "starts_with",
         "ends_with",
         "contains",
@@ -1074,6 +1103,8 @@ async fn prompt_mentions_every_builtin_we_document() {
         (r#"submit split("a,b", ",")"#, "split"),
         (r#"submit join(["a","b"], ",")"#, "join"),
         (r#"submit trim(" a ")"#, "trim"),
+        (r#"submit find("abc", "b")"#, "find"),
+        (r#"submit grep_text("abc", "b")"#, "grep_text"),
         (r#"submit starts_with("abc", "a")"#, "starts_with"),
         (r#"submit ends_with("abc", "c")"#, "ends_with"),
         (r#"submit contains("abc", "b")"#, "contains"),

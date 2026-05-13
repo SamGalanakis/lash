@@ -1,7 +1,8 @@
 use super::*;
 use crate::ast::Stmt;
+use std::fmt::Write as _;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -32,6 +33,378 @@ async fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
     let program = crate::parse(source).expect("program should parse");
     let mut state = State::new();
     execute_program(&program, &mut state, &Host).await
+}
+
+const GOLDEN_CONTRACT_SOURCE: &str = r#"
+source = join(history, ",")
+beta_index = find(source, "beta")
+matches = grep_text(source, "beta")
+Payload = Type {
+  beta_index: int | null,
+  matches: list[dict]
+}
+submit validate(
+  { beta_index: beta_index, matches: matches },
+  Payload
+)
+"#;
+
+#[test]
+fn golden_parser_ast_contract_covers_lashlang_surface() {
+    let program = crate::parse(GOLDEN_CONTRACT_SOURCE).expect("program should parse");
+    insta::assert_snapshot!(
+        "lashlang_parser_ast_contract",
+        serde_json::to_string_pretty(&program).expect("program should serialize")
+    );
+}
+
+#[test]
+fn golden_compiled_bytecode_contract_covers_lashlang_surface() {
+    insta::assert_snapshot!(
+        "lashlang_compiled_bytecode_contract",
+        compiled_program_snapshot(GOLDEN_CONTRACT_SOURCE)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn golden_runtime_diagnostic_contract_is_exact() {
+    let err = crate::execute_with_diagnostics("x = 1\nsubmit len(true)", &mut State::new(), &Host)
+        .await
+        .expect_err("runtime should fail");
+    insta::assert_snapshot!(
+        "lashlang_runtime_diagnostic_contract",
+        diagnostic_message(err)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn golden_serialized_state_snapshot_contract_is_exact() {
+    let program = crate::parse(
+        r#"
+counter = 7
+Payload = Type { title: str, count: int }
+submit Payload
+"#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &Host)
+        .await
+        .expect("program should execute");
+    assert!(matches!(outcome, ExecutionOutcome::Finished(_)));
+    state.globals.insert_str(
+        "cover",
+        Value::Image(ImageValue::new("img_1", "cover", 42, Some(640), Some(480))),
+    );
+    state.globals.insert_str(
+        "projected",
+        Value::Projected(ProjectedValue::custom(
+            "matches[0].text",
+            Arc::new(SnapshotGuardProjectedValue::default()),
+        )),
+    );
+
+    insta::assert_snapshot!(
+        "lashlang_serialized_state_snapshot_contract",
+        serde_json::to_string_pretty(&state.snapshot()).expect("snapshot should serialize")
+    );
+}
+
+fn diagnostic_message(err: crate::ExecuteError) -> String {
+    let crate::ExecuteError::Runtime(RuntimeError::ValueError { message }) = err else {
+        panic!("expected diagnostic runtime error");
+    };
+    message
+}
+
+fn compiled_program_snapshot(source: &str) -> String {
+    let compiled = compile_source(source).expect("source should compile");
+    let chunk = &compiled.chunk;
+    let mut out = String::new();
+
+    let stats = compiled.compile_stats();
+    writeln!(
+        out,
+        "compile_stats: total={} const_folded={} dynamic={} refs={}",
+        stats.type_literals_total,
+        stats.type_literals_const_folded,
+        stats.type_literals_dynamic,
+        stats.type_ref_sites
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "slots: [{}]",
+        chunk
+            .slot_names
+            .iter()
+            .map(|name| name.text.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "names: [{}]",
+        chunk
+            .names
+            .iter()
+            .map(|name| name.text.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(out, "constants:").unwrap();
+    for (index, value) in chunk.constants.iter().enumerate() {
+        writeln!(out, "  c{index}: {}", compact_json(value)).unwrap();
+    }
+    writeln!(out, "instructions:").unwrap();
+    for (ip, instruction) in chunk.code.iter().copied().enumerate() {
+        writeln!(
+            out,
+            "  {ip:04}: {}",
+            instruction_snapshot(chunk, instruction)
+        )
+        .unwrap();
+    }
+
+    out
+}
+
+fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
+    match instruction {
+        Instruction::PushConst(index) => {
+            format!(
+                "push_const c{index} {}",
+                compact_json(&chunk.constants[index])
+            )
+        }
+        Instruction::PushNull => "push_null".to_string(),
+        Instruction::PushBool(value) => format!("push_bool {value}"),
+        Instruction::PushNumber(value) => format!("push_number {value}"),
+        Instruction::LoadName(slot) => format!("load_name {slot}:{}", slot_name(chunk, slot)),
+        Instruction::StoreName(slot) => format!("store_name {slot}:{}", slot_name(chunk, slot)),
+        Instruction::StoreConst { slot, constant } => format!(
+            "store_const {slot}:{} c{constant} {}",
+            slot_name(chunk, slot),
+            compact_json(&chunk.constants[constant])
+        ),
+        Instruction::BuildList(count) => format!("build_list {count}"),
+        Instruction::BuildRecord(keys) => format!("build_record {}", keys_snapshot(chunk, keys)),
+        Instruction::LoadField { slot, field } => format!(
+            "load_field {slot}:{} .{}",
+            slot_name(chunk, slot),
+            name(chunk, field)
+        ),
+        Instruction::LoadFieldUnwrap { slot, field } => format!(
+            "load_field_unwrap {slot}:{} .{}",
+            slot_name(chunk, slot),
+            name(chunk, field)
+        ),
+        Instruction::Field(field) => format!("field .{}", name(chunk, field)),
+        Instruction::Index => "index".to_string(),
+        Instruction::PathAssign { slot, path } => format!(
+            "path_assign {slot}:{} {}",
+            slot_name(chunk, slot),
+            assign_path_snapshot(chunk, path)
+        ),
+        Instruction::ResultUnwrap => "result_unwrap".to_string(),
+        Instruction::Unary(op) => format!("unary {op:?}"),
+        Instruction::Binary(op) => format!("binary {op:?}"),
+        Instruction::ToBool => "to_bool".to_string(),
+        Instruction::Jump(target) => format!("jump {target}"),
+        Instruction::JumpIfFalse(target) => format!("jump_if_false {target}"),
+        Instruction::JumpIfCompareFalse { op, target } => {
+            format!("jump_if_compare_false {op:?} {target}")
+        }
+        Instruction::JumpIfSlotNumberCompareFalse {
+            slot,
+            op,
+            right,
+            target,
+        } => format!(
+            "jump_if_slot_number_compare_false {slot}:{} {op:?} {right} {target}",
+            slot_name(chunk, slot)
+        ),
+        Instruction::JumpIfSlotNumberBinaryCompareFalse {
+            slot,
+            binary_op,
+            binary_right,
+            compare_op,
+            compare_right,
+            target,
+        } => format!(
+            "jump_if_slot_number_binary_compare_false {slot}:{} {binary_op:?} {binary_right} {compare_op:?} {compare_right} {target}",
+            slot_name(chunk, slot)
+        ),
+        Instruction::JumpIfTrue(target) => format!("jump_if_true {target}"),
+        Instruction::CallTool { name, keys } => {
+            format!(
+                "call_tool {} {}",
+                name_text(chunk, name),
+                keys_snapshot(chunk, keys)
+            )
+        }
+        Instruction::CallToolUnwrap { name, keys } => format!(
+            "call_tool_unwrap {} {}",
+            name_text(chunk, name),
+            keys_snapshot(chunk, keys)
+        ),
+        Instruction::StartCallTool { name, keys } => format!(
+            "start_call_tool {} {}",
+            name_text(chunk, name),
+            keys_snapshot(chunk, keys)
+        ),
+        Instruction::AwaitHandle => "await_handle".to_string(),
+        Instruction::AwaitHandleUnwrap => "await_handle_unwrap".to_string(),
+        Instruction::CancelHandle => "cancel_handle".to_string(),
+        Instruction::CallBuiltin { builtin, argc } => {
+            format!(
+                "call_builtin {} argc={argc}",
+                builtin_snapshot(chunk, builtin)
+            )
+        }
+        Instruction::Len => "len".to_string(),
+        Instruction::Join => "join".to_string(),
+        Instruction::Validate => "validate".to_string(),
+        Instruction::ValidateCompiled(schema) => format!("validate_compiled schema#{schema}"),
+        Instruction::Push => "push".to_string(),
+        Instruction::Range { argc } => format!("range argc={argc}"),
+        Instruction::FormatCompiled(template) => {
+            format!(
+                "format_compiled {}",
+                format_template_snapshot(chunk, template)
+            )
+        }
+        Instruction::AddAssign(slot) => format!("add_assign {slot}:{}", slot_name(chunk, slot)),
+        Instruction::AddAssignNumber { slot, right } => {
+            format!(
+                "add_assign_number {slot}:{} {right}",
+                slot_name(chunk, slot)
+            )
+        }
+        Instruction::AddAssignIndexNumber { slot, right } => format!(
+            "add_assign_index_number {slot}:{} {right}",
+            slot_name(chunk, slot)
+        ),
+        Instruction::AppendAssign(slot) => {
+            format!("append_assign {slot}:{}", slot_name(chunk, slot))
+        }
+        Instruction::Print => "print".to_string(),
+        Instruction::Submit => "submit".to_string(),
+        Instruction::Pop => "pop".to_string(),
+        Instruction::BeginIter(slot) => format!("begin_iter {slot}:{}", slot_name(chunk, slot)),
+        Instruction::BeginRangeIter { binding, argc } => {
+            format!(
+                "begin_range_iter {binding}:{} argc={argc}",
+                slot_name(chunk, binding)
+            )
+        }
+        Instruction::IterNext { jump_to } => format!("iter_next {jump_to}"),
+        Instruction::EndIter => "end_iter".to_string(),
+        Instruction::ParallelCalls(index) => format!("parallel_calls set#{index}"),
+        Instruction::ParallelCallsValue(index) => format!("parallel_calls_value set#{index}"),
+        Instruction::ParallelNamedCallsValue(index) => {
+            format!("parallel_named_calls_value set#{index}")
+        }
+        Instruction::PureParallelValue(index) => format!("pure_parallel_value set#{index}"),
+        Instruction::PureParallelNamedValue(index) => {
+            format!("pure_parallel_named_value set#{index}")
+        }
+        Instruction::Parallel(index) => format!("parallel chunk_set#{index}"),
+        Instruction::ParallelValue(index) => format!("parallel_value chunk_set#{index}"),
+        Instruction::ParallelNamed(index) => format!("parallel_named chunk_set#{index}"),
+        Instruction::ParallelNamedValue(index) => {
+            format!("parallel_named_value chunk_set#{index}")
+        }
+        Instruction::ResolveTypeRef(slot) => {
+            format!("resolve_type_ref {slot}:{}", slot_name(chunk, slot))
+        }
+        Instruction::WrapTypeLiteral => "wrap_type_literal".to_string(),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).expect("value should serialize")
+}
+
+fn slot_name(chunk: &Chunk, index: usize) -> &str {
+    chunk.slot_names[index].text.as_ref()
+}
+
+fn name_text(chunk: &Chunk, index: usize) -> &str {
+    chunk.names[index].text.as_ref()
+}
+
+fn name(chunk: &Chunk, index: usize) -> &str {
+    name_text(chunk, index)
+}
+
+fn keys_snapshot(chunk: &Chunk, index: usize) -> String {
+    let keys = &chunk.key_lists[index];
+    let names = keys
+        .iter()
+        .map(|key| name_text(chunk, *key))
+        .collect::<Vec<_>>();
+    format!("[{}]", names.join(", "))
+}
+
+fn assign_path_snapshot(chunk: &Chunk, index: usize) -> String {
+    let path = &chunk.assign_paths[index];
+    let mut rendered = String::new();
+    for step in path.steps.iter() {
+        match step {
+            CompiledAssignPathStep::Field(field) => {
+                write!(rendered, ".{}", name_text(chunk, *field)).unwrap();
+            }
+            CompiledAssignPathStep::Index => rendered.push_str("[dynamic]"),
+        }
+    }
+    rendered
+}
+
+fn format_template_snapshot(chunk: &Chunk, index: usize) -> String {
+    let template = &chunk.format_templates[index];
+    let parts = template
+        .parts
+        .iter()
+        .map(|part| match part {
+            CompiledFormatPart::Literal(value) => format!("{value:?}"),
+            CompiledFormatPart::Arg(index) => format!("arg{index}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!(
+        "argc={} min={} parts={parts}",
+        template.argc, template.min_capacity
+    )
+}
+
+fn builtin_snapshot(chunk: &Chunk, builtin: Builtin) -> String {
+    match builtin {
+        Builtin::Len => "len".to_string(),
+        Builtin::Empty => "empty".to_string(),
+        Builtin::Keys => "keys".to_string(),
+        Builtin::Values => "values".to_string(),
+        Builtin::Contains => "contains".to_string(),
+        Builtin::Find => "find".to_string(),
+        Builtin::GrepText => "grep_text".to_string(),
+        Builtin::StartsWith => "starts_with".to_string(),
+        Builtin::EndsWith => "ends_with".to_string(),
+        Builtin::Split => "split".to_string(),
+        Builtin::Join => "join".to_string(),
+        Builtin::Trim => "trim".to_string(),
+        Builtin::Slice => "slice".to_string(),
+        Builtin::ToString => "to_string".to_string(),
+        Builtin::ToInt => "to_int".to_string(),
+        Builtin::ToFloat => "to_float".to_string(),
+        Builtin::JsonParse => "json_parse".to_string(),
+        Builtin::Format => "format".to_string(),
+        Builtin::Validate => "validate".to_string(),
+        Builtin::Range => "range".to_string(),
+        Builtin::Push => "push".to_string(),
+        Builtin::Unknown(index) => format!("unknown({})", name_text(chunk, index)),
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -530,6 +903,9 @@ async fn builtin_success_matrix_is_covered() {
           contains_l: contains([1,2,3], 2),
           contains_r: contains({ foo: 1, bar: 2 }, "foo"),
           contains_n: contains(null, 2),
+          find_hit: find("alpha beta", "beta"),
+          find_from: find("banana", "na", 3),
+          find_missing: find("alpha", "z"),
           starts: starts_with("lash", "la"),
           starts_num: starts_with(123, 12),
           ends: ends_with("lash", "sh"),
@@ -583,6 +959,9 @@ async fn builtin_success_matrix_is_covered() {
     assert_eq!(record["contains_l"], Value::Bool(true));
     assert_eq!(record["contains_r"], Value::Bool(true));
     assert_eq!(record["contains_n"], Value::Bool(false));
+    assert_eq!(record["find_hit"], Value::Number(6.0));
+    assert_eq!(record["find_from"], Value::Number(4.0));
+    assert_eq!(record["find_missing"], Value::Null);
     assert_eq!(record["keys_n"], Value::List(Vec::new().into()));
     assert_eq!(record["values_n"], Value::List(Vec::new().into()));
     assert_eq!(record["starts_num"], Value::Bool(true));
@@ -659,6 +1038,49 @@ async fn builtin_success_matrix_is_covered() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn grep_text_returns_documented_line_records() {
+    let value = exec(
+        r#"
+        matches = grep_text("alpha\nbeta match\r\ngamma match\n", "match")
+        submit matches
+        "#,
+    )
+    .await
+    .expect("grep_text should succeed");
+
+    let Value::List(matches) = value else {
+        panic!("expected list");
+    };
+    assert_eq!(matches.len(), 2);
+    let first = matches[0].as_record().expect("first match record");
+    assert_eq!(first["line"], Value::Number(2.0));
+    assert_eq!(first["text"], Value::String("beta match".into()));
+    assert_eq!(first["match"], Value::String("match".into()));
+    assert_eq!(first["start"], Value::Number(5.0));
+    assert_eq!(first["end"], Value::Number(10.0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn find_uses_character_offsets() {
+    let value = exec(
+        r#"
+        submit {
+          first: find("éclair café", "café"),
+          from_end: find("abc", "", 3),
+          beyond_end: find("abc", "a", 4)
+        }
+        "#,
+    )
+    .await
+    .expect("find should succeed");
+
+    let record = value.as_record().expect("record");
+    assert_eq!(record["first"], Value::Number(7.0));
+    assert_eq!(record["from_end"], Value::Number(3.0));
+    assert_eq!(record["beyond_end"], Value::Null);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn builtin_error_matrix_is_covered() {
     let cases = [
         ("submit len(true)", "len"),
@@ -666,6 +1088,10 @@ async fn builtin_error_matrix_is_covered() {
         ("submit keys([])", "keys"),
         ("submit values([])", "values"),
         ("submit contains(1, 2)", "contains"),
+        ("submit find(\"a\")", "find"),
+        ("submit find(\"a\", \"a\", -1)", "find"),
+        ("submit grep_text({}, \"a\")", "grep_text"),
+        ("submit grep_text(\"a\", \"\")", "grep_text"),
         ("submit starts_with({}, \"a\")", "starts_with"),
         ("submit ends_with({}, \"a\")", "ends_with"),
         ("submit split({}, \",\")", "split"),
@@ -1039,8 +1465,94 @@ impl TestProjectedValue {
     }
 }
 
+#[derive(Default)]
+struct SnapshotGuardProjectedValue {
+    materialize_count: AtomicUsize,
+    render_count: AtomicUsize,
+}
+
+struct SearchProjectedText {
+    text: Arc<str>,
+    slice_count: AtomicUsize,
+    materialize_count: AtomicUsize,
+    render_count: AtomicUsize,
+    slices: Mutex<Vec<(Option<isize>, Option<isize>)>>,
+}
+
+impl SearchProjectedText {
+    fn new(text: impl Into<Arc<str>>) -> Arc<Self> {
+        Arc::new(Self {
+            text: text.into(),
+            slice_count: AtomicUsize::new(0),
+            materialize_count: AtomicUsize::new(0),
+            render_count: AtomicUsize::new(0),
+            slices: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn slices(&self) -> Vec<(Option<isize>, Option<isize>)> {
+        self.slices.lock().expect("slices lock").clone()
+    }
+}
+
+impl ProjectedHostValue for SnapshotGuardProjectedValue {
+    fn type_name(&self) -> &str {
+        "string"
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async {
+            self.render_count.fetch_add(1, Ordering::SeqCst);
+            "rendered full text".to_string()
+        })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async {
+            self.materialize_count.fetch_add(1, Ordering::SeqCst);
+            Value::String("materialized full text".into())
+        })
+    }
+}
+
+impl ProjectedHostValue for SearchProjectedText {
+    fn type_name(&self) -> &str {
+        "string"
+    }
+
+    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
+        Box::pin(async { Some(self.text.chars().count()) })
+    }
+
+    fn slice(
+        &self,
+        start: Option<isize>,
+        end: Option<isize>,
+    ) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.slice_count.fetch_add(1, Ordering::SeqCst);
+            self.slices.lock().expect("slices lock").push((start, end));
+            ProjectedRead::Value(Value::String(slice_string(&self.text, start, end).into()))
+        })
+    }
+
+    fn render(&self) -> ProjectedFuture<'_, String> {
+        Box::pin(async {
+            self.render_count.fetch_add(1, Ordering::SeqCst);
+            self.text.to_string()
+        })
+    }
+
+    fn materialize(&self) -> ProjectedFuture<'_, Value> {
+        Box::pin(async {
+            self.materialize_count.fetch_add(1, Ordering::SeqCst);
+            Value::String(self.text.as_ref().into())
+        })
+    }
+}
+
 impl ProjectedHostValue for TestProjectedValue {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         "list"
     }
 
@@ -1107,7 +1619,7 @@ impl ProjectedFixture {
 }
 
 impl ProjectedHostValue for ProjectedFixture {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         value_type_name(&self.value)
     }
 
@@ -1293,6 +1805,118 @@ async fn print_projected_uses_render_and_submit_materializes() {
     assert_eq!(list.materialize_count.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn snapshot_serialization_marks_projected_values_without_materializing() {
+    let projected = Arc::new(SnapshotGuardProjectedValue::default());
+    let mut state = State::new();
+    state.globals.insert(
+        "match_text".to_string(),
+        Value::Projected(ProjectedValue::custom("matches[0].text", projected.clone())),
+    );
+
+    let encoded = serde_json::to_vec(&state.snapshot()).expect("snapshot encode");
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).expect("snapshot json");
+
+    assert_eq!(projected.render_count.load(Ordering::SeqCst), 0);
+    assert_eq!(projected.materialize_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        wire["globals"]["match_text"]["__lashlang_snapshot_projected__"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(wire["globals"]["match_text"]["name"], "matches[0].text");
+    assert_eq!(wire["globals"]["match_text"]["type_name"], "string");
+    let encoded_text = String::from_utf8(encoded).expect("utf8 snapshot");
+    assert!(!encoded_text.contains("rendered full text"));
+    assert!(!encoded_text.contains("materialized full text"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_restore_projected_marker_becomes_unavailable_placeholder() {
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "globals": {
+            "match_text": {
+                "__lashlang_snapshot_projected__": true,
+                "name": "matches[0].text",
+                "type_name": "string"
+            }
+        }
+    }))
+    .expect("snapshot decode");
+
+    let Some(Value::Projected(projected)) = snapshot.globals.get("match_text") else {
+        panic!("expected projected placeholder");
+    };
+
+    assert_eq!(projected.name(), "matches[0].text");
+    assert_eq!(projected.value_type_name(), "string");
+    let rendered = projected.render().await;
+    assert!(rendered.contains("unavailable after snapshot restore"));
+    assert!(rendered.contains("rerun the producing tool"));
+    let materialized = projected.materialize_async().await;
+    assert!(matches!(materialized, Value::String(_)));
+    assert_ne!(materialized, Value::String("materialized full text".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn flat_search_match_projected_text_separates_slice_snapshot_and_stringify_metrics() {
+    let text = SearchProjectedText::new("0123456789abcdefghijklmnopqrstuvwxyz");
+    let mut match_record = Record::default();
+    match_record.insert("title".to_string(), Value::String("first".into()));
+    match_record.insert(
+        "text".to_string(),
+        Value::Projected(ProjectedValue::custom(
+            "search.matches[0].text",
+            text.clone(),
+        )),
+    );
+    let mut result_record = Record::default();
+    result_record.insert(
+        "matches".to_string(),
+        Value::List(vec![Value::Record(Arc::new(match_record))].into()),
+    );
+
+    let (value, state) = exec_with_global_state(
+        "r",
+        Value::Record(Arc::new(result_record)),
+        "m = r.matches[0]\nhead = slice(m.text, 10, 30)\nsubmit { title: m.title, head: head }",
+    )
+    .await
+    .expect("projected search result should run");
+    let record = value.as_record().expect("submitted record");
+    assert_eq!(record["title"], Value::String("first".into()));
+    assert_eq!(record["head"], Value::String("abcdefghijklmnopqrst".into()));
+    assert_eq!(text.slice_count.load(Ordering::SeqCst), 1);
+    assert_eq!(text.slices(), vec![(Some(10), Some(30))]);
+    assert_eq!(text.render_count.load(Ordering::SeqCst), 0);
+    assert_eq!(text.materialize_count.load(Ordering::SeqCst), 0);
+
+    let snapshot = state.snapshot();
+    let Some(Value::Record(stored_match)) = snapshot.globals.get("m") else {
+        panic!("stored match should stay flat record");
+    };
+    assert!(matches!(
+        stored_match.get("text"),
+        Some(Value::Projected(_))
+    ));
+    let encoded = serde_json::to_string(&snapshot).expect("snapshot encode");
+    assert!(encoded.contains("__lashlang_snapshot_projected__"));
+    assert!(encoded.contains("search.matches[0].text"));
+    assert_eq!(text.render_count.load(Ordering::SeqCst), 0);
+    assert_eq!(text.materialize_count.load(Ordering::SeqCst), 0);
+
+    let program = crate::parse("submit to_string(m.text)").expect("program should parse");
+    let mut state = State::from_snapshot(snapshot);
+    let outcome = execute_program(&program, &mut state, &Host)
+        .await
+        .expect("explicit stringify should run");
+    let ExecutionOutcome::Finished(Value::String(full_text)) = outcome else {
+        panic!("expected full text");
+    };
+    assert_eq!(full_text.as_str(), "0123456789abcdefghijklmnopqrstuvwxyz");
+    assert_eq!(text.render_count.load(Ordering::SeqCst), 1);
+    assert_eq!(text.materialize_count.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn projected_values_match_normal_values_for_language_operations() {
     assert_projected_parity(
@@ -1318,6 +1942,8 @@ async fn projected_values_match_normal_values_for_language_operations() {
           contains_text: contains(input.context, "beta"),
           contains_list: contains(input.items, "green"),
           contains_record: contains(input.record, "a"),
+          find_text: find(input.context, "beta"),
+          grep_text: grep_text(input.context, "beta"),
           starts: starts_with(trim(input.context), "alpha"),
           ends: ends_with(trim(input.context), "gamma"),
           split: split(trim(input.context), ","),
@@ -1400,7 +2026,7 @@ impl OverrideProjectedValue {
 }
 
 impl ProjectedHostValue for OverrideProjectedValue {
-    fn type_name(&self) -> &'static str {
+    fn type_name(&self) -> &str {
         value_type_name(&self.value)
     }
 
@@ -1453,6 +2079,24 @@ impl ProjectedHostValue for OverrideProjectedValue {
         Box::pin(async move {
             self.push_call("contains");
             execute_contains_direct(&self.value, &needle).expect("contains override")
+        })
+    }
+
+    fn find(&self, needle: Value, start: usize) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("find");
+            execute_find_direct(&self.value, &needle, start)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
+        })
+    }
+
+    fn grep_text(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
+        Box::pin(async move {
+            self.push_call("grep_text");
+            execute_grep_text_direct(&self.value, &needle)
+                .map(ProjectedRead::Value)
+                .unwrap_or(ProjectedRead::Missing)
         })
     }
 
@@ -1649,6 +2293,20 @@ async fn projected_host_values_can_override_all_lazy_receiver_operations() {
     assert_override_uses_hook("submit keys(p)", "p", record.clone(), "keys").await;
     assert_override_uses_hook("submit values(p)", "p", record.clone(), "values").await;
     assert_override_uses_hook(r#"submit contains(p, "b")"#, "p", list.clone(), "contains").await;
+    assert_override_uses_hook(
+        r#"submit find(p, "ph")"#,
+        "p",
+        Value::String("alpha".into()),
+        "find",
+    )
+    .await;
+    assert_override_uses_hook(
+        r#"submit grep_text(p, "beta")"#,
+        "p",
+        Value::String("alpha\nbeta\n".into()),
+        "grep_text",
+    )
+    .await;
     assert_override_uses_hook(
         r#"submit starts_with(p, "al")"#,
         "p",

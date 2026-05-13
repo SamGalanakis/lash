@@ -31,7 +31,7 @@ pub struct OolongQuestion {
     pub dataset: Option<String>,
     pub config: Option<String>,
     pub context_len: Option<u64>,
-    pub context_window_id: Option<i64>,
+    pub context_window_id: Option<Value>,
     pub task_group: Option<String>,
     pub task: Option<String>,
     pub answer_type: Option<String>,
@@ -117,5 +117,36 @@ mod tests {
         let question: OolongQuestion = serde_json::from_str(row).expect("question");
 
         assert_eq!(question.input_subset, Some(false));
+    }
+
+    #[test]
+    fn question_accepts_real_suite_uuid_context_window_id() {
+        let row = r#"{
+            "question_id": "1",
+            "suite": "real",
+            "split": "test",
+            "dataset": null,
+            "config": "dnd",
+            "context_len": null,
+            "context_window_id": "29f1fec6-ebf3-378f-201d-8a20db19eecd",
+            "task_group": null,
+            "task": null,
+            "answer_type": null,
+            "input_subset": null,
+            "prompt": "p",
+            "context": "c",
+            "question": "q",
+            "answer": 114,
+            "source": {}
+        }"#;
+
+        let question: OolongQuestion = serde_json::from_str(row).expect("question");
+
+        assert_eq!(
+            question.context_window_id,
+            Some(Value::String(
+                "29f1fec6-ebf3-378f-201d-8a20db19eecd".to_string()
+            ))
+        );
     }
 }
