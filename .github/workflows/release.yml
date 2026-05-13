@@ -16,7 +16,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  LASH_CI_ZIG_VERSION: 0.15.1
+  LASH_CI_ZIG_VERSION: 0.15.2
 
 jobs:
   validate-release-ref:
