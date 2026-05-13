@@ -8,7 +8,7 @@ use lash_core::plugin::{
     CheckpointHookContext, HistoryError, ModeBeforeLlmCallContext, ModeLlmCallAction,
     ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    SessionPlugin, TurnContextTransform, TurnTransformContext,
+    SessionPlugin, ToolCallHookContext, TurnContextTransform, TurnTransformContext,
 };
 use lash_core::session_model::context::PreparedContext;
 use lash_core::{
@@ -138,6 +138,9 @@ impl SessionPlugin for RlmModePlugin {
         }))?;
         reg.tools()
             .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
+        reg.tool_calls().before(Arc::new(|ctx| {
+            Box::pin(async move { normalize_projected_tool_args(ctx) })
+        }));
 
         let bound_vars_cache = Arc::new(BoundVariablesCache::new());
         let bound_vars_hook: lash_core::plugin::PromptContributor = Arc::new(move |ctx| {
@@ -205,6 +208,81 @@ impl ModeProtocolDriverPlugin for RlmProtocolDriver {
                 prompt_features: self.config.prompt_features,
             },
         )
+    }
+}
+
+fn normalize_projected_tool_args(
+    ctx: ToolCallHookContext,
+) -> Result<Vec<PluginDirective>, PluginError> {
+    let original = ctx.args;
+    let normalized = normalize_tool_args_for_projection(&ctx.tool_name, original.clone());
+    if normalized == original {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![PluginDirective::ReplaceToolArgs { args: normalized }])
+    }
+}
+
+fn normalize_tool_args_for_projection(
+    tool_name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    match tool_name {
+        "continue_as" | "spawn_agent" => normalize_seed_preserving_tool_args(args),
+        _ => materialize_projected_json(args),
+    }
+}
+
+fn normalize_seed_preserving_tool_args(args: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(args) = args else {
+        return materialize_projected_json(args);
+    };
+    serde_json::Value::Object(
+        args.into_iter()
+            .map(|(key, value)| {
+                let value = if key == "seed" {
+                    normalize_projected_seed(value)
+                } else {
+                    materialize_projected_json(value)
+                };
+                (key, value)
+            })
+            .collect(),
+    )
+}
+
+fn normalize_projected_seed(seed: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(seed) = seed else {
+        return materialize_projected_json(seed);
+    };
+    serde_json::Value::Object(
+        seed.into_iter()
+            .map(|(key, value)| {
+                let value = if lash_rlm_types::projection_inner(&value).is_some() {
+                    value
+                } else {
+                    materialize_projected_json(value)
+                };
+                (key, value)
+            })
+            .collect(),
+    )
+}
+
+fn materialize_projected_json(value: serde_json::Value) -> serde_json::Value {
+    if let Some(inner) = lash_rlm_types::projection_inner(&value) {
+        return materialize_projected_json(inner.clone());
+    }
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(materialize_projected_json).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, materialize_projected_json(value)))
+                .collect(),
+        ),
+        value => value,
     }
 }
 
@@ -831,6 +909,216 @@ mod tests {
         .expect_err("extra properties should fail");
 
         assert!(err.to_string().contains("schema-invalid"));
+    }
+
+    fn projected(value: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "__projected__": value })
+    }
+
+    fn received_tool_args(tool_name: &str, args: serde_json::Value) -> serde_json::Value {
+        normalize_tool_args_for_projection(tool_name, args)
+    }
+
+    fn classify_received_seed(received: &serde_json::Value) -> lash_rlm_types::ClassifiedSeed {
+        lash_rlm_types::classify_seed(received).expect("seed should classify")
+    }
+
+    #[test]
+    fn projected_tool_arg_normalization_materializes_ordinary_tools_recursively() {
+        let args = serde_json::json!({
+            "path": projected(serde_json::json!("/tmp/projected.txt")),
+            "nested": {
+                "items": [
+                    projected(serde_json::json!("a")),
+                    { "plain": projected(serde_json::json!(true)) }
+                ]
+            }
+        });
+
+        let normalized = received_tool_args("read_file", args);
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "path": "/tmp/projected.txt",
+                "nested": {
+                    "items": [
+                        "a",
+                        { "plain": true }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn projected_tool_arg_normalization_preserves_seed_roots_for_projection_aware_tools() {
+        let args = serde_json::json!({
+            "agent_name": projected(serde_json::json!("worker")),
+            "task": projected(serde_json::json!("inspect the file")),
+            "capability": "explore",
+            "seed": {
+                "projected_root": projected(serde_json::json!("carry-over")),
+                "computed_record": {
+                    "field": projected(serde_json::json!("materialize me"))
+                }
+            }
+        });
+
+        let normalized = received_tool_args("spawn_agent", args);
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "agent_name": "worker",
+                "task": "inspect the file",
+                "capability": "explore",
+                "seed": {
+                    "projected_root": { "__projected__": "carry-over" },
+                    "computed_record": {
+                        "field": "materialize me"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn projected_tool_arg_normalization_preserves_continue_as_seed_roots() {
+        let args = serde_json::json!({
+            "task": projected(serde_json::json!("continue")),
+            "seed": {
+                "problem": projected(serde_json::json!({ "prompt": "large prompt" }))
+            }
+        });
+
+        let normalized = received_tool_args("continue_as", args);
+        let seed = classify_received_seed(&normalized);
+
+        assert_eq!(
+            normalized.get("task").and_then(serde_json::Value::as_str),
+            Some("continue")
+        );
+        assert_eq!(
+            seed.projected.entries.as_slice(),
+            &[(
+                "problem".to_string(),
+                serde_json::json!({ "prompt": "large prompt" })
+            )]
+        );
+        assert!(seed.globals.is_empty());
+    }
+
+    #[test]
+    fn ordinary_tool_receives_non_projected_input_without_materialization() {
+        let args = serde_json::json!({
+            "query": "plain",
+            "options": { "limit": 3, "exact": true }
+        });
+
+        let received = received_tool_args("search", args.clone());
+
+        assert_eq!(received, args);
+    }
+
+    #[test]
+    fn ordinary_tool_receives_projected_input_materialized_as_plain_json() {
+        let received = received_tool_args(
+            "search",
+            serde_json::json!({
+                "query": projected(serde_json::json!("lazy query")),
+                "options": {
+                    "limit": projected(serde_json::json!(3)),
+                    "filters": [
+                        projected(serde_json::json!("rust")),
+                        "tests"
+                    ]
+                }
+            }),
+        );
+
+        assert_eq!(
+            received,
+            serde_json::json!({
+                "query": "lazy query",
+                "options": {
+                    "limit": 3,
+                    "filters": ["rust", "tests"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn projection_aware_tool_receives_non_projected_seed_as_plain_input() {
+        let received = received_tool_args(
+            "spawn_agent",
+            serde_json::json!({
+                "agent_name": "worker",
+                "task": "continue from facts",
+                "capability": "explore",
+                "seed": {
+                    "facts": { "count": 2 },
+                    "label": "plain"
+                }
+            }),
+        );
+
+        let seed = classify_received_seed(&received);
+
+        assert!(seed.projected.is_empty());
+        assert_eq!(
+            seed.globals,
+            serde_json::Map::from_iter([
+                ("facts".to_string(), serde_json::json!({ "count": 2 })),
+                ("label".to_string(), serde_json::json!("plain")),
+            ])
+        );
+    }
+
+    #[test]
+    fn projection_aware_tool_receives_projected_seed_roots_without_materializing_them() {
+        let received = received_tool_args(
+            "spawn_agent",
+            serde_json::json!({
+                "agent_name": projected(serde_json::json!("worker")),
+                "task": projected(serde_json::json!("continue from projected context")),
+                "capability": "explore",
+                "seed": {
+                    "problem": projected(serde_json::json!("large parent context")),
+                    "computed": {
+                        "summary": projected(serde_json::json!("short summary"))
+                    }
+                }
+            }),
+        );
+
+        let seed = classify_received_seed(&received);
+
+        assert_eq!(
+            received
+                .get("agent_name")
+                .and_then(serde_json::Value::as_str),
+            Some("worker")
+        );
+        assert_eq!(
+            received.get("task").and_then(serde_json::Value::as_str),
+            Some("continue from projected context")
+        );
+        assert_eq!(
+            seed.projected.entries.as_slice(),
+            &[(
+                "problem".to_string(),
+                serde_json::json!("large parent context")
+            )]
+        );
+        assert_eq!(
+            seed.globals,
+            serde_json::Map::from_iter([(
+                "computed".to_string(),
+                serde_json::json!({ "summary": "short summary" })
+            )])
+        );
     }
 
     #[async_trait::async_trait]

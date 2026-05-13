@@ -42,6 +42,7 @@ members = [
     "lash-file-index",
     "lashlang",
     "examples/agent-service",
+    "bench/frontier-cs/runner",
     "bench/oolong/runner",
     "bench/longcot/runner",
     "bench/longmemeval-rlm/runner",

@@ -36,7 +36,7 @@ Both `spawn_agent` and `continue_as` accept `seed: { name: value, ... }`. Childr
 - `seed: { findings: findings }` — `findings` is a regular RLM global, so the child receives it as a regular global.
 - `seed: { hint: slice(input.prompt, 0, 1000) }` — computed expression, defaults to global.
 
-The wire encoding is a canonical `{"__projected__": <inner>}` wrapper any time lashlang serializes a `Value::Projected` to JSON; tools that don't care unwrap transparently via `lash::tools::unwrap_projected_arg`.
+The wire encoding is a canonical `{"__projected__": <inner>}` wrapper any time lashlang serializes a `Value::Projected` to JSON. RLM materializes wrappers before ordinary tools validate or execute, and preserves only root `seed` entries for `spawn_agent` / `continue_as` so successors can receive those values as projected bindings.
 
 ## Quickstart
 

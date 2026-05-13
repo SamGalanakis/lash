@@ -251,14 +251,6 @@ pub fn projection_inner(value: &serde_json::Value) -> Option<&serde_json::Value>
     obj.get(PROJECTED_JSON_TAG)
 }
 
-/// Strip the canonical `Value::Projected` wrapper if present, returning the
-/// inner value. No-op for any value that isn't a single-key object whose key
-/// is [`PROJECTED_JSON_TAG`]. Tools call this at the top of every
-/// arg-extraction helper so they see bare data regardless of source kind.
-pub fn unwrap_projected_arg(value: &serde_json::Value) -> &serde_json::Value {
-    projection_inner(value).unwrap_or(value)
-}
-
 /// Walk a `seed:` JSON object and split each entry by lashlang-source kind.
 /// Projected sources (encoded `{"__projected__": <inner>}`) land in the
 /// snapshot; everything else lands in the globals map. Returns an empty

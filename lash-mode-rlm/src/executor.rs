@@ -768,10 +768,9 @@ fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
             FlowValue::Projected(value) => {
                 // Canonical JSON encoding for projected values: a single-key
                 // object `{"__projected__": <inner>}` rather than the bare
-                // inner value. Tools that don't care unwrap via
-                // `lash_rlm_types::unwrap_projected_arg`; tools that do (e.g.
-                // `spawn_agent` / `continue_as` `seed:`) inspect the wrapper
-                // to preserve "kind" across the lashlang→host boundary.
+                // inner value. RLM's before-tool hook materializes wrappers
+                // for ordinary tool arguments and preserves root `seed`
+                // wrappers for projection-aware control tools.
                 let inner = flow_to_json_value(&value.materialize_async().await).await;
                 let mut obj = serde_json::Map::with_capacity(1);
                 obj.insert(PROJECTED_JSON_TAG.to_string(), inner);

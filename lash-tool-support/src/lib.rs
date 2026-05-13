@@ -1,5 +1,4 @@
 use lash_core::ToolResult;
-use lash_rlm_types::unwrap_projected_arg;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +28,6 @@ pub struct TruncationMeta {
 /// Extract a required non-empty string arg, or return ToolResult::err.
 pub fn require_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, ToolResult> {
     args.get(key)
-        .map(unwrap_projected_arg)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ToolResult::err_fmt(format_args!("Missing required parameter: {key}")))
@@ -41,7 +39,7 @@ pub fn parse_optional_bool(
     key: &str,
     default: bool,
 ) -> Result<bool, ToolResult> {
-    match args.get(key).map(unwrap_projected_arg) {
+    match args.get(key) {
         None => Ok(default),
         Some(v) if v.is_null() => Ok(default),
         Some(v) => match v.as_bool() {
@@ -62,7 +60,7 @@ pub fn parse_optional_usize_arg(
     allow_none: bool,
     min: usize,
 ) -> Result<Option<usize>, ToolResult> {
-    match args.get(key).map(unwrap_projected_arg) {
+    match args.get(key) {
         None => Ok(default),
         Some(v) if v.is_null() => {
             if allow_none {

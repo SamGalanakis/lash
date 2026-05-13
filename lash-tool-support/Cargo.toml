@@ -9,7 +9,6 @@ default = []
 
 [dependencies]
 lash-core = { path = "../lash-core", default-features = false }
-lash-rlm-types = { path = "../lash-rlm-types" }
 tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
