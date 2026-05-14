@@ -1,6 +1,6 @@
 //! Binary operations, comparison, numeric coercion, range/iterator helpers,
 //! `is_truthy` / `materialize_projected` / `value_type_name`, builtin
-//! dispatch (`execute_builtin` and the per-builtin direct paths), plus
+//! dispatch (`intrinsic` and the per-intrinsic direct paths), plus
 //! `eval_pure_expr` — the const-folder shared between `Compiler::compile_*`
 //! and `Vm::run_pure_*`.
 
@@ -49,12 +49,12 @@ pub(crate) fn eval_pure_expr(
             }
             Ok(Value::Record(Arc::new(record)))
         }
-        PureExpr::Builtin { builtin, args } => {
+        PureExpr::Intrinsic { op, args } => {
             let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
             for arg in args.iter() {
                 values.push(eval_pure_expr(arg, slots, names, slot_names)?);
             }
-            execute_builtin_blocking(*builtin, names, &values)
+            execute_intrinsic_blocking(*op, names, &values)
         }
         PureExpr::Format { template, args } => {
             let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
@@ -128,17 +128,17 @@ pub(crate) fn expect_arg_count(
     }
 }
 
-pub(crate) async fn execute_builtin(
-    builtin: Builtin,
+pub(crate) async fn execute_intrinsic(
+    builtin: IntrinsicOp,
     names: &[Name],
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
     match builtin {
-        Builtin::Len => {
+        IntrinsicOp::Len => {
             expect_arg_count("len", values, 1)?;
             execute_len_builtin(&values[0]).await
         }
-        Builtin::Empty => {
+        IntrinsicOp::Empty => {
             expect_arg_count("empty", values, 1)?;
             match &values[0] {
                 Value::String(value) => Ok(Value::Bool(value.is_empty())),
@@ -159,7 +159,7 @@ pub(crate) async fn execute_builtin(
                 }),
             }
         }
-        Builtin::Keys => {
+        IntrinsicOp::Keys => {
             expect_arg_count("keys", values, 1)?;
             match &values[0] {
                 Value::Record(record) => Ok(Value::List(
@@ -184,7 +184,7 @@ pub(crate) async fn execute_builtin(
                 }),
             }
         }
-        Builtin::Values => {
+        IntrinsicOp::Values => {
             expect_arg_count("values", values, 1)?;
             if let Value::Projected(value) = &values[0]
                 && let Some(value) = value.values().await
@@ -202,13 +202,13 @@ pub(crate) async fn execute_builtin(
                 }),
             }
         }
-        Builtin::Contains => {
+        IntrinsicOp::Contains => {
             expect_arg_count("contains", values, 2)?;
             execute_contains_builtin(&values[0], &values[1]).await
         }
-        Builtin::Find => execute_find_builtin(values).await,
-        Builtin::GrepText => execute_grep_text_builtin(values).await,
-        Builtin::StartsWith => {
+        IntrinsicOp::Find(_) => execute_find_builtin(values).await,
+        IntrinsicOp::GrepText => execute_grep_text_builtin(values).await,
+        IntrinsicOp::StartsWith => {
             expect_arg_count("starts_with", values, 2)?;
             let prefix = materialize_projected_async(values[1].clone()).await;
             if let Value::Projected(value) = &values[0]
@@ -221,7 +221,7 @@ pub(crate) async fn execute_builtin(
             let prefix = coerce_string(&prefix)?;
             Ok(Value::Bool(value.starts_with(prefix.as_ref())))
         }
-        Builtin::EndsWith => {
+        IntrinsicOp::EndsWith => {
             expect_arg_count("ends_with", values, 2)?;
             let suffix = materialize_projected_async(values[1].clone()).await;
             if let Value::Projected(value) = &values[0]
@@ -234,7 +234,7 @@ pub(crate) async fn execute_builtin(
             let suffix = coerce_string(&suffix)?;
             Ok(Value::Bool(value.ends_with(suffix.as_ref())))
         }
-        Builtin::Split => {
+        IntrinsicOp::Split => {
             expect_arg_count("split", values, 2)?;
             let needle = materialize_projected_async(values[1].clone()).await;
             if let Value::Projected(value) = &values[0]
@@ -253,11 +253,11 @@ pub(crate) async fn execute_builtin(
                     .into(),
             ))
         }
-        Builtin::Join => {
+        IntrinsicOp::Join => {
             expect_arg_count("join", values, 2)?;
             execute_join_builtin_async(&values[0], &values[1]).await
         }
-        Builtin::Trim => {
+        IntrinsicOp::Trim => {
             expect_arg_count("trim", values, 1)?;
             if let Value::Projected(value) = &values[0]
                 && let Some(value) = value.trim().await
@@ -267,7 +267,7 @@ pub(crate) async fn execute_builtin(
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::String(coerce_string(&value)?.trim().into()))
         }
-        Builtin::Slice => {
+        IntrinsicOp::Slice => {
             expect_arg_count("slice", values, 3)?;
             let start = as_slice_bound_async(&values[1]).await?;
             let end = as_slice_bound_async(&values[2]).await?;
@@ -290,7 +290,7 @@ pub(crate) async fn execute_builtin(
                 }),
             }
         }
-        Builtin::ToString => {
+        IntrinsicOp::ToString => {
             expect_arg_count("to_string", values, 1)?;
             let value = if value_contains_projected(&values[0]) {
                 stringify_value_async(&values[0]).await?
@@ -299,7 +299,7 @@ pub(crate) async fn execute_builtin(
             };
             Ok(Value::String(value.into()))
         }
-        Builtin::ToInt => {
+        IntrinsicOp::ToInt => {
             expect_arg_count("to_int", values, 1)?;
             if let Value::Projected(value) = &values[0]
                 && let Some(value) = value.to_number().await
@@ -309,7 +309,7 @@ pub(crate) async fn execute_builtin(
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::Number(as_number(&value)?.trunc()))
         }
-        Builtin::ToFloat => {
+        IntrinsicOp::ToFloat => {
             expect_arg_count("to_float", values, 1)?;
             if let Value::Projected(value) = &values[0]
                 && let Some(value) = value.to_number().await
@@ -319,7 +319,7 @@ pub(crate) async fn execute_builtin(
             let value = materialize_projected_async(values[0].clone()).await;
             Ok(Value::Number(as_number(&value)?))
         }
-        Builtin::JsonParse => {
+        IntrinsicOp::JsonParse => {
             expect_arg_count("json_parse", values, 1)?;
             if let Value::Projected(value) = &values[0]
                 && let Some(value) = value.json_parse().await
@@ -335,7 +335,7 @@ pub(crate) async fn execute_builtin(
                 })?;
             Ok(from_json(parsed))
         }
-        Builtin::Format => {
+        IntrinsicOp::Format(_) => {
             if values.is_empty() {
                 return Err(RuntimeError::TypeError {
                     message: "`format` requires at least a template string".to_string(),
@@ -356,34 +356,61 @@ pub(crate) async fn execute_builtin(
                 apply_format_async(template, &values[1..]).await?.into(),
             ))
         }
-        Builtin::Validate => {
+        IntrinsicOp::Validate => {
             expect_arg_count("validate", values, 2)?;
             execute_validate_builtin(
                 materialize_projected_async(values[0].clone()).await,
                 &materialize_projected_async(values[1].clone()).await,
             )
         }
-        Builtin::Range => execute_range_builtin_async(values).await,
-        Builtin::CeilDiv => execute_integer_div_builtin_async("ceil_div", values, f64::ceil).await,
-        Builtin::FloorDiv => {
+        IntrinsicOp::Range(_) => execute_range_builtin_async(values).await,
+        IntrinsicOp::CeilDiv => {
+            execute_integer_div_builtin_async("ceil_div", values, f64::ceil).await
+        }
+        IntrinsicOp::FloorDiv => {
             execute_integer_div_builtin_async("floor_div", values, f64::floor).await
         }
-        Builtin::Push => {
+        IntrinsicOp::Push => {
             expect_arg_count("push", values, 2)?;
             execute_push_builtin_async(values[0].clone(), values[1].clone()).await
         }
-        Builtin::Unknown(index) => Err(RuntimeError::UnknownBuiltin {
-            name: names[index].text.to_string(),
+        IntrinsicOp::ValidateCompiled(_)
+        | IntrinsicOp::PushAssign(_)
+        | IntrinsicOp::FormatCompiled(_)
+        | IntrinsicOp::FormatCompiledSlotNumber { .. }
+        | IntrinsicOp::FormatCompiledSlotNumberBinary { .. } => {
+            unreachable!("compiled-only intrinsic reached generic executor")
+        }
+        IntrinsicOp::InvalidArity { name, argc } => Err(RuntimeError::TypeError {
+            message: invalid_arity_message(names[name].text.as_ref(), argc),
+        }),
+        IntrinsicOp::Unknown { name, .. } => Err(RuntimeError::UnknownBuiltin {
+            name: names[name].text.to_string(),
         }),
     }
 }
 
-pub(crate) fn execute_builtin_blocking(
-    builtin: Builtin,
+fn invalid_arity_message(name: &str, argc: usize) -> String {
+    let expected = match name {
+        "find" => return format!("`find` takes 2 or 3 arg(s), got {argc}"),
+        "range" => return format!("`range` takes 1, 2, or 3 arg(s), got {argc}"),
+        "format" => return "`format` requires at least a template string".to_string(),
+        "len" | "empty" | "keys" | "values" | "trim" | "to_string" | "to_int" | "to_float"
+        | "json_parse" => 1,
+        "contains" | "grep_text" | "starts_with" | "ends_with" | "split" | "join" | "validate"
+        | "ceil_div" | "floor_div" | "push" => 2,
+        "slice" => 3,
+        _ => return format!("`{name}` takes 0 arg(s), got {argc}"),
+    };
+    format!("`{name}` takes {expected} arg(s), got {argc}")
+}
+
+pub(crate) fn execute_intrinsic_blocking(
+    builtin: IntrinsicOp,
     names: &[Name],
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(execute_builtin(builtin, names, values))
+    futures_executor::block_on(execute_intrinsic(builtin, names, values))
 }
 
 pub(crate) async fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
@@ -603,6 +630,7 @@ pub(crate) async fn execute_join_builtin_async(
     Ok(Value::String(joined.into()))
 }
 
+#[cfg(test)]
 pub(crate) fn execute_join_builtin(items: &Value, sep: &Value) -> Result<Value, RuntimeError> {
     futures_executor::block_on(execute_join_builtin_async(items, sep))
 }
@@ -680,6 +708,7 @@ pub(crate) async fn execute_push_builtin_async(
     Ok(Value::List(values.into()))
 }
 
+#[cfg(test)]
 pub(crate) fn execute_push_builtin(list: &Value, item: Value) -> Result<Value, RuntimeError> {
     futures_executor::block_on(execute_push_builtin_async(list.clone(), item))
 }

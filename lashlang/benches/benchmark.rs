@@ -4,8 +4,8 @@ mod bench_support;
 use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, State, Value, compile_program,
-    execute_compiled_with_projected_bindings, execute_with_projected_bindings, parse,
+    ExecutionOutcome, State, Value, compile_program, execute_compiled_with_projected_bindings,
+    execute_with_projected_bindings, parse, prewarm,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -22,13 +22,13 @@ fn lashlang_benchmarks(c: &mut Criterion) {
     group.sample_size(60);
 
     for scenario in Scenario::ALL {
-        benchmark_full_block_modes(&mut group, &rt, &host, *scenario);
+        benchmark_one_shot_modes(&mut group, &rt, &host, *scenario);
     }
 
     group.finish();
 }
 
-fn benchmark_full_block_modes(
+fn benchmark_one_shot_modes(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     rt: &tokio::runtime::Runtime,
     host: &BenchHost,
@@ -39,7 +39,7 @@ fn benchmark_full_block_modes(
     let compiled = compile_program(&program);
     let projected = projected_bindings(scenario);
 
-    group.bench_function(BenchmarkId::new("parse_execute", scenario), |b| {
+    group.bench_function(BenchmarkId::new("one_shot", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
             let outcome = rt
@@ -54,19 +54,13 @@ fn benchmark_full_block_modes(
         });
     });
 
-    group.bench_function(BenchmarkId::new("cached_block", scenario), |b| {
-        let mut cache = CompiledProgramCache::default();
-        cache
-            .get_or_compile(source)
-            .expect("benchmark program should compile");
+    group.bench_function(BenchmarkId::new("prewarmed_one_shot", scenario), |b| {
+        prewarm();
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
-            let compiled = cache
-                .get_or_compile(black_box(source))
-                .expect("benchmark cache lookup");
             let outcome = rt
-                .block_on(execute_compiled_with_projected_bindings(
-                    black_box(&compiled),
+                .block_on(execute_with_projected_bindings(
+                    black_box(source),
                     &mut state,
                     host,
                     &projected,
@@ -76,29 +70,7 @@ fn benchmark_full_block_modes(
         });
     });
 
-    group.bench_function(BenchmarkId::new("cached_session_block", scenario), |b| {
-        let mut cache = CompiledProgramCache::default();
-        cache
-            .get_or_compile(source)
-            .expect("benchmark program should compile");
-        let mut state = seeded_state_for(scenario);
-        b.iter(|| {
-            let compiled = cache
-                .get_or_compile(black_box(source))
-                .expect("benchmark cache lookup");
-            let outcome = rt
-                .block_on(execute_compiled_with_projected_bindings(
-                    black_box(&compiled),
-                    &mut state,
-                    host,
-                    &projected,
-                ))
-                .expect("benchmark execution");
-            black_box(expect_finished(outcome));
-        });
-    });
-
-    group.bench_function(BenchmarkId::new("execute_only", scenario), |b| {
+    group.bench_function(BenchmarkId::new("compiled_execute", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
             let outcome = rt
@@ -113,7 +85,7 @@ fn benchmark_full_block_modes(
         });
     });
 
-    group.bench_function(BenchmarkId::new("snapshot_execute", scenario), |b| {
+    group.bench_function(BenchmarkId::new("snapshot", scenario), |b| {
         b.iter(|| {
             let mut state = seeded_state_for(scenario);
             let snapshot = state.snapshot();

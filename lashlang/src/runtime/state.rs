@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    ProjectedValue, Record, Value, image_from_json_map, image_to_json, json_number,
-    record_with_capacity,
+    ProjectedValue, Record, SnapshotJson, Value, image_from_json_map, record_with_capacity,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -49,7 +48,10 @@ impl Serialize for Snapshot {
         S: Serializer,
     {
         let mut state = serializer.serialize_struct("Snapshot", 1)?;
-        state.serialize_field("globals", &snapshot_record_to_json(&self.globals))?;
+        state.serialize_field(
+            "globals",
+            &SnapshotJson(&Value::Record(Arc::new(self.globals.clone()))),
+        )?;
         state.end()
     }
 }
@@ -68,46 +70,6 @@ impl<'de> Deserialize<'de> for Snapshot {
         Ok(Self {
             globals: snapshot_record_from_json(wire.globals),
         })
-    }
-}
-
-fn snapshot_record_to_json(record: &Record) -> serde_json::Value {
-    let mut object = serde_json::Map::with_capacity(record.len());
-    for (key, value) in record.iter() {
-        object.insert(key.to_string(), snapshot_value_to_json(value));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn snapshot_value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(value) => serde_json::Value::Bool(*value),
-        Value::Number(value) => json_number(*value)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::String(value) => serde_json::Value::String(value.to_string()),
-        Value::Image(image) => image_to_json(image),
-        Value::List(values) => {
-            serde_json::Value::Array(values.iter().map(snapshot_value_to_json).collect())
-        }
-        Value::Record(record) => snapshot_record_to_json(record),
-        Value::Projected(projected) => {
-            let mut object = serde_json::Map::with_capacity(3);
-            object.insert(
-                PROJECTED_SNAPSHOT_TAG.to_string(),
-                serde_json::Value::Bool(true),
-            );
-            object.insert(
-                PROJECTED_SNAPSHOT_NAME.to_string(),
-                serde_json::Value::String(projected.name().to_string()),
-            );
-            object.insert(
-                PROJECTED_SNAPSHOT_TYPE_NAME.to_string(),
-                serde_json::Value::String(projected.value_type_name().to_string()),
-            );
-            serde_json::Value::Object(object)
-        }
     }
 }
 

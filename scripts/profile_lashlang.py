@@ -32,20 +32,13 @@ SCENARIOS = [
 ]
 
 PERF_MODES = [
-    "execute",
-    "parse",
-    "compile",
-    "block",
-    "cached_block",
-    "cached_session_block",
-    "cold_once",
-    "prewarmed_once",
-    "cached_cold_once",
+    "one_shot",
+    "prewarmed_one_shot",
+    "compiled_execute",
     "snapshot",
 ]
 
-DEFAULT_PERF_MODES = ["execute", "parse", "compile", "cached_session_block", "snapshot"]
-ONCE_MODES = {"cold_once", "prewarmed_once", "cached_cold_once"}
+DEFAULT_PERF_MODES = ["one_shot", "prewarmed_one_shot", "compiled_execute", "snapshot"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -206,7 +199,7 @@ def main() -> int:
         if not perf_bin.exists():
             raise SystemExit(f"error: perf example not found: {perf_bin}")
         for mode in modes:
-            iterations = 1 if mode in ONCE_MODES else max(args.iterations, 1)
+            iterations = max(args.iterations, 1)
             for scenario in scenarios:
                 parsed = parse_perf_output(run_command(root, [str(perf_bin), mode, scenario, str(iterations)]))
                 parsed["mode_arg"] = mode

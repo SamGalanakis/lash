@@ -39,12 +39,17 @@ const GOLDEN_CONTRACT_SOURCE: &str = r#"
 source = join(history, ",")
 beta_index = find(source, "beta")
 matches = grep_text(source, "beta")
+counts = {}
+for token in split(source, ",") {
+  counts[token] = counts[token] + 1
+}
 Payload = Type {
   beta_index: int | null,
-  matches: list[dict]
+  matches: list[dict],
+  counts: dict
 }
 submit validate(
-  { beta_index: beta_index, matches: matches },
+  { beta_index: beta_index, matches: matches, counts: counts },
   Payload
 )
 "#;
@@ -158,11 +163,11 @@ fn compiled_program_snapshot(source: &str) -> String {
     for (index, value) in chunk.constants.iter().enumerate() {
         writeln!(out, "  c{index}: {}", compact_json(value)).unwrap();
     }
-    writeln!(out, "instructions:").unwrap();
-    for (ip, instruction) in chunk.code.iter().copied().enumerate() {
+    writeln!(out, "code:").unwrap();
+    for (index, instruction) in chunk.code.iter().copied().enumerate() {
         writeln!(
             out,
-            "  {ip:04}: {}",
+            "  {index:04}: {}",
             instruction_snapshot(chunk, instruction)
         )
         .unwrap();
@@ -276,40 +281,7 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::AwaitHandle => "await_handle".to_string(),
         Instruction::AwaitHandleUnwrap => "await_handle_unwrap".to_string(),
         Instruction::CancelHandle => "cancel_handle".to_string(),
-        Instruction::CallBuiltin { builtin, argc } => {
-            format!(
-                "call_builtin {} argc={argc}",
-                builtin_snapshot(chunk, builtin)
-            )
-        }
-        Instruction::Len => "len".to_string(),
-        Instruction::Join => "join".to_string(),
-        Instruction::Validate => "validate".to_string(),
-        Instruction::ValidateCompiled(schema) => format!("validate_compiled schema#{schema}"),
-        Instruction::Push => "push".to_string(),
-        Instruction::PushAssign(slot) => format!("push_assign {slot}:{}", slot_name(chunk, slot)),
-        Instruction::Range { argc } => format!("range argc={argc}"),
-        Instruction::FormatCompiled(template) => {
-            format!(
-                "format_compiled {}",
-                format_template_snapshot(chunk, template)
-            )
-        }
-        Instruction::FormatCompiledSlotNumber { template, slot } => format!(
-            "format_compiled_slot_number {} {slot}:{}",
-            format_template_snapshot(chunk, template),
-            slot_name(chunk, slot)
-        ),
-        Instruction::FormatCompiledSlotNumberBinary {
-            template,
-            slot,
-            op,
-            right,
-        } => format!(
-            "format_compiled_slot_number_binary {} {slot}:{} {op:?} {right}",
-            format_template_snapshot(chunk, template),
-            slot_name(chunk, slot)
-        ),
+        Instruction::Intrinsic(op) => intrinsic_snapshot(chunk, op),
         Instruction::AddAssign(slot) => format!("add_assign {slot}:{}", slot_name(chunk, slot)),
         Instruction::AddAssignNumber { slot, right } => {
             format!(
@@ -344,6 +316,7 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
                 slot_name(chunk, binding)
             )
         }
+        Instruction::LoweredLoop(index) => lowered_loop_snapshot(chunk, index),
         Instruction::IterNext { jump_to } => format!("iter_next {jump_to}"),
         Instruction::EndIter => "end_iter".to_string(),
         Instruction::ParallelCalls(index) => format!("parallel_calls set#{index}"),
@@ -370,6 +343,21 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).expect("value should serialize")
+}
+
+fn lowered_loop_snapshot(chunk: &Chunk, index: usize) -> String {
+    let lowered_loop = &chunk.lowered_loops[index];
+    let iterable = match &lowered_loop.iterable {
+        LoopIterable::Range(args) => format!("range argc={}", args.len()),
+        LoopIterable::Values(_) => "values".to_string(),
+        LoopIterable::Keys(_) => "keys".to_string(),
+    };
+    format!(
+        "lowered_loop #{index} {}:{} {iterable} ops={}",
+        lowered_loop.binding,
+        slot_name(chunk, lowered_loop.binding),
+        lowered_loop.body.len()
+    )
 }
 
 fn slot_name(chunk: &Chunk, index: usize) -> &str {
@@ -424,32 +412,68 @@ fn format_template_snapshot(chunk: &Chunk, index: usize) -> String {
     )
 }
 
-fn builtin_snapshot(chunk: &Chunk, builtin: Builtin) -> String {
-    match builtin {
-        Builtin::Len => "len".to_string(),
-        Builtin::Empty => "empty".to_string(),
-        Builtin::Keys => "keys".to_string(),
-        Builtin::Values => "values".to_string(),
-        Builtin::Contains => "contains".to_string(),
-        Builtin::Find => "find".to_string(),
-        Builtin::GrepText => "grep_text".to_string(),
-        Builtin::StartsWith => "starts_with".to_string(),
-        Builtin::EndsWith => "ends_with".to_string(),
-        Builtin::Split => "split".to_string(),
-        Builtin::Join => "join".to_string(),
-        Builtin::Trim => "trim".to_string(),
-        Builtin::Slice => "slice".to_string(),
-        Builtin::ToString => "to_string".to_string(),
-        Builtin::ToInt => "to_int".to_string(),
-        Builtin::ToFloat => "to_float".to_string(),
-        Builtin::JsonParse => "json_parse".to_string(),
-        Builtin::Format => "format".to_string(),
-        Builtin::Validate => "validate".to_string(),
-        Builtin::Range => "range".to_string(),
-        Builtin::CeilDiv => "ceil_div".to_string(),
-        Builtin::FloorDiv => "floor_div".to_string(),
-        Builtin::Push => "push".to_string(),
-        Builtin::Unknown(index) => format!("unknown({})", name_text(chunk, index)),
+fn intrinsic_snapshot(chunk: &Chunk, op: IntrinsicOp) -> String {
+    let argc = op.argc();
+    match op {
+        IntrinsicOp::Len => format!("intrinsic len argc={argc}"),
+        IntrinsicOp::Empty => format!("intrinsic empty argc={argc}"),
+        IntrinsicOp::Keys => format!("intrinsic keys argc={argc}"),
+        IntrinsicOp::Values => format!("intrinsic values argc={argc}"),
+        IntrinsicOp::Contains => format!("intrinsic contains argc={argc}"),
+        IntrinsicOp::Find(_) => format!("intrinsic find argc={argc}"),
+        IntrinsicOp::GrepText => format!("intrinsic grep_text argc={argc}"),
+        IntrinsicOp::StartsWith => format!("intrinsic starts_with argc={argc}"),
+        IntrinsicOp::EndsWith => format!("intrinsic ends_with argc={argc}"),
+        IntrinsicOp::Split => format!("intrinsic split argc={argc}"),
+        IntrinsicOp::Join => format!("intrinsic join argc={argc}"),
+        IntrinsicOp::Trim => format!("intrinsic trim argc={argc}"),
+        IntrinsicOp::Slice => format!("intrinsic slice argc={argc}"),
+        IntrinsicOp::ToString => format!("intrinsic to_string argc={argc}"),
+        IntrinsicOp::ToInt => format!("intrinsic to_int argc={argc}"),
+        IntrinsicOp::ToFloat => format!("intrinsic to_float argc={argc}"),
+        IntrinsicOp::JsonParse => format!("intrinsic json_parse argc={argc}"),
+        IntrinsicOp::Format(_) => format!("intrinsic format argc={argc}"),
+        IntrinsicOp::Validate => format!("intrinsic validate argc={argc}"),
+        IntrinsicOp::Range(_) => format!("intrinsic range argc={argc}"),
+        IntrinsicOp::CeilDiv => format!("intrinsic ceil_div argc={argc}"),
+        IntrinsicOp::FloorDiv => format!("intrinsic floor_div argc={argc}"),
+        IntrinsicOp::Push => format!("intrinsic push argc={argc}"),
+        IntrinsicOp::InvalidArity { name, .. } => {
+            format!(
+                "intrinsic invalid_arity({}) argc={argc}",
+                name_text(chunk, name)
+            )
+        }
+        IntrinsicOp::Unknown { name, .. } => {
+            format!("intrinsic unknown({}) argc={argc}", name_text(chunk, name))
+        }
+        IntrinsicOp::ValidateCompiled(schema) => {
+            format!("intrinsic validate_compiled schema#{schema}")
+        }
+        IntrinsicOp::PushAssign(slot) => {
+            format!("intrinsic push_assign {slot}:{}", slot_name(chunk, slot))
+        }
+        IntrinsicOp::FormatCompiled(template) => {
+            format!(
+                "intrinsic format_compiled {}",
+                format_template_snapshot(chunk, template)
+            )
+        }
+        IntrinsicOp::FormatCompiledSlotNumber { template, slot } => format!(
+            "intrinsic format_compiled_slot_number {} {slot}:{}",
+            format_template_snapshot(chunk, template),
+            slot_name(chunk, slot)
+        ),
+        IntrinsicOp::FormatCompiledSlotNumberBinary {
+            template,
+            slot,
+            op,
+            right,
+        } => format!(
+            "intrinsic format_compiled_slot_number_binary {} {slot}:{} {op:?} {right}",
+            format_template_snapshot(chunk, template),
+            slot_name(chunk, slot)
+        ),
     }
 }
 
@@ -526,10 +550,7 @@ async fn compiler_propagates_safe_straight_line_constants() {
     assert!(
         !compiled.chunk.code.iter().any(|instruction| matches!(
             instruction,
-            Instruction::CallBuiltin {
-                builtin: Builtin::Len | Builtin::Range | Builtin::Push,
-                ..
-            }
+            Instruction::Intrinsic(IntrinsicOp::Len | IntrinsicOp::Range(_) | IntrinsicOp::Push)
         )),
         "straight-line constant builtins should fold out of the runtime instruction stream"
     );
@@ -549,6 +570,99 @@ async fn compiler_propagates_safe_straight_line_constants() {
             ]
             .into()
         ))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lowered_loops_cover_range_list_keys_nested_control_and_mutation() {
+    let source = r#"
+        counts = {}
+        items = ["a", "b", "a"]
+        seen = []
+        total = 0
+        for i in range(0, 5) {
+          if i == 1 {
+            continue
+          }
+          if i == 4 {
+            break
+          }
+          total = total + i
+        }
+        for item in items {
+          counts[item] = counts[item] + 1
+          seen = push(seen, format("{}:{}", item, counts[item]))
+        }
+        pairs = []
+        for key in keys(counts) {
+          for n in range(0, counts[key]) {
+            pairs = pairs + [format("{}{}", key, n)]
+          }
+        }
+        submit { total: total, counts: counts, seen: seen, pairs: pairs }
+    "#;
+    let program = crate::parse(source).expect("program should parse");
+    let compiled = compile_program(&program);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::LoweredLoop(_)))
+            .count()
+            >= 3,
+        "eligible loops should lower into loop-local instructions"
+    );
+
+    let mut state = State::new();
+    let outcome = execute_compiled(&compiled, &mut state, &Host)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(Value::Record(record)) = outcome else {
+        panic!("expected record result");
+    };
+    assert_eq!(record["total"], Value::Number(5.0));
+    let counts = record["counts"].as_record().expect("counts record");
+    assert_eq!(counts["a"], Value::Number(2.0));
+    assert_eq!(counts["b"], Value::Number(1.0));
+    let Value::List(seen) = &record["seen"] else {
+        panic!("seen should be a list");
+    };
+    assert_eq!(seen.len(), 3);
+    let Value::List(pairs) = &record["pairs"] else {
+        panic!("pairs should be a list");
+    };
+    assert_eq!(pairs.len(), 3);
+}
+
+#[test]
+fn effectful_loop_bodies_stay_on_generic_iterator_bytecode() {
+    let program = crate::parse(
+        r#"
+        items = [1, 2]
+        for item in items {
+          print item
+        }
+        submit null
+        "#,
+    )
+    .expect("program should parse");
+    let compiled = compile_program(&program);
+    assert!(
+        compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::BeginIter(_))),
+        "effectful loops should use the generic iterator fallback"
+    );
+    assert!(
+        !compiled
+            .chunk
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LoweredLoop(_))),
+        "effectful loops must not lower"
     );
 }
 
@@ -1626,17 +1740,22 @@ impl ProjectedHostValue for SnapshotGuardProjectedValue {
         "string"
     }
 
-    fn render(&self) -> ProjectedFuture<'_, String> {
-        Box::pin(async {
-            self.render_count.fetch_add(1, Ordering::SeqCst);
-            "rendered full text".to_string()
-        })
-    }
-
-    fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async {
-            self.materialize_count.fetch_add(1, Ordering::SeqCst);
-            Value::String("materialized full text".into())
+    fn read_one(
+        &self,
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
+        Box::pin(async move {
+            match request {
+                ProjectedReadRequest::Render => {
+                    self.render_count.fetch_add(1, Ordering::SeqCst);
+                    ProjectedReadResponse::Text("rendered full text".to_string())
+                }
+                ProjectedReadRequest::Materialize => {
+                    self.materialize_count.fetch_add(1, Ordering::SeqCst);
+                    ProjectedReadResponse::Value(Value::String("materialized full text".into()))
+                }
+                _ => ProjectedReadResponse::Missing,
+            }
         })
     }
 }
@@ -1646,33 +1765,30 @@ impl ProjectedHostValue for SearchProjectedText {
         "string"
     }
 
-    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async { Some(self.text.chars().count()) })
-    }
-
-    fn slice(
+    fn read_one(
         &self,
-        start: Option<isize>,
-        end: Option<isize>,
-    ) -> ProjectedFuture<'_, ProjectedRead> {
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
         Box::pin(async move {
-            self.slice_count.fetch_add(1, Ordering::SeqCst);
-            self.slices.lock().expect("slices lock").push((start, end));
-            ProjectedRead::Value(Value::String(slice_string(&self.text, start, end).into()))
-        })
-    }
-
-    fn render(&self) -> ProjectedFuture<'_, String> {
-        Box::pin(async {
-            self.render_count.fetch_add(1, Ordering::SeqCst);
-            self.text.to_string()
-        })
-    }
-
-    fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async {
-            self.materialize_count.fetch_add(1, Ordering::SeqCst);
-            Value::String(self.text.as_ref().into())
+            match request {
+                ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.text.chars().count()),
+                ProjectedReadRequest::Slice { start, end } => {
+                    self.slice_count.fetch_add(1, Ordering::SeqCst);
+                    self.slices.lock().expect("slices lock").push((start, end));
+                    ProjectedReadResponse::Value(Value::String(
+                        slice_string(&self.text, start, end).into(),
+                    ))
+                }
+                ProjectedReadRequest::Render => {
+                    self.render_count.fetch_add(1, Ordering::SeqCst);
+                    ProjectedReadResponse::Text(self.text.to_string())
+                }
+                ProjectedReadRequest::Materialize => {
+                    self.materialize_count.fetch_add(1, Ordering::SeqCst);
+                    ProjectedReadResponse::Value(Value::String(self.text.as_ref().into()))
+                }
+                _ => ProjectedReadResponse::Missing,
+            }
         })
     }
 }
@@ -1682,44 +1798,43 @@ impl ProjectedHostValue for TestProjectedValue {
         "list"
     }
 
-    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async { Some(self.values.len()) })
-    }
-
-    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
+    fn read_one(
+        &self,
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
         Box::pin(async move {
+            let ProjectedReadRequest::Index(index) = request else {
+                return match request {
+                    ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.values.len()),
+                    ProjectedReadRequest::Render => {
+                        self.render_count.fetch_add(1, Ordering::SeqCst);
+                        ProjectedReadResponse::Text("<projected list>".to_string())
+                    }
+                    ProjectedReadRequest::Materialize => {
+                        self.materialize_count.fetch_add(1, Ordering::SeqCst);
+                        ProjectedReadResponse::Value(Value::List(self.values.clone().into()))
+                    }
+                    _ => ProjectedReadResponse::Missing,
+                };
+            };
             let Value::Number(index) = index else {
-                return ProjectedRead::Missing;
+                return ProjectedReadResponse::Missing;
             };
             if !index.is_finite() || index.fract() != 0.0 {
-                return ProjectedRead::Missing;
+                return ProjectedReadResponse::Missing;
             }
             let len = self.values.len() as isize;
             let index = index as isize;
             let index = if index < 0 { len + index } else { index };
             if index < 0 || index >= len {
-                return ProjectedRead::Missing;
+                return ProjectedReadResponse::Missing;
             }
             self.get_count.fetch_add(1, Ordering::SeqCst);
             self.values
                 .get(index as usize)
                 .cloned()
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn render(&self) -> ProjectedFuture<'_, String> {
-        Box::pin(async {
-            self.render_count.fetch_add(1, Ordering::SeqCst);
-            "<projected list>".to_string()
-        })
-    }
-
-    fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async {
-            self.materialize_count.fetch_add(1, Ordering::SeqCst);
-            Value::List(self.values.clone().into())
+                .map(ProjectedReadResponse::Value)
+                .unwrap_or(ProjectedReadResponse::Missing)
         })
     }
 }
@@ -1744,15 +1859,154 @@ impl ProjectedFixture {
     }
 }
 
+fn projected_response_from_value(
+    value: &Value,
+    request: ProjectedReadRequest,
+) -> ProjectedReadResponse {
+    match request {
+        ProjectedReadRequest::Len => value_len(value)
+            .map(ProjectedReadResponse::Len)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Empty => value_len(value)
+            .map(|len| ProjectedReadResponse::Bool(len == 0))
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Truthy => ProjectedReadResponse::Bool(is_truthy(value)),
+        ProjectedReadRequest::Field(field) => {
+            let field = Name {
+                symbol: intern_symbol(field.as_ref()),
+                text: field,
+            };
+            read_field_ref_direct(value, &field)
+                .map(ProjectedReadResponse::Value)
+                .unwrap_or(ProjectedReadResponse::Missing)
+        }
+        ProjectedReadRequest::Index(index) => read_index_ref_direct(value, &index)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Contains(needle) => execute_contains_direct(value, &needle)
+            .map(ProjectedReadResponse::Bool)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Find { needle, start } => execute_find_direct(value, &needle, start)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::GrepText(needle) => execute_grep_text_direct(value, &needle)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Keys => match value {
+            Value::Record(record) => {
+                ProjectedReadResponse::Keys(record.keys().map(ToString::to_string).collect())
+            }
+            _ => ProjectedReadResponse::Missing,
+        },
+        ProjectedReadRequest::Values => match value {
+            Value::Record(record) => ProjectedReadResponse::Value(Value::List(
+                record.values().cloned().collect::<Vec<_>>().into(),
+            )),
+            Value::Null => ProjectedReadResponse::Value(Value::List(Vec::new().into())),
+            _ => ProjectedReadResponse::Missing,
+        },
+        ProjectedReadRequest::StartsWith(prefix) => {
+            let Ok(value) = coerce_string(value) else {
+                return ProjectedReadResponse::Missing;
+            };
+            let Ok(prefix) = coerce_string(&prefix) else {
+                return ProjectedReadResponse::Missing;
+            };
+            ProjectedReadResponse::Bool(value.starts_with(prefix.as_ref()))
+        }
+        ProjectedReadRequest::EndsWith(suffix) => {
+            let Ok(value) = coerce_string(value) else {
+                return ProjectedReadResponse::Missing;
+            };
+            let Ok(suffix) = coerce_string(&suffix) else {
+                return ProjectedReadResponse::Missing;
+            };
+            ProjectedReadResponse::Bool(value.ends_with(suffix.as_ref()))
+        }
+        ProjectedReadRequest::Split(needle) => {
+            let Ok(value) = coerce_string(value) else {
+                return ProjectedReadResponse::Missing;
+            };
+            let Ok(needle) = coerce_string(&needle) else {
+                return ProjectedReadResponse::Missing;
+            };
+            ProjectedReadResponse::Value(Value::List(
+                value
+                    .split(needle.as_ref())
+                    .map(|part| Value::String(part.into()))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        }
+        ProjectedReadRequest::Join(sep) => execute_join_builtin(value, &sep)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Trim => {
+            let Ok(value) = coerce_string(value) else {
+                return ProjectedReadResponse::Missing;
+            };
+            ProjectedReadResponse::Value(Value::String(value.trim().into()))
+        }
+        ProjectedReadRequest::Slice { start, end } => match value {
+            Value::String(value) => {
+                ProjectedReadResponse::Value(Value::String(slice_string(value, start, end).into()))
+            }
+            Value::List(items) => {
+                let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
+                    return ProjectedReadResponse::Value(Value::List(Vec::new().into()));
+                };
+                ProjectedReadResponse::Value(Value::List(items[start..end].to_vec().into()))
+            }
+            _ => ProjectedReadResponse::Missing,
+        },
+        ProjectedReadRequest::Push(item) => execute_push_builtin(value, item)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::ToNumber => as_number(value)
+            .map(Value::Number)
+            .map(ProjectedReadResponse::Value)
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::JsonParse => {
+            let Ok(text) = coerce_string(value) else {
+                return ProjectedReadResponse::Missing;
+            };
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map(from_json)
+                .map(ProjectedReadResponse::Value)
+                .unwrap_or(ProjectedReadResponse::Missing)
+        }
+        ProjectedReadRequest::SliceBound => as_slice_bound(value)
+            .map(|bound| {
+                ProjectedReadResponse::Value(match bound {
+                    Some(value) => Value::Number(value as f64),
+                    None => Value::Null,
+                })
+            })
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::RangeBound => as_range_bound(value)
+            .map(|value| ProjectedReadResponse::Value(Value::Number(value as f64)))
+            .unwrap_or(ProjectedReadResponse::Missing),
+        ProjectedReadRequest::Render => ProjectedReadResponse::Text(
+            stringify_value(value).expect("projected fixture should stringify"),
+        ),
+        ProjectedReadRequest::Materialize => ProjectedReadResponse::Value(value.clone()),
+    }
+}
+
 impl ProjectedHostValue for ProjectedFixture {
     fn type_name(&self) -> &str {
         value_type_name(&self.value)
     }
 
-    fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async {
-            self.materialize_count.fetch_add(1, Ordering::SeqCst);
-            self.value.clone()
+    fn read_one(
+        &self,
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
+        Box::pin(async move {
+            if matches!(request, ProjectedReadRequest::Materialize) {
+                self.materialize_count.fetch_add(1, Ordering::SeqCst);
+            }
+            projected_response_from_value(&self.value, request)
         })
     }
 }
@@ -2156,227 +2410,181 @@ impl ProjectedHostValue for OverrideProjectedValue {
         value_type_name(&self.value)
     }
 
-    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async {
-            self.push_call("len");
-            value_len(&self.value)
-        })
-    }
-
-    fn empty(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("empty");
-            value_len(&self.value)
-                .map(|len| ProjectedRead::Value(Value::Bool(len == 0)))
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn truthy(&self) -> ProjectedFuture<'_, bool> {
-        Box::pin(async {
-            self.push_call("truthy");
-            is_truthy(&self.value)
-        })
-    }
-
-    fn get_index(&self, index: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("get_index");
-            read_index_ref_direct(&self.value, &index)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn get_field(&self, field: Arc<str>) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("get_field");
-            let field = Name {
-                symbol: intern_symbol(field.as_ref()),
-                text: field,
-            };
-            read_field_ref_direct(&self.value, &field)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn contains(&self, needle: Value) -> ProjectedFuture<'_, bool> {
-        Box::pin(async move {
-            self.push_call("contains");
-            execute_contains_direct(&self.value, &needle).expect("contains override")
-        })
-    }
-
-    fn find(&self, needle: Value, start: usize) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("find");
-            execute_find_direct(&self.value, &needle, start)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn grep_text(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("grep_text");
-            execute_grep_text_direct(&self.value, &needle)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn keys(&self) -> ProjectedFuture<'_, Vec<String>> {
-        Box::pin(async {
-            self.push_call("keys");
-            match &self.value {
-                Value::Record(record) => record.keys().map(ToString::to_string).collect(),
-                _ => Vec::new(),
-            }
-        })
-    }
-
-    fn values(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("values");
-            match &self.value {
-                Value::Record(record) => ProjectedRead::Value(Value::List(
-                    record.values().cloned().collect::<Vec<_>>().into(),
-                )),
-                _ => ProjectedRead::Missing,
-            }
-        })
-    }
-
-    fn starts_with(&self, prefix: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("starts_with");
-            let value = coerce_string(&self.value).expect("string receiver");
-            let prefix = coerce_string(&prefix).expect("string prefix");
-            ProjectedRead::Value(Value::Bool(value.starts_with(prefix.as_ref())))
-        })
-    }
-
-    fn ends_with(&self, suffix: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("ends_with");
-            let value = coerce_string(&self.value).expect("string receiver");
-            let suffix = coerce_string(&suffix).expect("string suffix");
-            ProjectedRead::Value(Value::Bool(value.ends_with(suffix.as_ref())))
-        })
-    }
-
-    fn split(&self, needle: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("split");
-            let value = coerce_string(&self.value).expect("string receiver");
-            let needle = coerce_string(&needle).expect("string needle");
-            ProjectedRead::Value(Value::List(
-                value
-                    .split(needle.as_ref())
-                    .map(|part| Value::String(part.to_string().into()))
-                    .collect::<Vec<_>>()
-                    .into(),
-            ))
-        })
-    }
-
-    fn join(&self, sep: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("join");
-            execute_join_builtin(&self.value, &sep)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn trim(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("trim");
-            let value = coerce_string(&self.value).expect("string receiver");
-            ProjectedRead::Value(Value::String(value.trim().to_string().into()))
-        })
-    }
-
-    fn slice(
+    fn read_one(
         &self,
-        start: Option<isize>,
-        end: Option<isize>,
-    ) -> ProjectedFuture<'_, ProjectedRead> {
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
         Box::pin(async move {
-            self.push_call("slice");
-            match &self.value {
-                Value::String(value) => {
-                    ProjectedRead::Value(Value::String(slice_string(value, start, end).into()))
+            match request {
+                ProjectedReadRequest::Len => {
+                    self.push_call("len");
+                    value_len(&self.value)
+                        .map(ProjectedReadResponse::Len)
+                        .unwrap_or(ProjectedReadResponse::Missing)
                 }
-                Value::List(items) => {
-                    let Some((start, end)) = clamp_slice_bounds(start, end, items.len()) else {
-                        return ProjectedRead::Value(Value::List(Vec::new().into()));
+                ProjectedReadRequest::Empty => {
+                    self.push_call("empty");
+                    value_len(&self.value)
+                        .map(|len| ProjectedReadResponse::Bool(len == 0))
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Truthy => {
+                    self.push_call("truthy");
+                    ProjectedReadResponse::Bool(is_truthy(&self.value))
+                }
+                ProjectedReadRequest::Index(index) => {
+                    self.push_call("get_index");
+                    read_index_ref_direct(&self.value, &index)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Field(field) => {
+                    self.push_call("get_field");
+                    let field = Name {
+                        symbol: intern_symbol(field.as_ref()),
+                        text: field,
                     };
-                    ProjectedRead::Value(Value::List(items[start..end].to_vec().into()))
+                    read_field_ref_direct(&self.value, &field)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
                 }
-                _ => ProjectedRead::Missing,
+                ProjectedReadRequest::Contains(needle) => {
+                    self.push_call("contains");
+                    ProjectedReadResponse::Bool(
+                        execute_contains_direct(&self.value, &needle).expect("contains override"),
+                    )
+                }
+                ProjectedReadRequest::Find { needle, start } => {
+                    self.push_call("find");
+                    execute_find_direct(&self.value, &needle, start)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::GrepText(needle) => {
+                    self.push_call("grep_text");
+                    execute_grep_text_direct(&self.value, &needle)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Keys => {
+                    self.push_call("keys");
+                    match &self.value {
+                        Value::Record(record) => ProjectedReadResponse::Keys(
+                            record.keys().map(ToString::to_string).collect(),
+                        ),
+                        _ => ProjectedReadResponse::Missing,
+                    }
+                }
+                ProjectedReadRequest::Values => {
+                    self.push_call("values");
+                    match &self.value {
+                        Value::Record(record) => ProjectedReadResponse::Value(Value::List(
+                            record.values().cloned().collect::<Vec<_>>().into(),
+                        )),
+                        _ => ProjectedReadResponse::Missing,
+                    }
+                }
+                ProjectedReadRequest::StartsWith(prefix) => {
+                    self.push_call("starts_with");
+                    let value = coerce_string(&self.value).expect("string receiver");
+                    let prefix = coerce_string(&prefix).expect("string prefix");
+                    ProjectedReadResponse::Bool(value.starts_with(prefix.as_ref()))
+                }
+                ProjectedReadRequest::EndsWith(suffix) => {
+                    self.push_call("ends_with");
+                    let value = coerce_string(&self.value).expect("string receiver");
+                    let suffix = coerce_string(&suffix).expect("string suffix");
+                    ProjectedReadResponse::Bool(value.ends_with(suffix.as_ref()))
+                }
+                ProjectedReadRequest::Split(needle) => {
+                    self.push_call("split");
+                    let value = coerce_string(&self.value).expect("string receiver");
+                    let needle = coerce_string(&needle).expect("string needle");
+                    ProjectedReadResponse::Value(Value::List(
+                        value
+                            .split(needle.as_ref())
+                            .map(|part| Value::String(part.to_string().into()))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ))
+                }
+                ProjectedReadRequest::Join(sep) => {
+                    self.push_call("join");
+                    execute_join_builtin(&self.value, &sep)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Trim => {
+                    self.push_call("trim");
+                    let value = coerce_string(&self.value).expect("string receiver");
+                    ProjectedReadResponse::Value(Value::String(value.trim().to_string().into()))
+                }
+                ProjectedReadRequest::Slice { start, end } => {
+                    self.push_call("slice");
+                    match &self.value {
+                        Value::String(value) => ProjectedReadResponse::Value(Value::String(
+                            slice_string(value, start, end).into(),
+                        )),
+                        Value::List(items) => {
+                            let Some((start, end)) = clamp_slice_bounds(start, end, items.len())
+                            else {
+                                return ProjectedReadResponse::Value(Value::List(
+                                    Vec::new().into(),
+                                ));
+                            };
+                            ProjectedReadResponse::Value(Value::List(
+                                items[start..end].to_vec().into(),
+                            ))
+                        }
+                        _ => ProjectedReadResponse::Missing,
+                    }
+                }
+                ProjectedReadRequest::Push(item) => {
+                    self.push_call("push");
+                    execute_push_builtin(&self.value, item)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::ToNumber => {
+                    self.push_call("to_number");
+                    as_number(&self.value)
+                        .map(Value::Number)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::JsonParse => {
+                    self.push_call("json_parse");
+                    let value = coerce_string(&self.value).expect("json text");
+                    serde_json::from_str::<serde_json::Value>(&value)
+                        .map(from_json)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::SliceBound => {
+                    self.push_call("slice_bound");
+                    as_slice_bound(&self.value)
+                        .map(|bound| {
+                            ProjectedReadResponse::Value(match bound {
+                                Some(value) => Value::Number(value as f64),
+                                None => Value::Null,
+                            })
+                        })
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::RangeBound => {
+                    self.push_call("range_bound");
+                    as_range_bound(&self.value)
+                        .map(|value| ProjectedReadResponse::Value(Value::Number(value as f64)))
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Materialize => {
+                    self.push_call("materialize");
+                    ProjectedReadResponse::Value(self.value.clone())
+                }
+                ProjectedReadRequest::Render => ProjectedReadResponse::Text(
+                    stringify_value(&self.value).expect("render projected override"),
+                ),
             }
-        })
-    }
-
-    fn push(&self, item: Value) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async move {
-            self.push_call("push");
-            execute_push_builtin(&self.value, item)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn to_number(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("to_number");
-            as_number(&self.value)
-                .map(Value::Number)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn json_parse(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("json_parse");
-            let value = coerce_string(&self.value).expect("json text");
-            serde_json::from_str::<serde_json::Value>(&value)
-                .map(from_json)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn slice_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("slice_bound");
-            as_slice_bound(&self.value)
-                .map(|bound| {
-                    ProjectedRead::Value(match bound {
-                        Some(value) => Value::Number(value as f64),
-                        None => Value::Null,
-                    })
-                })
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn range_bound(&self) -> ProjectedFuture<'_, ProjectedRead> {
-        Box::pin(async {
-            self.push_call("range_bound");
-            as_range_bound(&self.value)
-                .map(|value| ProjectedRead::Value(Value::Number(value as f64)))
-                .unwrap_or(ProjectedRead::Missing)
-        })
-    }
-
-    fn materialize(&self) -> ProjectedFuture<'_, Value> {
-        Box::pin(async {
-            self.push_call("materialize");
-            self.value.clone()
         })
     }
 }

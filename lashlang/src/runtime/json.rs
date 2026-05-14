@@ -7,8 +7,12 @@
 
 use std::sync::Arc;
 
-use super::*;
+#[cfg(test)]
+use super::value_contains_projected;
 use super::{ImageValue, ProjectedFuture, Value};
+use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
+use std::fmt::Write as _;
 
 pub(crate) fn json_number(value: f64) -> Option<serde_json::Number> {
     if !value.is_finite() {
@@ -27,6 +31,7 @@ pub(crate) fn json_number(value: f64) -> Option<serde_json::Number> {
     serde_json::Number::from_f64(value)
 }
 
+#[cfg(test)]
 pub(crate) fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_json::Value> {
     Box::pin(async move {
         match value {
@@ -56,6 +61,7 @@ pub(crate) fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_j
     })
 }
 
+#[cfg(test)]
 pub(crate) fn to_json(value: &Value) -> serde_json::Value {
     if value_contains_projected(value) {
         futures_executor::block_on(to_json_async(value))
@@ -64,10 +70,7 @@ pub(crate) fn to_json(value: &Value) -> serde_json::Value {
     }
 }
 
-pub(crate) fn to_json_blocking(value: &Value) -> serde_json::Value {
-    to_json(value)
-}
-
+#[cfg(test)]
 pub(crate) fn to_json_direct(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -91,6 +94,178 @@ pub(crate) fn to_json_direct(value: &Value) -> serde_json::Value {
     }
 }
 
+pub(crate) struct RuntimeJson<'a>(pub(crate) &'a Value);
+pub(crate) struct DirectJson<'a>(pub(crate) &'a Value);
+pub(crate) struct SnapshotJson<'a>(pub(crate) &'a Value);
+
+impl Serialize for RuntimeJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            Value::Projected(projected) => {
+                RuntimeJson(&projected.materialize()).serialize(serializer)
+            }
+            value => serialize_value(value, serializer, ProjectedMode::Runtime),
+        }
+    }
+}
+
+impl Serialize for DirectJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_value(self.0, serializer, ProjectedMode::Direct)
+    }
+}
+
+impl Serialize for SnapshotJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_value(self.0, serializer, ProjectedMode::Snapshot)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedMode {
+    Runtime,
+    Direct,
+    Snapshot,
+}
+
+fn serialize_value<S>(
+    value: &Value,
+    serializer: S,
+    projected_mode: ProjectedMode,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Value::Null => serializer.serialize_none(),
+        Value::Bool(value) => serializer.serialize_bool(*value),
+        Value::Number(value) => match json_number(*value) {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_none(),
+        },
+        Value::String(value) => serializer.serialize_str(value),
+        Value::Image(image) => serialize_image(image, serializer),
+        Value::List(values) => {
+            let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+            for value in values.iter() {
+                match projected_mode {
+                    ProjectedMode::Runtime => sequence.serialize_element(&RuntimeJson(value))?,
+                    ProjectedMode::Direct => sequence.serialize_element(&DirectJson(value))?,
+                    ProjectedMode::Snapshot => sequence.serialize_element(&SnapshotJson(value))?,
+                }
+            }
+            sequence.end()
+        }
+        Value::Record(record) => {
+            let mut entries = record.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let mut map = serializer.serialize_map(Some(entries.len()))?;
+            for (key, value) in entries {
+                match projected_mode {
+                    ProjectedMode::Runtime => map.serialize_entry(key, &RuntimeJson(value))?,
+                    ProjectedMode::Direct => map.serialize_entry(key, &DirectJson(value))?,
+                    ProjectedMode::Snapshot => map.serialize_entry(key, &SnapshotJson(value))?,
+                }
+            }
+            map.end()
+        }
+        Value::Projected(projected) => match projected_mode {
+            ProjectedMode::Runtime => RuntimeJson(&projected.materialize()).serialize(serializer),
+            ProjectedMode::Direct => {
+                unreachable!("projected values require runtime or snapshot json conversion")
+            }
+            ProjectedMode::Snapshot => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("__lashlang_snapshot_projected__", &true)?;
+                map.serialize_entry("name", projected.name())?;
+                map.serialize_entry("type_name", projected.value_type_name())?;
+                map.end()
+            }
+        },
+    }
+}
+
+fn serialize_image<S>(image: &ImageValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut map = serializer.serialize_map(Some(6))?;
+    map.serialize_entry("height", &image.height)?;
+    map.serialize_entry("id", &image.id)?;
+    map.serialize_entry("label", &image.label)?;
+    map.serialize_entry("size", &image.size)?;
+    map.serialize_entry("type", "image")?;
+    map.serialize_entry("width", &image.width)?;
+    map.end()
+}
+
+pub(crate) fn append_direct_json(output: &mut String, value: &Value) {
+    output.push_str(
+        &serde_json::to_string(&DirectJson(value))
+            .expect("value json serialization should succeed"),
+    );
+}
+
+pub(crate) fn append_runtime_json_async<'a>(
+    output: &'a mut String,
+    value: &'a Value,
+) -> ProjectedFuture<'a, ()> {
+    Box::pin(async move {
+        match value {
+            Value::Null => output.push_str("null"),
+            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => match json_number(*value) {
+                Some(value) => write!(output, "{value}").expect("string writes should not fail"),
+                None => output.push_str("null"),
+            },
+            Value::String(value) => output.push_str(
+                &serde_json::to_string(value).expect("string json serialization should succeed"),
+            ),
+            Value::Image(_) => append_direct_json(output, value),
+            Value::List(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    append_runtime_json_async(output, value).await;
+                }
+                output.push(']');
+            }
+            Value::Record(record) => {
+                let mut entries = record.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by_key(|(key, _)| *key);
+                output.push('{');
+                for (index, (key, value)) in entries.into_iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(
+                        &serde_json::to_string(key)
+                            .expect("record key json serialization should succeed"),
+                    );
+                    output.push(':');
+                    append_runtime_json_async(output, value).await;
+                }
+                output.push('}');
+            }
+            Value::Projected(projected) => {
+                append_runtime_json_async(output, &projected.materialize_async().await).await;
+            }
+        }
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn image_to_json(image: &ImageValue) -> serde_json::Value {
     let mut object = serde_json::Map::with_capacity(7);
     object.insert(

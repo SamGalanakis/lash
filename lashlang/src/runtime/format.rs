@@ -48,10 +48,7 @@ pub(crate) fn append_stringified_value_direct(
             write_number(output, *value).expect("string writes should not fail")
         }
         Value::Projected(_) => unreachable!("projected values require async stringification"),
-        Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
-            &serde_json::to_string(&to_json_direct(value))
-                .expect("value json serialization should succeed"),
-        ),
+        Value::Image(_) | Value::List(_) | Value::Record(_) => append_direct_json(output, value),
     }
     Ok(())
 }
@@ -69,10 +66,9 @@ pub(crate) fn append_stringified_value_async<'a>(
                 write_number(output, *value).expect("string writes should not fail")
             }
             Value::Projected(value) => output.push_str(&value.render().await),
-            Value::Image(_) | Value::List(_) | Value::Record(_) => output.push_str(
-                &serde_json::to_string(&to_json_async(value).await)
-                    .expect("value json serialization should succeed"),
-            ),
+            Value::Image(_) | Value::List(_) | Value::Record(_) => {
+                append_runtime_json_async(output, value).await;
+            }
         }
         Ok(())
     })

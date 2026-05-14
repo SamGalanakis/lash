@@ -67,7 +67,8 @@ pub(crate) use ops::*;
 pub use state::{Snapshot, State};
 pub use value::{
     ImageValue, LASH_TYPE_KEY, ListValue, ProjectedBindingError, ProjectedBindings,
-    ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Value,
+    ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
+    ProjectedValue, Value,
 };
 use vm::IterState;
 

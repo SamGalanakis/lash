@@ -67,6 +67,68 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
     {
       "Assign": {
         "target": {
+          "root": "counts"
+        },
+        "expr": {
+          "Record": []
+        }
+      }
+    },
+    {
+      "For": {
+        "binding": "token",
+        "iterable": {
+          "BuiltinCall": {
+            "name": "split",
+            "args": [
+              {
+                "Variable": "source"
+              },
+              {
+                "String": ","
+              }
+            ]
+          }
+        },
+        "body": [
+          {
+            "Assign": {
+              "target": {
+                "root": "counts",
+                "steps": [
+                  {
+                    "Index": {
+                      "Variable": "token"
+                    }
+                  }
+                ]
+              },
+              "expr": {
+                "Binary": {
+                  "left": {
+                    "Index": {
+                      "target": {
+                        "Variable": "counts"
+                      },
+                      "index": {
+                        "Variable": "token"
+                      }
+                    }
+                  },
+                  "op": "Add",
+                  "right": {
+                    "Number": 1.0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "Assign": {
+        "target": {
           "root": "Payload"
         },
         "expr": {
@@ -87,6 +149,11 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
                 "ty": {
                   "List": "Dict"
                 },
+                "optional": false
+              },
+              {
+                "name": "counts",
+                "ty": "Dict",
                 "optional": false
               }
             ]
@@ -111,6 +178,12 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
                   "matches",
                   {
                     "Variable": "matches"
+                  }
+                ],
+                [
+                  "counts",
+                  {
+                    "Variable": "counts"
                   }
                 ]
               ]
@@ -138,11 +211,19 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
     },
     {
       "start": 99,
-      "end": 165
+      "end": 110
     },
     {
-      "start": 166,
-      "end": 242
+      "start": 111,
+      "end": 182
+    },
+    {
+      "start": 183,
+      "end": 265
+    },
+    {
+      "start": 266,
+      "end": 358
     }
   ]
 }

@@ -25,12 +25,12 @@ use crate::lexer::Span;
 use super::record::{Symbol, intern_symbol, lookup_symbol, record_with_capacity, symbol_name};
 use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
-    Builtin, Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep,
-    CompiledFormatTemplate, Instruction, LASH_TYPE_KEY, Name, NamedBranchChunk,
-    NamedParallelCallBranch, ParallelCallBranch, PureExpr, RuntimeError, Value, as_number,
-    compile_format_template, eval_binary_values, execute_integer_div_builtin,
-    execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op, is_truthy,
-    read_field_direct, read_index_direct, transient_name, unwrap_type_value,
+    Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
+    Instruction, IntrinsicOp, LASH_TYPE_KEY, LoopExpr, LoopIterable, LoopOp, LoweredLoop, Name,
+    NamedBranchChunk, NamedParallelCallBranch, ParallelCallBranch, PureExpr, RuntimeError, Value,
+    as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
+    execute_len_direct, execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op,
+    is_truthy, read_field_direct, read_index_direct, transient_name, unwrap_type_value,
 };
 
 pub(crate) struct Compiler {
@@ -50,6 +50,7 @@ pub(crate) struct Compiler {
     branch_sets: Vec<Box<[Chunk]>>,
     named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
     assign_paths: Vec<CompiledAssignPath>,
+    lowered_loops: Vec<LoweredLoop>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
@@ -58,6 +59,167 @@ pub(crate) struct Compiler {
 struct LoopContext {
     continue_target: usize,
     break_jumps: SmallVec<[usize; 4]>,
+}
+
+struct LoopLowerer<'a, 'b> {
+    compiler: &'a mut Compiler,
+    binding_name: &'b str,
+    assigned_slots: SmallVec<[usize; 8]>,
+}
+
+impl LoopLowerer<'_, '_> {
+    fn lower_block(&mut self, statements: &[Stmt]) -> Option<Vec<LoopOp>> {
+        statements
+            .iter()
+            .map(|statement| self.lower_stmt(statement))
+            .collect()
+    }
+
+    fn lower_stmt(&mut self, statement: &Stmt) -> Option<LoopOp> {
+        match statement {
+            Stmt::Assign { target, expr } if target.root.as_str() == self.binding_name => None,
+            Stmt::Assign { target, expr } if target.is_simple() => {
+                let slot = self.compiler.push_slot(&target.root);
+                self.assigned_slots.push(slot);
+                if let Expr::Binary {
+                    left,
+                    op: BinaryOp::Add,
+                    right,
+                } = expr
+                    && matches!(left.as_ref(), Expr::Variable(var) if var.as_str() == target.root.as_str())
+                {
+                    if let Expr::List(items) = right.as_ref()
+                        && items.len() == 1
+                    {
+                        return Some(LoopOp::AppendAssign {
+                            slot,
+                            expr: self.compiler.lower_loop_expr(&items[0])?,
+                        });
+                    }
+                    if let Some(Value::Number(right)) = self.compiler.fold_compile_time_expr(right)
+                    {
+                        return Some(LoopOp::AddAssignNumber { slot, right });
+                    }
+                    if let Expr::Variable(right_name) = right.as_ref() {
+                        let right = self.compiler.push_slot(right_name);
+                        return Some(LoopOp::AddAssignSlot { slot, right });
+                    }
+                    return Some(LoopOp::AddAssign {
+                        slot,
+                        expr: self.compiler.lower_loop_expr(right)?,
+                    });
+                }
+                if let Expr::BuiltinCall {
+                    name: builtin_name,
+                    args,
+                } = expr
+                    && builtin_name == "push"
+                    && let [Expr::Variable(first_arg), item] = args.as_slice()
+                    && first_arg.as_str() == target.root.as_str()
+                {
+                    return Some(LoopOp::AppendAssign {
+                        slot,
+                        expr: self.compiler.lower_loop_expr(item)?,
+                    });
+                }
+                Some(LoopOp::Assign {
+                    slot,
+                    expr: self.compiler.lower_loop_expr(expr)?,
+                })
+            }
+            Stmt::Assign { target, expr } => {
+                let slot = self.compiler.push_slot(&target.root);
+                self.assigned_slots.push(slot);
+                if let [AssignPathStep::Index(index)] = target.steps.as_slice()
+                    && let Expr::Binary {
+                        left,
+                        op: BinaryOp::Add,
+                        right,
+                    } = expr
+                    && let Expr::Index {
+                        target: left_target,
+                        index: left_index,
+                    } = left.as_ref()
+                    && matches!(left_target.as_ref(), Expr::Variable(name) if name.as_str() == target.root.as_str())
+                    && left_index.as_ref() == index
+                    && let Some(Value::Number(right)) = self.compiler.fold_compile_time_expr(right)
+                {
+                    if let Expr::Variable(index_name) = index {
+                        let index = self.compiler.push_slot(index_name);
+                        return Some(LoopOp::AddAssignIndexSlotNumber { slot, index, right });
+                    }
+                    return Some(LoopOp::AddAssignIndexNumber {
+                        slot,
+                        index: self.compiler.lower_loop_expr(index)?,
+                        right,
+                    });
+                }
+
+                let indexes = target
+                    .steps
+                    .iter()
+                    .filter_map(|step| match step {
+                        AssignPathStep::Field(_) => None,
+                        AssignPathStep::Index(index) => Some(self.compiler.lower_loop_expr(index)),
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .into_boxed_slice();
+                let path = self.compiler.push_assign_path(&target.steps);
+                Some(LoopOp::PathAssign {
+                    slot,
+                    path,
+                    indexes,
+                    expr: self.compiler.lower_loop_expr(expr)?,
+                })
+            }
+            Stmt::Expr(expr) => Some(LoopOp::Expr(self.compiler.lower_loop_expr(expr)?)),
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let condition = self.compiler.lower_loop_expr(condition)?;
+                let then_ops = self.lower_block(then_block)?.into_boxed_slice();
+                let else_ops = self.lower_block(else_block)?.into_boxed_slice();
+                Some(LoopOp::If {
+                    condition,
+                    then_ops,
+                    else_ops,
+                })
+            }
+            Stmt::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                let binding_slot = self.compiler.push_slot(binding);
+                let iterable = self.compiler.lower_loop_iterable(iterable)?;
+                let mut nested = LoopLowerer {
+                    compiler: self.compiler,
+                    binding_name: binding,
+                    assigned_slots: SmallVec::new(),
+                };
+                let body = nested.lower_block(body)?.into_boxed_slice();
+                nested.compiler.set_const_slot(binding_slot, None);
+                for slot in nested.assigned_slots {
+                    nested.compiler.set_const_slot(slot, None);
+                    self.assigned_slots.push(slot);
+                }
+                Some(LoopOp::Loop(Box::new(LoweredLoop {
+                    binding: binding_slot,
+                    iterable,
+                    body,
+                })))
+            }
+            Stmt::Break => Some(LoopOp::Break),
+            Stmt::Continue => Some(LoopOp::Continue),
+            Stmt::Call(_)
+            | Stmt::Cancel(_)
+            | Stmt::Print(_)
+            | Stmt::Parallel { .. }
+            | Stmt::Submit(_) => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -98,6 +260,7 @@ impl Compiler {
             branch_sets: Vec::new(),
             named_branch_sets: Vec::new(),
             assign_paths: Vec::new(),
+            lowered_loops: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
             loop_contexts: Vec::new(),
@@ -124,6 +287,7 @@ impl Compiler {
             branch_sets: self.branch_sets,
             named_branch_sets: self.named_branch_sets,
             assign_paths: self.assign_paths,
+            lowered_loops: self.lowered_loops,
         }
     }
 
@@ -238,6 +402,12 @@ impl Compiler {
         index
     }
 
+    fn push_lowered_loop(&mut self, lowered_loop: LoweredLoop) -> usize {
+        let index = self.lowered_loops.len();
+        self.lowered_loops.push(lowered_loop);
+        index
+    }
+
     fn push_parallel_call_set(&mut self, branches: Vec<ParallelCallBranch>) -> usize {
         let index = self.parallel_call_sets.len();
         self.parallel_call_sets.push(branches.into_boxed_slice());
@@ -291,32 +461,52 @@ impl Compiler {
         self.const_for_slot(slot)
     }
 
-    fn resolve_builtin(&mut self, name: &str) -> Builtin {
+    fn resolve_intrinsic(&mut self, name: &str, argc: usize) -> IntrinsicOp {
+        let valid = match name {
+            "len" | "empty" | "keys" | "values" | "trim" | "to_string" | "to_int" | "to_float"
+            | "json_parse" => argc == 1,
+            "contains" | "grep_text" | "starts_with" | "ends_with" | "split" | "join"
+            | "validate" | "ceil_div" | "floor_div" | "push" => argc == 2,
+            "slice" => argc == 3,
+            "find" => argc == 2 || argc == 3,
+            "format" => argc >= 1,
+            "range" => (1..=3).contains(&argc),
+            _ => true,
+        };
+        if !valid {
+            return IntrinsicOp::InvalidArity {
+                name: self.push_name(name),
+                argc,
+            };
+        }
         match name {
-            "len" => Builtin::Len,
-            "empty" => Builtin::Empty,
-            "keys" => Builtin::Keys,
-            "values" => Builtin::Values,
-            "contains" => Builtin::Contains,
-            "find" => Builtin::Find,
-            "grep_text" => Builtin::GrepText,
-            "starts_with" => Builtin::StartsWith,
-            "ends_with" => Builtin::EndsWith,
-            "split" => Builtin::Split,
-            "join" => Builtin::Join,
-            "trim" => Builtin::Trim,
-            "slice" => Builtin::Slice,
-            "to_string" => Builtin::ToString,
-            "to_int" => Builtin::ToInt,
-            "to_float" => Builtin::ToFloat,
-            "json_parse" => Builtin::JsonParse,
-            "format" => Builtin::Format,
-            "validate" => Builtin::Validate,
-            "range" => Builtin::Range,
-            "ceil_div" => Builtin::CeilDiv,
-            "floor_div" => Builtin::FloorDiv,
-            "push" => Builtin::Push,
-            _ => Builtin::Unknown(self.push_name(name)),
+            "len" => IntrinsicOp::Len,
+            "empty" => IntrinsicOp::Empty,
+            "keys" => IntrinsicOp::Keys,
+            "values" => IntrinsicOp::Values,
+            "contains" => IntrinsicOp::Contains,
+            "find" => IntrinsicOp::Find(argc),
+            "grep_text" => IntrinsicOp::GrepText,
+            "starts_with" => IntrinsicOp::StartsWith,
+            "ends_with" => IntrinsicOp::EndsWith,
+            "split" => IntrinsicOp::Split,
+            "join" => IntrinsicOp::Join,
+            "trim" => IntrinsicOp::Trim,
+            "slice" => IntrinsicOp::Slice,
+            "to_string" => IntrinsicOp::ToString,
+            "to_int" => IntrinsicOp::ToInt,
+            "to_float" => IntrinsicOp::ToFloat,
+            "json_parse" => IntrinsicOp::JsonParse,
+            "format" => IntrinsicOp::Format(argc),
+            "validate" => IntrinsicOp::Validate,
+            "range" => IntrinsicOp::Range(argc),
+            "ceil_div" => IntrinsicOp::CeilDiv,
+            "floor_div" => IntrinsicOp::FloorDiv,
+            "push" => IntrinsicOp::Push,
+            _ => IntrinsicOp::Unknown {
+                name: self.push_name(name),
+                argc,
+            },
         }
     }
 
@@ -397,7 +587,8 @@ impl Compiler {
                     && first_arg == name
                 {
                     self.compile_expr(item);
-                    self.code.push(Instruction::PushAssign(slot));
+                    self.code
+                        .push(Instruction::Intrinsic(IntrinsicOp::PushAssign(slot)));
                     self.set_const_slot(slot, None);
                     return;
                 }
@@ -494,6 +685,12 @@ impl Compiler {
                 iterable,
                 body,
             } => {
+                if let Some(loop_id) = self.compile_lowered_for(binding, iterable, body) {
+                    self.clear_const_slots();
+                    self.code.push(Instruction::LoweredLoop(loop_id));
+                    return;
+                }
+
                 let binding = self.push_slot(binding);
                 if let Expr::BuiltinCall { name, args } = iterable
                     && name.as_str() == "range"
@@ -573,6 +770,134 @@ impl Compiler {
             self.patch_jump(break_jump, loop_end);
         }
         self.clear_const_slots();
+    }
+
+    fn compile_lowered_for(
+        &mut self,
+        binding_name: &str,
+        iterable: &Expr,
+        body: &[Stmt],
+    ) -> Option<usize> {
+        let binding = self.push_slot(binding_name);
+        let iterable = self.lower_loop_iterable(iterable)?;
+        let mut lowerer = LoopLowerer {
+            compiler: self,
+            binding_name,
+            assigned_slots: SmallVec::new(),
+        };
+        let body = lowerer.lower_block(body)?;
+        lowerer.compiler.set_const_slot(binding, None);
+        for slot in lowerer.assigned_slots {
+            lowerer.compiler.set_const_slot(slot, None);
+        }
+        let lowered_loop = LoweredLoop {
+            binding,
+            iterable,
+            body: body.into_boxed_slice(),
+        };
+        Some(lowerer.compiler.push_lowered_loop(lowered_loop))
+    }
+
+    fn lower_loop_iterable(&mut self, iterable: &Expr) -> Option<LoopIterable> {
+        match iterable {
+            Expr::BuiltinCall { name, args }
+                if name == "range" && (1..=3).contains(&args.len()) =>
+            {
+                Some(LoopIterable::Range(
+                    args.iter()
+                        .map(|arg| self.lower_loop_expr(arg))
+                        .collect::<Option<Vec<_>>>()?
+                        .into_boxed_slice(),
+                ))
+            }
+            Expr::BuiltinCall { name, args } if name == "keys" && args.len() == 1 => Some(
+                LoopIterable::Keys(Box::new(self.lower_loop_expr(&args[0])?)),
+            ),
+            _ => Some(LoopIterable::Values(Box::new(
+                self.lower_loop_expr(iterable)?,
+            ))),
+        }
+    }
+
+    fn lower_loop_expr(&mut self, expr: &Expr) -> Option<LoopExpr> {
+        match expr {
+            Expr::Null => Some(LoopExpr::Const(Value::Null)),
+            Expr::Bool(value) => Some(LoopExpr::Const(Value::Bool(*value))),
+            Expr::Number(value) => Some(LoopExpr::Const(Value::Number(*value))),
+            Expr::String(value) => Some(LoopExpr::Const(Value::String(value.clone()))),
+            Expr::Variable(name) => Some(LoopExpr::Slot(self.push_slot(name))),
+            Expr::List(items) => Some(LoopExpr::List(
+                items
+                    .iter()
+                    .map(|item| self.lower_loop_expr(item))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_boxed_slice(),
+            )),
+            Expr::Record(entries) => Some(LoopExpr::Record(
+                entries
+                    .iter()
+                    .map(|(key, value)| Some((self.push_name(key), self.lower_loop_expr(value)?)))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_boxed_slice(),
+            )),
+            Expr::BuiltinCall { name, args } => {
+                if name == "validate" {
+                    return None;
+                }
+                if name == "format"
+                    && let Some((Expr::String(template), value_args)) = args.split_first()
+                {
+                    return Some(LoopExpr::Format {
+                        template: compile_format_template(template, value_args.len()),
+                        args: value_args
+                            .iter()
+                            .map(|arg| self.lower_loop_expr(arg))
+                            .collect::<Option<Vec<_>>>()?
+                            .into_boxed_slice(),
+                    });
+                }
+                Some(LoopExpr::Intrinsic {
+                    op: self.resolve_intrinsic(name, args.len()),
+                    args: args
+                        .iter()
+                        .map(|arg| self.lower_loop_expr(arg))
+                        .collect::<Option<Vec<_>>>()?
+                        .into_boxed_slice(),
+                })
+            }
+            Expr::Field { target, field } => Some(LoopExpr::Field {
+                target: Box::new(self.lower_loop_expr(target)?),
+                field: self.push_name(field),
+            }),
+            Expr::Index { target, index } => Some(LoopExpr::Index {
+                target: Box::new(self.lower_loop_expr(target)?),
+                index: Box::new(self.lower_loop_expr(index)?),
+            }),
+            Expr::Unary { op, expr } => Some(LoopExpr::Unary {
+                op: *op,
+                expr: Box::new(self.lower_loop_expr(expr)?),
+            }),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => Some(LoopExpr::Conditional {
+                condition: Box::new(self.lower_loop_expr(condition)?),
+                then_expr: Box::new(self.lower_loop_expr(then_expr)?),
+                else_expr: Box::new(self.lower_loop_expr(else_expr)?),
+            }),
+            Expr::Binary { left, op, right } => Some(LoopExpr::Binary {
+                left: Box::new(self.lower_loop_expr(left)?),
+                op: *op,
+                right: Box::new(self.lower_loop_expr(right)?),
+            }),
+            Expr::ToolCall(_)
+            | Expr::StartToolCall(_)
+            | Expr::Parallel { .. }
+            | Expr::Await(_)
+            | Expr::ResultUnwrap(_)
+            | Expr::TypeLiteral(_) => None,
+        }
     }
 
     fn compile_parallel_calls(&mut self, branches: &[Stmt]) -> Option<Vec<ParallelCallBranch>> {
@@ -712,8 +1037,8 @@ impl Compiler {
                     });
                 }
 
-                Ok(PureExpr::Builtin {
-                    builtin: self.resolve_builtin(name),
+                Ok(PureExpr::Intrinsic {
+                    op: self.resolve_intrinsic(name, args.len()),
                     args: args
                         .iter()
                         .map(|arg| self.compile_pure_expr(arg))
@@ -786,43 +1111,56 @@ impl Compiler {
                     .map(|arg| self.fold_compile_time_expr(arg))
                     .collect::<Option<Vec<_>>>()?;
                 let builtin = match name.as_str() {
-                    "len" => Builtin::Len,
-                    "empty" => Builtin::Empty,
-                    "keys" => Builtin::Keys,
-                    "values" => Builtin::Values,
-                    "contains" => Builtin::Contains,
-                    "find" => Builtin::Find,
-                    "grep_text" => Builtin::GrepText,
-                    "starts_with" => Builtin::StartsWith,
-                    "ends_with" => Builtin::EndsWith,
-                    "split" => Builtin::Split,
-                    "join" => Builtin::Join,
-                    "trim" => Builtin::Trim,
-                    "slice" => Builtin::Slice,
-                    "to_string" => Builtin::ToString,
-                    "to_int" => Builtin::ToInt,
-                    "to_float" => Builtin::ToFloat,
-                    "json_parse" => Builtin::JsonParse,
-                    "format" => Builtin::Format,
-                    "validate" => Builtin::Validate,
-                    "range" => Builtin::Range,
-                    "ceil_div" => Builtin::CeilDiv,
-                    "floor_div" => Builtin::FloorDiv,
-                    "push" => Builtin::Push,
+                    "len" => IntrinsicOp::Len,
+                    "empty" => IntrinsicOp::Empty,
+                    "keys" => IntrinsicOp::Keys,
+                    "values" => IntrinsicOp::Values,
+                    "contains" => IntrinsicOp::Contains,
+                    "find" => IntrinsicOp::Find(args.len()),
+                    "grep_text" => IntrinsicOp::GrepText,
+                    "starts_with" => IntrinsicOp::StartsWith,
+                    "ends_with" => IntrinsicOp::EndsWith,
+                    "split" => IntrinsicOp::Split,
+                    "join" => IntrinsicOp::Join,
+                    "trim" => IntrinsicOp::Trim,
+                    "slice" => IntrinsicOp::Slice,
+                    "to_string" => IntrinsicOp::ToString,
+                    "to_int" => IntrinsicOp::ToInt,
+                    "to_float" => IntrinsicOp::ToFloat,
+                    "json_parse" => IntrinsicOp::JsonParse,
+                    "format" => IntrinsicOp::Format(args.len()),
+                    "validate" => IntrinsicOp::Validate,
+                    "range" => IntrinsicOp::Range(args.len()),
+                    "ceil_div" => IntrinsicOp::CeilDiv,
+                    "floor_div" => IntrinsicOp::FloorDiv,
+                    "push" => IntrinsicOp::Push,
                     _ => return None,
                 };
                 match builtin {
-                    Builtin::Range => execute_range_builtin(&values).ok(),
-                    Builtin::CeilDiv => {
+                    IntrinsicOp::Len => {
+                        if values.len() == 1 {
+                            execute_len_direct(&values[0]).ok()
+                        } else {
+                            None
+                        }
+                    }
+                    IntrinsicOp::Range(_) => execute_range_builtin(&values).ok(),
+                    IntrinsicOp::CeilDiv => {
                         execute_integer_div_builtin("ceil_div", &values, f64::ceil).ok()
                     }
-                    Builtin::FloorDiv => {
+                    IntrinsicOp::FloorDiv => {
                         execute_integer_div_builtin("floor_div", &values, f64::floor).ok()
                     }
-                    _ => {
-                        let _ = values;
-                        None
+                    IntrinsicOp::Push => {
+                        if let [Value::List(items), item] = values.as_slice() {
+                            let mut values = items.to_vec();
+                            values.push(item.clone());
+                            Some(Value::List(values.into()))
+                        } else {
+                            None
+                        }
                     }
+                    _ => None,
                 }
             }
             Expr::Field { target, field } => {
@@ -896,8 +1234,9 @@ impl Compiler {
             if let [Expr::Variable(slot_name)] = value_args {
                 let template = self.push_format_template(template, value_args.len());
                 let slot = self.push_slot(slot_name);
-                self.code
-                    .push(Instruction::FormatCompiledSlotNumber { template, slot });
+                self.code.push(Instruction::Intrinsic(
+                    IntrinsicOp::FormatCompiledSlotNumber { template, slot },
+                ));
                 return;
             }
             if let [Expr::Binary { left, op, right }] = value_args
@@ -907,31 +1246,36 @@ impl Compiler {
             {
                 let template = self.push_format_template(template, value_args.len());
                 let slot = self.push_slot(slot_name);
-                self.code.push(Instruction::FormatCompiledSlotNumberBinary {
-                    template,
-                    slot,
-                    op: *op,
-                    right,
-                });
+                self.code.push(Instruction::Intrinsic(
+                    IntrinsicOp::FormatCompiledSlotNumberBinary {
+                        template,
+                        slot,
+                        op: *op,
+                        right,
+                    },
+                ));
                 return;
             }
             for arg in value_args {
                 self.compile_expr(arg);
             }
             let template = self.push_format_template(template, value_args.len());
-            self.code.push(Instruction::FormatCompiled(template));
+            self.code
+                .push(Instruction::Intrinsic(IntrinsicOp::FormatCompiled(
+                    template,
+                )));
             return;
         }
 
         match (name, args.len()) {
             ("len", 1) => {
                 self.compile_expr(&args[0]);
-                self.code.push(Instruction::Len);
+                self.code.push(Instruction::Intrinsic(IntrinsicOp::Len));
             }
             ("join", 2) => {
                 self.compile_expr(&args[0]);
                 self.compile_expr(&args[1]);
-                self.code.push(Instruction::Join);
+                self.code.push(Instruction::Intrinsic(IntrinsicOp::Join));
             }
             ("validate", 2) => {
                 if let Some(schema_wrapper) = self.fold_compile_time_expr(&args[1])
@@ -939,34 +1283,36 @@ impl Compiler {
                 {
                     self.compile_expr(&args[0]);
                     let schema = self.push_compiled_schema(&schema);
-                    self.code.push(Instruction::ValidateCompiled(schema));
+                    self.code
+                        .push(Instruction::Intrinsic(IntrinsicOp::ValidateCompiled(
+                            schema,
+                        )));
                     return;
                 }
 
                 self.compile_expr(&args[0]);
                 self.compile_expr(&args[1]);
-                self.code.push(Instruction::Validate);
+                self.code
+                    .push(Instruction::Intrinsic(IntrinsicOp::Validate));
             }
             ("push", 2) => {
                 self.compile_expr(&args[0]);
                 self.compile_expr(&args[1]);
-                self.code.push(Instruction::Push);
+                self.code.push(Instruction::Intrinsic(IntrinsicOp::Push));
             }
             ("range", 1..=3) => {
                 for arg in args {
                     self.compile_expr(arg);
                 }
-                self.code.push(Instruction::Range { argc: args.len() });
+                self.code
+                    .push(Instruction::Intrinsic(IntrinsicOp::Range(args.len())));
             }
             _ => {
                 for arg in args {
                     self.compile_expr(arg);
                 }
-                let builtin = self.resolve_builtin(name);
-                self.code.push(Instruction::CallBuiltin {
-                    builtin,
-                    argc: args.len(),
-                });
+                let builtin = self.resolve_intrinsic(name, args.len());
+                self.code.push(Instruction::Intrinsic(builtin));
             }
         }
     }

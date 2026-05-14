@@ -286,6 +286,35 @@ pub(crate) fn assign_index(
     }
 }
 
+pub(crate) fn descend_index<'a>(
+    target: &'a mut Value,
+    index: &Value,
+) -> Result<&'a mut Value, RuntimeError> {
+    match target {
+        Value::List(values) => {
+            let idx = resolve_existing_list_assignment_index(index, values.len())?;
+            Ok(&mut values.make_mut()[idx])
+        }
+        Value::Record(record) => {
+            let key = coerce_string(index)?;
+            let record = Arc::make_mut(record);
+            if let Some(value) = record.get_mut(key.as_ref()) {
+                Ok(value)
+            } else {
+                Err(RuntimeError::ValueError {
+                    message: format!("can't assign through missing key `{}`", key.as_ref()),
+                })
+            }
+        }
+        Value::Image(_) => Err(RuntimeError::TypeError {
+            message: "can't assign through image fields; images are immutable".to_string(),
+        }),
+        _ => Err(RuntimeError::TypeError {
+            message: format!("can't assign through index on {}", value_type_name(target)),
+        }),
+    }
+}
+
 pub(crate) fn add_assign_index_number(
     target: &mut Value,
     index: &Value,
@@ -330,35 +359,6 @@ pub(crate) fn add_assign_value_number(
             *left = value.clone();
             Ok(value)
         }
-    }
-}
-
-pub(crate) fn descend_index<'a>(
-    target: &'a mut Value,
-    index: &Value,
-) -> Result<&'a mut Value, RuntimeError> {
-    match target {
-        Value::List(values) => {
-            let idx = resolve_existing_list_assignment_index(index, values.len())?;
-            Ok(&mut values.make_mut()[idx])
-        }
-        Value::Record(record) => {
-            let key = coerce_string(index)?;
-            let record = Arc::make_mut(record);
-            if let Some(value) = record.get_mut(key.as_ref()) {
-                Ok(value)
-            } else {
-                Err(RuntimeError::ValueError {
-                    message: format!("can't assign through missing key `{}`", key.as_ref()),
-                })
-            }
-        }
-        Value::Image(_) => Err(RuntimeError::TypeError {
-            message: "can't assign through image fields; images are immutable".to_string(),
-        }),
-        _ => Err(RuntimeError::TypeError {
-            message: format!("can't assign through index on {}", value_type_name(target)),
-        }),
     }
 }
 

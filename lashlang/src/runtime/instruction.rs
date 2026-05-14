@@ -1,5 +1,5 @@
 //! Bytecode instruction set + the inert data types that flow from the
-//! compiler to the VM: `Chunk`, `Name`, `Instruction`, `Builtin`, the
+//! compiler to the VM: `Chunk`, `Name`, `Instruction`, `IntrinsicOp`, the
 //! profile-tag enums and accumulator, the format-template / assign-path
 //! shapes, and the pure-expression form used by the parallel-call
 //! optimization.
@@ -34,6 +34,7 @@ pub(crate) struct Chunk {
     pub(crate) branch_sets: Vec<Box<[Chunk]>>,
     pub(crate) named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
     pub(crate) assign_paths: Vec<CompiledAssignPath>,
+    pub(crate) lowered_loops: Vec<LoweredLoop>,
 }
 
 #[derive(Clone)]
@@ -122,6 +123,9 @@ pub(crate) enum Instruction {
     ResultUnwrap,
     Unary(UnaryOp),
     Binary(BinaryOp),
+    // Retained after measurement: large_data/loop_control/type_system_stress
+    // regressed when these numeric slot ops were routed through generic stack
+    // dispatch.
     SlotNumberBinary {
         slot: usize,
         op: BinaryOp,
@@ -176,31 +180,10 @@ pub(crate) enum Instruction {
     AwaitHandle,
     AwaitHandleUnwrap,
     CancelHandle,
-    CallBuiltin {
-        builtin: Builtin,
-        argc: usize,
-    },
-    Len,
-    Join,
-    Validate,
-    ValidateCompiled(usize),
-    Push,
-    PushAssign(usize),
-    Range {
-        argc: usize,
-    },
-    FormatCompiled(usize),
-    FormatCompiledSlotNumber {
-        template: usize,
-        slot: usize,
-    },
-    FormatCompiledSlotNumberBinary {
-        template: usize,
-        slot: usize,
-        op: BinaryOp,
-        right: f64,
-    },
+    Intrinsic(IntrinsicOp),
     AddAssign(usize),
+    // Retained after measurement: indexed_assignment/large_data regress when
+    // numeric add-assign paths route through generic stack/path assignment.
     AddAssignNumber {
         slot: usize,
         right: f64,
@@ -227,6 +210,7 @@ pub(crate) enum Instruction {
         binding: usize,
         argc: usize,
     },
+    LoweredLoop(usize),
     IterNext {
         jump_to: usize,
     },
@@ -245,13 +229,13 @@ pub(crate) enum Instruction {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Builtin {
+pub(crate) enum IntrinsicOp {
     Len,
     Empty,
     Keys,
     Values,
     Contains,
-    Find,
+    Find(usize),
     GrepText,
     StartsWith,
     EndsWith,
@@ -263,13 +247,35 @@ pub(crate) enum Builtin {
     ToInt,
     ToFloat,
     JsonParse,
-    Format,
+    Format(usize),
     Validate,
-    Range,
+    Range(usize),
     CeilDiv,
     FloorDiv,
     Push,
-    Unknown(usize),
+    InvalidArity {
+        name: usize,
+        argc: usize,
+    },
+    Unknown {
+        name: usize,
+        argc: usize,
+    },
+    ValidateCompiled(usize),
+    PushAssign(usize),
+    FormatCompiled(usize),
+    // Retained after measurement: projected_operations and formatting-heavy
+    // surfaces lost more than the allowed gate without these direct paths.
+    FormatCompiledSlotNumber {
+        template: usize,
+        slot: usize,
+    },
+    FormatCompiledSlotNumberBinary {
+        template: usize,
+        slot: usize,
+        op: BinaryOp,
+        right: f64,
+    },
 }
 
 impl Instruction {
@@ -312,19 +318,7 @@ impl Instruction {
                 InstructionProfileTag::AwaitHandle
             }
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
-            Instruction::CallBuiltin { .. }
-            | Instruction::Len
-            | Instruction::Join
-            | Instruction::Validate
-            | Instruction::ValidateCompiled(_)
-            | Instruction::Push
-            | Instruction::PushAssign(_)
-            | Instruction::Range { .. }
-            | Instruction::FormatCompiled(_)
-            | Instruction::FormatCompiledSlotNumber { .. }
-            | Instruction::FormatCompiledSlotNumberBinary { .. } => {
-                InstructionProfileTag::CallBuiltin
-            }
+            Instruction::Intrinsic(_) => InstructionProfileTag::Intrinsic,
             Instruction::AddAssign(_)
             | Instruction::AddAssignNumber { .. }
             | Instruction::AddAssignSlot { .. }
@@ -337,6 +331,7 @@ impl Instruction {
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
                 InstructionProfileTag::BeginIter
             }
+            Instruction::LoweredLoop(_) => InstructionProfileTag::LoweredLoop,
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
             Instruction::ParallelCalls(_) => InstructionProfileTag::Parallel,
@@ -354,33 +349,73 @@ impl Instruction {
     }
 }
 
-impl Builtin {
+impl IntrinsicOp {
+    pub(crate) fn argc(self) -> usize {
+        match self {
+            IntrinsicOp::Len
+            | IntrinsicOp::Empty
+            | IntrinsicOp::Keys
+            | IntrinsicOp::Values
+            | IntrinsicOp::Trim
+            | IntrinsicOp::ToString
+            | IntrinsicOp::ToInt
+            | IntrinsicOp::ToFloat
+            | IntrinsicOp::JsonParse
+            | IntrinsicOp::ValidateCompiled(_)
+            | IntrinsicOp::PushAssign(_) => 1,
+            IntrinsicOp::Contains
+            | IntrinsicOp::GrepText
+            | IntrinsicOp::StartsWith
+            | IntrinsicOp::EndsWith
+            | IntrinsicOp::Split
+            | IntrinsicOp::Join
+            | IntrinsicOp::Validate
+            | IntrinsicOp::CeilDiv
+            | IntrinsicOp::FloorDiv
+            | IntrinsicOp::Push => 2,
+            IntrinsicOp::Slice => 3,
+            IntrinsicOp::Find(argc)
+            | IntrinsicOp::Format(argc)
+            | IntrinsicOp::Range(argc)
+            | IntrinsicOp::InvalidArity { argc, .. }
+            | IntrinsicOp::Unknown { argc, .. }
+            | IntrinsicOp::FormatCompiled(argc) => argc,
+            IntrinsicOp::FormatCompiledSlotNumber { .. }
+            | IntrinsicOp::FormatCompiledSlotNumberBinary { .. } => 0,
+        }
+    }
+
     pub(crate) fn profile_tag(self) -> BuiltinProfileTag {
         match self {
-            Builtin::Len => BuiltinProfileTag::Len,
-            Builtin::Empty => BuiltinProfileTag::Empty,
-            Builtin::Keys => BuiltinProfileTag::Keys,
-            Builtin::Values => BuiltinProfileTag::Values,
-            Builtin::Contains => BuiltinProfileTag::Contains,
-            Builtin::Find => BuiltinProfileTag::Find,
-            Builtin::GrepText => BuiltinProfileTag::GrepText,
-            Builtin::StartsWith => BuiltinProfileTag::StartsWith,
-            Builtin::EndsWith => BuiltinProfileTag::EndsWith,
-            Builtin::Split => BuiltinProfileTag::Split,
-            Builtin::Join => BuiltinProfileTag::Join,
-            Builtin::Trim => BuiltinProfileTag::Trim,
-            Builtin::Slice => BuiltinProfileTag::Slice,
-            Builtin::ToString => BuiltinProfileTag::ToString,
-            Builtin::ToInt => BuiltinProfileTag::ToInt,
-            Builtin::ToFloat => BuiltinProfileTag::ToFloat,
-            Builtin::JsonParse => BuiltinProfileTag::JsonParse,
-            Builtin::Format => BuiltinProfileTag::Format,
-            Builtin::Validate => BuiltinProfileTag::Validate,
-            Builtin::Range => BuiltinProfileTag::Range,
-            Builtin::CeilDiv => BuiltinProfileTag::CeilDiv,
-            Builtin::FloorDiv => BuiltinProfileTag::FloorDiv,
-            Builtin::Push => BuiltinProfileTag::Push,
-            Builtin::Unknown(_) => BuiltinProfileTag::Unknown,
+            IntrinsicOp::Len => BuiltinProfileTag::Len,
+            IntrinsicOp::Empty => BuiltinProfileTag::Empty,
+            IntrinsicOp::Keys => BuiltinProfileTag::Keys,
+            IntrinsicOp::Values => BuiltinProfileTag::Values,
+            IntrinsicOp::Contains => BuiltinProfileTag::Contains,
+            IntrinsicOp::Find(_) => BuiltinProfileTag::Find,
+            IntrinsicOp::GrepText => BuiltinProfileTag::GrepText,
+            IntrinsicOp::StartsWith => BuiltinProfileTag::StartsWith,
+            IntrinsicOp::EndsWith => BuiltinProfileTag::EndsWith,
+            IntrinsicOp::Split => BuiltinProfileTag::Split,
+            IntrinsicOp::Join => BuiltinProfileTag::Join,
+            IntrinsicOp::Trim => BuiltinProfileTag::Trim,
+            IntrinsicOp::Slice => BuiltinProfileTag::Slice,
+            IntrinsicOp::ToString => BuiltinProfileTag::ToString,
+            IntrinsicOp::ToInt => BuiltinProfileTag::ToInt,
+            IntrinsicOp::ToFloat => BuiltinProfileTag::ToFloat,
+            IntrinsicOp::JsonParse => BuiltinProfileTag::JsonParse,
+            IntrinsicOp::Format(_)
+            | IntrinsicOp::FormatCompiled(_)
+            | IntrinsicOp::FormatCompiledSlotNumber { .. }
+            | IntrinsicOp::FormatCompiledSlotNumberBinary { .. } => BuiltinProfileTag::Format,
+            IntrinsicOp::Validate | IntrinsicOp::ValidateCompiled(_) => BuiltinProfileTag::Validate,
+            IntrinsicOp::Range(_) => BuiltinProfileTag::Range,
+            IntrinsicOp::CeilDiv => BuiltinProfileTag::CeilDiv,
+            IntrinsicOp::FloorDiv => BuiltinProfileTag::FloorDiv,
+            IntrinsicOp::Push | IntrinsicOp::PushAssign(_) => BuiltinProfileTag::Push,
+            IntrinsicOp::InvalidArity { .. } | IntrinsicOp::Unknown { .. } => {
+                BuiltinProfileTag::Unknown
+            }
         }
     }
 }
@@ -406,13 +441,14 @@ pub(crate) enum InstructionProfileTag {
     StartCallTool,
     AwaitHandle,
     CancelHandle,
-    CallBuiltin,
+    Intrinsic,
     AddAssign,
     AppendAssign,
     Print,
     Submit,
     Pop,
     BeginIter,
+    LoweredLoop,
     IterNext,
     EndIter,
     Parallel,
@@ -498,13 +534,14 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "start_call_tool",
     "await_handle",
     "cancel_handle",
-    "call_builtin",
+    "intrinsic",
     "add_assign",
     "append_assign",
     "print",
     "submit",
     "pop",
     "begin_iter",
+    "lowered_loop",
     "iter_next",
     "end_iter",
     "parallel",
@@ -601,13 +638,114 @@ pub(crate) struct NamedBranchChunk {
 }
 
 #[derive(Clone)]
+pub(crate) struct LoweredLoop {
+    pub(crate) binding: usize,
+    pub(crate) iterable: LoopIterable,
+    pub(crate) body: Box<[LoopOp]>,
+}
+
+#[derive(Clone)]
+pub(crate) enum LoopIterable {
+    Range(Box<[LoopExpr]>),
+    Values(Box<LoopExpr>),
+    Keys(Box<LoopExpr>),
+}
+
+#[derive(Clone)]
+pub(crate) enum LoopOp {
+    Assign {
+        slot: usize,
+        expr: LoopExpr,
+    },
+    PathAssign {
+        slot: usize,
+        path: usize,
+        indexes: Box<[LoopExpr]>,
+        expr: LoopExpr,
+    },
+    AddAssign {
+        slot: usize,
+        expr: LoopExpr,
+    },
+    AddAssignNumber {
+        slot: usize,
+        right: f64,
+    },
+    AddAssignSlot {
+        slot: usize,
+        right: usize,
+    },
+    AddAssignIndexNumber {
+        slot: usize,
+        index: LoopExpr,
+        right: f64,
+    },
+    AddAssignIndexSlotNumber {
+        slot: usize,
+        index: usize,
+        right: f64,
+    },
+    AppendAssign {
+        slot: usize,
+        expr: LoopExpr,
+    },
+    Expr(LoopExpr),
+    If {
+        condition: LoopExpr,
+        then_ops: Box<[LoopOp]>,
+        else_ops: Box<[LoopOp]>,
+    },
+    Loop(Box<LoweredLoop>),
+    Break,
+    Continue,
+}
+
+#[derive(Clone)]
+pub(crate) enum LoopExpr {
+    Const(Value),
+    Slot(usize),
+    List(Box<[LoopExpr]>),
+    Record(Box<[(usize, LoopExpr)]>),
+    Intrinsic {
+        op: IntrinsicOp,
+        args: Box<[LoopExpr]>,
+    },
+    Format {
+        template: CompiledFormatTemplate,
+        args: Box<[LoopExpr]>,
+    },
+    Field {
+        target: Box<LoopExpr>,
+        field: usize,
+    },
+    Index {
+        target: Box<LoopExpr>,
+        index: Box<LoopExpr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<LoopExpr>,
+    },
+    Conditional {
+        condition: Box<LoopExpr>,
+        then_expr: Box<LoopExpr>,
+        else_expr: Box<LoopExpr>,
+    },
+    Binary {
+        left: Box<LoopExpr>,
+        op: BinaryOp,
+        right: Box<LoopExpr>,
+    },
+}
+
+#[derive(Clone)]
 pub(crate) enum PureExpr {
     Const(Value),
     Slot(usize),
     List(Box<[PureExpr]>),
     Record(Box<[(usize, PureExpr)]>),
-    Builtin {
-        builtin: Builtin,
+    Intrinsic {
+        op: IntrinsicOp,
         args: Box<[PureExpr]>,
     },
     Format {

@@ -2,8 +2,8 @@ mod bench_support;
 
 use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
 use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State, compile_program,
-    compile_source, execute_compiled_with_scratch_and_projected_bindings, parse, prewarm,
+    ExecutionOutcome, ExecutionScratch, State, compile_program, compile_source,
+    execute_compiled_with_scratch_and_projected_bindings, parse, prewarm,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::env;
@@ -78,15 +78,9 @@ fn record_dealloc(bytes: u64) {
 
 #[derive(Clone, Copy, Debug)]
 enum Mode {
-    Execute,
-    Parse,
-    Compile,
-    Block,
-    CachedBlock,
-    CachedSessionBlock,
-    ColdOnce,
-    PrewarmedOnce,
-    CachedColdOnce,
+    OneShot,
+    PrewarmedOneShot,
+    CompiledExecute,
     Snapshot,
 }
 
@@ -96,17 +90,14 @@ fn main() {
         .next()
         .as_deref()
         .map(parse_mode)
-        .unwrap_or(Mode::Execute);
+        .unwrap_or(Mode::OneShot);
     let scenario_arg = args.next();
     let iterations = args
         .next()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(match mode {
-            Mode::Parse | Mode::Compile | Mode::Block => 25_000,
-            Mode::ColdOnce | Mode::PrewarmedOnce | Mode::CachedColdOnce => 1,
-            Mode::Execute | Mode::CachedBlock | Mode::CachedSessionBlock | Mode::Snapshot => {
-                100_000
-            }
+            Mode::OneShot | Mode::PrewarmedOneShot => 25_000,
+            Mode::CompiledExecute | Mode::Snapshot => 100_000,
         });
 
     let scenarios = parse_scenarios(scenario_arg.as_deref());
@@ -127,12 +118,50 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     let projected = projected_bindings(scenario);
     let host = BenchHost;
     let mut scratch = ExecutionScratch::new();
-    let mut cache = CompiledProgramCache::default();
 
     reset_alloc_counters();
     let mut started = Instant::now();
     match mode {
-        Mode::Execute => {
+        Mode::OneShot => {
+            for _ in 0..iterations {
+                let mut state = seeded_state_for(scenario);
+                let mut scratch = ExecutionScratch::new();
+                let compiled =
+                    compile_source(std::hint::black_box(source)).expect("compile should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                        &projected,
+                    ))
+                    .expect("benchmark execution should succeed");
+                expect_finished(outcome);
+            }
+        }
+        Mode::PrewarmedOneShot => {
+            prewarm();
+            reset_alloc_counters();
+            started = Instant::now();
+            for _ in 0..iterations {
+                let mut state = seeded_state_for(scenario);
+                let mut scratch = ExecutionScratch::new();
+                let compiled =
+                    compile_source(std::hint::black_box(source)).expect("compile should succeed");
+                let outcome = rt
+                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
+                        &compiled,
+                        &mut state,
+                        &host,
+                        &mut scratch,
+                        &projected,
+                    ))
+                    .expect("benchmark execution should succeed");
+                expect_finished(outcome);
+            }
+        }
+        Mode::CompiledExecute => {
             let program = parse(source).expect("benchmark program should parse");
             let compiled = compile_program(&program);
             for _ in 0..iterations {
@@ -148,131 +177,6 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
                     .expect("benchmark execution should succeed");
                 expect_finished(outcome);
             }
-        }
-        Mode::Parse => {
-            for _ in 0..iterations {
-                let program = parse(std::hint::black_box(source)).expect("parse should succeed");
-                std::hint::black_box(program);
-            }
-        }
-        Mode::Compile => {
-            for _ in 0..iterations {
-                let compiled =
-                    compile_source(std::hint::black_box(source)).expect("compile should succeed");
-                std::hint::black_box(compiled);
-            }
-        }
-        Mode::Block => {
-            for _ in 0..iterations {
-                let mut state = seeded_state_for(scenario);
-                let compiled =
-                    compile_source(std::hint::black_box(source)).expect("compile should succeed");
-                let outcome = rt
-                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                        &compiled,
-                        &mut state,
-                        &host,
-                        &mut scratch,
-                        &projected,
-                    ))
-                    .expect("benchmark execution should succeed");
-                expect_finished(outcome);
-            }
-        }
-        Mode::CachedBlock => {
-            cache
-                .get_or_compile(source)
-                .expect("benchmark program should compile");
-            reset_alloc_counters();
-            started = Instant::now();
-            for _ in 0..iterations {
-                let mut state = seeded_state_for(scenario);
-                let compiled = cache
-                    .get_or_compile(std::hint::black_box(source))
-                    .expect("cached compile should succeed");
-                let outcome = rt
-                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                        &compiled,
-                        &mut state,
-                        &host,
-                        &mut scratch,
-                        &projected,
-                    ))
-                    .expect("benchmark execution should succeed");
-                expect_finished(outcome);
-            }
-        }
-        Mode::CachedSessionBlock => {
-            cache
-                .get_or_compile(source)
-                .expect("benchmark program should compile");
-            let mut state = seeded_state_for(scenario);
-            reset_alloc_counters();
-            started = Instant::now();
-            for _ in 0..iterations {
-                let compiled = cache
-                    .get_or_compile(std::hint::black_box(source))
-                    .expect("cached compile should succeed");
-                let outcome = rt
-                    .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                        &compiled,
-                        &mut state,
-                        &host,
-                        &mut scratch,
-                        &projected,
-                    ))
-                    .expect("benchmark execution should succeed");
-                expect_finished(outcome);
-            }
-        }
-        Mode::ColdOnce => {
-            let mut state = seeded_state_for(scenario);
-            let compiled =
-                compile_source(std::hint::black_box(source)).expect("compile should succeed");
-            let outcome = rt
-                .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                    &compiled,
-                    &mut state,
-                    &host,
-                    &mut scratch,
-                    &projected,
-                ))
-                .expect("benchmark execution should succeed");
-            expect_finished(outcome);
-        }
-        Mode::PrewarmedOnce => {
-            prewarm();
-            reset_alloc_counters();
-            started = Instant::now();
-            let mut state = seeded_state_for(scenario);
-            let compiled =
-                compile_source(std::hint::black_box(source)).expect("compile should succeed");
-            let outcome = rt
-                .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                    &compiled,
-                    &mut state,
-                    &host,
-                    &mut scratch,
-                    &projected,
-                ))
-                .expect("benchmark execution should succeed");
-            expect_finished(outcome);
-        }
-        Mode::CachedColdOnce => {
-            let mut state = seeded_state_for(scenario);
-            let compiled = cache
-                .get_or_compile(std::hint::black_box(source))
-                .expect("cached compile should succeed");
-            let outcome = rt
-                .block_on(execute_compiled_with_scratch_and_projected_bindings(
-                    &compiled,
-                    &mut state,
-                    &host,
-                    &mut scratch,
-                    &projected,
-                ))
-                .expect("benchmark execution should succeed");
-            expect_finished(outcome);
         }
         Mode::Snapshot => {
             let program = parse(source).expect("benchmark program should parse");
@@ -304,13 +208,6 @@ fn run_perf(rt: &tokio::runtime::Runtime, mode: Mode, scenario: Scenario, iterat
     println!("scenario: {scenario}");
     println!("iterations: {iterations}");
     println!("program_bytes: {}", source.len());
-    let cache_stats = cache.stats();
-    if cache_stats.hits > 0 || cache_stats.misses > 0 {
-        println!("cache_hits: {}", cache_stats.hits);
-        println!("cache_misses: {}", cache_stats.misses);
-        println!("cache_evictions: {}", cache_stats.evictions);
-        println!("cache_entries: {}", cache_stats.entries);
-    }
     println!("elapsed_ms: {:.3}", elapsed.as_secs_f64() * 1_000.0);
     println!(
         "ns_per_iter: {:.1}",
@@ -345,18 +242,12 @@ fn parse_scenarios(value: Option<&str>) -> Vec<Scenario> {
 
 fn parse_mode(value: &str) -> Mode {
     match value {
-        "execute" => Mode::Execute,
-        "parse" => Mode::Parse,
-        "compile" => Mode::Compile,
-        "block" => Mode::Block,
-        "cached_block" => Mode::CachedBlock,
-        "cached_session_block" => Mode::CachedSessionBlock,
-        "cold_once" => Mode::ColdOnce,
-        "prewarmed_once" => Mode::PrewarmedOnce,
-        "cached_cold_once" => Mode::CachedColdOnce,
+        "one_shot" => Mode::OneShot,
+        "prewarmed_one_shot" => Mode::PrewarmedOneShot,
+        "compiled_execute" => Mode::CompiledExecute,
         "snapshot" => Mode::Snapshot,
         other => panic!(
-            "unknown mode `{other}`; expected execute, parse, compile, block, cached_block, cached_session_block, cold_once, prewarmed_once, cached_cold_once, or snapshot"
+            "unknown mode `{other}`; expected one_shot, prewarmed_one_shot, compiled_execute, or snapshot"
         ),
     }
 }

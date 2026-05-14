@@ -10,8 +10,9 @@ use lash_core::{
 use lash_rlm_types::PROJECTED_JSON_TAG;
 use lashlang::{
     CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, ProjectedBindings,
-    ProjectedFuture, ProjectedHostValue, ProjectedRead, ProjectedValue, Record as FlowRecord,
-    State as FlowState, ToolHost, ToolHostCall, ToolHostError, Value as FlowValue,
+    ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
+    ProjectedValue, Record as FlowRecord, State as FlowState, ToolHost, ToolHostCall,
+    ToolHostError, Value as FlowValue,
 };
 use serde_json::{Value, json};
 
@@ -313,32 +314,31 @@ impl ProjectedHostValue for HistoryProjectedValue {
         "list"
     }
 
-    fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-        Box::pin(async { Some(self.projection.len()) })
-    }
-
-    fn get_index(&self, index: FlowValue) -> ProjectedFuture<'_, ProjectedRead> {
+    fn read_one(&self, request: ProjectedReadRequest) -> ProjectedFuture<'_, ProjectedReadResponse> {
         Box::pin(async move {
-            let Ok(Some(index)) = projected_index(&index, self.projection.len()) else {
-                return ProjectedRead::Missing;
-            };
-            self.projection
-                .item(index)
-                .and_then(|item| serde_json::to_value(item).ok())
-                .map(json_to_flow_value)
-                .map(ProjectedRead::Value)
-                .unwrap_or(ProjectedRead::Missing)
+            match request {
+                ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.projection.len()),
+                ProjectedReadRequest::Index(index) => {
+                    let Ok(Some(index)) = projected_index(&index, self.projection.len()) else {
+                        return ProjectedReadResponse::Missing;
+                    };
+                    self.projection
+                        .item(index)
+                        .and_then(|item| serde_json::to_value(item).ok())
+                        .map(json_to_flow_value)
+                        .map(ProjectedReadResponse::Value)
+                        .unwrap_or(ProjectedReadResponse::Missing)
+                }
+                ProjectedReadRequest::Render => ProjectedReadResponse::Text(
+                    serde_json::to_string(self.projection.history())
+                        .unwrap_or_else(|_| "[]".to_string()),
+                ),
+                ProjectedReadRequest::Materialize => {
+                    ProjectedReadResponse::Value(json_to_flow_value(self.projection.value()))
+                }
+                _ => ProjectedReadResponse::Missing,
+            }
         })
-    }
-
-    fn render(&self) -> ProjectedFuture<'_, String> {
-        Box::pin(async move {
-            serde_json::to_string(self.projection.history()).unwrap_or_else(|_| "[]".to_string())
-        })
-    }
-
-    fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
-        Box::pin(async move { json_to_flow_value(self.projection.value()) })
     }
 }
 
@@ -1014,17 +1014,24 @@ mod tests {
             "string"
         }
 
-        fn render(&self) -> ProjectedFuture<'_, String> {
-            Box::pin(async {
-                self.render_count.fetch_add(1, Ordering::SeqCst);
-                "rendered tool text".to_string()
-            })
-        }
-
-        fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
-            Box::pin(async {
-                self.materialize_count.fetch_add(1, Ordering::SeqCst);
-                FlowValue::String("materialized tool text".into())
+        fn read_one(
+            &self,
+            request: ProjectedReadRequest,
+        ) -> ProjectedFuture<'_, ProjectedReadResponse> {
+            Box::pin(async move {
+                match request {
+                    ProjectedReadRequest::Render => {
+                        self.render_count.fetch_add(1, Ordering::SeqCst);
+                        ProjectedReadResponse::Text("rendered tool text".to_string())
+                    }
+                    ProjectedReadRequest::Materialize => {
+                        self.materialize_count.fetch_add(1, Ordering::SeqCst);
+                        ProjectedReadResponse::Value(FlowValue::String(
+                            "materialized tool text".into(),
+                        ))
+                    }
+                    _ => ProjectedReadResponse::Missing,
+                }
             })
         }
     }
@@ -1034,25 +1041,29 @@ mod tests {
             "list"
         }
 
-        fn len(&self) -> ProjectedFuture<'_, Option<usize>> {
-            Box::pin(async { Some(self.0.len()) })
-        }
-
-        fn get_index(&self, index: FlowValue) -> ProjectedFuture<'_, ProjectedRead> {
+        fn read_one(
+            &self,
+            request: ProjectedReadRequest,
+        ) -> ProjectedFuture<'_, ProjectedReadResponse> {
             Box::pin(async move {
+                let ProjectedReadRequest::Index(index) = request else {
+                    return match request {
+                        ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.0.len()),
+                        ProjectedReadRequest::Materialize => {
+                            ProjectedReadResponse::Value(FlowValue::List(self.0.clone().into()))
+                        }
+                        _ => ProjectedReadResponse::Missing,
+                    };
+                };
                 let Ok(Some(index)) = projected_index(&index, self.0.len()) else {
-                    return ProjectedRead::Missing;
+                    return ProjectedReadResponse::Missing;
                 };
                 self.0
                     .get(index)
                     .cloned()
-                    .map(ProjectedRead::Value)
-                    .unwrap_or(ProjectedRead::Missing)
+                    .map(ProjectedReadResponse::Value)
+                    .unwrap_or(ProjectedReadResponse::Missing)
             })
-        }
-
-        fn materialize(&self) -> ProjectedFuture<'_, FlowValue> {
-            Box::pin(async { FlowValue::List(self.0.clone().into()) })
         }
     }
 
