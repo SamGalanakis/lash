@@ -28,7 +28,8 @@ use lash_core::plugin::{
     PluginSurfaceEvent, SessionPlugin,
 };
 use lash_core::{
-    PromptContribution, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    PromptContribution, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest,
+    ToolProvider, ToolResult,
 };
 
 const PLUGIN_ID: &str = "update_plan";
@@ -94,9 +95,24 @@ struct UpdatePlanTool {
 
 #[async_trait::async_trait]
 impl ToolProvider for UpdatePlanTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![update_plan_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "update_plan").then(|| Arc::new(update_plan_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "update_plan" => execute_update_plan(&self.state, call.args),
+            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
+        }
+    }
+}
+
+fn update_plan_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "update_plan",
                 "Publish or replace the current plan: a list of short ordered steps with statuses (pending, in_progress, completed), plus an optional explanation. At most one step can be in_progress at a time. Each call fully replaces the previous plan. Use this for substantial multi-step work to keep progress visible to the user. After updating, briefly summarize what changed and what comes next instead of repeating the full checklist.",
                 serde_json::json!({
@@ -128,16 +144,7 @@ impl ToolProvider for UpdatePlanTool {
                 "{\"explanation\":\"I found the main renderer.\",\"plan\":[{\"step\":\"Inspect renderer\",\"status\":\"completed\"},{\"step\":\"Patch layout\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}"
                     .into(),
             ])
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        match call.name {
-            "update_plan" => execute_update_plan(&self.state, call.args),
-            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
-        }
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) -> ToolResult {
@@ -460,7 +467,7 @@ mod tests {
             .find(|contribution| contribution.title.as_deref() == Some("Planning"))
             .expect("planning guidance");
         assert_eq!(contribution.slot, PromptSlot::Guidance);
-        assert_eq!(contribution.content, PLANNING_GUIDANCE);
+        assert_eq!(contribution.content.as_ref(), PLANNING_GUIDANCE);
     }
 
     #[tokio::test]

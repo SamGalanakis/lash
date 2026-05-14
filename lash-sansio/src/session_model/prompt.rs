@@ -305,7 +305,7 @@ fn grouped_contributions<'a>(
     prompt: &'a PromptContext,
 ) -> HashMap<PromptSlot, Vec<&'a PromptContribution>> {
     let mut grouped: HashMap<PromptSlot, Vec<&'a PromptContribution>> = HashMap::new();
-    for contribution in &prompt.contributions {
+    for contribution in prompt.contributions.iter() {
         grouped
             .entry(contribution.slot)
             .or_default()
@@ -368,7 +368,7 @@ fn push_text(parts: &mut Vec<String>, text: &str) {
 fn render_builtin(builtin: PromptBuiltin, prompt: &PromptContext) -> String {
     match builtin {
         PromptBuiltin::MainAgentIntro => MAIN_AGENT_INTRO.to_string(),
-        PromptBuiltin::ExecutionInstructions => prompt.execution_prompt.clone(),
+        PromptBuiltin::ExecutionInstructions => prompt.execution_prompt.to_string(),
         PromptBuiltin::CoreGuidance => render_core_guidance(prompt),
     }
 }
@@ -396,7 +396,7 @@ mod tests {
     fn prompt(mode: crate::ExecutionMode) -> PromptContext {
         PromptContext {
             mode,
-            execution_prompt: "mode execution".to_string(),
+            execution_prompt: std::sync::Arc::from("mode execution"),
             ..PromptContext::default()
         }
     }
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn default_template_renders_builtin_sections() {
         let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
-        ctx.tool_names = vec!["ask".to_string()];
+        ctx.tool_names = std::sync::Arc::new(vec!["ask".to_string()]);
         let text = default_prompt_template().render(&ctx);
         assert!(text.contains(MAIN_AGENT_INTRO));
         assert!(text.contains("## Execution"));
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn core_guidance_keeps_ask_line_when_ask_tool_present() {
         let mut ctx = prompt(crate::ExecutionMode::new("test_mode"));
-        ctx.tool_names = vec!["ask".to_string()];
+        ctx.tool_names = std::sync::Arc::new(vec!["ask".to_string()]);
         let rendered = render_core_guidance(&ctx);
         assert!(rendered.contains("Ask only when progress is blocked"));
     }
@@ -442,7 +442,8 @@ mod tests {
         prompt.contributions = vec![
             PromptContribution::guidance("Second Guide", "Second details.").with_priority(10),
             PromptContribution::guidance("First Guide", "First details.").with_priority(0),
-        ];
+        ]
+        .into();
         let text = default_prompt_template().render(&prompt);
         assert!(text.contains("### First Guide"));
         assert!(text.contains("### Second Guide"));
@@ -456,7 +457,8 @@ mod tests {
             vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
         )]);
         let mut prompt = prompt(crate::ExecutionMode::new("test_mode"));
-        prompt.contributions = vec![PromptContribution::guidance("Custom", "More guidance.")];
+        prompt.contributions =
+            vec![PromptContribution::guidance("Custom", "More guidance.")].into();
         let text = template.render(&prompt);
         assert!(text.contains("## Guidance"));
         assert!(text.contains("### Custom"));
@@ -481,7 +483,8 @@ mod tests {
         prompt.contributions = vec![
             PromptContribution::project_instructions("Repo rules"),
             PromptContribution::guidance("Shell", "Use exec_command."),
-        ];
+        ]
+        .into();
         let text = template.render(&prompt);
         assert!(text.contains("## Rules"));
         assert!(text.contains("Repo rules"));

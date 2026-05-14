@@ -1,10 +1,10 @@
 use serde_json::Value;
 
-use crate::ToolDefinition;
+use crate::ToolContract;
 
-pub(crate) fn validate_tool_input(tool: &ToolDefinition, args: &Value) -> Result<(), String> {
-    let _ = jsonschema::JSONSchema::compile(&tool.input_schema);
-    validate_schema("", &tool.input_schema, args)
+pub(crate) fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
+    let _ = jsonschema::JSONSchema::compile(&contract.input_schema);
+    validate_schema("", &contract.input_schema, args)
 }
 
 fn validate_schema(path: &str, schema: &Value, value: &Value) -> Result<(), String> {
@@ -288,6 +288,7 @@ fn display_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolDefinition;
 
     #[test]
     fn validation_reports_missing_required_property_by_path() {
@@ -305,7 +306,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let error = validate_tool_input(&tool, &serde_json::json!({})).unwrap_err();
+        let error = validate_tool_input(&tool.contract(), &serde_json::json!({})).unwrap_err();
         assert_eq!(error, "access_token: required property missing");
     }
 
@@ -326,7 +327,8 @@ mod tests {
         );
 
         let error =
-            validate_tool_input(&tool, &serde_json::json!({ "page_limit": 100 })).unwrap_err();
+            validate_tool_input(&tool.contract(), &serde_json::json!({ "page_limit": 100 }))
+                .unwrap_err();
         assert_eq!(error, "page_limit: expected integer <= 20, got 100");
     }
 
@@ -348,7 +350,7 @@ mod tests {
         );
 
         let error = validate_tool_input(
-            &tool,
+            &tool.contract(),
             &serde_json::json!({
                 "min_datetime": "2024-01-01T00:00:00Z",
                 "limit": 20
@@ -374,7 +376,7 @@ mod tests {
         );
 
         validate_tool_input(
-            &tool,
+            &tool.contract(),
             &serde_json::json!({
                 "path": "README.md",
                 "unknown": "preserved"
@@ -398,7 +400,7 @@ mod tests {
         );
 
         validate_tool_input(
-            &tool,
+            &tool.contract(),
             &serde_json::json!({
                 "query": "hello",
                 "__session_id__": "session"

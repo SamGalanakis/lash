@@ -9,10 +9,7 @@ pub(crate) struct CatalogTool {
     pub(crate) name: String,
     pub(crate) namespace: Option<String>,
     pub(crate) aliases: Vec<String>,
-    pub(crate) callable: bool,
-    pub(crate) showcased: bool,
     pub(crate) searchable: bool,
-    pub(crate) loadable: bool,
 }
 
 impl CatalogTool {
@@ -26,31 +23,16 @@ impl CatalogTool {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let aliases = string_vec(obj.get("aliases"));
-        let callable = obj
-            .get("callable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let showcased = obj
-            .get("showcased")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let searchable = obj
             .get("searchable")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let loadable = obj
-            .get("loadable")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         Some(Self {
             raw,
             name,
             namespace,
             aliases,
-            callable,
-            showcased,
             searchable,
-            loadable,
         })
     }
 

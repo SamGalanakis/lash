@@ -17,8 +17,8 @@ use lash_core::plugin::{
 use lash_core::{
     AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
     SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
-    SessionStateEnvelope, ToolDefinition, ToolProvider, ToolRegistry, ToolResult, TurnHookContext,
-    TurnInput, TurnResultHookContext,
+    SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
+    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
@@ -189,21 +189,27 @@ struct PlanModeTestTools;
 
 #[async_trait::async_trait]
 impl ToolProvider for PlanModeTestTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            test_tool(
-                "plan_exit",
-                "Ask whether to exit plan mode.",
-                lash_core::ToolAvailabilityConfig::off(),
-                lash_core::ToolExecutionMode::Parallel,
-            )
-            .with_examples(vec!["plan_exit()".to_string()]),
-        ]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![plan_mode_test_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "plan_exit").then(|| Arc::new(plan_mode_test_tool_definition().contract()))
     }
 
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
     }
+}
+
+fn plan_mode_test_tool_definition() -> ToolDefinition {
+    test_tool(
+        "plan_exit",
+        "Ask whether to exit plan mode.",
+        lash_core::ToolAvailabilityConfig::off(),
+        lash_core::ToolExecutionMode::Parallel,
+    )
+    .with_examples(vec!["plan_exit()".to_string()])
 }
 
 fn mock_session_manager(run_session_id: &str) -> MockSessionManager {
@@ -356,7 +362,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("initial tool state");
     assert!(initial.get("plan_exit").is_some_and(|tool| {
-        tool.definition()
+        tool.manifest()
             .effective_availability(&lash_core::ExecutionMode::standard())
             == lash_core::ToolAvailability::Off
     }));
@@ -377,7 +383,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("enabled tool state");
     assert!(enabled.get("plan_exit").is_some_and(|tool| {
-        tool.definition()
+        tool.manifest()
             .effective_availability(&lash_core::ExecutionMode::standard())
             == lash_core::ToolAvailability::Showcased
     }));
@@ -392,7 +398,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
         .await
         .expect("disabled tool state");
     assert!(disabled.get("plan_exit").is_some_and(|tool| {
-        tool.definition()
+        tool.manifest()
             .effective_availability(&lash_core::ExecutionMode::standard())
             == lash_core::ToolAvailability::Off
     }));
@@ -483,42 +489,49 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         .expect("before_tool_call");
     assert!(allowed.is_empty());
 
+    let tools = vec![
+        test_tool(
+            "search_tools",
+            "Discover tools",
+            lash_core::ToolAvailabilityConfig::callable(),
+            lash_core::ToolExecutionMode::Parallel,
+        ),
+        test_tool(
+            "read_file",
+            "Read files",
+            lash_core::ToolAvailabilityConfig::showcased(),
+            lash_core::ToolExecutionMode::Parallel,
+        ),
+        test_tool(
+            "search_web",
+            "Search the web",
+            lash_core::ToolAvailabilityConfig::showcased(),
+            lash_core::ToolExecutionMode::Parallel,
+        ),
+        test_tool(
+            "apply_patch",
+            "Apply patches",
+            lash_core::ToolAvailabilityConfig::showcased(),
+            lash_core::ToolExecutionMode::Serial,
+        ),
+        test_tool(
+            "plan_exit",
+            "Exit plan mode",
+            lash_core::ToolAvailabilityConfig::off(),
+            lash_core::ToolExecutionMode::Parallel,
+        ),
+    ];
+    let contracts = tools
+        .iter()
+        .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let manifests = tools.into_iter().map(|tool| tool.manifest()).collect();
     let surface = session
         .resolve_tool_surface(ToolSurfaceContext {
             session_id: "root".to_string(),
             mode: ExecutionMode::standard(),
-            tools: vec![
-                test_tool(
-                    "search_tools",
-                    "Discover tools",
-                    lash_core::ToolAvailabilityConfig::callable(),
-                    lash_core::ToolExecutionMode::Parallel,
-                ),
-                test_tool(
-                    "read_file",
-                    "Read files",
-                    lash_core::ToolAvailabilityConfig::showcased(),
-                    lash_core::ToolExecutionMode::Parallel,
-                ),
-                test_tool(
-                    "search_web",
-                    "Search the web",
-                    lash_core::ToolAvailabilityConfig::showcased(),
-                    lash_core::ToolExecutionMode::Parallel,
-                ),
-                test_tool(
-                    "apply_patch",
-                    "Apply patches",
-                    lash_core::ToolAvailabilityConfig::showcased(),
-                    lash_core::ToolExecutionMode::Serial,
-                ),
-                test_tool(
-                    "plan_exit",
-                    "Exit plan mode",
-                    lash_core::ToolAvailabilityConfig::off(),
-                    lash_core::ToolExecutionMode::Parallel,
-                ),
-            ],
+            tools: manifests,
+            resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
@@ -527,14 +540,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
         surface
             .tools
             .iter()
-            .find(|tool| tool.definition.name == "search_web")
+            .find(|tool| tool.manifest.name == "search_web")
             .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
     );
     assert!(
         surface
             .tools
             .iter()
-            .find(|tool| tool.definition.name == "plan_exit")
+            .find(|tool| tool.manifest.name == "plan_exit")
             .is_some_and(|tool| tool.availability == lash_core::ToolAvailability::Showcased)
     );
     assert!(
@@ -888,7 +901,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             .await
             .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
-        tool.definition()
+        tool.manifest()
             .effective_availability(&lash_core::ExecutionMode::standard())
             == lash_core::ToolAvailability::Off
     }));

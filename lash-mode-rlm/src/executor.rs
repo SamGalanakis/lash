@@ -126,13 +126,13 @@ pub async fn execute_code(
 ) -> Result<(RlmExecutionState, ExecResponse), SessionError> {
     let start = std::time::Instant::now();
     let clean_code = clean_model_code(&request.code);
-    let response = execute_code_inner(
+    let response = Box::pin(execute_code_inner(
         &mut state,
         ctx,
         &clean_code,
         start,
         session_projected_bindings,
-    )
+    ))
     .await;
     Ok((state, response))
 }
@@ -207,12 +207,14 @@ async fn execute_code_inner(
         next_tool_index: Mutex::new(0),
     };
 
-    let result = lashlang::execute_compiled_traced_with_scratch_and_projected_bindings(
-        &compiled,
-        &mut state.rlm,
-        &host,
-        &mut state.scratch,
-        &projected,
+    let result = Box::pin(
+        lashlang::execute_compiled_traced_with_scratch_and_projected_bindings(
+            &compiled,
+            &mut state.rlm,
+            &host,
+            &mut state.scratch,
+            &projected,
+        ),
     )
     .await;
     let terminal_finish = match result {
@@ -314,7 +316,10 @@ impl ProjectedHostValue for HistoryProjectedValue {
         "list"
     }
 
-    fn read_one(&self, request: ProjectedReadRequest) -> ProjectedFuture<'_, ProjectedReadResponse> {
+    fn read_one(
+        &self,
+        request: ProjectedReadRequest,
+    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
         Box::pin(async move {
             match request {
                 ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.projection.len()),

@@ -276,9 +276,21 @@ impl Session {
         session_id: &str,
         mode: crate::ExecutionMode,
     ) -> ToolSurfaceHandle {
-        let mut tools = self.tools().definitions();
+        let provider = self.tools();
+        let mut tools = provider.tool_manifests();
+        let contract_provider = Arc::clone(&provider);
+        let plugins = self.plugins();
+        let native_contract_providers = plugins.mode_native_tools().to_vec();
+        let resolve_contract: lash_sansio::ToolContractResolver = Arc::new(move |name: &str| {
+            contract_provider.resolve_contract(name).or_else(|| {
+                native_contract_providers
+                    .iter()
+                    .find_map(|provider| provider.resolve_contract(name))
+            })
+        });
         if self.include_base_tools && mode == self.plugins().execution_mode() {
-            tools.extend(self.plugins().mode_native_tool_definitions());
+            let native_tools = self.plugins().mode_native_tool_manifests();
+            tools.extend(native_tools);
         }
         let surface = match self
             .plugins()
@@ -286,17 +298,25 @@ impl Session {
                 session_id: session_id.to_string(),
                 mode: mode.clone(),
                 tools,
+                resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
                 subagent: self.plugins().subagent_authority().cloned(),
             }) {
             Ok(surface) => Arc::new(surface),
             Err(err) => {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                let mut fallback_tools = self.tools().definitions();
+                let provider = self.tools();
+                let mut fallback_tools = provider.tool_manifests();
                 if self.include_base_tools && mode == self.plugins().execution_mode() {
-                    fallback_tools.extend(self.plugins().mode_native_tool_definitions());
+                    let native_tools = self.plugins().mode_native_tool_manifests();
+                    fallback_tools.extend(native_tools);
                 }
-                Arc::new(crate::ToolSurface::from_tools(fallback_tools, mode.clone()))
+                Arc::new(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
+                    tools: fallback_tools,
+                    mode: mode.clone(),
+                    resolve_contract: Some(resolve_contract),
+                    contributions: Vec::new(),
+                }))
             }
         };
         let input = crate::ModeBuildInput {

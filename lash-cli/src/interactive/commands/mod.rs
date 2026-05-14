@@ -167,7 +167,7 @@ pub(super) async fn dispatch_next_queued_turn(
             return Ok(());
         }
         *toolset_hash = hash12(
-            &serde_json::to_vec(&desired_tool_state.definitions())
+            &serde_json::to_vec(&desired_tool_state.tool_manifests())
                 .unwrap_or_else(|_| b"[]".to_vec()),
         );
         let turn_input = make_turn_input(&queued);

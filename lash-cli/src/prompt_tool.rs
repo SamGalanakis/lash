@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use lash_core::plugin::StaticPluginFactory;
 use lash_core::{
-    PluginError, PluginFactory, PluginSpec, ToolCall, ToolDefinition, ToolDiscoveryMetadata,
-    ToolExecutionMode, ToolProvider, ToolResult,
+    PluginError, PluginFactory, PluginSpec, ToolCall, ToolContract, ToolDefinition,
+    ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use lash_core::{PromptRequest, PromptResponse, PromptSelectionMode};
 use serde_json::json;
@@ -100,9 +100,24 @@ impl CliAskTool {
 
 #[async_trait::async_trait]
 impl ToolProvider for CliAskTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![ask_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "ask").then(|| Arc::new(ask_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "ask" => self.execute_ask(call.args).await,
+            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
+        }
+    }
+}
+
+fn ask_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "ask",
                 "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Provide `options` when there are roughly 2-6 discrete choices; omit it for open-ended responses.",
                 object_schema(
@@ -136,16 +151,7 @@ impl ToolProvider for CliAskTool {
                 namespace: Some("user".to_string()),
                 aliases: vec!["prompt_user".to_string(), "request_input".to_string()],
             })
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        match call.name {
-            "ask" => self.execute_ask(call.args).await,
-            other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
-        }
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 pub(crate) fn cli_ask_plugin_factory(prompt: CliPromptBridge) -> Arc<dyn PluginFactory> {

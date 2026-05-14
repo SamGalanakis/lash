@@ -384,11 +384,11 @@ impl PluginRegistrar {
     }
 
     fn add_tool_provider(&mut self, provider: Arc<dyn ToolProvider>) -> Result<(), PluginError> {
-        for def in provider.definitions() {
-            if !self.tool_names.insert(def.name.clone()) {
+        for manifest in provider.tool_manifests() {
+            if !self.tool_names.insert(manifest.name.clone()) {
                 return Err(PluginError::Registration(format!(
                     "duplicate plugin tool name `{}`",
-                    def.name
+                    manifest.name
                 )));
             }
         }

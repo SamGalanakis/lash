@@ -14,7 +14,9 @@ use lash_standard_plugins::{
 };
 
 use super::openai_compat::OpenAiCompatBenchServer;
-use super::providers::{BenchmarkEchoTool, benchmark_provider, benchmark_stream_profile};
+use super::providers::{
+    BenchmarkEchoTool, BenchmarkLargeToolSurface, benchmark_provider, benchmark_stream_profile,
+};
 use super::scenarios::RuntimePerfScenario;
 use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
 
@@ -173,6 +175,12 @@ pub(crate) async fn build_runtime(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));
+    if matches!(scenario, RuntimePerfScenario::RlmLargeToolSurface) {
+        factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(
+            "runtime_perf_large_tool_surface",
+            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface)),
+        )));
+    }
     factories.push(Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     ));
@@ -303,6 +311,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::Rlm | RuntimePerfScenario::EmbedRlm => format!(
             "Turn {} in RLM mode. Continue the benchmark chat and reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmLargeToolSurface => format!(
+            "Turn {} in RLM mode with a Gmail-sized callable tool surface. Do not call a Gmail tool; reply with exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

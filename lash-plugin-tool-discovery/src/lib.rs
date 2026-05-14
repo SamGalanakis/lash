@@ -19,11 +19,10 @@ use provider::ToolDiscoveryToolsProvider;
 #[cfg(test)]
 use common::{DEFAULT_LIMIT, DEFAULT_LLM_RERANK_MODEL, MAX_LIMIT};
 #[cfg(test)]
-use definitions::{load_tools_definition, search_tools_definition};
+use definitions::search_tools_definition;
 #[cfg(test)]
 use lash_core::{
-    DirectOutputSpec, DirectPart, ToolActivation, ToolAvailabilityConfig, ToolDefinition,
-    ToolExecutionMode,
+    DirectOutputSpec, DirectPart, ToolAvailabilityConfig, ToolDefinition, ToolExecutionMode,
 };
 #[cfg(test)]
 use ranking::{RankedCandidate, ToolDiscoveryIndex, reciprocal_rank_fusion};
@@ -46,9 +45,14 @@ impl PluginFactory for ToolDiscoveryPluginFactory {
         "tool_discovery"
     }
 
-    fn build(&self, _ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+    fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
+        let provider = if ctx.execution_mode.plugin_id() == "rlm" {
+            ToolDiscoveryToolsProvider::search_only()
+        } else {
+            ToolDiscoveryToolsProvider::new()
+        };
         Ok(Arc::new(ToolDiscoveryPlugin {
-            provider: Arc::new(ToolDiscoveryToolsProvider::new()),
+            provider: Arc::new(provider),
         }))
     }
 }
@@ -80,12 +84,6 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
         .tools
         .iter()
         .filter_map(|tool| {
-            if tool.name == "load_tools" {
-                return Some(ToolSurfaceOverride {
-                    tool_name: tool.name.clone(),
-                    availability: Some(ToolAvailability::Off),
-                });
-            }
             if tool.name == "search_tools" && !has_catalogued_tools {
                 return Some(ToolSurfaceOverride {
                     tool_name: tool.name.clone(),
@@ -112,7 +110,7 @@ fn rlm_tool_surface(ctx: ToolSurfaceContext) -> Result<ToolSurfaceContribution, 
 
 fn has_catalogued_tools(ctx: &ToolSurfaceContext) -> bool {
     ctx.tools.iter().any(|tool| {
-        !matches!(tool.name.as_str(), "search_tools" | "load_tools")
+        tool.name != "search_tools"
             && tool.effective_availability(&ctx.mode).is_searchable()
             && !tool.effective_availability(&ctx.mode).is_showcased()
     })
@@ -129,7 +127,7 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
     let mut by_namespace: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut omitted_tool_count = 0usize;
     for tool in &ctx.tools {
-        if matches!(tool.name.as_str(), "search_tools" | "load_tools") {
+        if tool.name == "search_tools" {
             continue;
         }
         let availability = tool.effective_availability(&ctx.mode);
@@ -153,7 +151,7 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
     }
 
     let mut rendered = format!(
-        "Catalogued tools: {omitted_tool_count} not showcased here; searchable with `search_tools`.\n\
+        "Catalogued tools: {omitted_tool_count} other tools are searchable through `search_tools`.\n\
          When a task needs a tool not showcased here, run `search_tools(query=...)` and call the relevant result by name. \
          Results use the same compact contract shape as showcased tools: signature, description, and capped examples."
     );
@@ -216,19 +214,8 @@ mod tests {
             "callable": false,
             "showcased": false,
             "searchable": true,
-            "activation": "loadable",
-            "loadable": true,
-            "activation_hint": "",
+            "activation": "always",
         })
-    }
-
-    fn callable_unshowcased_tool(name: &str) -> Value {
-        let mut tool = catalog_tool(name, "callable omitted tool");
-        let obj = tool.as_object_mut().unwrap();
-        obj.insert("callable".to_string(), json!(true));
-        obj.insert("showcased".to_string(), json!(false));
-        obj.insert("loadable".to_string(), json!(false));
-        tool
     }
 
     #[derive(Default)]
@@ -1504,42 +1491,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn load_tools_reports_callable_unshowcased_as_already_callable() {
-        let host = Arc::new(FakeSessionManager {
-            catalog: vec![
-                callable_unshowcased_tool("mcp__appworld__spotify_search_songs"),
-                catalog_tool("fetch_url", "Fetch a URL"),
-            ],
-            promoted: Mutex::default(),
-            ..Default::default()
-        });
-        let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
-
-        let args = json!({
-            "names": ["mcp__appworld__spotify_search_songs", "fetch_url"]
-        });
-        let result = provider
-            .execute(ToolCall {
-                name: "load_tools",
-                args: &args,
-                context: &context,
-                progress: None,
-            })
-            .await;
-        assert!(result.success, "{result:?}");
-        assert_eq!(
-            result.result["already_callable"],
-            json!(["mcp__appworld__spotify_search_songs"])
-        );
-        assert_eq!(result.result["loaded"], json!(["fetch_url"]));
-        assert_eq!(
-            *host.promoted.lock().expect("promoted lock poisoned"),
-            vec!["fetch_url".to_string()]
-        );
-    }
-
     #[test]
     fn search_tools_has_typed_result_schema() {
         let definition = search_tools_definition();
@@ -1577,10 +1528,20 @@ mod tests {
     }
 
     #[test]
-    fn rlm_surface_hides_load_tools_and_promotes_searchable_tools() {
-        let tools = vec![
+    fn rlm_discovery_provider_exposes_search_tools_only() {
+        let names = ToolDiscoveryToolsProvider::search_only()
+            .tool_manifests()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["search_tools"]);
+    }
+
+    #[test]
+    fn rlm_surface_promotes_searchable_tools() {
+        let tools = [
             search_tools_definition(),
-            load_tools_definition(),
             ToolDefinition::raw(
                 "fetch_url",
                 "Fetch URL",
@@ -1588,28 +1549,33 @@ mod tests {
                 serde_json::json!({ "type": "string" }),
             )
             .with_availability(ToolAvailabilityConfig::same(ToolAvailability::Searchable))
-            .with_activation(ToolActivation::Loadable)
             .with_execution_mode(ToolExecutionMode::Parallel),
         ];
         let mode = ExecutionMode::new("rlm");
+        let contracts: std::collections::BTreeMap<_, _> = tools
+            .iter()
+            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .collect();
+        let manifests = tools.iter().map(|tool| tool.manifest()).collect::<Vec<_>>();
         let contribution = rlm_tool_surface(ToolSurfaceContext {
             session_id: "session".to_string(),
             mode: mode.clone(),
-            tools: tools.clone(),
+            tools: manifests.clone(),
+            resolve_contract: Some(Arc::new({
+                let contracts = contracts.clone();
+                move |name| contracts.get(name).cloned()
+            })),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
         .unwrap();
         let surface = build_tool_surface(ToolSurfaceBuildInput {
-            tools,
+            tools: manifests,
             mode,
+            resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             contributions: vec![contribution],
         });
 
-        assert_eq!(
-            surface.tool_availability("load_tools"),
-            Some(ToolAvailability::Off)
-        );
         assert_eq!(
             surface.tool_availability("search_tools"),
             Some(ToolAvailability::Showcased)
@@ -1619,34 +1585,42 @@ mod tests {
             Some(ToolAvailability::Callable)
         );
         let docs = surface.prompt_tool_docs();
-        assert!(docs.contains("Catalogued tools: 1 not showcased here"));
+        assert!(
+            docs.contains("Catalogued tools: 1 other tools are searchable through `search_tools`")
+        );
         assert!(docs.contains("default: fetch_url"));
     }
 
     #[test]
     fn rlm_surface_hides_search_tools_when_there_is_no_catalogue() {
-        let tools = vec![search_tools_definition(), load_tools_definition()];
+        let tools = [search_tools_definition()];
         let mode = ExecutionMode::new("rlm");
+        let contracts: std::collections::BTreeMap<_, _> = tools
+            .iter()
+            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .collect();
+        let manifests = tools.iter().map(|tool| tool.manifest()).collect::<Vec<_>>();
         let contribution = rlm_tool_surface(ToolSurfaceContext {
             session_id: "session".to_string(),
             mode: mode.clone(),
-            tools: tools.clone(),
+            tools: manifests.clone(),
+            resolve_contract: Some(Arc::new({
+                let contracts = contracts.clone();
+                move |name| contracts.get(name).cloned()
+            })),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
         })
         .unwrap();
         let surface = build_tool_surface(ToolSurfaceBuildInput {
-            tools,
+            tools: manifests,
             mode,
+            resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             contributions: vec![contribution],
         });
 
         assert_eq!(
             surface.tool_availability("search_tools"),
-            Some(ToolAvailability::Off)
-        );
-        assert_eq!(
-            surface.tool_availability("load_tools"),
             Some(ToolAvailability::Off)
         );
         assert!(!surface.prompt_tool_docs().contains("search_tools"));

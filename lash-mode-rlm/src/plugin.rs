@@ -564,7 +564,7 @@ impl ModeSessionPlugin for RlmModeSession {
             .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
         let referenced_handles =
             crate::control_tools::collect_seed_async_handle_ids(args.get("seed"));
-        let referenced_handles_vec = referenced_handles.iter().cloned().collect::<Vec<_>>();
+        let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
         ctx.host
             .validate_async_handles_visible(&ctx.session_id, &referenced_handles_vec)
             .await

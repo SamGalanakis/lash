@@ -191,10 +191,10 @@ impl PluginSession {
         &self.mode_native_tools
     }
 
-    pub(crate) fn mode_native_tool_definitions(&self) -> Vec<ToolDefinition> {
+    pub(crate) fn mode_native_tool_manifests(&self) -> Vec<ToolManifest> {
         self.mode_native_tools
             .iter()
-            .flat_map(|provider| provider.definitions())
+            .flat_map(|provider| provider.tool_manifests())
             .collect()
     }
 
@@ -206,25 +206,42 @@ impl PluginSession {
     }
 
     pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> Arc<crate::ToolSurface> {
-        let mut tools = self.tools.definitions();
+        let mut tools = self.tools.tool_manifests();
+        let contract_provider = Arc::clone(&self.tools);
+        let native_contract_providers = self.mode_native_tools.to_vec();
+        let resolve_contract: lash_sansio::ToolContractResolver = Arc::new(move |name: &str| {
+            contract_provider.resolve_contract(name).or_else(|| {
+                native_contract_providers
+                    .iter()
+                    .find_map(|provider| provider.resolve_contract(name))
+            })
+        });
         if mode == self.execution_mode {
-            tools.extend(self.mode_native_tool_definitions());
+            let native_tools = self.mode_native_tool_manifests();
+            tools.extend(native_tools);
         }
         match self.resolve_tool_surface(ToolSurfaceContext {
             session_id: session_id.to_string(),
             mode: mode.clone(),
             tools,
+            resolve_contract: Some(Arc::clone(&resolve_contract)),
             tool_access: self.tool_access.clone(),
             subagent: self.subagent.clone(),
         }) {
             Ok(surface) => Arc::new(surface),
             Err(err) => {
                 tracing::warn!("failed to resolve tool surface: {err}");
-                let mut fallback_tools = self.tools.definitions();
+                let mut fallback_tools = self.tools.tool_manifests();
                 if mode == self.execution_mode {
-                    fallback_tools.extend(self.mode_native_tool_definitions());
+                    let native_tools = self.mode_native_tool_manifests();
+                    fallback_tools.extend(native_tools);
                 }
-                Arc::new(crate::ToolSurface::from_tools(fallback_tools, mode))
+                Arc::new(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
+                    tools: fallback_tools,
+                    mode,
+                    resolve_contract: Some(resolve_contract),
+                    contributions: Vec::new(),
+                }))
             }
         }
     }
@@ -263,6 +280,7 @@ impl PluginSession {
                 session_id: ctx.session_id.clone(),
                 mode: ctx.mode.clone(),
                 tools: ctx.tools.clone(),
+                resolve_contract: ctx.resolve_contract.clone(),
                 tool_access: ctx.tool_access.clone(),
                 subagent: ctx.subagent.clone(),
             },
@@ -272,10 +290,24 @@ impl PluginSession {
         .map(|owned| owned.value)
         .collect::<Vec<_>>();
         contributions.push(self.tool_surface_overlay.clone());
-        let tools = if ctx.tool_access.tools.is_empty() {
-            ctx.tools
+        let (tools, resolve_contract) = if ctx.tool_access.tools.is_empty() {
+            (ctx.tools, ctx.resolve_contract)
         } else {
-            ctx.tool_access.tools.clone()
+            let contracts = ctx
+                .tool_access
+                .tools
+                .iter()
+                .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+                .collect::<BTreeMap<_, _>>();
+            (
+                ctx.tool_access
+                    .tools
+                    .iter()
+                    .map(|tool| tool.manifest())
+                    .collect(),
+                Some(Arc::new(move |name: &str| contracts.get(name).cloned())
+                    as lash_sansio::ToolContractResolver),
+            )
         };
         let authority_hidden_tools = tools
             .iter()
@@ -297,6 +329,7 @@ impl PluginSession {
         Ok(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
             tools,
             mode: ctx.mode,
+            resolve_contract,
             contributions,
         }))
     }

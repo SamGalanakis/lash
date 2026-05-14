@@ -17,7 +17,7 @@ use super::{SessionAppendNode, SessionCreateRequest};
 use crate::runtime::PersistedSessionState;
 use crate::{
     ExecRequest, ExecResponse, ExecutionMode, LlmRequest, ModeExecutionContext, PromptUsage,
-    SessionReadView, ToolDefinition, ToolResult,
+    SessionReadView, ToolContract, ToolManifest, ToolResult,
 };
 
 /// Session-scoped plugin that initializes, restores, and extends mode
@@ -169,7 +169,13 @@ impl<'a> ModeRuntimeContext<'a> {
 
 #[async_trait::async_trait]
 pub trait ModeNativeToolsPlugin: Send + Sync {
-    fn definitions(&self) -> Vec<ToolDefinition>;
+    fn tool_manifests(&self) -> Vec<ToolManifest>;
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == name)
+    }
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
 
     async fn execute(
         &self,

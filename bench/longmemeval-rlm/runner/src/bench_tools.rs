@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use lash::tools::{
-    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode,
+    ToolManifest, ToolProvider, ToolResult,
 };
 use regex::RegexBuilder;
 use serde_json::json;
@@ -209,7 +210,60 @@ fn bench_tool(name: &str, description: &str, input_schema: serde_json::Value) ->
 
 #[async_trait::async_trait]
 impl ToolProvider for LongMemEvalSessionTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
+        match call.name {
+            "list_sessions" => ToolResult::ok(self.ctx.list_sessions()),
+            "get_session" => {
+                let Some(number) = args.get("session_number").and_then(|value| value.as_u64())
+                else {
+                    return ToolResult::err_fmt("session_number must be an integer");
+                };
+                self.ctx.get_session(number as usize)
+            }
+            "search_sessions" => {
+                let query = args
+                    .get("query")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let limit = args
+                    .get("limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(5);
+                self.ctx.search_sessions(query, limit as usize)
+            }
+            "grep_sessions" => {
+                let pattern = args
+                    .get("pattern")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let limit = args
+                    .get("limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(20);
+                self.ctx.grep_sessions(pattern, limit as usize)
+            }
+            other => ToolResult::err_fmt(format_args!("Unknown session tool: {other}")),
+        }
+    }
+}
+
+impl LongMemEvalSessionTools {
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
         vec![
             bench_tool(
                 "list_sessions",
@@ -253,47 +307,6 @@ impl ToolProvider for LongMemEvalSessionTools {
                 }),
             ),
         ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        match call.name {
-            "list_sessions" => ToolResult::ok(self.ctx.list_sessions()),
-            "get_session" => {
-                let Some(number) = args.get("session_number").and_then(|value| value.as_u64())
-                else {
-                    return ToolResult::err_fmt("session_number must be an integer");
-                };
-                self.ctx.get_session(number as usize)
-            }
-            "search_sessions" => {
-                let Some(query) = args.get("query").and_then(|value| value.as_str()) else {
-                    return ToolResult::err_fmt("query must be a string");
-                };
-                let limit = args
-                    .get("limit")
-                    .and_then(|value| value.as_u64())
-                    .map(|value| value as usize)
-                    .unwrap_or(5);
-                self.ctx.search_sessions(query, limit)
-            }
-            "grep_sessions" => {
-                let pattern = args
-                    .get("pattern")
-                    .and_then(|value| value.as_str())
-                    .or_else(|| args.get("query").and_then(|value| value.as_str()));
-                let Some(pattern) = pattern else {
-                    return ToolResult::err_fmt("pattern must be a string");
-                };
-                let limit = args
-                    .get("limit")
-                    .and_then(|value| value.as_u64())
-                    .map(|value| value as usize)
-                    .unwrap_or(10);
-                self.ctx.grep_sessions(pattern, limit)
-            }
-            other => ToolResult::err_fmt(format!("unknown tool: {other}")),
-        }
     }
 }
 

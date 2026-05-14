@@ -20,7 +20,10 @@ use lash::{
         PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     },
     provider::{ProviderHandle, ProviderOptions},
-    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    tools::{
+        ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+        ToolResult,
+    },
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
@@ -872,8 +875,13 @@ struct LongCoTAsyncHandlesTool;
 
 #[async_trait]
 impl ToolProvider for LongCoTAsyncHandlesTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![longcot_list_async_handles_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![longcot_list_async_handles_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "list_async_handles")
+            .then(|| Arc::new(longcot_list_async_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

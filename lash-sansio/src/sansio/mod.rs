@@ -103,7 +103,10 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
         update_machine_config: bool,
     },
     /// Start an LLM call.
-    LlmCall { id: EffectId, request: LlmRequest },
+    LlmCall {
+        id: EffectId,
+        request: Arc<LlmRequest>,
+    },
     /// Cancel an in-progress LLM stream.
     CancelLlm { id: EffectId },
     /// Execute one or more standard-mode tool calls.
@@ -203,7 +206,7 @@ where
 }
 
 pub struct WaitingLlmState {
-    pub request: LlmRequest,
+    pub request: Arc<LlmRequest>,
     driver_state: Option<DriverState>,
 }
 
@@ -242,7 +245,7 @@ pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
     Emit(SessionEvent),
     AppendEvents(Vec<SessionEventRecord<M::Event>>),
     StartLlm {
-        request: LlmRequest,
+        request: Arc<LlmRequest>,
         driver_state: Option<DriverState>,
     },
     StartTools {
@@ -271,7 +274,7 @@ pub struct DriverContextView<'a, M: ModeProtocol = UnitModeProtocol> {
 }
 
 impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
-    pub fn project_llm_request(&self, use_tools: bool) -> LlmRequest {
+    pub fn project_llm_request(&self, use_tools: bool) -> Arc<LlmRequest> {
         self.config.projector.project(ProjectorContext {
             config: self.config,
             messages: self.messages,
@@ -323,14 +326,14 @@ pub struct ProjectorContext<'a, M: ModeProtocol = UnitModeProtocol> {
 }
 
 pub trait ContextProjector<M: ModeProtocol = UnitModeProtocol>: Send + Sync {
-    fn project(&self, ctx: ProjectorContext<'_, M>) -> LlmRequest;
+    fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest>;
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ChatContextProjector;
 
 impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
-    fn project(&self, ctx: ProjectorContext<'_, M>) -> LlmRequest {
+    fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest> {
         let rendered_prompt = ctx.messages.render_prompt();
         let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
         let mut messages = rendered_prompt.messages;
@@ -344,7 +347,7 @@ impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
             );
         }
 
-        LlmRequest {
+        Arc::new(LlmRequest {
             model: ctx.config.model.clone(),
             messages,
             attachments,
@@ -363,7 +366,7 @@ impl<M: ModeProtocol> ContextProjector<M> for ChatContextProjector {
             output_spec: None,
             stream_events: None,
             provider_trace: None,
-        }
+        })
     }
 }
 
@@ -416,7 +419,7 @@ enum MachineState {
     PrepareIteration,
     WaitingLlm {
         effect_id: EffectId,
-        request: LlmRequest,
+        request: Arc<LlmRequest>,
         driver_state: Option<DriverState>,
     },
     WaitingTools {
@@ -617,7 +620,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.apply_actions(actions);
     }
 
-    fn start_llm_request(&mut self, request: LlmRequest, driver_state: Option<DriverState>) {
+    fn start_llm_request(&mut self, request: Arc<LlmRequest>, driver_state: Option<DriverState>) {
         let tool_list = self
             .config
             .tool_specs
@@ -634,7 +637,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         let id = self.next_id();
         self.state = MachineState::WaitingLlm {
             effect_id: id,
-            request: request.clone(),
+            request: Arc::clone(&request),
             driver_state,
         };
         self.pending_effects

@@ -368,11 +368,11 @@ impl ObservableSession {
         self.snapshot().tool_state.clone()
     }
 
-    pub fn active_tool_definitions(&self) -> Vec<ToolDefinition> {
+    pub fn active_tool_definitions(&self) -> Vec<ToolManifest> {
         self.snapshot()
             .tool_state
             .as_ref()
-            .map(ToolState::definitions)
+            .map(ToolState::tool_manifests)
             .unwrap_or_default()
     }
 

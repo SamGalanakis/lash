@@ -6,7 +6,7 @@ use lash::direct::{LlmOutputPart, LlmResponse};
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
 use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
 use serde_json::json;
 
@@ -103,17 +103,12 @@ struct TestTools {
 
 #[async_trait]
 impl ToolProvider for TestTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::raw(
-            "typed_probe",
-            "Probe typed turn input.",
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            json!({ "type": "object" }),
-        )]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![typed_probe_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "typed_probe").then(|| Arc::new(typed_probe_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -123,10 +118,23 @@ impl ToolProvider for TestTools {
         };
         self.seen
             .lock()
-            .expect("tool seen lock")
+            .expect("seen lock")
             .push(input.label.clone());
         ToolResult::ok(json!({ "label": input.label }))
     }
+}
+
+fn typed_probe_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "typed_probe",
+        "Probe typed turn input.",
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        json!({ "type": "object" }),
+    )
 }
 
 fn response_text(text: &str) -> LlmResponse {

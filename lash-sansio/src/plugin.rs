@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
@@ -50,21 +52,21 @@ impl PromptContributionGate {
 pub struct PromptContribution {
     pub slot: crate::PromptSlot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<Arc<str>>,
     #[serde(default)]
     pub priority: i32,
     #[serde(default, skip_serializing_if = "PromptContributionGate::is_empty")]
     pub gate: PromptContributionGate,
-    pub content: String,
+    pub content: Arc<str>,
 }
 
 impl PromptContribution {
     pub fn new(
         slot: crate::PromptSlot,
-        title: impl Into<String>,
-        content: impl Into<String>,
+        title: impl Into<Arc<str>>,
+        content: impl Into<Arc<str>>,
     ) -> Self {
-        let title = title.into();
+        let title: Arc<str> = title.into();
         let title = (!title.trim().is_empty()).then_some(title);
         Self {
             slot,
@@ -107,19 +109,19 @@ impl PromptContribution {
         self
     }
 
-    pub fn intro(title: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn intro(title: impl Into<Arc<str>>, content: impl Into<Arc<str>>) -> Self {
         Self::new(crate::PromptSlot::Intro, title, content)
     }
 
-    pub fn execution(title: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn execution(title: impl Into<Arc<str>>, content: impl Into<Arc<str>>) -> Self {
         Self::new(crate::PromptSlot::Execution, title, content)
     }
 
-    pub fn guidance(title: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn guidance(title: impl Into<Arc<str>>, content: impl Into<Arc<str>>) -> Self {
         Self::new(crate::PromptSlot::Guidance, title, content)
     }
 
-    pub fn project_instructions(content: impl Into<String>) -> Self {
+    pub fn project_instructions(content: impl Into<Arc<str>>) -> Self {
         Self::new(
             crate::PromptSlot::ProjectInstructions,
             "Project Instructions",
@@ -127,7 +129,7 @@ impl PromptContribution {
         )
     }
 
-    pub fn runtime_context(content: impl Into<String>) -> Self {
+    pub fn runtime_context(content: impl Into<Arc<str>>) -> Self {
         Self::new(
             crate::PromptSlot::RuntimeContext,
             "Runtime Context",
@@ -135,7 +137,7 @@ impl PromptContribution {
         )
     }
 
-    pub fn environment(title: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn environment(title: impl Into<Arc<str>>, content: impl Into<Arc<str>>) -> Self {
         Self::new(crate::PromptSlot::Environment, title, content)
     }
 }

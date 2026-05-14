@@ -19,7 +19,7 @@ pub(crate) use lash_core::{
     RuntimePersistence, SessionCreateRequest, SessionError, SessionHandle, SessionReadView,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
     SessionTurnHandle, SessionUsageReport, StandardContextApproach, TerminationPolicy,
-    TokioSessionTaskExecutor, ToolAvailability, ToolCallRecord, ToolDefinition, ToolProvider,
+    TokioSessionTaskExecutor, ToolAvailability, ToolCallRecord, ToolManifest, ToolProvider,
     ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};

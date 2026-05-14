@@ -692,18 +692,26 @@ submit result
     fn subagent_surface_reports_authority_notes() {
         use lash_core::plugin::ToolSurfaceContext;
 
+        let tools = vec![
+            dummy_tool("read_file"),
+            dummy_tool("ask"),
+            dummy_tool("show_snippet_to_user"),
+            dummy_tool("showcase"),
+            dummy_tool("plan_exit"),
+            dummy_tool("apply_patch"),
+            dummy_tool("spawn_agent"),
+        ];
+        let contracts = tools
+            .iter()
+            .map(|tool| (tool.name.clone(), std::sync::Arc::new(tool.contract())))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let ctx = ToolSurfaceContext {
             session_id: "child".to_string(),
             mode: lash_core::ExecutionMode::standard(),
-            tools: vec![
-                dummy_tool("read_file"),
-                dummy_tool("ask"),
-                dummy_tool("show_snippet_to_user"),
-                dummy_tool("showcase"),
-                dummy_tool("plan_exit"),
-                dummy_tool("apply_patch"),
-                dummy_tool("spawn_agent"),
-            ],
+            tools: tools.into_iter().map(|tool| tool.manifest()).collect(),
+            resolve_contract: Some(std::sync::Arc::new(move |name| {
+                contracts.get(name).cloned()
+            })),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: Some(lash_core::SubagentSessionAuthority {
                 agent_name: "probe".to_string(),

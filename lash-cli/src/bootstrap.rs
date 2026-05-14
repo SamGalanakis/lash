@@ -12,7 +12,8 @@ use lash::prompt::{
 use lash::provider::ProviderHandle;
 #[cfg(test)]
 use lash::tools::{
-    ToolAvailabilityConfig, ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    ToolAvailabilityConfig, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode,
+    ToolManifest, ToolProvider, ToolResult,
 };
 use lash::tracing::TraceLevel;
 use lash::{PluginStack, SessionSpec};
@@ -722,18 +723,32 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for DummyToolProvider {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![
-                dummy_tool("read_file"),
-                dummy_tool("ask"),
-                dummy_tool("plan_exit"),
-                dummy_tool("showcase"),
-            ]
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            dummy_tools()
+                .into_iter()
+                .map(|tool| tool.manifest())
+                .collect()
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
+            dummy_tools()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| std::sync::Arc::new(tool.contract()))
         }
 
         async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
             ToolResult::err_fmt(format_args!("unexpected tool call: {}", call.name))
         }
+    }
+
+    fn dummy_tools() -> Vec<ToolDefinition> {
+        vec![
+            dummy_tool("read_file"),
+            dummy_tool("ask"),
+            dummy_tool("plan_exit"),
+            dummy_tool("showcase"),
+        ]
     }
 
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
@@ -803,7 +818,7 @@ mod tests {
         }));
         assert!(contributions.iter().any(|contribution| {
             contribution.slot == PromptSlot::CliRlmExecution
-                && contribution.content == CLI_RLM_SUBMISSION_GUIDANCE
+                && contribution.content.as_ref() == CLI_RLM_SUBMISSION_GUIDANCE
         }));
     }
 
@@ -866,11 +881,11 @@ mod tests {
         }));
         assert!(contributions.iter().any(|contribution| {
             contribution.slot == PromptSlot::CliAutonomousIntro
-                && contribution.content == CLI_AUTONOMOUS_INTRO
+                && contribution.content.as_ref() == CLI_AUTONOMOUS_INTRO
         }));
         assert!(contributions.iter().any(|contribution| {
             contribution.slot == PromptSlot::CliAutonomousExecution
-                && contribution.content == CLI_AUTONOMOUS_EXECUTION
+                && contribution.content.as_ref() == CLI_AUTONOMOUS_EXECUTION
         }));
     }
 

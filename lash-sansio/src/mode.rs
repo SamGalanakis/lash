@@ -40,9 +40,9 @@ impl<M: ModeProtocol> ModeConfig<M> {
 pub struct ModePreamble<M: ModeProtocol = UnitModeProtocol> {
     pub config: ModeConfig<M>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
-    pub tool_names: Vec<String>,
+    pub tool_names: Arc<Vec<String>>,
     pub omitted_tool_count: usize,
-    pub execution_prompt: String,
+    pub execution_prompt: Arc<str>,
     pub prompt_contributions: Vec<PromptContribution>,
 }
 

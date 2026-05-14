@@ -362,6 +362,11 @@ struct Args {
     #[arg(long, hide = true, default_value_t = 12)]
     runtime_perf_turns: usize,
 
+    /// Tokio worker stack size for runtime benchmark processes
+    #[cfg(feature = "runtime-perf")]
+    #[arg(long, hide = true, value_name = "BYTES")]
+    runtime_perf_worker_stack_bytes: Option<usize>,
+
     /// Export a persisted session `.db` path and exit
     #[arg(long, value_name = "DB")]
     export: Option<String>,
@@ -410,9 +415,20 @@ fn cleanup_terminal() {
     );
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse_from(normalized_cli_args());
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    #[cfg(feature = "runtime-perf")]
+    if args.runtime_perf_benchmark
+        && let Some(stack_bytes) = args.runtime_perf_worker_stack_bytes
+    {
+        runtime.thread_stack_size(stack_bytes);
+    }
+    runtime.build()?.block_on(async_main(args))
+}
+
+async fn async_main(args: Args) -> anyhow::Result<()> {
     if args.ui_perf_benchmark {
         return ui_perf::run_cli(
             args.ui_perf_out,

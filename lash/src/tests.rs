@@ -283,17 +283,12 @@ struct AppTools;
 
 #[async_trait]
 impl ToolProvider for AppTools {
-    fn definitions(&self) -> Vec<lash_core::ToolDefinition> {
-        vec![lash_core::ToolDefinition::raw(
-            "app_lookup",
-            "Look up app state.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            serde_json::json!({ "type": "object" }),
-        )]
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
     }
 
     async fn execute(&self, _call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
@@ -301,26 +296,47 @@ impl ToolProvider for AppTools {
     }
 }
 
+fn app_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "app_lookup",
+        "Look up app state.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object" }),
+    )
+}
+
 struct LongTextTools;
 
 #[async_trait]
 impl ToolProvider for LongTextTools {
-    fn definitions(&self) -> Vec<lash_core::ToolDefinition> {
-        vec![lash_core::ToolDefinition::raw(
-            "app_lookup",
-            "Look up verbose app state.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            serde_json::json!({ "type": "string" }),
-        )]
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![long_text_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(long_text_tool_definition().contract()))
     }
 
     async fn execute(&self, _call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
         lash_core::ToolResult::ok(serde_json::json!("abcdefghijklmnopqrstuvwxyz0123456789"))
     }
+}
+
+fn long_text_tool_definition() -> lash_core::ToolDefinition {
+    lash_core::ToolDefinition::raw(
+        "app_lookup",
+        "Look up verbose app state.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "string" }),
+    )
 }
 
 struct SurfacePluginFactory;

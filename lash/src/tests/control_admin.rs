@@ -119,7 +119,7 @@ async fn config_and_tool_mutations_publish_observation_immediately() -> Result<(
     assert_eq!(
         tool_state
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
     Ok(())

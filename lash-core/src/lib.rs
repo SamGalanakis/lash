@@ -33,7 +33,10 @@ pub use attachments::{
     AttachmentStore, AttachmentStoreError, FileAttachmentStore, InMemoryAttachmentStore,
     StoredAttachment,
 };
-pub use chronological::{ChronologicalEntry, ChronologicalPayload, ChronologicalProjection};
+pub use chronological::{
+    BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
+    ChronologicalEntry, ChronologicalPayload, ChronologicalProjection, visit_turn_view,
+};
 pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
@@ -45,17 +48,19 @@ pub use lash_sansio::{
     ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence,
     ModeBuildInput, Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt,
     PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
-    PromptLayer, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode, PromptSlot,
-    PromptSlotLayer, PromptTemplate, PromptTemplateEntry, PromptTemplateSection, PruneState,
-    RenderedPrompt, ResolvedPromptLayer, Response, SchemaProjectionOverride, SessionEvent,
-    TextProjectionMetadata, TokenUsage, ToolActivation, ToolAvailability, ToolAvailabilityConfig,
-    ToolCallRecord, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolImage, ToolOutputContract, ToolResult, ToolSurface, ToolSurfaceBuildInput,
-    ToolSurfaceEntry, ToolSurfaceOverride, TurnFinish, TurnOutcome, TurnStop,
-    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
-    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
-    messages_are_prompt_resume_safe, normalized_response_parts, reasoning_part,
-    resolve_prompt_layers, shared_parts, turn_limit_exhausted_message,
+    PromptContributionSet, PromptFingerprint, PromptLayer, PromptPanel, PromptRequest,
+    PromptResponse, PromptSelectionMode, PromptSlot, PromptSlotLayer, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
+    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
+    ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolContract,
+    ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolManifest,
+    ToolOutputContract, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
+    ToolSurfaceOverride, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
+    build_prompt, build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
+    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
+    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
+    turn_limit_exhausted_message,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,

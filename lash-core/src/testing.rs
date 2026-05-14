@@ -710,8 +710,12 @@ mod test_mode_fakes {
 
     #[async_trait]
     impl crate::plugin::ModeNativeToolsPlugin for TestModeNativeTools {
-        fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![test_batch_tool_definition()]
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![test_batch_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "batch").then(|| Arc::new(test_batch_tool_definition().contract()))
         }
 
         async fn execute(
@@ -884,10 +888,10 @@ mod test_mode_fakes {
         fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
             ModePreamble {
                 config: ModeConfig::chat(Arc::new(TestDriver), false),
-                tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
+                tool_specs: input.tool_surface.model_tool_specs(),
                 tool_names: input.tool_surface.tool_names(),
                 omitted_tool_count: 0,
-                execution_prompt: String::new(),
+                execution_prompt: Arc::from(""),
                 prompt_contributions: input.extra_prompt_contributions,
             }
         }

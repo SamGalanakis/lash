@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult,
+};
 
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
@@ -16,58 +19,14 @@ const MAX_RESULTS: usize = 100;
 
 #[async_trait::async_trait]
 impl ToolProvider for Glob {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
-                "glob",
-                [
-                    "Find filesystem entries by glob. ",
-                    FS_DEFAULTS_PREAMBLE,
-                    " Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit=100, with_lines=false, include_hidden=true, respect_gitignore=true.",
-                ]
-                .concat(),
-                object_schema(
-                    serde_json::json!({
-                        "pattern": { "type": "string" },
-                        "path": {
-                            "type": "string",
-                            "default": ".",
-                            "description": "Base directory to search in (default: current directory)"
-                        },
-                        "limit": {
-                            "type": ["integer", "null", "string"],
-                            "minimum": 1,
-                            "default": MAX_RESULTS,
-                            "description": "Maximum results to return (default: 100). Use null or \"none\" for no cap."
-                        },
-                        "with_lines": {
-                            "type": "boolean",
-                            "default": false,
-                            "description": "Count text lines for file entries (`lines`). Default: false."
-                        },
-                        "include_hidden": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Include dotfiles and dot-directories. Default: true."
-                        },
-                        "respect_gitignore": {
-                            "type": "boolean",
-                            "default": true,
-                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
-                        }
-                    }),
-                    &["pattern"],
-                ),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
-            )
-            .with_examples(vec![
-                r#"glob(pattern="**/*.rs", path="lash/src", limit=50)"#.into(),
-                r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
-            ])
-            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![glob_tool_definition().manifest()]
     }
+
+    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
+        (name == "glob").then(|| std::sync::Arc::new(glob_tool_definition().contract()))
+    }
+
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let args = call.args;
         let pattern = match require_str(args, "pattern") {
@@ -77,7 +36,7 @@ impl ToolProvider for Glob {
 
         let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let limit = match parse_limit(args) {
-            Ok(l) => l,
+            Ok(limit) => limit,
             Err(e) => return e,
         };
         let with_lines = match parse_optional_bool(args, "with_lines", false) {
@@ -92,8 +51,8 @@ impl ToolProvider for Glob {
             Ok(v) => v,
             Err(e) => return e,
         };
-        let pattern = pattern.to_string();
         let base = PathBuf::from(base_dir);
+        let pattern = pattern.to_string();
 
         run_blocking(move || {
             if !base.exists() {
@@ -161,6 +120,57 @@ impl ToolProvider for Glob {
         })
         .await
     }
+}
+
+fn glob_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+                "glob",
+                [
+                    "Find filesystem entries by glob. ",
+                    FS_DEFAULTS_PREAMBLE,
+                    " Returns a record with `items` sorted by `modified_at` (newest first). Each item has `path`, `kind`, `size_bytes`, `lines`, and `modified_at`. Defaults: limit=100, with_lines=false, include_hidden=true, respect_gitignore=true.",
+                ]
+                .concat(),
+                object_schema(
+                    serde_json::json!({
+                        "pattern": { "type": "string" },
+                        "path": {
+                            "type": "string",
+                            "default": ".",
+                            "description": "Base directory to search in (default: current directory)"
+                        },
+                        "limit": {
+                            "type": ["integer", "null", "string"],
+                            "minimum": 1,
+                            "default": MAX_RESULTS,
+                            "description": "Maximum results to return (default: 100). Use null or \"none\" for no cap."
+                        },
+                        "with_lines": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Count text lines for file entries (`lines`). Default: false."
+                        },
+                        "include_hidden": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Include dotfiles and dot-directories. Default: true."
+                        },
+                        "respect_gitignore": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Respect `.gitignore` and related ignore files. When true (default), `.gitignore` is honored only inside Git repos. When false, ignore-file processing is fully disabled."
+                        }
+                    }),
+                    &["pattern"],
+                ),
+                serde_json::json!({ "type": "object", "additionalProperties": true }),
+            )
+            .with_examples(vec![
+                r#"glob(pattern="**/*.rs", path="lash/src", limit=50)"#.into(),
+                r#"glob(pattern="**/Cargo.toml", path=".")"#.into(),
+            ])
+            .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {

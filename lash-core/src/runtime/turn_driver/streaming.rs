@@ -105,11 +105,12 @@ impl RuntimeTurnDriver {
 
     pub(super) async fn run_standard_llm_call(
         &mut self,
-        request: LlmRequest,
+        request: Arc<LlmRequest>,
         mode_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        let request = (*request).clone();
         let request = match crate::attachments::resolve_llm_request_attachments(
             request,
             self.host.core.attachment_store.as_ref(),

@@ -33,34 +33,6 @@ fn update_documentation_state(availability: ToolAvailability, injected: bool) ->
     }
 }
 
-fn output_schema_label(schema: &serde_json::Value) -> String {
-    match schema.get("type").and_then(serde_json::Value::as_str) {
-        Some("string") => "str".to_string(),
-        Some("integer") => "int".to_string(),
-        Some("number") => "float".to_string(),
-        Some("boolean") => "bool".to_string(),
-        Some("object") => "record".to_string(),
-        Some("array") => "list".to_string(),
-        Some("null") => "null".to_string(),
-        _ => "any".to_string(),
-    }
-}
-
-fn output_schema_from_hint(hint: &str) -> serde_json::Value {
-    match hint.trim() {
-        "str" | "string" => serde_json::json!({ "type": "string" }),
-        "int" | "integer" => serde_json::json!({ "type": "integer" }),
-        "float" | "number" => serde_json::json!({ "type": "number" }),
-        "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
-        "dict" | "record" | "json" => {
-            serde_json::json!({ "type": "object", "additionalProperties": true })
-        }
-        "list" | "array" => serde_json::json!({ "type": "array", "items": {} }),
-        "null" | "None" => serde_json::json!({ "type": "null" }),
-        _ => serde_json::json!({}),
-    }
-}
-
 pub(super) async fn handle_tools(
     raw: Option<String>,
     app: &mut App,
@@ -81,12 +53,11 @@ pub(super) async fn handle_tools(
         ];
         for (name, spec) in desired_tool_state.iter() {
             let availability = spec
-                .definition()
+                .manifest()
                 .effective_availability(&current_execution_mode);
             lines.push(format!(
-                "  - {} [{}] availability={}",
+                "  - {} availability={}",
                 name,
-                output_schema_label(&spec.definition().output_schema),
                 availability_label(availability)
             ));
         }
@@ -121,15 +92,12 @@ pub(super) async fn handle_tools(
             };
             let kv_raw = update_parts.next().unwrap_or_default();
             let kv = parse_kv_args(kv_raw);
-            let Some(definition) = desired_tool_state.definition_mut(name) else {
+            let Some(manifest) = desired_tool_state.manifest_mut(name) else {
                 push_system_message(app, format!("Tool `{name}` not found."));
                 return Ok(false);
             };
             if let Some(desc) = kv.get("description") {
-                definition.description = desc.clone();
-            }
-            if let Some(returns) = kv.get("returns") {
-                definition.output_schema = output_schema_from_hint(returns);
+                manifest.description = desc.clone();
             }
             if let Some(raw) = kv.get("availability") {
                 let Some(availability) = parse_availability(raw) else {
@@ -139,12 +107,12 @@ pub(super) async fn handle_tools(
                     );
                     return Ok(false);
                 };
-                definition.availability_override = Some(availability);
+                manifest.availability_override = Some(availability);
             }
             if let Some(inject) = kv.get("injected") {
                 let injected = inject == "true";
-                let availability = definition.effective_availability(&current_execution_mode);
-                definition.availability_override =
+                let availability = manifest.effective_availability(&current_execution_mode);
+                manifest.availability_override =
                     Some(update_documentation_state(availability, injected));
             }
             *pending_reconfigure = true;
@@ -227,7 +195,7 @@ pub(super) async fn handle_reconfigure(
                             .active_definitions()
                             .await
                             .unwrap_or_default(),
-                        None => desired_tool_state.definitions(),
+                        None => desired_tool_state.tool_manifests(),
                     };
                     *toolset_hash = hash12(
                         &serde_json::to_vec(&definitions).unwrap_or_else(|_| b"[]".to_vec()),

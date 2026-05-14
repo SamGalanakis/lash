@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    SessionSpec, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    SessionSpec, ToolCall, ToolContext, ToolContract, ToolDefinition, ToolExecutionMode,
+    ToolManifest, ToolProvider, ToolResult,
 };
 use serde_json::Value;
 
@@ -107,12 +108,18 @@ impl RlmSubagentToolsProvider {
 
 #[async_trait]
 impl ToolProvider for RlmSubagentToolsProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
-        if self.include_submit_error {
-            definitions.push(shared::submit_error_tool_definition());
-        }
-        definitions
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -122,6 +129,16 @@ impl ToolProvider for RlmSubagentToolsProvider {
             other => Err(format!("Unknown tool: {other}")),
         };
         finalise_tool_result(result)
+    }
+}
+
+impl RlmSubagentToolsProvider {
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = rlm_subagent_tool_definitions(&self.registry.names());
+        if self.include_submit_error {
+            definitions.push(shared::submit_error_tool_definition());
+        }
+        definitions
     }
 }
 

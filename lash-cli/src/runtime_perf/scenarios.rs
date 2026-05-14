@@ -8,6 +8,7 @@ pub(crate) enum RuntimePerfScenario {
     Rlm,
     RlmToolCalls,
     RlmGlobals,
+    RlmLargeToolSurface,
     ObservationalMemory,
     OpenAiCompatStream,
     EmbedStandard,
@@ -15,21 +16,23 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 8] = [
+    pub(crate) const DEFAULTS: [Self; 9] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
         Self::RlmGlobals,
+        Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
         Self::EmbedRlm,
     ];
-    pub(crate) const KNOWN: [Self; 8] = [
+    pub(crate) const KNOWN: [Self; 9] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
         Self::RlmGlobals,
+        Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
@@ -42,6 +45,7 @@ impl RuntimePerfScenario {
             "rlm" => Some(Self::Rlm),
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
             "rlm_globals" => Some(Self::RlmGlobals),
+            "rlm_large_tool_surface" => Some(Self::RlmLargeToolSurface),
             "observational_memory" => Some(Self::ObservationalMemory),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             "embed_standard" => Some(Self::EmbedStandard),
@@ -56,6 +60,7 @@ impl RuntimePerfScenario {
             Self::Rlm => "rlm",
             Self::RlmToolCalls => "rlm_tool_calls",
             Self::RlmGlobals => "rlm_globals",
+            Self::RlmLargeToolSurface => "rlm_large_tool_surface",
             Self::ObservationalMemory => "observational_memory",
             Self::OpenAiCompatStream => "openai_compat_stream",
             Self::EmbedStandard => "embed_standard",
@@ -69,9 +74,11 @@ impl RuntimePerfScenario {
             | Self::ObservationalMemory
             | Self::OpenAiCompatStream
             | Self::EmbedStandard => ExecutionMode::standard(),
-            Self::Rlm | Self::RlmToolCalls | Self::RlmGlobals | Self::EmbedRlm => {
-                ExecutionMode::new("rlm")
-            }
+            Self::Rlm
+            | Self::RlmToolCalls
+            | Self::RlmGlobals
+            | Self::RlmLargeToolSurface
+            | Self::EmbedRlm => ExecutionMode::new("rlm"),
         }
     }
 

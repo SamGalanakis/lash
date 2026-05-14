@@ -82,7 +82,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     assert_eq!(
         showcased
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Showcased)
     );
 
@@ -97,7 +97,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     assert_eq!(
         cleared
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         None
     );
 
@@ -111,7 +111,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     assert_eq!(off.generation(), generation);
     assert_eq!(
         off.get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
 
@@ -131,7 +131,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     assert_eq!(
         callable
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Callable)
     );
     Ok(())
@@ -179,7 +179,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     assert_eq!(
         state
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
     Ok(())
