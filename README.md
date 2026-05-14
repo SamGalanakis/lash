@@ -39,6 +39,21 @@ lash                           # interactive TUI
 lash -p "summarize this repo"  # single-shot, output to stdout
 ```
 
+## Run the example
+
+The `examples/agent-service` crate is a localhost SQLite-backed chat app that
+showcases the `lash` facade, RLM mode, and typed plugin input. From the repo
+root, with an OpenRouter key in the environment:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service
+```
+
+Then open <http://127.0.0.1:3000>. See
+[`examples/agent-service/README.md`](examples/agent-service/README.md) for the
+optional environment knobs (`OPENROUTER_MODEL`, `AGENT_SERVICE_ADDR`,
+`AGENT_SERVICE_DATA_DIR`, `AGENT_SERVICE_TRACE`, …).
+
 ## Development
 
 The CI runtime performance gate uses the quick synthetic profile:
@@ -55,10 +70,14 @@ python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-
 
 ## Docs
 
+Browse them online at <https://samgalanakis.github.io/lash/> (mirrors the
+`docs/` tree for `main` and `staging`).
+
 - `docs/quickstart.html` is the shortest app-facing setup path.
 - `docs/embedding.html` covers the `lash` facade API, session specs, plugin stacks, turn streaming, storage, and MCP.
 - `docs/plugins.html` covers plugin factories, tool providers, default plugin stacks, and `ToolContext` capabilities.
-- `docs/architecture/index.html` documents the current workspace architecture.
+- `docs/architecture/index.html` documents the current workspace architecture (start at `docs/architecture/lashlang.html` for the RLM execution language).
+- `docs/example-agent-service.html` walks through the runnable `examples/agent-service` app.
 - `docs/design-language.html` documents the TUI design language.
 
 ## License
