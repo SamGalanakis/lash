@@ -79,7 +79,7 @@
         <div class="section" id="program-form">
           <div class="section-header">
             <h2>Program Form</h2>
-            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output (the driver also accepts <code>rlm</code> and <code>lash</code> labels for legacy/internal callers, but only <code>lashlang</code> is advertised to the model). Anything after that block is ignored by the driver, so the block must contain the next action or final <code>submit</code>.</p>
+            <p>RLM mode extracts the first closed <code>```lashlang</code> fence from model output. Only the <code>lashlang</code> language tag is recognised — <code>rlm</code> and other labels are treated as plain prose by <code>first_lashlang_fence_span</code>. Opening fences may be three or more backticks (CommonMark variable-length), the closer must match the opener length, and anything after the first closed block is ignored by the driver — so the block must contain the next action or final <code>submit</code>.</p>
           </div>
           <dl class="def-list">
             <dt>REPL state</dt>
@@ -288,7 +288,7 @@ submit {
             <dt>Named branches</dt>
             <dd><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</dd>
             <dt>Positional branches</dt>
-            <dd><code>parallel { call ...; call ... }</code> returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
+            <dd><code>parallel { call ..., call ... }</code> (or with newlines as separators) returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
           </dl>
           <pre><code>a = start call spawn_agent { agent_name: "one", task: "Read file A", capability: "explore" }
 b = start call spawn_agent { agent_name: "two", task: "Read file B", capability: "explore" }
@@ -476,13 +476,13 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3>Compiler</h3>
-                <p><code>runtime/compiler.rs</code> folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p>
+                <p><code>runtime/compiler.rs</code> lowers the AST into a <code>Chunk</code> of <code>Instruction</code>s (defined in <code>runtime/instruction.rs</code>), folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p>
               </div>
             </li>
             <li>
               <div>
                 <h3>VM</h3>
-                <p><code>runtime/vm.rs</code> stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults <code>ProjectedBindings</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment.</p>
+                <p><code>runtime/vm.rs</code> walks the compiled <code>Chunk</code>, stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults the <code>ProjectedBindings</code> defined in <code>value.rs</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment; <code>format.rs</code> and <code>json.rs</code> own <code>format(...)</code> and <code>json_parse</code>/serialization helpers. <code>entry_points.rs</code> wires the public <code>compile_source</code> / <code>execute_compiled*</code> / <code>profile_compiled*</code> surface re-exported from the crate root.</p>
               </div>
             </li>
             <li>
@@ -504,14 +504,24 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
               <thead><tr><th>Path</th><th>Role</th></tr></thead>
               <tbody>
                 <tr><td><code>lashlang/src/lexer.rs</code></td><td>Tokens, including raw triple-single-quote strings used for embedded code and heredoc-like content.</td></tr>
+                <tr><td><code>lashlang/src/ast.rs</code></td><td>AST node types (<code>Program</code>, <code>Stmt</code>, <code>Expr</code>, <code>AssignTarget</code>, <code>ParallelBranches</code>, <code>TypeExpr</code>, …) shared by the parser and compiler.</td></tr>
                 <tr><td><code>lashlang/src/parser.rs</code></td><td>AST construction for expressions, statements, type literals, calls, async, and control flow.</td></tr>
-                <tr><td><code>lashlang/src/runtime/mod.rs</code></td><td>VM evaluator, value semantics, async handles, image values, serialization, built-ins, profiling, and the <code>ProjectedBindings</code>/<code>ProjectedValue</code>/<code>ProjectedHostValue</code> seam.</td></tr>
-                <tr><td><code>lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and snapshot/restore.</td></tr>
-                <tr><td><code>lashlang/src/runtime/host.rs</code></td><td><code>ToolHost</code>, <code>ToolHostCall</code>, and <code>ToolHostError</code> contracts.</td></tr>
+                <tr><td><code>lashlang/src/runtime/mod.rs</code></td><td>Cross-cutting runtime types (<code>RuntimeError</code>, <code>RuntimeFailure</code>, <code>ExecutionScratch</code>, <code>ExecutionOutcome</code>, <code>CompiledProgram</code>, <code>ProfileReport</code>, <code>CompileStats</code>) and the <code>pub use</code> wiring that re-exports each focused submodule.</td></tr>
+                <tr><td><code>lashlang/src/runtime/compiler.rs</code></td><td>AST → bytecode <code>Chunk</code> lowering, type-literal const-folding, parallel-call optimization, builtin specialization.</td></tr>
+                <tr><td><code>lashlang/src/runtime/instruction.rs</code></td><td><code>Instruction</code> opcode enum and supporting types (<code>ParallelCallBranch</code>, profile tags, loop ops).</td></tr>
+                <tr><td><code>lashlang/src/runtime/vm.rs</code></td><td>Bytecode executor — walks instructions, materializes intermediate values, dispatches to <code>ToolHost</code>, emits trace/profile data.</td></tr>
+                <tr><td><code>lashlang/src/runtime/value.rs</code></td><td><code>Value</code>, <code>ListValue</code>, <code>ImageValue</code>, <code>LASH_TYPE_KEY</code>, and the <code>ProjectedBindings</code> / <code>ProjectedValue</code> / <code>ProjectedHostValue</code> / <code>ProjectedRead*</code> seam.</td></tr>
+                <tr><td><code>lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and <code>Snapshot</code>/restore (including projected snapshot tagging).</td></tr>
+                <tr><td><code>lashlang/src/runtime/host.rs</code></td><td><code>ToolHost</code>, <code>ToolHostCall</code>, and <code>ToolHostError</code> contracts plus the default <code>call_batch</code>/<code>start_call</code>/<code>await_handle</code>/<code>cancel_handle</code>/<code>print</code>/<code>yield_now</code> impls.</td></tr>
                 <tr><td><code>lashlang/src/runtime/cache.rs</code></td><td><code>CompiledProgramCache</code> with LRU stats for fenced-block reuse.</td></tr>
-                <tr><td><code>lashlang/src/runtime/record.rs</code></td><td>Record value form, ordered keys, and shared structural helpers.</td></tr>
-                <tr><td><code>lashlang/src/runtime/schema.rs</code></td><td>Runtime schema validation and Lash type descriptor support.</td></tr>
-                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, and language reference shown to the model.</td></tr>
+                <tr><td><code>lashlang/src/runtime/record.rs</code></td><td>Record value form, ordered keys, interned symbols, and shared structural helpers.</td></tr>
+                <tr><td><code>lashlang/src/runtime/schema.rs</code></td><td>Runtime schema validation and Lash type descriptor support (<code>ValidationPlan</code>, <code>execute_validate_builtin</code>).</td></tr>
+                <tr><td><code>lashlang/src/runtime/access.rs</code></td><td>Field/index read and path-assignment helpers.</td></tr>
+                <tr><td><code>lashlang/src/runtime/ops.rs</code></td><td>Value coercions, comparison/arithmetic, and most builtin function bodies.</td></tr>
+                <tr><td><code>lashlang/src/runtime/format.rs</code></td><td><code>format(...)</code> template engine and compiled-format fast paths.</td></tr>
+                <tr><td><code>lashlang/src/runtime/json.rs</code></td><td><code>json_parse</code>, JSON serialization, and round-trip helpers shared by snapshots and tool args.</td></tr>
+                <tr><td><code>lashlang/src/runtime/entry_points.rs</code></td><td>Top-level <code>compile_source</code> / <code>execute_compiled*</code> / <code>profile_compiled*</code> / <code>prewarm</code> entry points re-exported from the crate root.</td></tr>
+                <tr><td><code>lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, language reference shown to the model, and the <code>first_lashlang_fence_span</code> / <code>extract_first_lashlang_fence</code> extractors.</td></tr>
                 <tr><td><code>lash-mode-rlm/src/executor.rs</code></td><td>Bridge between Lashlang tool calls and runtime tool execution, host-projected bindings (<code>history</code> and globals), snapshot/restore, and image conversion.</td></tr>
                 <tr><td><code>lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
                 <tr><td><code>lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling and benchmark entrypoints.</td></tr>
