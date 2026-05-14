@@ -339,7 +339,8 @@ pub(crate) async fn switch_to_session_identifier(
     .await
     .map_err(anyhow::Error::msg)?;
     *toolset_hash = hash12(
-        &serde_json::to_vec(&desired_tool_state.definitions()).unwrap_or_else(|_| b"[]".to_vec()),
+        &serde_json::to_vec(&desired_tool_state.tool_manifests())
+            .unwrap_or_else(|_| b"[]".to_vec()),
     );
     Ok(())
 }

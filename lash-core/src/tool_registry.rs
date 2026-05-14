@@ -5,7 +5,9 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ProgressSender, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult};
+use crate::{
+    ProgressSender, ToolCall, ToolContext, ToolContract, ToolManifest, ToolProvider, ToolResult,
+};
 
 const PLUGIN_SOURCE_ID: &str = "plugins";
 
@@ -27,17 +29,17 @@ impl ToolSourceHandle {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolStateEntry {
-    definition: ToolDefinition,
+    manifest: ToolManifest,
     source_id: String,
 }
 
 impl ToolStateEntry {
-    pub fn definition(&self) -> &ToolDefinition {
-        &self.definition
+    pub fn manifest(&self) -> &ToolManifest {
+        &self.manifest
     }
 
-    pub fn definition_mut(&mut self) -> &mut ToolDefinition {
-        &mut self.definition
+    pub fn manifest_mut(&mut self) -> &mut ToolManifest {
+        &mut self.manifest
     }
 }
 
@@ -61,10 +63,10 @@ impl ToolState {
         self
     }
 
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
+    pub fn tool_manifests(&self) -> Vec<ToolManifest> {
         self.tools
             .values()
-            .map(|entry| entry.definition.clone())
+            .map(|entry| entry.manifest.clone())
             .collect()
     }
 
@@ -72,8 +74,8 @@ impl ToolState {
         self.tools.get(name)
     }
 
-    pub fn definition_mut(&mut self, name: &str) -> Option<&mut ToolDefinition> {
-        self.tools.get_mut(name).map(|entry| &mut entry.definition)
+    pub fn manifest_mut(&mut self, name: &str) -> Option<&mut ToolManifest> {
+        self.tools.get_mut(name).map(|entry| &mut entry.manifest)
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -104,7 +106,7 @@ impl ToolState {
                 "unknown tool `{name}`"
             )));
         };
-        entry.definition.availability_override = availability;
+        entry.manifest.availability_override = availability;
         Ok(())
     }
 
@@ -128,7 +130,13 @@ impl ToolState {
 #[async_trait::async_trait]
 pub(crate) trait ToolSourceExecutor: Send + Sync + 'static {
     fn id(&self) -> &str;
-    fn advertised_tools(&self) -> Vec<ToolDefinition>;
+    fn advertised_tools(&self) -> Vec<ToolManifest>;
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.advertised_tools()
+            .into_iter()
+            .find(|manifest| manifest.name == name)
+    }
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
     async fn execute(
         &self,
         tool: &str,
@@ -158,8 +166,16 @@ impl ToolSourceExecutor for ToolProviderSource {
         &self.id
     }
 
-    fn advertised_tools(&self) -> Vec<ToolDefinition> {
-        self.provider.definitions()
+    fn advertised_tools(&self) -> Vec<ToolManifest> {
+        self.provider.tool_manifests()
+    }
+
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.provider.resolve_manifest(name)
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.provider.resolve_contract(name)
     }
 
     async fn execute(
@@ -254,15 +270,10 @@ impl ToolRegistry {
                 let Some(source) = sources.get(&entry.source_id) else {
                     return Err(ReconfigureError::UnknownSource(entry.source_id.clone()));
                 };
-                let advertised: BTreeSet<String> = source
-                    .advertised_tools()
-                    .into_iter()
-                    .map(|d| d.name)
-                    .collect();
-                if !advertised.contains(&entry.definition.name) {
+                if source.resolve_manifest(&entry.manifest.name).is_none() {
                     return Err(ReconfigureError::Validation(format!(
-                        "tool source `{}` does not advertise tool `{}`",
-                        entry.source_id, entry.definition.name
+                        "tool source `{}` does not resolve tool `{}`",
+                        entry.source_id, entry.manifest.name
                     )));
                 }
             }
@@ -308,7 +319,7 @@ impl ToolRegistry {
     ) -> Result<u64, ReconfigureError> {
         let source_id = source.id().to_string();
         let advertised_tools = source.advertised_tools();
-        validate_unique_definitions(&advertised_tools)?;
+        validate_unique_manifests(&advertised_tools)?;
 
         let mut state = self
             .state
@@ -317,20 +328,20 @@ impl ToolRegistry {
         let previous_overrides = state
             .tools
             .iter()
-            .map(|(name, entry)| (name.clone(), entry.definition.availability_override))
+            .map(|(name, entry)| (name.clone(), entry.manifest.availability_override))
             .collect::<BTreeMap<_, _>>();
         let same_source_names = state
             .tools
             .iter()
             .filter_map(|(name, entry)| (entry.source_id == source_id).then_some(name.clone()))
             .collect::<BTreeSet<_>>();
-        for def in &advertised_tools {
-            if let Some(existing) = state.tools.get(&def.name)
+        for manifest in &advertised_tools {
+            if let Some(existing) = state.tools.get(&manifest.name)
                 && existing.source_id != source_id
             {
                 return Err(ReconfigureError::Validation(format!(
                     "duplicate tool name `{}` from source `{}` conflicts with source `{}`",
-                    def.name, source_id, existing.source_id
+                    manifest.name, source_id, existing.source_id
                 )));
             }
         }
@@ -338,17 +349,17 @@ impl ToolRegistry {
             entry.source_id != source_id || !same_source_names.contains(name)
         });
 
-        for mut def in advertised_tools {
-            let name = def.name.clone();
-            def.availability_override = previous_overrides
+        for mut manifest in advertised_tools {
+            let name = manifest.name.clone();
+            manifest.availability_override = previous_overrides
                 .get(&name)
                 .copied()
                 .flatten()
-                .or(def.availability_override);
+                .or(manifest.availability_override);
             state.tools.insert(
                 name,
                 ToolStateEntry {
-                    definition: def,
+                    manifest,
                     source_id: source_id.clone(),
                 },
             );
@@ -404,7 +415,7 @@ impl ToolRegistry {
 
 #[async_trait::async_trait]
 impl ToolProvider for ToolRegistry {
-    fn definitions(&self) -> Vec<ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
         let state = self
             .state
             .read()
@@ -412,19 +423,87 @@ impl ToolProvider for ToolRegistry {
         state
             .tools
             .values()
-            .map(|entry| entry.definition.clone())
+            .map(|entry| entry.manifest.clone())
             .collect()
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let name = call.name;
-        let source_id = {
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if let Some(manifest) = {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state.tools.get(name).map(|entry| entry.manifest.clone())
+        } {
+            return Some(manifest);
+        }
+
+        let sources = self
+            .sources
+            .read()
+            .expect("tool source lock poisoned")
+            .iter()
+            .map(|(source_id, source)| (source_id.clone(), Arc::clone(source)))
+            .collect::<Vec<_>>();
+        for (source_id, source) in sources {
+            let Some(mut manifest) = source.resolve_manifest(name) else {
+                continue;
+            };
+            let previous_override = {
+                let state = self
+                    .state
+                    .read()
+                    .expect("tool registry state lock poisoned");
+                state
+                    .tools
+                    .get(&manifest.name)
+                    .and_then(|entry| entry.manifest.availability_override)
+            };
+            manifest.availability_override = previous_override.or(manifest.availability_override);
+            let mut state = self
+                .state
+                .write()
+                .expect("tool registry state lock poisoned");
+            if let Some(existing) = state.tools.get(&manifest.name) {
+                return (existing.source_id == source_id).then(|| existing.manifest.clone());
+            }
+            state.tools.insert(
+                manifest.name.clone(),
+                ToolStateEntry {
+                    manifest: manifest.clone(),
+                    source_id,
+                },
+            );
+            state.generation += 1;
+            return Some(manifest);
+        }
+        None
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        let source_id = self.resolve_manifest(name).and_then(|_| {
             let state = self
                 .state
                 .read()
                 .expect("tool registry state lock poisoned");
             state.tools.get(name).map(|entry| entry.source_id.clone())
-        };
+        })?;
+        self.sources
+            .read()
+            .expect("tool source lock poisoned")
+            .get(&source_id)?
+            .resolve_contract(name)
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let name = call.name;
+        let source_id = self.resolve_manifest(name).and_then(|_| {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state.tools.get(name).map(|entry| entry.source_id.clone())
+        });
         let Some(source_id) = source_id else {
             return ToolResult::err_fmt(format_args!("Unknown tool: {name}"));
         };
@@ -444,18 +523,18 @@ impl ToolProvider for ToolRegistry {
     }
 }
 
-fn validate_unique_definitions(defs: &[ToolDefinition]) -> Result<(), ReconfigureError> {
+fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), ReconfigureError> {
     let mut names = BTreeSet::new();
-    for def in defs {
-        if def.name.trim().is_empty() {
+    for manifest in manifests {
+        if manifest.name.trim().is_empty() {
             return Err(ReconfigureError::Validation(
                 "tool name cannot be empty".to_string(),
             ));
         }
-        if !names.insert(def.name.clone()) {
+        if !names.insert(manifest.name.clone()) {
             return Err(ReconfigureError::Validation(format!(
                 "duplicate tool name `{}` in source",
-                def.name
+                manifest.name
             )));
         }
     }
@@ -465,11 +544,18 @@ fn validate_unique_definitions(defs: &[ToolDefinition]) -> Result<(), Reconfigur
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolDefinition;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockTool;
     struct MixedEnabledTool;
     struct ExternalMockSource;
+    struct ExactResolvingSource {
+        manifest_resolutions: Arc<AtomicUsize>,
+        contract_resolutions: Arc<AtomicUsize>,
+        executions: Arc<AtomicUsize>,
+    }
 
     fn test_tool(
         name: &str,
@@ -485,14 +571,39 @@ mod tests {
         .with_availability(availability)
     }
 
+    fn manifests(definitions: Vec<ToolDefinition>) -> Vec<ToolManifest> {
+        definitions
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn contract_from(definitions: Vec<ToolDefinition>, name: &str) -> Option<Arc<ToolContract>> {
+        definitions
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
     #[async_trait::async_trait]
     impl ToolProvider for MockTool {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![test_tool(
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            manifests(vec![test_tool(
                 "mock_tool",
                 "mock",
                 crate::ToolAvailabilityConfig::callable(),
-            )]
+            )])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            contract_from(
+                vec![test_tool(
+                    "mock_tool",
+                    "mock",
+                    crate::ToolAvailabilityConfig::callable(),
+                )],
+                name,
+            )
         }
 
         async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
@@ -502,8 +613,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for MixedEnabledTool {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            manifests(vec![
                 test_tool(
                     "enabled_tool",
                     "enabled",
@@ -514,7 +625,25 @@ mod tests {
                     "disabled",
                     crate::ToolAvailabilityConfig::off(),
                 ),
-            ]
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            contract_from(
+                vec![
+                    test_tool(
+                        "enabled_tool",
+                        "enabled",
+                        crate::ToolAvailabilityConfig::callable(),
+                    ),
+                    test_tool(
+                        "disabled_tool",
+                        "disabled",
+                        crate::ToolAvailabilityConfig::off(),
+                    ),
+                ],
+                name,
+            )
         }
 
         async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
@@ -528,8 +657,8 @@ mod tests {
             "external"
         }
 
-        fn advertised_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition::raw(
+        fn advertised_tools(&self) -> Vec<ToolManifest> {
+            manifests(vec![ToolDefinition::raw(
                 "mcp__demo__search",
                 "search",
                 json!({
@@ -541,7 +670,26 @@ mod tests {
                     "additionalProperties": false
                 }),
                 json!({ "type": "object", "additionalProperties": true }),
-            )]
+            )])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            contract_from(
+                vec![ToolDefinition::raw(
+                    "mcp__demo__search",
+                    "search",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }),
+                    json!({ "type": "object", "additionalProperties": true }),
+                )],
+                name,
+            )
         }
 
         async fn execute(
@@ -558,6 +706,52 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ToolSourceExecutor for ExactResolvingSource {
+        fn id(&self) -> &str {
+            "exact"
+        }
+
+        fn advertised_tools(&self) -> Vec<ToolManifest> {
+            Vec::new()
+        }
+
+        fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+            self.manifest_resolutions.fetch_add(1, Ordering::SeqCst);
+            (name == "host_only").then(|| {
+                test_tool(
+                    "host_only",
+                    "host-only",
+                    crate::ToolAvailabilityConfig::callable(),
+                )
+                .manifest()
+            })
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+            self.contract_resolutions.fetch_add(1, Ordering::SeqCst);
+            contract_from(
+                vec![test_tool(
+                    "host_only",
+                    "host-only",
+                    crate::ToolAvailabilityConfig::callable(),
+                )],
+                name,
+            )
+        }
+
+        async fn execute(
+            &self,
+            tool: &str,
+            _args: &serde_json::Value,
+            _context: &ToolContext,
+            _progress: Option<&ProgressSender>,
+        ) -> ToolResult {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(json!(tool))
+        }
+    }
+
     #[test]
     fn registry_preserves_initial_availability_state() {
         let registry =
@@ -567,7 +761,7 @@ mod tests {
             snapshot
                 .get("enabled_tool")
                 .unwrap()
-                .definition()
+                .manifest()
                 .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Callable
         );
@@ -575,7 +769,7 @@ mod tests {
             snapshot
                 .get("disabled_tool")
                 .unwrap()
-                .definition()
+                .manifest()
                 .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Off
         );
@@ -588,11 +782,12 @@ mod tests {
         snapshot.tools.insert(
             "missing".to_string(),
             ToolStateEntry {
-                definition: test_tool(
+                manifest: test_tool(
                     "missing",
                     "missing",
                     crate::ToolAvailabilityConfig::callable(),
-                ),
+                )
+                .manifest(),
                 source_id: PLUGIN_SOURCE_ID.to_string(),
             },
         );
@@ -602,6 +797,82 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn advertised_manifest_resolves_without_exact_host_lookup() {
+        let manifest_resolutions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::clone(&manifest_resolutions),
+                contract_resolutions: Arc::new(AtomicUsize::new(0)),
+                executions: Arc::new(AtomicUsize::new(0)),
+            }))
+            .expect("source registered");
+
+        assert_eq!(
+            registry
+                .resolve_manifest("mock_tool")
+                .map(|manifest| manifest.name),
+            Some("mock_tool".to_string())
+        );
+        assert_eq!(manifest_resolutions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_manifest_exact_resolves_and_routes_to_owner() {
+        let manifest_resolutions = Arc::new(AtomicUsize::new(0));
+        let contract_resolutions = Arc::new(AtomicUsize::new(0));
+        let executions = Arc::new(AtomicUsize::new(0));
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+        registry
+            .upsert_source(Arc::new(ExactResolvingSource {
+                manifest_resolutions: Arc::clone(&manifest_resolutions),
+                contract_resolutions: Arc::clone(&contract_resolutions),
+                executions: Arc::clone(&executions),
+            }))
+            .expect("source registered");
+
+        assert_eq!(
+            registry
+                .resolve_manifest("host_only")
+                .map(|manifest| manifest.name),
+            Some("host_only".to_string())
+        );
+        assert_eq!(manifest_resolutions.load(Ordering::SeqCst), 1);
+
+        let contract = registry.resolve_contract("host_only");
+        assert!(contract.is_some());
+        assert_eq!(manifest_resolutions.load(Ordering::SeqCst), 1);
+        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
+
+        let context = crate::ToolContext::new(
+            "registry-test".to_string(),
+            Arc::new(crate::testing::MockSessionManager::default()),
+            crate::TurnContext::default(),
+            None,
+        );
+        let args = json!({});
+        let result = registry
+            .execute(crate::ToolCall {
+                name: "host_only",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
+            .await;
+        assert!(result.success);
+        assert_eq!(result.result, json!("host_only"));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unknown_manifest_without_host_resolver_is_unavailable() {
+        let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
+
+        assert!(registry.resolve_manifest("missing").is_none());
+        assert!(registry.resolve_contract("missing").is_none());
+    }
+
     #[tokio::test]
     async fn upsert_source_registers_and_executes_external_tools() {
         let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
@@ -609,7 +880,7 @@ mod tests {
             .upsert_source(Arc::new(ExternalMockSource))
             .expect("source registered");
 
-        let defs = registry.definitions();
+        let defs = registry.tool_manifests();
         assert!(defs.iter().any(|def| def.name == "mcp__demo__search"));
 
         let context = crate::ToolContext::new(
@@ -651,7 +922,7 @@ mod tests {
             snapshot
                 .get("mcp__demo__search")
                 .unwrap()
-                .definition()
+                .manifest()
                 .effective_availability(&crate::ExecutionMode::standard()),
             crate::ToolAvailability::Off
         );
@@ -666,7 +937,7 @@ mod tests {
         registry
             .remove_source_id("external")
             .expect("source removed");
-        let defs = registry.definitions();
+        let defs = registry.tool_manifests();
         assert!(!defs.iter().any(|def| def.name == "mcp__demo__search"));
     }
 
@@ -682,20 +953,17 @@ mod tests {
         }
         let catalog = project_tool_catalog([
             crate::ToolSurfaceEntry {
-                definition: dummy_tool("read_file"),
+                manifest: dummy_tool("read_file").manifest(),
                 availability: crate::ToolAvailability::Showcased,
             },
             crate::ToolSurfaceEntry {
-                definition: dummy_tool("search_tools"),
+                manifest: dummy_tool("search_tools").manifest(),
                 availability: crate::ToolAvailability::Callable,
             },
         ]);
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
-        assert_eq!(
-            catalog[0]["signature"],
-            serde_json::json!("read_file() -> any")
-        );
+        assert!(catalog[0].get("signature").is_none());
         assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
     }
@@ -711,21 +979,16 @@ mod tests {
             )
         }
         let catalog = project_tool_catalog([crate::ToolSurfaceEntry {
-            definition: dummy_tool("llm_query").with_output_from_input_schema(
-                "output",
-                Some(serde_json::json!({ "type": "string" })),
-            ),
+            manifest: dummy_tool("llm_query")
+                .with_output_from_input_schema(
+                    "output",
+                    Some(serde_json::json!({ "type": "string" })),
+                )
+                .manifest(),
             availability: crate::ToolAvailability::Searchable,
         }]);
 
-        assert_eq!(
-            catalog[0]["output_contract"],
-            serde_json::json!({
-                "kind": "from_input_schema",
-                "input_field": "output",
-                "default_schema": { "type": "string" }
-            })
-        );
+        assert!(catalog[0].get("output_contract").is_none());
     }
 }
 
@@ -737,46 +1000,19 @@ where
         .into_iter()
         .filter(|entry| entry.availability.is_searchable())
         .map(|entry| {
-            let definition = entry.definition;
+            let manifest = entry.manifest;
             let availability = entry.availability;
-            let signature = definition.compact_contract().render_signature();
-            let loadable = matches!(definition.activation, crate::ToolActivation::Loadable);
-            let activation_hint = if loadable && !availability.is_callable() {
-                format!(
-                    "Call `load_tools(names=[\"{}\"])` to make this tool callable in the current session.",
-                    definition.name
-                )
-            } else if matches!(definition.activation, crate::ToolActivation::Internal) {
-                "This tool is internal and cannot be activated directly.".to_string()
-            } else {
-                String::new()
-            };
-            let mut projected = serde_json::json!({
-                "name": definition.name,
-                "signature": signature,
-                "namespace": definition.discovery.namespace,
-                "description": definition.description,
-                "params": definition.parameter_metadata(),
-                "input_schema": definition.input_schema,
-                "output_schema": definition.output_schema,
-                "examples": definition.examples,
-                "aliases": definition.discovery.aliases,
+            let projected = serde_json::json!({
+                "name": manifest.name,
+                "namespace": manifest.discovery.namespace,
+                "description": manifest.description,
+                "aliases": manifest.discovery.aliases,
                 "availability": availability,
                 "callable": availability.is_callable(),
                 "showcased": availability.is_showcased(),
                 "searchable": availability.is_searchable(),
-                "activation": definition.activation,
-                "loadable": loadable,
-                "activation_hint": activation_hint,
+                "activation": manifest.activation,
             });
-            if !definition.output_contract.is_static()
-                && let Some(object) = projected.as_object_mut()
-            {
-                object.insert(
-                    "output_contract".to_string(),
-                    serde_json::json!(definition.output_contract),
-                );
-            }
             projected
         })
         .collect()

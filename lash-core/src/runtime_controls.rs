@@ -17,7 +17,7 @@ use crate::plugin::{
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
     MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState, MonitorSpec,
-    ProgressSender, ToolDefinition, ToolExecutionMode, ToolResult,
+    ProgressSender, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
 };
 
 /// Plugin factory for mode-agnostic task-control tools.
@@ -63,8 +63,18 @@ struct TaskControlsNativeTools;
 
 #[async_trait::async_trait]
 impl ModeNativeToolsPlugin for TaskControlsNativeTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![tasks_list_tool_definition(), tasks_stop_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        task_control_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        task_control_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
     }
 
     async fn execute(
@@ -118,8 +128,12 @@ struct MonitorNativeTool;
 
 #[async_trait::async_trait]
 impl ModeNativeToolsPlugin for MonitorNativeTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![monitor_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![monitor_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "monitor").then(|| Arc::new(monitor_tool_definition().contract()))
     }
 
     async fn execute(
@@ -192,6 +206,10 @@ pub fn tasks_list_tool_definition() -> ToolDefinition {
     )
     .with_examples(vec!["tasks_list()".into()])
     .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
+fn task_control_tool_definitions() -> Vec<ToolDefinition> {
+    vec![tasks_list_tool_definition(), tasks_stop_tool_definition()]
 }
 
 pub fn tasks_stop_tool_definition() -> ToolDefinition {

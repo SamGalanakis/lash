@@ -20,7 +20,10 @@ use lash::{
         PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     },
     provider::{ProviderHandle, ProviderOptions},
-    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    tools::{
+        ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+        ToolResult,
+    },
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
@@ -921,8 +924,25 @@ struct FrontierAsyncHandlesTool;
 
 #[async_trait]
 impl ToolProvider for FrontierAsyncHandlesTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![frontier_list_async_handles_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "list_async_handles")
+            .then(|| Arc::new(frontier_list_async_handles_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        ToolResult::err_fmt(format_args!(
+            "`{}` is handled by the RLM session runtime and cannot run directly",
+            call.name
+        ))
+    }
+}
+
+fn frontier_list_async_handles_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
             "list_async_handles",
             "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
             ToolDefinition::default_input_schema(),
@@ -937,15 +957,7 @@ impl ToolProvider for FrontierAsyncHandlesTool {
             }),
         )
         .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
-        .with_execution_mode(ToolExecutionMode::Parallel)]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        ToolResult::err_fmt(format_args!(
-            "`{}` is handled by the RLM session runtime and cannot run directly",
-            call.name
-        ))
-    }
+        .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn evaluate_solution(

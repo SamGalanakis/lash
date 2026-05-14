@@ -424,7 +424,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     assert_eq!(
         state
             .get("app_lookup")
-            .and_then(|spec| spec.definition().availability_override),
+            .and_then(|spec| spec.manifest().availability_override),
         Some(ToolAvailability::Off)
     );
     Ok(())

@@ -18,7 +18,7 @@ use lash::{
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
-    tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult},
+    tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult},
     tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
@@ -777,8 +777,18 @@ struct DemoTools;
 
 #[async_trait]
 impl ToolProvider for DemoTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![read_board_tool(), play_move_tool()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        demo_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        demo_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -797,6 +807,10 @@ impl ToolProvider for DemoTools {
             other => ToolResult::err_fmt(format!("unknown demo tool `{other}`")),
         }
     }
+}
+
+fn demo_tool_definitions() -> Vec<ToolDefinition> {
+    vec![read_board_tool(), play_move_tool()]
 }
 
 fn read_board_tool() -> ToolDefinition {

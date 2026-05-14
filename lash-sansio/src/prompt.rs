@@ -3,14 +3,71 @@ use std::sync::{Arc, Mutex};
 
 use crate::{ExecutionMode, PromptContext, PromptContribution, PromptTemplate};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PromptFingerprint(u64);
+
+impl PromptFingerprint {
+    fn from_hashable(value: impl Hash) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+
+    fn write(self, state: &mut impl Hasher) {
+        self.0.hash(state);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptContributionSet {
+    contributions: Arc<Vec<PromptContribution>>,
+    fingerprint: PromptFingerprint,
+}
+
+impl PromptContributionSet {
+    pub fn new(contributions: Vec<PromptContribution>) -> Self {
+        let contributions = Arc::new(merge_prompt_contributions(contributions));
+        let fingerprint = fingerprint_contributions(&contributions);
+        Self {
+            contributions,
+            fingerprint,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
+    pub fn as_arc(&self) -> Arc<Vec<PromptContribution>> {
+        Arc::clone(&self.contributions)
+    }
+
+    pub fn as_slice(&self) -> &[PromptContribution] {
+        &self.contributions
+    }
+
+    pub fn fingerprint(&self) -> PromptFingerprint {
+        self.fingerprint
+    }
+}
+
+impl Default for PromptContributionSet {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PromptBuildInput {
     pub mode: ExecutionMode,
     pub template: PromptTemplate,
-    pub execution_prompt: String,
-    pub tool_names: Vec<String>,
+    pub template_fingerprint: PromptFingerprint,
+    pub execution_prompt: Arc<str>,
+    pub execution_prompt_fingerprint: PromptFingerprint,
+    pub tool_names: Arc<Vec<String>>,
+    pub tool_names_fingerprint: PromptFingerprint,
     pub omitted_tool_count: usize,
-    pub contributions: Vec<PromptContribution>,
+    pub contributions: PromptContributionSet,
 }
 
 #[derive(Clone, Debug)]
@@ -48,13 +105,13 @@ pub fn build_prompt(input: PromptBuildInput) -> PreparedPrompt {
 
 pub fn build_prompt_cached(input: PromptBuildInput, cache: Option<&PromptCache>) -> PreparedPrompt {
     let context = PromptContext {
-        mode: input.mode,
-        execution_prompt: input.execution_prompt,
-        tool_names: input.tool_names,
+        mode: input.mode.clone(),
+        execution_prompt: Arc::clone(&input.execution_prompt),
+        tool_names: Arc::clone(&input.tool_names),
         omitted_tool_count: input.omitted_tool_count,
-        contributions: merge_prompt_contributions(input.contributions),
+        contributions: input.contributions.as_arc(),
     };
-    let key = cache.map(|_| hash_prompt_inputs(&input.template, &context));
+    let key = cache.map(|_| hash_prompt_inputs(&input, &context));
     if let (Some(cache), Some(key)) = (cache, key)
         && let Some(cached) = cache.inner.lock().ok().and_then(|guard| {
             guard
@@ -80,20 +137,38 @@ pub fn build_prompt_cached(input: PromptBuildInput, cache: Option<&PromptCache>)
     }
 }
 
-fn hash_prompt_inputs(template: &PromptTemplate, context: &PromptContext) -> u64 {
+pub fn prompt_template_fingerprint(template: &PromptTemplate) -> PromptFingerprint {
+    PromptFingerprint::from_hashable(template)
+}
+
+pub fn prompt_text_fingerprint(text: &str) -> PromptFingerprint {
+    PromptFingerprint::from_hashable(text)
+}
+
+pub fn prompt_tool_names_fingerprint(tool_names: &[String]) -> PromptFingerprint {
+    PromptFingerprint::from_hashable(tool_names)
+}
+
+fn hash_prompt_inputs(input: &PromptBuildInput, context: &PromptContext) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    template.hash(&mut hasher);
+    input.template_fingerprint.write(&mut hasher);
     context.mode.hash(&mut hasher);
-    context.execution_prompt.hash(&mut hasher);
-    context.tool_names.hash(&mut hasher);
+    input.execution_prompt_fingerprint.write(&mut hasher);
+    input.tool_names_fingerprint.write(&mut hasher);
     context.omitted_tool_count.hash(&mut hasher);
-    for contribution in &context.contributions {
+    input.contributions.fingerprint().write(&mut hasher);
+    hasher.finish()
+}
+
+fn fingerprint_contributions(contributions: &[PromptContribution]) -> PromptFingerprint {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for contribution in contributions {
         contribution.slot.hash(&mut hasher);
         contribution.priority.hash(&mut hasher);
         contribution.title.hash(&mut hasher);
         contribution.content.hash(&mut hasher);
     }
-    hasher.finish()
+    PromptFingerprint(hasher.finish())
 }
 
 fn merge_prompt_contributions(contributions: Vec<PromptContribution>) -> Vec<PromptContribution> {
@@ -122,7 +197,7 @@ fn merge_prompt_contributions(contributions: Vec<PromptContribution>) -> Vec<Pro
 }
 
 fn normalize_contribution(mut contribution: PromptContribution) -> Option<PromptContribution> {
-    contribution.content = contribution.content.trim().to_string();
+    contribution.content = Arc::from(contribution.content.trim());
     if contribution.content.is_empty() {
         return None;
     }
@@ -131,7 +206,7 @@ fn normalize_contribution(mut contribution: PromptContribution) -> Option<Prompt
         .as_deref()
         .map(str::trim)
         .filter(|title| !title.is_empty())
-        .map(ToOwned::to_owned);
+        .map(Arc::from);
     Some(contribution)
 }
 
@@ -157,20 +232,41 @@ mod tests {
         PromptTemplateEntry, PromptTemplateSection, default_prompt_template, resolve_prompt_layers,
     };
 
+    fn input(
+        template: PromptTemplate,
+        execution_prompt: &str,
+        tool_names: Vec<String>,
+        omitted_tool_count: usize,
+        contributions: Vec<PromptContribution>,
+    ) -> PromptBuildInput {
+        let execution_prompt: Arc<str> = Arc::from(execution_prompt);
+        let tool_names = Arc::new(tool_names);
+        PromptBuildInput {
+            mode: crate::ExecutionMode::standard(),
+            template_fingerprint: prompt_template_fingerprint(&template),
+            template,
+            execution_prompt_fingerprint: prompt_text_fingerprint(&execution_prompt),
+            execution_prompt,
+            tool_names_fingerprint: prompt_tool_names_fingerprint(&tool_names),
+            tool_names,
+            omitted_tool_count,
+            contributions: PromptContributionSet::new(contributions),
+        }
+    }
+
     #[test]
     fn build_prompt_renders_template_from_merged_context() {
-        let prepared = build_prompt(PromptBuildInput {
-            mode: crate::ExecutionMode::standard(),
-            template: default_prompt_template(),
-            execution_prompt: "Use tools.".to_string(),
-            tool_names: vec!["read_file".to_string()],
-            omitted_tool_count: 0,
-            contributions: vec![
+        let prepared = build_prompt(input(
+            default_prompt_template(),
+            "Use tools.",
+            vec!["read_file".to_string()],
+            0,
+            vec![
                 PromptContribution::guidance("Repo", "Follow repo rules."),
                 PromptContribution::guidance("Repo", "Follow repo rules."),
                 PromptContribution::project_instructions("Be careful."),
             ],
-        });
+        ));
 
         assert!(prepared.system_prompt.contains("Use tools."));
         assert!(prepared.system_prompt.contains("Follow repo rules."));
@@ -181,13 +277,14 @@ mod tests {
     #[test]
     fn build_prompt_cached_reuses_arc_on_identical_inputs() {
         let cache = PromptCache::new();
-        let inputs = || PromptBuildInput {
-            mode: crate::ExecutionMode::standard(),
-            template: default_prompt_template(),
-            execution_prompt: "Use tools.".to_string(),
-            tool_names: vec!["read_file".to_string()],
-            omitted_tool_count: 0,
-            contributions: vec![PromptContribution::guidance("Repo", "Follow repo rules.")],
+        let inputs = || {
+            input(
+                default_prompt_template(),
+                "Use tools.",
+                vec!["read_file".to_string()],
+                0,
+                vec![PromptContribution::guidance("Repo", "Follow repo rules.")],
+            )
         };
         let first = build_prompt_cached(inputs(), Some(&cache));
         let second = build_prompt_cached(inputs(), Some(&cache));
@@ -198,25 +295,23 @@ mod tests {
     fn build_prompt_cached_renders_again_when_inputs_change() {
         let cache = PromptCache::new();
         let first = build_prompt_cached(
-            PromptBuildInput {
-                mode: crate::ExecutionMode::standard(),
-                template: default_prompt_template(),
-                execution_prompt: "Use tools.".to_string(),
-                tool_names: vec!["read_file".to_string()],
-                omitted_tool_count: 0,
-                contributions: vec![],
-            },
+            input(
+                default_prompt_template(),
+                "Use tools.",
+                vec!["read_file".to_string()],
+                0,
+                vec![],
+            ),
             Some(&cache),
         );
         let second = build_prompt_cached(
-            PromptBuildInput {
-                mode: crate::ExecutionMode::standard(),
-                template: default_prompt_template(),
-                execution_prompt: "Use other tools.".to_string(),
-                tool_names: vec!["read_file".to_string()],
-                omitted_tool_count: 0,
-                contributions: vec![],
-            },
+            input(
+                default_prompt_template(),
+                "Use other tools.",
+                vec!["read_file".to_string()],
+                0,
+                vec![],
+            ),
             Some(&cache),
         );
         assert!(!Arc::ptr_eq(&first.system_prompt, &second.system_prompt));
@@ -233,7 +328,7 @@ mod tests {
     fn content(contributions: &[PromptContribution]) -> Vec<&str> {
         contributions
             .iter()
-            .map(|contribution| contribution.content.as_str())
+            .map(|contribution| contribution.content.as_ref())
             .collect()
     }
 
@@ -245,7 +340,7 @@ mod tests {
 
         let rendered = resolved.template.render(&PromptContext {
             mode: crate::ExecutionMode::standard(),
-            execution_prompt: "execute".to_string(),
+            execution_prompt: Arc::from("execute"),
             ..PromptContext::default()
         });
         assert!(rendered.contains("session"));

@@ -6,7 +6,10 @@ use std::sync::Arc;
 use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolImage, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolImage, ToolManifest,
+    ToolProvider, ToolResult,
+};
 
 use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
 
@@ -68,9 +71,39 @@ const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
 
 #[async_trait::async_trait]
 impl ToolProvider for ReadFile {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![read_file_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "read_file").then(|| Arc::new(read_file_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
+        let path_str = match require_str(args, "path") {
+            Ok(s) => s.to_string(),
+            Err(e) => return e,
+        };
+
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(1)
+            .max(1);
+
+        let limit = match parse_limit(args) {
+            Ok(limit) => limit,
+            Err(e) => return e,
+        };
+
+        run_blocking(move || execute_read_file_sync(&path_str, offset, limit)).await
+    }
+}
+
+fn read_file_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "read_file",
                 "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
                 object_schema(
@@ -97,31 +130,7 @@ impl ToolProvider for ReadFile {
                 r#"read_file(path="src/main.rs", offset=1, limit=120)"#.into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let path_str = match require_str(args, "path") {
-            Ok(s) => s.to_string(),
-            Err(e) => return e,
-        };
-
-        let offset = args
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(1)
-            .max(1);
-
-        let limit = match parse_limit(args) {
-            Ok(limit) => limit,
-            Err(e) => return e,
-        };
-
-        run_blocking(move || execute_read_file_sync(&path_str, offset, limit)).await
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {

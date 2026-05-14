@@ -9,6 +9,8 @@ pub mod session_model;
 pub mod tool_surface;
 pub mod turn;
 
+use std::sync::Arc;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use attachment::{AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType};
@@ -20,7 +22,9 @@ pub use plugin::{
     CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, PromptContributionGate,
 };
 pub use prompt::{
-    PreparedPrompt, PromptBuildInput, PromptCache, build_prompt, build_prompt_cached,
+    PreparedPrompt, PromptBuildInput, PromptCache, PromptContributionSet, PromptFingerprint,
+    build_prompt, build_prompt_cached, prompt_template_fingerprint, prompt_text_fingerprint,
+    prompt_tool_names_fingerprint,
 };
 pub use sansio::{
     ChatContextProjector, CheckpointResumeAction, CompletedToolCall, ContextProjector,
@@ -43,8 +47,8 @@ pub use session_model::{
     default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
 };
 pub use tool_surface::{
-    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution, ToolSurfaceEntry,
-    ToolSurfaceOverride, build_tool_surface,
+    ToolContractResolver, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution,
+    ToolSurfaceEntry, ToolSurfaceOverride, build_tool_surface,
 };
 pub use turn::{PreparedTurnMachine, SansIoTurnInput, build_turn};
 
@@ -228,7 +232,6 @@ impl Default for ToolAvailabilityConfig {
 pub enum ToolActivation {
     #[default]
     Always,
-    Loadable,
     Internal,
 }
 
@@ -328,7 +331,119 @@ impl ToolOutputContract {
     }
 }
 
-/// A tool definition exposed to the runtime.
+/// Cheap tool metadata exposed to prompts, catalogs, UI, and availability checks.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolManifest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
+    pub availability: ToolAvailabilityConfig,
+    #[serde(default, skip_serializing_if = "is_default_tool_activation")]
+    pub activation: ToolActivation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_override: Option<ToolAvailability>,
+    #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
+    pub discovery: ToolDiscoveryMetadata,
+    #[serde(
+        default = "default_tool_execution_mode",
+        skip_serializing_if = "is_default_tool_execution_mode"
+    )]
+    pub execution_mode: ToolExecutionMode,
+}
+
+impl ToolManifest {
+    pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
+        self.availability_override
+            .unwrap_or_else(|| self.availability.for_mode(mode))
+    }
+}
+
+/// Heavy tool contract resolved only when a prompt or call needs schemas/docs.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ToolContract {
+    #[serde(default = "ToolDefinition::default_input_schema")]
+    pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub output_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_schema_projections: Vec<SchemaProjectionOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_schema_projections: Vec<SchemaProjectionOverride>,
+    #[serde(default, skip_serializing_if = "ToolOutputContract::is_static")]
+    pub output_contract: ToolOutputContract,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+}
+
+impl ToolContract {
+    pub fn compact_contract(&self, manifest: &ToolManifest) -> CompactToolContract {
+        self.compact_contract_with_example_limit(manifest, COMPACT_TOOL_EXAMPLE_LIMIT)
+    }
+
+    pub fn compact_contract_with_example_limit(
+        &self,
+        manifest: &ToolManifest,
+        example_limit: usize,
+    ) -> CompactToolContract {
+        CompactToolContract {
+            name: manifest.name.clone(),
+            signature: self.input_signature(manifest),
+            returns: self.output_summary(),
+            parameters: self.parameter_metadata(),
+            return_fields: self.output_contract.return_fields(&self.output_schema),
+            description: manifest.description.trim().to_string(),
+            examples: compact_examples(&self.examples, example_limit),
+        }
+    }
+
+    pub fn input_signature(&self, manifest: &ToolManifest) -> String {
+        let params = self
+            .parameter_docs()
+            .into_iter()
+            .map(|p| p.signature_fragment())
+            .collect::<Vec<_>>();
+        format!(
+            "{}{}({})",
+            manifest.name,
+            self.output_contract
+                .type_parameter_suffix()
+                .unwrap_or_default(),
+            params.join(", ")
+        )
+    }
+
+    pub fn output_summary(&self) -> String {
+        self.output_contract.return_type_label(&self.output_schema)
+    }
+
+    pub fn parameter_metadata(&self) -> Vec<serde_json::Value> {
+        self.parameter_docs()
+            .into_iter()
+            .map(|param| param.into_value())
+            .collect()
+    }
+
+    pub fn model_tool(&self, manifest: &ToolManifest) -> ModelTool {
+        ModelTool {
+            name: manifest.name.clone(),
+            description: manifest.description.clone(),
+            input_schema: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            input_schema_projections: self.input_schema_projections.clone(),
+            output_schema_projections: self.output_schema_projections.clone(),
+        }
+    }
+
+    fn parameter_docs(&self) -> Vec<ParameterDoc> {
+        let mut params = schema_parameter_docs(&self.input_schema);
+        self.output_contract
+            .apply_type_witness_parameter(&mut params);
+        params
+    }
+}
+
+/// Static authoring helper for tools.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -597,7 +712,7 @@ impl ToolDefinition {
     }
 
     pub fn output_summary(&self) -> String {
-        self.output_contract.return_type_label(&self.output_schema)
+        self.contract().output_summary()
     }
 
     pub fn signature(&self) -> String {
@@ -609,15 +724,8 @@ impl ToolDefinition {
     }
 
     pub fn compact_contract_with_example_limit(&self, example_limit: usize) -> CompactToolContract {
-        CompactToolContract {
-            name: self.name.clone(),
-            signature: self.input_signature(),
-            returns: self.output_summary(),
-            parameters: self.parameter_metadata(),
-            return_fields: self.output_contract.return_fields(&self.output_schema),
-            description: self.description.trim().to_string(),
-            examples: compact_examples(&self.examples, example_limit),
-        }
+        self.contract()
+            .compact_contract_with_example_limit(&self.manifest(), example_limit)
     }
 
     pub fn effective_availability(&self, mode: &ExecutionMode) -> ToolAvailability {
@@ -626,13 +734,47 @@ impl ToolDefinition {
     }
 
     pub fn model_tool(&self) -> ModelTool {
-        ModelTool {
+        self.contract().model_tool(&self.manifest())
+    }
+
+    pub fn manifest(&self) -> ToolManifest {
+        ToolManifest {
             name: self.name.clone(),
             description: self.description.clone(),
+            availability: self.availability.clone(),
+            activation: self.activation,
+            availability_override: self.availability_override,
+            discovery: self.discovery.clone(),
+            execution_mode: self.execution_mode,
+        }
+    }
+
+    pub fn contract(&self) -> ToolContract {
+        ToolContract {
             input_schema: self.input_schema.clone(),
             output_schema: self.output_schema.clone(),
             input_schema_projections: self.input_schema_projections.clone(),
             output_schema_projections: self.output_schema_projections.clone(),
+            output_contract: self.output_contract.clone(),
+            examples: self.examples.clone(),
+        }
+    }
+
+    pub fn from_manifest_and_contract(manifest: ToolManifest, contract: ToolContract) -> Self {
+        Self {
+            name: manifest.name,
+            description: manifest.description,
+            input_schema: contract.input_schema,
+            output_schema: contract.output_schema,
+            input_schema_projections: contract.input_schema_projections,
+            output_schema_projections: contract.output_schema_projections,
+            output_contract: contract.output_contract,
+            examples: contract.examples,
+            availability: manifest.availability,
+            activation: manifest.activation,
+            availability_override: manifest.availability_override,
+            discovery: manifest.discovery,
+            execution_mode: manifest.execution_mode,
         }
     }
 
@@ -2432,10 +2574,10 @@ pub fn head_tail_truncate(value: &str, max_chars: usize) -> (String, usize) {
 pub struct PromptContext {
     pub mode: ExecutionMode,
     #[serde(default)]
-    pub execution_prompt: String,
-    pub tool_names: Vec<String>,
+    pub execution_prompt: Arc<str>,
+    pub tool_names: Arc<Vec<String>>,
     pub omitted_tool_count: usize,
-    pub contributions: Vec<PromptContribution>,
+    pub contributions: Arc<Vec<PromptContribution>>,
 }
 
 impl PromptContext {

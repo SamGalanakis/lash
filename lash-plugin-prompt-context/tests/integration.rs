@@ -78,6 +78,6 @@ async fn prompt_context_plugin_contributes_environment_and_project_instruction_s
     assert!(contributions.iter().any(|contribution| {
         contribution.slot == PromptSlot::ProjectInstructions
             && contribution.title.as_deref() == Some("Project Instructions")
-            && contribution.content == "Repo rules"
+            && contribution.content.as_ref() == "Repo rules"
     }));
 }

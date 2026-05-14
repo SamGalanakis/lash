@@ -1,14 +1,10 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use lash_core::{
-    ToolAvailability, ToolCall, ToolContext, ToolDefinition, ToolProvider, ToolResult,
-};
+use lash_core::{ToolCall, ToolContext, ToolContract, ToolManifest, ToolProvider, ToolResult};
 use serde_json::{Value, json};
 
-use crate::catalog::CatalogTool;
 use crate::common::{LLM_CANDIDATE_LIMIT, args_with_limit, catalog_key, limit_from_args};
-use crate::definitions::{load_tools_definition, search_tools_definition};
+use crate::definitions::search_tools_definition;
 use crate::ranking::ToolDiscoveryIndex;
 use crate::rerank::{llm_rerank_request, merge_llm_selection, parse_llm_tool_names};
 
@@ -17,14 +13,26 @@ struct IndexCache {
     index: Option<Arc<ToolDiscoveryIndex>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ToolDiscoveryToolsProvider {
     cache: Arc<RwLock<IndexCache>>,
 }
 
+impl Default for ToolDiscoveryToolsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolDiscoveryToolsProvider {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            cache: Arc::default(),
+        }
+    }
+
+    pub fn search_only() -> Self {
+        Self::new()
     }
 
     fn index_for_catalog(&self, catalog: Vec<Value>) -> Arc<ToolDiscoveryIndex> {
@@ -84,105 +92,16 @@ impl ToolDiscoveryToolsProvider {
             limit
         )))
     }
-
-    fn requested_names(args: &Value) -> Result<Vec<String>, ToolResult> {
-        let Some(raw) = args.get("names") else {
-            return Ok(Vec::new());
-        };
-        match raw {
-            Value::Null => Ok(Vec::new()),
-            Value::String(name) => {
-                let trimmed = name.trim();
-                if trimmed.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    Ok(vec![trimmed.to_string()])
-                }
-            }
-            Value::Array(values) => values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                        .ok_or_else(|| {
-                            ToolResult::err_fmt("load_tools.names must contain non-empty strings")
-                        })
-                })
-                .collect(),
-            _ => Err(ToolResult::err_fmt(
-                "load_tools.names must be a string or list of strings",
-            )),
-        }
-    }
-
-    async fn load_tools(&self, args: &Value, context: &ToolContext) -> ToolResult {
-        let catalog = match context.tool_catalog().await {
-            Ok(catalog) => catalog,
-            Err(err) => return ToolResult::err_fmt(err.to_string()),
-        };
-        let requested_names = match Self::requested_names(args) {
-            Ok(names) => names,
-            Err(err) => return err,
-        };
-        if requested_names.is_empty() {
-            return ToolResult::err_fmt("load_tools requires non-empty `names`");
-        }
-
-        let by_name = catalog
-            .into_iter()
-            .filter_map(CatalogTool::from_value)
-            .map(|tool| (tool.name.clone(), tool))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut loaded = Vec::new();
-        let mut already_callable = Vec::new();
-        let mut already_showcased = Vec::new();
-        let mut not_loadable = Vec::new();
-        let mut unknown = Vec::new();
-        let mut to_promote = Vec::new();
-
-        for name in requested_names {
-            let Some(tool) = by_name.get(&name) else {
-                unknown.push(name);
-                continue;
-            };
-            if tool.callable {
-                already_callable.push(name);
-            } else if tool.showcased {
-                already_showcased.push(name);
-            } else if tool.loadable {
-                to_promote.push(name.clone());
-                loaded.push(name);
-            } else {
-                not_loadable.push(name);
-            }
-        }
-
-        if !to_promote.is_empty()
-            && let Err(err) = context
-                .set_tools_availability(&to_promote, Some(ToolAvailability::Showcased))
-                .await
-        {
-            return ToolResult::err_fmt(format_args!("failed to load tools: {err}"));
-        }
-
-        ToolResult::ok(json!({
-            "loaded": loaded,
-            "already_callable": already_callable,
-            "already_showcased": already_showcased,
-            "not_loadable": not_loadable,
-            "unknown": unknown,
-        }))
-    }
 }
 
 #[async_trait::async_trait]
 impl ToolProvider for ToolDiscoveryToolsProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![search_tools_definition(), load_tools_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![search_tools_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "search_tools").then(|| Arc::new(search_tools_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -191,7 +110,6 @@ impl ToolProvider for ToolDiscoveryToolsProvider {
                 Ok(catalog) => self.search_tools(call.args, catalog, call.context).await,
                 Err(err) => ToolResult::err_fmt(err.to_string()),
             },
-            "load_tools" => self.load_tools(call.args, call.context).await,
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         }
     }

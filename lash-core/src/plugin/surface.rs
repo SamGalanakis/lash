@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use super::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolSurfaceContext {
     pub session_id: String,
     pub mode: ExecutionMode,
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Vec<ToolManifest>,
+    pub resolve_contract: Option<lash_sansio::ToolContractResolver>,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionAuthority>,
 }

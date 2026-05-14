@@ -5,7 +5,7 @@ use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
     ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
-    ToolProvider, ToolResult, TurnInput,
+    ToolManifest, ToolProvider, ToolResult, TurnInput,
 };
 
 pub use lash_sansio::{
@@ -161,7 +161,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for MockToolProvider {
-        fn definitions(&self) -> Vec<ToolDefinition> {
+        fn tool_manifests(&self) -> Vec<ToolManifest> {
+            self.tool_definitions()
+                .into_iter()
+                .map(|tool| tool.manifest())
+                .collect()
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            self.tool_definitions()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| Arc::new(tool.contract()))
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> ToolResult {
+            ToolResult::ok(call.args.clone())
+        }
+    }
+
+    impl MockToolProvider {
+        fn tool_definitions(&self) -> Vec<ToolDefinition> {
             vec![
                 ToolDefinition::raw(
                     "mock_tool",
@@ -176,10 +196,6 @@ mod tests {
                 )
                 .with_availability(crate::ToolAvailabilityConfig::callable()),
             ]
-        }
-
-        async fn execute(&self, call: crate::ToolCall<'_>) -> ToolResult {
-            ToolResult::ok(call.args.clone())
         }
     }
 
@@ -267,7 +283,7 @@ mod tests {
     async fn session_collects_tools_and_prompts() {
         let host = PluginHost::new(vec![Arc::new(MockPluginFactory)]);
         let session = host.build_standard_session("root", None).expect("session");
-        assert_eq!(session.tools().definitions().len(), 1);
+        assert_eq!(session.tools().tool_manifests().len(), 1);
         let contributions = session
             .collect_prompt_contributions(PromptHookContext {
                 session_id: "root".to_string(),
@@ -525,7 +541,7 @@ mod tests {
             services
                 .plugins
                 .tools()
-                .definitions()
+                .tool_manifests()
                 .iter()
                 .any(|tool| tool.name == "mock_tool")
         );

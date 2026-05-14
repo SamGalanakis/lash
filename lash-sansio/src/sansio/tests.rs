@@ -99,7 +99,7 @@ fn drain_effects(machine: &mut TurnMachine) -> Vec<Effect> {
 
 fn find_llm_call(effects: &[Effect]) -> Option<(&EffectId, &LlmRequest)> {
     effects.iter().find_map(|effect| match effect {
-        Effect::LlmCall { id, request } => Some((id, request)),
+        Effect::LlmCall { id, request } => Some((id, request.as_ref())),
         _ => None,
     })
 }

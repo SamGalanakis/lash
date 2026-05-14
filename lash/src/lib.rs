@@ -53,9 +53,9 @@ pub mod tools {
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
         StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolCallRecord, ToolContext, ToolDefinition,
-        ToolDiscoveryMetadata, ToolExecutionMode, ToolOutputContract, ToolProvider, ToolResult,
-        ToolSourceHandle,
+        ToolAvailabilityConfig, ToolCall, ToolCallRecord, ToolContext, ToolContract,
+        ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
+        ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 

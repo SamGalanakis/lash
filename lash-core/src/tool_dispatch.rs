@@ -11,7 +11,7 @@ use crate::plugin::{
 use crate::tool_schema::validate_tool_input;
 use crate::{
     ProgressSender, SessionEvent, ToolCall, ToolCallRecord, ToolContext, ToolExecutionMode,
-    ToolImage, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
+    ToolImage, ToolManifest, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
@@ -70,11 +70,11 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext,
 ) -> ToolDispatchOutcome {
-    if !context.surface.has_callable_tool(&tool_name) {
+    if resolve_callable_manifest(context, &tool_name).is_none() {
         return outcome(
             tool_name,
             args,
-            ToolResult::err_fmt("Tool is not callable in this session"),
+            ToolResult::err_fmt("Tool is unavailable in this session"),
             0,
         );
     }
@@ -162,14 +162,21 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
         return outcome(tool_name, args, result, 0);
     }
 
-    if let Some(tool) = context
-        .surface
-        .tools
+    let contract = context
+        .plugins
+        .mode_native_tools()
         .iter()
-        .find(|entry| entry.availability.is_callable() && entry.definition.name == tool_name)
-        .map(|entry| &entry.definition)
-        && let Err(err) = validate_tool_input(tool, &args)
-    {
+        .find_map(|provider| provider.resolve_contract(&tool_name))
+        .or_else(|| context.tools.resolve_contract(&tool_name));
+    let Some(contract) = contract else {
+        return outcome(
+            tool_name,
+            args,
+            ToolResult::err_fmt("Tool contract is unavailable in this session"),
+            0,
+        );
+    };
+    if let Err(err) = validate_tool_input(&contract, &args) {
         return outcome(tool_name, args, ToolResult::err_fmt(err), 0);
     }
 
@@ -284,6 +291,48 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     outcome(tool_name, args, result, duration_ms)
 }
 
+fn resolve_callable_manifest(
+    context: &ToolDispatchContext,
+    tool_name: &str,
+) -> Option<ToolManifest> {
+    if let Some(entry) = context
+        .surface
+        .tools
+        .iter()
+        .find(|tool| tool.manifest.name == tool_name)
+    {
+        return entry
+            .availability
+            .is_callable()
+            .then(|| entry.manifest.clone());
+    }
+
+    let mode = context.plugins.execution_mode();
+    let visible_and_callable = |manifest: ToolManifest| {
+        if context.plugins.tool_access().hides(&manifest.name) {
+            return None;
+        }
+        manifest
+            .effective_availability(&mode)
+            .is_callable()
+            .then_some(manifest)
+    };
+
+    for provider in context.plugins.mode_native_tools() {
+        if let Some(manifest) = provider
+            .resolve_manifest(tool_name)
+            .and_then(&visible_and_callable)
+        {
+            return Some(manifest);
+        }
+    }
+
+    context
+        .tools
+        .resolve_manifest(tool_name)
+        .and_then(visible_and_callable)
+}
+
 pub(crate) async fn dispatch_parallel_tool_call(
     context: Arc<ToolDispatchContext>,
     spec: ParallelToolCallSpec,
@@ -308,8 +357,8 @@ pub(crate) fn resolve_tool_execution_mode(
         .surface
         .tools
         .iter()
-        .find(|def| def.definition.name == tool_name)
-        .map(|def| def.definition.execution_mode)
+        .find(|def| def.manifest.name == tool_name)
+        .map(|def| def.manifest.execution_mode)
         .unwrap_or_default()
 }
 
@@ -427,6 +476,7 @@ mod tests {
     use crate::plugin::{PluginHost, StaticPluginFactory};
     use crate::{ExecutionMode, ToolProvider};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Barrier;
     use tokio::time::{Duration, timeout};
@@ -458,12 +508,56 @@ mod tests {
         .with_execution_mode(ToolExecutionMode::Parallel)
     }
 
+    fn named_beta_tool(name: &str) -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            name,
+            "",
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+            json!({ "type": "string" }),
+        )
+        .with_execution_mode(ToolExecutionMode::Parallel)
+    }
+
+    fn manifests(definitions: Vec<crate::ToolDefinition>) -> Vec<crate::ToolManifest> {
+        definitions
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn contract_from(
+        definitions: Vec<crate::ToolDefinition>,
+        name: &str,
+    ) -> Option<Arc<crate::ToolContract>> {
+        definitions
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
     struct MockTools;
 
     #[async_trait::async_trait]
     impl ToolProvider for MockTools {
-        fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![test_tool("alpha", ToolExecutionMode::Parallel), beta_tool()]
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![
+                test_tool("alpha", ToolExecutionMode::Parallel),
+                beta_tool(),
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            contract_from(
+                vec![test_tool("alpha", ToolExecutionMode::Parallel), beta_tool()],
+                name,
+            )
         }
 
         async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -490,11 +584,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for ParallelProbeTools {
-        fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![
                 test_tool("probe_a", ToolExecutionMode::Parallel),
                 test_tool("probe_b", ToolExecutionMode::Parallel),
-            ]
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            contract_from(
+                vec![
+                    test_tool("probe_a", ToolExecutionMode::Parallel),
+                    test_tool("probe_b", ToolExecutionMode::Parallel),
+                ],
+                name,
+            )
         }
 
         async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -513,27 +617,36 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for StrictMcpTools {
-        fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![crate::ToolDefinition::raw(
-                "mcp__appworld__venmo_show_transactions",
-                "Show Venmo transactions",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "min_created_at": { "type": "string" },
-                        "max_created_at": { "type": "string" },
-                        "limit": { "type": "integer", "maximum": 100 }
-                    },
-                    "required": ["limit"]
-                }),
-                json!({ "type": "object", "additionalProperties": true }),
-            )]
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![strict_mcp_tool_definition()])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "mcp__appworld__venmo_show_transactions")
+                .then(|| Arc::new(strict_mcp_tool_definition().contract()))
         }
 
         async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
             self.executed.fetch_add(1, Ordering::SeqCst);
             ToolResult::ok(json!({ "executed": true }))
         }
+    }
+
+    fn strict_mcp_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "mcp__appworld__venmo_show_transactions",
+            "Show Venmo transactions",
+            json!({
+                "type": "object",
+                "properties": {
+                    "min_created_at": { "type": "string" },
+                    "max_created_at": { "type": "string" },
+                    "limit": { "type": "integer", "maximum": 100 }
+                },
+                "required": ["limit"]
+            }),
+            json!({ "type": "object", "additionalProperties": true }),
+        )
     }
 
     fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext {
@@ -583,6 +696,126 @@ mod tests {
         }
     }
 
+    struct CountingContractTools {
+        contracts_resolved: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+    }
+
+    struct ExactDispatchTools {
+        contracts_resolved: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+        contract_available: bool,
+    }
+
+    struct HiddenDispatchTools {
+        contracts_resolved: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for CountingContractTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![beta_tool()])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            self.contracts_resolved.fetch_add(1, Ordering::SeqCst);
+            (name == "beta").then(|| Arc::new(beta_tool().contract()))
+        }
+
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(json!("ok"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for ExactDispatchTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            Vec::new()
+        }
+
+        fn resolve_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
+            (name == "host_only").then(|| named_beta_tool("host_only").manifest())
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            self.contracts_resolved.fetch_add(1, Ordering::SeqCst);
+            (self.contract_available && name == "host_only")
+                .then(|| Arc::new(named_beta_tool("host_only").contract()))
+        }
+
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(json!("host"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for HiddenDispatchTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![
+                named_beta_tool("hidden").with_availability(crate::ToolAvailabilityConfig::off()),
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            self.contracts_resolved.fetch_add(1, Ordering::SeqCst);
+            (name == "hidden").then(|| Arc::new(named_beta_tool("hidden").contract()))
+        }
+
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(json!("hidden"))
+        }
+    }
+
+    fn lazy_contract_dispatch_context(
+        contracts_resolved: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+    ) -> ToolDispatchContext {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let provider: Arc<dyn ToolProvider> = Arc::new(CountingContractTools {
+            contracts_resolved,
+            executed,
+        });
+        let tools = Arc::clone(&provider);
+        let surface = Arc::new(crate::ToolSurface::from_tools(
+            provider.tool_manifests(),
+            ExecutionMode::standard(),
+            BTreeMap::new(),
+        ));
+        ToolDispatchContext {
+            plugins: test_plugins(provider),
+            tools,
+            surface,
+            host: Arc::new(MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        }
+    }
+
+    fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let plugins = test_plugins(Arc::clone(&provider));
+        let tools = plugins.tools();
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        ToolDispatchContext {
+            plugins,
+            tools,
+            surface,
+            host: Arc::new(MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        }
+    }
+
     fn parallel_dispatch_context(
         barrier: Arc<Barrier>,
         started: Arc<AtomicUsize>,
@@ -614,6 +847,97 @@ mod tests {
             outcome.record.result,
             json!("value: required property missing")
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolves_contract_only_for_called_tool_before_execution() {
+        let contracts_resolved = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let outcome = dispatch_tool_call(
+            &lazy_contract_dispatch_context(Arc::clone(&contracts_resolved), Arc::clone(&executed)),
+            "beta".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(outcome.record.success);
+        assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_exact_resolves_missing_surface_tool_and_executes_owner() {
+        let contracts_resolved = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
+            contracts_resolved: Arc::clone(&contracts_resolved),
+            executed: Arc::clone(&executed),
+            contract_available: true,
+        });
+        let outcome = dispatch_tool_call(
+            &exact_dispatch_context(provider),
+            "host_only".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(outcome.record.success);
+        assert_eq!(outcome.record.result, json!("host"));
+        assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_contract_unavailable_skips_execution() {
+        let contracts_resolved = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn ToolProvider> = Arc::new(ExactDispatchTools {
+            contracts_resolved: Arc::clone(&contracts_resolved),
+            executed: Arc::clone(&executed),
+            contract_available: false,
+        });
+        let outcome = dispatch_tool_call(
+            &exact_dispatch_context(provider),
+            "host_only".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.success);
+        assert_eq!(
+            outcome.record.result,
+            json!("Tool contract is unavailable in this session")
+        );
+        assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_hidden_tool_before_contract_resolution() {
+        let contracts_resolved = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn ToolProvider> = Arc::new(HiddenDispatchTools {
+            contracts_resolved: Arc::clone(&contracts_resolved),
+            executed: Arc::clone(&executed),
+        });
+        let outcome = dispatch_tool_call(
+            &exact_dispatch_context(provider),
+            "hidden".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.success);
+        assert_eq!(
+            outcome.record.result,
+            json!("Tool is unavailable in this session")
+        );
+        assert_eq!(contracts_resolved.load(Ordering::SeqCst), 0);
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -766,11 +1090,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolProvider for SerialProbeTools {
-        fn definitions(&self) -> Vec<crate::ToolDefinition> {
-            vec![
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![
                 test_tool("serial_a", ToolExecutionMode::Serial),
                 test_tool("serial_b", ToolExecutionMode::Serial),
-            ]
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            contract_from(
+                vec![
+                    test_tool("serial_a", ToolExecutionMode::Serial),
+                    test_tool("serial_b", ToolExecutionMode::Serial),
+                ],
+                name,
+            )
         }
 
         async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -871,12 +1205,23 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ToolProvider for MixedTools {
-            fn definitions(&self) -> Vec<crate::ToolDefinition> {
-                vec![
+            fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+                manifests(vec![
                     test_tool("par_a", ToolExecutionMode::Parallel),
                     test_tool("par_b", ToolExecutionMode::Parallel),
                     test_tool("ser", ToolExecutionMode::Serial),
-                ]
+                ])
+            }
+
+            fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+                contract_from(
+                    vec![
+                        test_tool("par_a", ToolExecutionMode::Parallel),
+                        test_tool("par_b", ToolExecutionMode::Parallel),
+                        test_tool("ser", ToolExecutionMode::Serial),
+                    ],
+                    name,
+                )
             }
 
             async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

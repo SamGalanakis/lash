@@ -4,9 +4,12 @@ use std::{fmt::Write as _, sync::Arc};
 use lash_core::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use lash_core::sansio::ContextProjector;
 use lash_core::{
-    ChronologicalEntry, ChronologicalPayload, LlmRequest, ModeBuildInput, ModeConfig, ModePreamble,
-    ProjectorContext, PromptContribution, PromptUsage, head_tail_truncate,
+    BorrowedChronologicalEntry, BorrowedChronologicalPayload, LlmRequest, ModeBuildInput,
+    ModeConfig, ModePreamble, ProjectorContext, PromptContribution, PromptUsage,
+    head_tail_truncate,
 };
+#[cfg(test)]
+use lash_core::{ChronologicalEntry, ChronologicalPayload};
 #[cfg(test)]
 use lash_rlm_types::RlmHistoryItem;
 use lash_rlm_types::{RlmAttachmentRef, RlmHistoryRole, RlmImageRef, RlmTermination};
@@ -38,7 +41,7 @@ impl Default for RlmProjectorConfig {
 }
 
 pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> ModePreamble {
-    let tool_surface = (*input.tool_surface).clone();
+    let tool_surface = input.tool_surface.as_ref();
     let omitted_tool_count = tool_surface.omitted_tool_count();
     let mut prompt_contributions = Vec::new();
 
@@ -61,9 +64,9 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
         tool_specs: Arc::new(Vec::new()),
         tool_names: tool_surface.tool_names(),
         omitted_tool_count,
-        execution_prompt: crate::protocol::rlm_execution_section_with_features(
+        execution_prompt: Arc::from(crate::protocol::rlm_execution_section_with_features(
             config.prompt_features,
-        ),
+        )),
         prompt_contributions,
     }
 }
@@ -91,9 +94,18 @@ mod catalogue_tests {
 
     #[test]
     fn rlm_preamble_uses_resolved_tool_surface_without_search_tool_special_cases() {
+        let definitions = vec![tool("search_tools"), tool("grep")];
+        let contracts = definitions
+            .iter()
+            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .collect();
         let surface = lash_core::ToolSurface::from_tools(
-            vec![tool("search_tools"), tool("grep")],
+            definitions
+                .into_iter()
+                .map(|tool| tool.manifest())
+                .collect(),
             ExecutionMode::new("test"),
+            contracts,
         );
 
         let preamble = build_rlm_preamble(
@@ -106,11 +118,11 @@ mod catalogue_tests {
         );
 
         assert_eq!(preamble.omitted_tool_count, 0);
-        assert_eq!(preamble.tool_names, vec!["search_tools", "grep"]);
+        assert_eq!(preamble.tool_names.as_ref(), &vec!["search_tools", "grep"]);
         let prompt = preamble
             .prompt_contributions
             .iter()
-            .map(|contribution| contribution.content.as_str())
+            .map(|contribution| contribution.content.as_ref())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(prompt.contains("search_tools"));
@@ -149,8 +161,7 @@ fn rlm_termination(options: &lash_core::ModeTurnOptions) -> RlmTermination {
 }
 
 impl ContextProjector<lash_core::HostModeProtocol> for RlmContextProjector {
-    fn project(&self, ctx: ProjectorContext<'_>) -> LlmRequest {
-        let projection = projection_from_projector_context(&ctx);
+    fn project(&self, ctx: ProjectorContext<'_>) -> Arc<LlmRequest> {
         let termination = rlm_termination(&ctx.config.termination);
         let finalization = rlm_finalization_prompt(&termination);
         let required_output = required_output_block(&termination);
@@ -166,21 +177,24 @@ impl ContextProjector<lash_core::HostModeProtocol> for RlmContextProjector {
         if !ctx.config.system_prompt.trim().is_empty() {
             messages.push(LlmMessage::text(
                 LlmRole::System,
-                std::sync::Arc::clone(&ctx.config.system_prompt),
+                Arc::clone(&ctx.config.system_prompt),
             ));
         }
         let mut attachments = Vec::new();
-        messages.extend(build_rlm_history_messages(
-            &projection,
-            self.max_output_chars,
-            ctx.mode_iteration + 1,
-            finalization,
-            required_output.as_deref(),
-            budget_suffix.as_deref(),
+        messages.extend(build_rlm_history_messages_from_turn(
+            RlmHistoryRenderInput {
+                events: ctx.events,
+                turn_messages: ctx.messages,
+                max_output_chars: self.max_output_chars,
+                mode_iteration: ctx.mode_iteration + 1,
+                finalization,
+                required_output: required_output.as_deref(),
+                budget_suffix: budget_suffix.as_deref(),
+            },
             &mut attachments,
         ));
 
-        LlmRequest {
+        Arc::new(LlmRequest {
             model: ctx.config.model.clone(),
             messages,
             attachments,
@@ -191,10 +205,50 @@ impl ContextProjector<lash_core::HostModeProtocol> for RlmContextProjector {
             output_spec: None,
             stream_events: None,
             provider_trace: None,
-        }
+        })
     }
 }
 
+struct RlmHistoryRenderInput<'a> {
+    events: &'a [lash_core::SessionEventRecord],
+    turn_messages: &'a lash_core::MessageSequence,
+    max_output_chars: usize,
+    mode_iteration: usize,
+    finalization: &'a str,
+    required_output: Option<&'a str>,
+    budget_suffix: Option<&'a str>,
+}
+
+fn build_rlm_history_messages_from_turn(
+    input: RlmHistoryRenderInput<'_>,
+    attachments: &mut Vec<LlmAttachment>,
+) -> Vec<LlmMessage> {
+    let mut messages = Vec::new();
+    let mut saw_history = false;
+    lash_core::visit_turn_view(input.events, input.turn_messages, &[], |entry| {
+        saw_history = true;
+        let mut blocks = vec![text_block(
+            render_borrowed_history_entry(entry, input.max_output_chars),
+            false,
+        )];
+        append_borrowed_entry_image_blocks(entry, attachments, &mut blocks);
+        messages.push(LlmMessage::new(
+            borrowed_history_entry_llm_role(entry),
+            blocks,
+        ));
+    });
+    append_current_iteration_message(
+        &mut messages,
+        saw_history,
+        input.mode_iteration,
+        input.finalization,
+        input.required_output,
+        input.budget_suffix,
+    );
+    messages
+}
+
+#[cfg(test)]
 fn build_rlm_history_messages(
     projection: &lash_core::ChronologicalProjection,
     max_output_chars: usize,
@@ -206,15 +260,7 @@ fn build_rlm_history_messages(
 ) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
 
-    if projection.entries().is_empty() {
-        messages.push(LlmMessage::new(
-            LlmRole::User,
-            vec![text_block(
-                "=== HISTORY ===\n\nNo chronological history is available.",
-                false,
-            )],
-        ));
-    } else {
+    if !projection.entries().is_empty() {
         for entry in projection.entries() {
             let mut blocks = vec![text_block(
                 render_history_entry(entry, max_output_chars),
@@ -223,9 +269,37 @@ fn build_rlm_history_messages(
             append_entry_image_blocks(entry, attachments, &mut blocks);
             messages.push(LlmMessage::new(history_entry_llm_role(entry), blocks));
         }
-        mark_last_history_text_cache_breakpoint(&mut messages);
     }
+    append_current_iteration_message(
+        &mut messages,
+        !projection.entries().is_empty(),
+        mode_iteration,
+        finalization,
+        required_output,
+        budget_suffix,
+    );
+    messages
+}
 
+fn append_current_iteration_message(
+    messages: &mut Vec<LlmMessage>,
+    saw_history: bool,
+    mode_iteration: usize,
+    finalization: &str,
+    required_output: Option<&str>,
+    budget_suffix: Option<&str>,
+) {
+    if !saw_history {
+        messages.push(LlmMessage::new(
+            LlmRole::User,
+            vec![text_block(
+                "=== HISTORY ===\n\nNo chronological history is available.",
+                false,
+            )],
+        ));
+    } else {
+        mark_last_history_text_cache_breakpoint(messages);
+    }
     let mut current_prompt = format!(
         "\n\n\n=== CURRENT ITERATION: {mode_iteration} ===\n\n\n=== FINALIZATION ===\n\n{finalization}",
     );
@@ -241,7 +315,6 @@ fn build_rlm_history_messages(
         LlmRole::User,
         vec![text_block(current_prompt, false)],
     ));
-    messages
 }
 
 fn required_output_block(termination: &RlmTermination) -> Option<String> {
@@ -315,6 +388,7 @@ fn text_block(text: impl Into<Arc<str>>, cache_breakpoint: bool) -> LlmContentBl
     }
 }
 
+#[cfg(test)]
 fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
     match &entry.payload {
         ChronologicalPayload::Message(message) => match message.role {
@@ -324,6 +398,18 @@ fn history_entry_llm_role(entry: &ChronologicalEntry) -> LlmRole {
         },
         ChronologicalPayload::ToolCall(_) => LlmRole::User,
         ChronologicalPayload::ModeEvent(_) => LlmRole::Assistant,
+    }
+}
+
+fn borrowed_history_entry_llm_role(entry: BorrowedChronologicalEntry<'_>) -> LlmRole {
+    match entry.payload {
+        BorrowedChronologicalPayload::Message(message) => match message.role {
+            lash_core::MessageRole::User => LlmRole::User,
+            lash_core::MessageRole::Assistant => LlmRole::Assistant,
+            lash_core::MessageRole::System => LlmRole::System,
+        },
+        BorrowedChronologicalPayload::ToolCall(_) => LlmRole::User,
+        BorrowedChronologicalPayload::ModeEvent(_) => LlmRole::Assistant,
     }
 }
 
@@ -366,29 +452,15 @@ impl RlmContextProjector {
     }
 }
 
-fn projection_from_projector_context(
-    ctx: &ProjectorContext<'_>,
-) -> lash_core::ChronologicalProjection {
-    let read_view = lash_core::SessionReadView::from_derived_message_view(
-        lash_core::SessionStateEnvelope::default(),
-        Arc::new(ctx.events.to_vec()),
-        Arc::new(ctx.messages.iter().cloned().collect()),
-        Arc::new(Vec::new()),
-    );
-    read_view.chronological_projection()
-}
-
 #[cfg(test)]
 fn projection_from_events(
     events: &[lash_core::SessionEventRecord],
 ) -> lash_core::ChronologicalProjection {
-    let read_view = lash_core::SessionReadView::from_derived_message_view(
-        lash_core::SessionStateEnvelope::default(),
-        Arc::new(events.to_vec()),
-        Arc::new(Vec::new()),
-        Arc::new(Vec::new()),
-    );
-    read_view.chronological_projection()
+    lash_core::ChronologicalProjection::from_turn_view(
+        events,
+        &lash_core::MessageSequence::default(),
+        &[],
+    )
 }
 
 #[cfg(test)]
@@ -470,6 +542,7 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
     rendered
 }
 
+#[cfg(test)]
 fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> String {
     let mut rendered = String::new();
     match &entry.payload {
@@ -510,6 +583,85 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
             },
         ),
         ChronologicalPayload::ModeEvent(event) => {
+            let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step)) =
+                crate::decode_rlm_mode_event(event)
+            else {
+                return rendered;
+            };
+            let images = step
+                .images
+                .iter()
+                .map(|image| RlmImageRef {
+                    id: image.id.to_string(),
+                    media_type: image.media_type,
+                    width: image.width,
+                    height: image.height,
+                    bytes: image.byte_len as usize,
+                    label: image.label.clone(),
+                })
+                .collect::<Vec<_>>();
+            append_repl_step(
+                &mut rendered,
+                ReplStepRender {
+                    index: entry.index,
+                    mode_iteration: step.mode_iteration,
+                    reasoning: &step.reasoning,
+                    code: &step.code,
+                    output: &step.output,
+                    images: &images,
+                    error: step.error.as_deref(),
+                    final_output: step.final_output.as_ref(),
+                    max_output_chars,
+                },
+            );
+        }
+    }
+    rendered
+}
+
+fn render_borrowed_history_entry(
+    entry: BorrowedChronologicalEntry<'_>,
+    max_output_chars: usize,
+) -> String {
+    let mut rendered = String::new();
+    match entry.payload {
+        BorrowedChronologicalPayload::Message(message) => {
+            let content = message_history_text_parts(message.parts);
+            let attachments = message
+                .parts
+                .iter()
+                .filter_map(|part| {
+                    let attachment = part.attachment.as_ref()?;
+                    Some(RlmAttachmentRef {
+                        id: part.id.clone(),
+                        media_type: attachment.reference.media_type,
+                        label: attachment.reference.label.clone(),
+                        reference: attachment.reference.id.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            append_history_message(
+                &mut rendered,
+                entry.index,
+                &history_role(message.role),
+                &content,
+                &attachments,
+                max_output_chars,
+            );
+        }
+        BorrowedChronologicalPayload::ToolCall(record) => append_history_tool_call(
+            &mut rendered,
+            HistoryToolCallRender {
+                index: entry.index,
+                tool: &record.tool,
+                args: &record.args,
+                result: &record.result,
+                success: record.success,
+                duration_ms: record.duration_ms,
+                max_output_chars,
+            },
+        ),
+        BorrowedChronologicalPayload::ModeEvent(event) => {
             let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step)) =
                 crate::decode_rlm_mode_event(event)
             else {
@@ -587,6 +739,7 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
     );
 }
 
+#[cfg(test)]
 fn append_entry_image_blocks(
     entry: &lash_core::ChronologicalEntry,
     attachments: &mut Vec<LlmAttachment>,
@@ -615,6 +768,37 @@ fn append_entry_image_blocks(
             }
         }
         lash_core::ChronologicalPayload::ToolCall(_) => {}
+    }
+}
+
+fn append_borrowed_entry_image_blocks(
+    entry: BorrowedChronologicalEntry<'_>,
+    attachments: &mut Vec<LlmAttachment>,
+    blocks: &mut Vec<LlmContentBlock>,
+) {
+    match entry.payload {
+        BorrowedChronologicalPayload::Message(message) => {
+            for part in message.parts {
+                let Some(attachment) = part.attachment.as_ref() else {
+                    continue;
+                };
+                let attachment_idx = attachments.len();
+                attachments.push(LlmAttachment::reference(attachment.reference.clone()));
+                blocks.push(LlmContentBlock::Image { attachment_idx });
+            }
+        }
+        BorrowedChronologicalPayload::ModeEvent(event) => {
+            if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
+                crate::decode_rlm_mode_event(event)
+            {
+                for image in &entry.images {
+                    let attachment_idx = attachments.len();
+                    attachments.push(LlmAttachment::reference(image.clone()));
+                    blocks.push(LlmContentBlock::Image { attachment_idx });
+                }
+            }
+        }
+        BorrowedChronologicalPayload::ToolCall(_) => {}
     }
 }
 
@@ -650,9 +834,13 @@ fn append_history_message(
     }
 }
 
+#[cfg(test)]
 fn message_history_text(message: &lash_core::Message) -> String {
-    let chunks = message
-        .parts
+    message_history_text_parts(message.parts.as_slice())
+}
+
+fn message_history_text_parts(parts: &[lash_core::Part]) -> String {
+    let chunks = parts
         .iter()
         .filter(|part| {
             matches!(

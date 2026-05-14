@@ -14,7 +14,10 @@ use fff_search::{
 };
 use serde_json::json;
 
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult,
+};
 
 use lash_tool_support::{object_schema, require_str};
 
@@ -273,9 +276,22 @@ impl Default for Grep {
 
 #[async_trait::async_trait]
 impl ToolProvider for Grep {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![grep_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "grep").then(|| Arc::new(grep_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let cancellation_token = call.context.cancellation_token().cloned();
+        self.execute_inner(call.args, cancellation_token).await
+    }
+}
+
+fn grep_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "grep",
                 "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query as a leading token: `*.rs term` (extension), `src/ term` (path segment), `**/foo/* term` (glob), `!*.test.ts term` (negate). Constraints AND together; one search term per query.",
                 object_schema(
@@ -312,14 +328,7 @@ impl ToolProvider for Grep {
                 "filesystem",
                 &["search_files", "ripgrep"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let cancellation_token = call.context.cancellation_token().cloned();
-        self.execute_inner(call.args, cancellation_token).await
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 impl Grep {
@@ -1405,11 +1414,7 @@ mod tests {
 
     #[test]
     fn grep_uses_limit_argument_in_model_contract() {
-        let definition = Grep::new()
-            .definitions()
-            .into_iter()
-            .find(|definition| definition.name == "grep")
-            .expect("grep definition");
+        let definition = grep_tool_definition();
         let properties = definition
             .input_schema
             .get("properties")

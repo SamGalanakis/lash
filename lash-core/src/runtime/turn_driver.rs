@@ -1,6 +1,6 @@
 use super::*;
 use crate::{ModePreamble, PluginError, ToolSurface};
-use lash_sansio::{PreparedPrompt, PromptCache, PromptLayer};
+use lash_sansio::{PreparedPrompt, PromptCache, PromptContributionSet, PromptLayer};
 
 mod effects;
 mod streaming;
@@ -303,14 +303,22 @@ impl PreparedExecutionSurface {
         let prompt_contributions = self
             .tool_surface
             .filter_prompt_contributions(resolved.contributions);
+        let contributions = PromptContributionSet::new(prompt_contributions);
         lash_sansio::build_prompt_cached(
             crate::PromptBuildInput {
                 mode: self.execution_mode.clone(),
+                template_fingerprint: crate::prompt_template_fingerprint(&resolved.template),
                 template: resolved.template,
-                execution_prompt: self.mode_preamble.execution_prompt.clone(),
-                tool_names: self.mode_preamble.tool_names.clone(),
+                execution_prompt_fingerprint: crate::prompt_text_fingerprint(
+                    &self.mode_preamble.execution_prompt,
+                ),
+                execution_prompt: Arc::clone(&self.mode_preamble.execution_prompt),
+                tool_names_fingerprint: crate::prompt_tool_names_fingerprint(
+                    &self.mode_preamble.tool_names,
+                ),
+                tool_names: Arc::clone(&self.mode_preamble.tool_names),
                 omitted_tool_count: self.mode_preamble.omitted_tool_count,
-                contributions: prompt_contributions,
+                contributions,
             },
             prompt_cache.as_deref(),
         )
@@ -751,7 +759,6 @@ impl RuntimeTurnDriver {
                 return Err((messages.clone(), run_offset));
             }
         };
-        self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
         let execution_surface = match self
             .prepare_execution_surface(
                 execution_mode,
@@ -773,24 +780,13 @@ impl RuntimeTurnDriver {
                 return Err((messages, run_offset));
             }
         };
-        let mut mode_prompt = PromptLayer::new();
-        for contribution in execution_surface
-            .mode_preamble
-            .prompt_contributions
-            .iter()
-            .cloned()
-        {
-            mode_prompt.add_contribution(contribution);
-        }
-        let resolved_prompt = crate::resolve_prompt_layers([
-            &mode_prompt,
-            &execution_surface.prompt,
+        self.mark_phase_begin(RuntimeTurnPhase::PromptBuild);
+        let prepared_prompt = execution_surface.build_prompt(
             &self.host.core.prompt,
             &session_policy.prompt,
             self.turn_context.prompt_layer(),
-        ]);
-        let mut mode_preamble = (*execution_surface.mode_preamble).clone();
-        mode_preamble.prompt_contributions.clear();
+            Some(self.session.prompt_cache()),
+        );
         let prepared = crate::build_turn(crate::SansIoTurnInput {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
@@ -800,15 +796,12 @@ impl RuntimeTurnDriver {
             messages,
             events: self.turn_pipeline.active_events(),
             mode_run_offset: run_offset,
-            tool_surface: execution_surface.tool_surface,
-            mode_preamble: Arc::new(mode_preamble),
-            prompt_template: resolved_prompt.template,
-            prompt_contributions: resolved_prompt.contributions,
+            mode_preamble: execution_surface.mode_preamble,
+            prepared_prompt,
             max_turns: session_policy.max_turns,
             model_variant: session_policy.model_variant.clone(),
             emit_llm_trace: false,
             termination: self.mode_turn_options.clone(),
-            prompt_cache: Some(self.session.prompt_cache()),
         });
         if self.host.core.trace_sink.is_some() {
             let prompt_hash =
@@ -840,7 +833,6 @@ impl RuntimeTurnDriver {
         machine: &crate::TurnMachine,
         update_machine_config: bool,
     ) -> Result<Option<crate::sansio::ExecutionSurfaceSync>, crate::SessionError> {
-        self.session.refresh_tool_surface().await?;
         if !update_machine_config {
             return Ok(None);
         }
@@ -921,7 +913,7 @@ impl RuntimeTurnDriver {
         &mut self,
         machine: &mut TurnMachine,
         effect_id: crate::sansio::EffectId,
-        request: LlmRequest,
+        request: Arc<LlmRequest>,
         mode_iteration: usize,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,

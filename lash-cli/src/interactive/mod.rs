@@ -259,7 +259,7 @@ pub(crate) async fn run_app(
         } else {
             let _ = app_tx.send(AppEvent::RequestUiSnapshot);
             toolset_hash = hash12(
-                &serde_json::to_vec(&desired_tool_state.definitions())
+                &serde_json::to_vec(&desired_tool_state.tool_manifests())
                     .unwrap_or_else(|_| b"[]".to_vec()),
             );
         }
@@ -285,7 +285,7 @@ pub(crate) async fn run_app(
                 );
             } else {
                 toolset_hash = hash12(
-                    &serde_json::to_vec(&desired_tool_state.definitions())
+                    &serde_json::to_vec(&desired_tool_state.tool_manifests())
                         .unwrap_or_else(|_| b"[]".to_vec()),
                 );
                 let prepared = PreparedTurn::prepare(prompt.to_string(), Vec::new(), &app.skills);

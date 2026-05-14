@@ -138,12 +138,28 @@ impl RuntimePersistence for RuntimePerfStore {
                 .expect("lock perf usage deltas")
                 .extend(usage_deltas);
         }
+        let next_checkpoint_blob_ref = |kind: &str| {
+            let id = self.next_blob_id.fetch_add(1, Ordering::Relaxed);
+            BlobRef(format!("perf-{kind}-{id}"))
+        };
         let manifest = SessionCheckpoint {
             turn_state: checkpoint.turn_state,
-            tool_state_ref: checkpoint.tool_state_ref,
-            plugin_snapshot_ref: checkpoint.plugin_snapshot_ref,
+            tool_state_ref: if checkpoint.tool_state.is_some() {
+                Some(next_checkpoint_blob_ref("tool-state"))
+            } else {
+                checkpoint.tool_state_ref
+            },
+            plugin_snapshot_ref: if checkpoint.plugin_snapshot.is_some() {
+                Some(next_checkpoint_blob_ref("plugin-snapshot"))
+            } else {
+                checkpoint.plugin_snapshot_ref
+            },
             plugin_snapshot_revision: checkpoint.plugin_snapshot_revision,
-            execution_state_ref: checkpoint.execution_state_ref,
+            execution_state_ref: if checkpoint.execution_state.is_some() {
+                Some(next_checkpoint_blob_ref("execution-state"))
+            } else {
+                checkpoint.execution_state_ref
+            },
         };
         let graph_node_count = graph.nodes.len();
         drop(graph);

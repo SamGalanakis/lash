@@ -21,8 +21,8 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash_core::{
-    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
+    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -1235,7 +1235,29 @@ impl Default for StandardShell {
 
 #[async_trait::async_trait]
 impl ToolProvider for StandardShell {
-    fn definitions(&self) -> Vec<ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let cancellation_token = call.context.cancellation_token().cloned();
+        self.dispatch(call.name, call.args, call.progress, cancellation_token)
+            .await
+    }
+}
+
+impl StandardShell {
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let exec_command_description = "Run a noninteractive one-shot command with stdin closed and stdout/stderr captured, then wait for it to finish. Successful results always include `status: \"completed\"`, `done: true`, `running: false`, cleaned `output`, and `exit_code`. Commands time out after 600000 ms by default; set `timeout_ms` to override the hard timeout. Timed-out commands are killed and the result has `status: \"timed_out\"`, `timed_out: true`, and no `exit_code`; by default this fails the tool. Use `start_command` instead for interactive, TTY-dependent, or intentionally long-lived processes. Nonzero exit codes (including SIGPIPE 141 from `cmd | head`-style pipelines) fail the tool by default. Pass `allow_nonzero_exit: true` to receive the result without failure on either nonzero exit or timeout, then inspect `exit_code` and `timed_out`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.";
         let start_command_description = "Start an interactive or intentionally long-lived command in a PTY. If the process is still alive after the initial poll window, the result includes `status: \"running\"`, `done: false`, `running: true`, and `session_id`; that output is partial and is not proof of completion. If the process exits during the poll window, the result is a normal completed command result. Nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. Use `poll_ms` only to choose the initial observation window; use `exec_command.timeout_ms` for bounded one-shot commands. Use `exec_command` for builds, installs, tests, service setup, verification, and other commands that must complete before the next step.";
         let command_common = |command_description: &str| {
@@ -1367,14 +1389,6 @@ impl ToolProvider for StandardShell {
         ]
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let cancellation_token = call.context.cancellation_token().cloned();
-        self.dispatch(call.name, call.args, call.progress, cancellation_token)
-            .await
-    }
-}
-
-impl StandardShell {
     async fn dispatch(
         &self,
         name: &str,
@@ -2216,7 +2230,7 @@ mod tests {
     #[test]
     fn shell_definitions_are_compact_and_non_empty() {
         let shell = StandardShell::default();
-        let defs = shell.definitions();
+        let defs = shell.tool_definitions();
         assert_eq!(defs.len(), 3);
         assert!(defs.iter().all(|def| !def.description.is_empty()));
     }
@@ -2225,7 +2239,7 @@ mod tests {
     fn start_command_contract_distinguishes_poll_from_timeout() {
         let shell = StandardShell::default();
         let definition = shell
-            .definitions()
+            .tool_definitions()
             .into_iter()
             .find(|definition| definition.name == "start_command")
             .expect("start_command definition");
@@ -2270,7 +2284,7 @@ mod tests {
     fn exec_command_timeout_schema_documents_default() {
         let shell = StandardShell::default();
         let definition = shell
-            .definitions()
+            .tool_definitions()
             .into_iter()
             .find(|definition| definition.name == "exec_command")
             .expect("exec_command definition");

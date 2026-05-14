@@ -3,11 +3,12 @@ use lash_core::plugin::runtime_host::SessionLifecycleHost;
 use lash_core::session_model::SessionEventRecord;
 use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
-    SessionPluginMode, SessionSnapshot, ToolCall, ToolContext, ToolControl, ToolDefinition,
-    ToolExecutionMode, ToolProvider, ToolResult,
+    SessionPluginMode, SessionSnapshot, ToolCall, ToolContext, ToolContract, ToolControl,
+    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub(crate) struct RlmControlToolsProvider;
 
@@ -24,7 +25,7 @@ impl RlmControlToolsProvider {
         let seed =
             lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
         let referenced_handles = collect_seed_async_handle_ids(args.get("seed"));
-        let referenced_handles_vec = referenced_handles.iter().cloned().collect::<Vec<_>>();
+        let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
         context
             .tasks()
             .validate_async_handles_visible(&referenced_handles_vec)
@@ -88,8 +89,12 @@ impl RlmControlToolsProvider {
 
 #[async_trait]
 impl ToolProvider for RlmControlToolsProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![continue_as_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![continue_as_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "continue_as").then(|| Arc::new(continue_as_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -403,7 +408,7 @@ mod tests {
     fn rlm_control_definitions_include_continue_as_only() {
         let provider = RlmControlToolsProvider;
         let names = provider
-            .definitions()
+            .tool_manifests()
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();

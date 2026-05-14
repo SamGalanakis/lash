@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::MessageSequence;
 use crate::mode::ModePreamble;
-use crate::prompt::{PreparedPrompt, PromptBuildInput, PromptCache, build_prompt_cached};
+use crate::prompt::PreparedPrompt;
 use crate::sansio::{ModeProtocol, TurnMachine, TurnMachineConfig, UnitModeProtocol};
-use crate::{MessageSequence, PromptContribution, PromptTemplate, ToolSurface};
 
 pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub session_id: String,
@@ -14,17 +14,12 @@ pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub messages: MessageSequence,
     pub events: Arc<Vec<crate::SessionEventRecord<M::Event>>>,
     pub mode_run_offset: usize,
-    pub tool_surface: Arc<ToolSurface>,
     pub mode_preamble: Arc<ModePreamble<M>>,
-    pub prompt_template: PromptTemplate,
-    pub prompt_contributions: Vec<PromptContribution>,
+    pub prepared_prompt: PreparedPrompt,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
-    /// Optional cache that lets repeat turns skip re-rendering the
-    /// system prompt when inputs are unchanged.
-    pub prompt_cache: Option<Arc<PromptCache>>,
 }
 
 pub struct PreparedTurnMachine<M: ModeProtocol = UnitModeProtocol> {
@@ -34,23 +29,6 @@ pub struct PreparedTurnMachine<M: ModeProtocol = UnitModeProtocol> {
 }
 
 pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMachine<M> {
-    let mut prompt_contributions = input.mode_preamble.prompt_contributions.clone();
-    prompt_contributions.extend(input.prompt_contributions);
-    let prompt_contributions = input
-        .tool_surface
-        .filter_prompt_contributions(prompt_contributions);
-    let prepared_prompt = build_prompt_cached(
-        PromptBuildInput {
-            mode: input.mode,
-            template: input.prompt_template,
-            execution_prompt: input.mode_preamble.execution_prompt.clone(),
-            tool_names: input.mode_preamble.tool_names.clone(),
-            omitted_tool_count: input.mode_preamble.omitted_tool_count,
-            contributions: prompt_contributions,
-        },
-        input.prompt_cache.as_deref(),
-    );
-
     let machine = TurnMachine::new_shared(
         TurnMachineConfig {
             protocol_driver: input.mode_preamble.config.protocol.clone(),
@@ -62,7 +40,7 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             run_session_id: input.run_session_id,
             autonomous: input.autonomous,
             tool_specs: input.mode_preamble.tool_specs.clone(),
-            system_prompt: Arc::clone(&prepared_prompt.system_prompt),
+            system_prompt: Arc::clone(&input.prepared_prompt.system_prompt),
             session_id: input.session_id,
             emit_llm_trace: input.emit_llm_trace,
             termination: input.termination,
@@ -74,7 +52,7 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
 
     PreparedTurnMachine {
         machine,
-        prepared_prompt,
+        prepared_prompt: input.prepared_prompt,
         mode_preamble: input.mode_preamble,
     }
 }
@@ -90,8 +68,9 @@ mod tests {
         WaitingLlmState,
     };
     use crate::{
-        ExecutionMode, PromptContribution, ToolDefinition, ToolExecutionMode,
-        default_prompt_template,
+        ExecutionMode, PromptBuildInput, PromptContribution, PromptContributionSet, ToolDefinition,
+        ToolExecutionMode, build_prompt, default_prompt_template, prompt_template_fingerprint,
+        prompt_text_fingerprint, prompt_tool_names_fingerprint,
     };
 
     fn tool(name: &str) -> ToolDefinition {
@@ -149,17 +128,31 @@ mod tests {
 
     #[test]
     fn build_turn_creates_machine_with_rendered_system_prompt() {
-        let tool_surface = Arc::new(crate::ToolSurface::from_tools(
+        let tool_surface = Arc::new(crate::ToolSurface::from_tool_definitions(
             vec![tool("read_file")],
             ExecutionMode::standard(),
         ));
         let mode_preamble = Arc::new(ModePreamble {
             config: ModeConfig::chat(Arc::new(NoopDriver), false),
-            tool_specs: Arc::new(tool_surface.model_tool_specs()),
+            tool_specs: tool_surface.model_tool_specs(),
             tool_names: tool_surface.tool_names(),
             omitted_tool_count: 0,
-            execution_prompt: "test prompt".to_string(),
+            execution_prompt: Arc::from("test prompt"),
             prompt_contributions: Vec::new(),
+        });
+        let template = default_prompt_template();
+        let prompt_contributions =
+            PromptContributionSet::new(vec![PromptContribution::guidance("Guide", "Be precise.")]);
+        let prepared_prompt = build_prompt(PromptBuildInput {
+            mode: ExecutionMode::standard(),
+            template_fingerprint: prompt_template_fingerprint(&template),
+            template,
+            execution_prompt_fingerprint: prompt_text_fingerprint(&mode_preamble.execution_prompt),
+            execution_prompt: Arc::clone(&mode_preamble.execution_prompt),
+            tool_names_fingerprint: prompt_tool_names_fingerprint(&mode_preamble.tool_names),
+            tool_names: Arc::clone(&mode_preamble.tool_names),
+            omitted_tool_count: mode_preamble.omitted_tool_count,
+            contributions: prompt_contributions,
         });
         let prepared = build_turn(SansIoTurnInput {
             session_id: "session".to_string(),
@@ -170,15 +163,12 @@ mod tests {
             messages: crate::MessageSequence::default(),
             events: Arc::new(Vec::new()),
             mode_run_offset: 2,
-            tool_surface: Arc::clone(&tool_surface),
             mode_preamble,
-            prompt_template: default_prompt_template(),
-            prompt_contributions: vec![PromptContribution::guidance("Guide", "Be precise.")],
+            prepared_prompt,
             max_turns: Some(3),
             model_variant: Some("mini".to_string()),
             emit_llm_trace: true,
             termination: (),
-            prompt_cache: None,
         });
 
         assert_eq!(prepared.machine.mode_iteration(), 2);

@@ -38,8 +38,8 @@ mod batch;
 use batch::batch_tool_definition;
 use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
-    ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolDefinition,
-    ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
+    ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolContract,
+    ToolManifest, ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 use serde_json::Value;
@@ -124,10 +124,10 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
     fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
         ModePreamble {
             config: ModeConfig::chat(Arc::new(StandardDriver), true),
-            tool_specs: Arc::new(input.tool_surface.model_tool_specs()),
+            tool_specs: input.tool_surface.model_tool_specs(),
             tool_names: input.tool_surface.tool_names(),
             omitted_tool_count: 0,
-            execution_prompt: STANDARD_EXECUTION_SECTION.to_string(),
+            execution_prompt: Arc::from(STANDARD_EXECUTION_SECTION),
             prompt_contributions: input.extra_prompt_contributions,
         }
     }
@@ -137,8 +137,12 @@ struct StandardModeNativeTools;
 
 #[async_trait]
 impl ModeNativeToolsPlugin for StandardModeNativeTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![batch_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![batch_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "batch").then(|| Arc::new(batch_tool_definition().contract()))
     }
 
     async fn execute(

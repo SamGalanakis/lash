@@ -257,11 +257,11 @@ impl PluginHost {
             .collect::<Vec<_>>();
         let mode_protocol_driver = reg.mode_protocol_driver.take().map(|entry| entry.hook);
         for provider in &mode_native_tools {
-            for def in provider.definitions() {
-                if !reg.tool_names.insert(def.name.clone()) {
+            for manifest in provider.tool_manifests() {
+                if !reg.tool_names.insert(manifest.name.clone()) {
                     return Err(PluginError::Registration(format!(
                         "duplicate mode native tool name `{}`",
-                        def.name
+                        manifest.name
                     )));
                 }
             }

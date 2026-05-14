@@ -1,7 +1,10 @@
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult,
+};
 
 use lash_tool_support::{compact_diff, object_schema, require_str, run_blocking};
 
@@ -108,9 +111,33 @@ pub struct PatchFileOp {
 
 #[async_trait::async_trait]
 impl ToolProvider for ApplyPatchTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![apply_patch_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
+        (name == "apply_patch")
+            .then(|| std::sync::Arc::new(apply_patch_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let input = match require_str(call.args, "input") {
+            Ok(value) => value.to_string(),
+            Err(err) => return err,
+        };
+        let workdir = call
+            .args
+            .get("workdir")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        run_blocking(move || apply_patch(&input, workdir.as_deref())).await
+    }
+}
+
+fn apply_patch_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "apply_patch",
                 APPLY_PATCH_INSTRUCTIONS,
                 object_schema(
@@ -135,23 +162,7 @@ impl ToolProvider for ApplyPatchTool {
                     .into(),
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["patch", "edit_file"]))
-            .with_execution_mode(ToolExecutionMode::Serial),
-        ]
-    }
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let input = match require_str(call.args, "input") {
-            Ok(value) => value.to_string(),
-            Err(err) => return err,
-        };
-        let workdir = call
-            .args
-            .get("workdir")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-
-        run_blocking(move || apply_patch(&input, workdir.as_deref())).await
-    }
+            .with_execution_mode(ToolExecutionMode::Serial)
 }
 
 #[cfg(test)]
@@ -160,7 +171,7 @@ mod description_tests {
 
     #[test]
     fn apply_patch_description_mentions_avoiding_rereads() {
-        let description = ApplyPatchTool.definitions()[0].description.clone();
+        let description = ApplyPatchTool.tool_manifests()[0].description.clone();
         assert!(description.contains("Avoid re-reading a file"));
     }
 }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::plugin::{DirectCompletion, PluginError, SessionHandle, SessionSnapshot, ToolHookHost};
-use crate::{ToolDefinition, ToolResult};
+use crate::{ToolContract, ToolManifest, ToolResult};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -327,18 +327,25 @@ pub struct ToolCall<'a> {
 
 /// Trait for providing tools to the sandbox. Implement this per-project.
 ///
-/// Implementations supply a list of [`ToolDefinition`]s and a single
+/// Implementations supply cheap [`ToolManifest`]s, lazily resolved
+/// [`ToolContract`]s, and a single
 /// [`execute`](Self::execute) method that handles every call. Tools that
 /// need session state read it from `call.context`; tools that stream
 /// progress send through `call.progress`.
 #[async_trait::async_trait]
 pub trait ToolProvider: Send + Sync + 'static {
-    fn definitions(&self) -> Vec<ToolDefinition>;
+    fn tool_manifests(&self) -> Vec<ToolManifest>;
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == name)
+    }
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
 }
 
 pub(crate) struct CompositeToolProvider {
-    tools: BTreeMap<String, (ToolDefinition, usize)>,
+    tools: std::sync::RwLock<BTreeMap<String, (ToolManifest, usize)>>,
     providers: Vec<(Arc<dyn ToolProvider>, Vec<String>)>,
 }
 
@@ -348,18 +355,18 @@ impl CompositeToolProvider {
         let mut entries = Vec::new();
         for provider in providers {
             let tool_names = provider
-                .definitions()
+                .tool_manifests()
                 .into_iter()
-                .map(|def| {
-                    let name = def.name.clone();
-                    tools.insert(name.clone(), (def, entries.len()));
+                .map(|manifest| {
+                    let name = manifest.name.clone();
+                    tools.insert(name.clone(), (manifest, entries.len()));
                     name
                 })
                 .collect::<Vec<_>>();
             entries.push((provider, tool_names));
         }
         Self {
-            tools,
+            tools: std::sync::RwLock::new(tools),
             providers: entries,
         }
     }
@@ -367,13 +374,57 @@ impl CompositeToolProvider {
 
 #[async_trait::async_trait]
 impl ToolProvider for CompositeToolProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|(def, _)| def.clone()).collect()
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.tools
+            .read()
+            .expect("composite tool provider lock poisoned")
+            .values()
+            .map(|(manifest, _)| manifest.clone())
+            .collect()
+    }
+
+    fn resolve_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if let Some((manifest, _)) = self
+            .tools
+            .read()
+            .expect("composite tool provider lock poisoned")
+            .get(name)
+        {
+            return Some(manifest.clone());
+        }
+        for (provider_idx, (provider, _)) in self.providers.iter().enumerate() {
+            if let Some(manifest) = provider.resolve_manifest(name) {
+                self.tools
+                    .write()
+                    .expect("composite tool provider lock poisoned")
+                    .insert(name.to_string(), (manifest.clone(), provider_idx));
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        let provider_idx = self.resolve_manifest(name).and_then(|_| {
+            self.tools
+                .read()
+                .expect("composite tool provider lock poisoned")
+                .get(name)
+                .map(|(_, provider_idx)| *provider_idx)
+        })?;
+        self.providers[provider_idx].0.resolve_contract(name)
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        match self.tools.get(call.name) {
-            Some((_, provider_idx)) => self.providers[*provider_idx].0.execute(call).await,
+        let provider_idx = self.resolve_manifest(call.name).and_then(|_| {
+            self.tools
+                .read()
+                .expect("composite tool provider lock poisoned")
+                .get(call.name)
+                .map(|(_, provider_idx)| *provider_idx)
+        });
+        match provider_idx {
+            Some(provider_idx) => self.providers[provider_idx].0.execute(call).await,
             None => ToolResult::err_fmt(format_args!("Unknown tool: {}", call.name)),
         }
     }

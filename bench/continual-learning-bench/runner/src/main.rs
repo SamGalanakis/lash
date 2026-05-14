@@ -12,7 +12,10 @@ use lash::{
     },
     plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
     provider::ProviderHandle,
-    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    tools::{
+        ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+        ToolResult,
+    },
     usage::{SessionUsageReport, TokenLedgerEntry},
 };
 use lash_cli::config::LashConfig;
@@ -293,8 +296,13 @@ struct ClbenchAsyncHandlesTool;
 
 #[async_trait]
 impl ToolProvider for ClbenchAsyncHandlesTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![list_async_handles_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![list_async_handles_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "list_async_handles")
+            .then(|| Arc::new(list_async_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -421,7 +429,7 @@ mod tests {
         let session = build_plugin_session(mode.clone(), &policy).expect("plugin session");
         let surface = session.tool_surface("root", mode);
 
-        let mut names = surface.tool_names();
+        let mut names = surface.tool_names().as_ref().clone();
         names.sort();
         let mut child_names = clbench_tool_definitions()
             .into_iter()
@@ -474,8 +482,9 @@ mod tests {
             "CLBench prompt must not advertise unavailable peer capability"
         );
 
-        let spawn_agent = surface
-            .callable_tools_iter()
+        let model_tool_specs = surface.model_tool_specs();
+        let spawn_agent = model_tool_specs
+            .iter()
             .find(|tool| tool.name == "spawn_agent")
             .expect("spawn_agent tool");
         assert_eq!(

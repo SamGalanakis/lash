@@ -73,24 +73,3 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         })
         .with_execution_mode(ToolExecutionMode::Serial)
 }
-
-pub(crate) fn load_tools_definition() -> ToolDefinition {
-    #[derive(schemars::JsonSchema)]
-    #[allow(dead_code)]
-    struct LoadToolsArgs {
-        names: Option<Vec<String>>,
-    }
-
-    ToolDefinition::typed::<LoadToolsArgs, serde_json::Value>(
-        "load_tools",
-        "Promote loadable tools into the showcased surface. Callable omitted tools do not need loading and can be called directly.",
-    )
-        .with_examples(vec!["load_tools(names=[\"tool_name\"])".into()])
-        .with_availability(ToolAvailabilityConfig::showcased())
-        .with_activation(ToolActivation::Always)
-        .with_discovery(lash_core::ToolDiscoveryMetadata {
-            namespace: Some("runtime".to_string()),
-            aliases: vec!["activate_tools".to_string()],
-        })
-        .with_execution_mode(ToolExecutionMode::Serial)
-}

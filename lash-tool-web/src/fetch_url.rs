@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult,
+};
 
 use lash_tool_support::{object_schema, require_str};
 
@@ -30,9 +33,64 @@ impl Default for FetchUrl {
 
 #[async_trait::async_trait]
 impl ToolProvider for FetchUrl {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![fetch_url_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
+        (name == "fetch_url").then(|| std::sync::Arc::new(fetch_url_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
+        let url = match require_str(args, "url") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        if self.api_key.trim().is_empty() {
+            return ToolResult::err(json!("Tavily API key is required for fetch_url"));
+        }
+
+        let body = json!({
+            "api_key": self.api_key,
+            "urls": [url],
+        });
+
+        let resp = self
+            .client
+            .post("https://api.tavily.com/extract")
+            .json(&body)
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(resp) => resp,
+            Err(err) => return ToolResult::err(json!(format!("fetch_url request failed: {err}"))),
+        };
+        let status = resp.status();
+        let value: serde_json::Value = match resp.json().await {
+            Ok(value) => value,
+            Err(err) => return ToolResult::err(json!(format!("fetch_url response failed: {err}"))),
+        };
+        if !status.is_success() {
+            return ToolResult::err(value);
+        }
+        let content = value
+            .get("results")
+            .and_then(|value| value.as_array())
+            .and_then(|results| results.first())
+            .and_then(|item| item.get("raw_content").or_else(|| item.get("content")))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        ToolResult::ok(json!({
+            "url": url,
+            "content": content,
+        }))
+    }
+}
+
+fn fetch_url_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "fetch_url",
                 "Fetch one known URL and extract readable page text.",
                 object_schema(
@@ -62,69 +120,7 @@ impl ToolProvider for FetchUrl {
                 "web",
                 &["fetch", "open_url"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let url = match require_str(args, "url") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        if self.api_key.trim().is_empty() {
-            return ToolResult::err(json!("Tavily API key is required for fetch_url"));
-        }
-
-        let body = json!({
-            "api_key": self.api_key,
-            "urls": [url],
-        });
-
-        let resp = self
-            .client
-            .post("https://api.tavily.com/extract")
-            .json(&body)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-                Ok(data) => {
-                    let content = data
-                        .get("results")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|v| {
-                            v.get("raw_content")
-                                .and_then(|s| s.as_str())
-                                .or_else(|| v.get("content").and_then(|s| s.as_str()))
-                        })
-                        .unwrap_or_default();
-
-                    if content.is_empty() {
-                        return ToolResult::ok(json!({
-                            "url": url,
-                            "content": "",
-                        }));
-                    }
-
-                    ToolResult::ok(json!({
-                        "url": url,
-                        "content": content,
-                    }))
-                }
-                Err(e) => ToolResult::err_fmt(format_args!("Failed to parse response: {e}")),
-            },
-            Ok(r) => {
-                let status = r.status();
-                let body = r.text().await.unwrap_or_default();
-                ToolResult::err_fmt(format_args!("Tavily API error ({status}): {body}"))
-            }
-            Err(e) => ToolResult::err_fmt(format_args!("Request failed: {e}")),
-        }
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 #[cfg(test)]
@@ -133,11 +129,7 @@ mod tests {
 
     #[test]
     fn fetch_url_returns_minimal_typed_record_and_is_showcased() {
-        let definition = FetchUrl::new("test-key")
-            .definitions()
-            .into_iter()
-            .find(|definition| definition.name == "fetch_url")
-            .expect("fetch_url definition");
+        let definition = fetch_url_tool_definition();
 
         assert_eq!(
             definition.output_schema["type"],

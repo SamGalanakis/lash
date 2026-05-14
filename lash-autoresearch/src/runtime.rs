@@ -13,7 +13,7 @@ use lash_core::plugin::{
 };
 use lash_core::{
     MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolCall, ToolContext,
-    ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult,
+    ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -430,7 +430,35 @@ fn autoresearch_tool(
 
 #[async_trait]
 impl ToolProvider for AutoresearchTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.tool_definitions()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        match call.name {
+            "init_experiment" => self.execute_init(call.args),
+            "log_experiment" => self.execute_log(call.args),
+            "run_experiment" => {
+                self.execute_run(call.args, Some(call.context), call.progress)
+                    .await
+            }
+            other => ToolResult::err_fmt(format_args!("unknown autoresearch tool `{other}`")),
+        }
+    }
+}
+
+impl AutoresearchTools {
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
         vec![
             autoresearch_tool(
                 "init_experiment",
@@ -517,20 +545,6 @@ impl ToolProvider for AutoresearchTools {
         ]
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        match call.name {
-            "init_experiment" => self.execute_init(call.args),
-            "log_experiment" => self.execute_log(call.args),
-            "run_experiment" => {
-                self.execute_run(call.args, Some(call.context), call.progress)
-                    .await
-            }
-            other => ToolResult::err_fmt(format_args!("unknown autoresearch tool `{other}`")),
-        }
-    }
-}
-
-impl AutoresearchTools {
     fn execute_init(&self, args: &Value) -> ToolResult {
         let name = match require_string(args, "name") {
             Ok(value) => value,
@@ -1309,7 +1323,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             state: Arc::new(Mutex::new(RuntimeState::default())),
         };
-        assert!(tools.definitions().into_iter().all(|tool| {
+        assert!(tools.tool_manifests().into_iter().all(|tool| {
             tool.effective_availability(&lash_core::ExecutionMode::standard())
                 == lash_core::ToolAvailability::Off
         }));

@@ -458,8 +458,12 @@ pub(super) struct EmptyTools;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for EmptyTools {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
         Vec::new()
+    }
+
+    fn resolve_contract(&self, _name: &str) -> Option<Arc<crate::ToolContract>> {
+        None
     }
 
     async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -591,20 +595,28 @@ pub(super) async fn runtime_with_plugins_and_tools_and_host(
 
 pub(super) struct EchoTool;
 
+fn echo_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "echo_tool",
+        "Return a tool payload",
+        serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
 #[async_trait::async_trait]
 impl crate::ToolProvider for EchoTool {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::raw(
-            "echo_tool",
-            "Return a tool payload",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "value": { "type": "string" } },
-                "required": ["value"],
-                "additionalProperties": false
-            }),
-            serde_json::json!({ "type": "object", "additionalProperties": true }),
-        )]
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![echo_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "echo_tool").then(|| Arc::new(echo_tool_definition().contract()))
     }
 
     async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -626,17 +638,17 @@ pub(super) struct TerminalControlTool {
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for TerminalControlTool {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
         (0..self.controls.len())
-            .map(|index| {
-                crate::ToolDefinition::raw(
-                    format!("terminal_tool_{index}"),
-                    "Return a terminal control result",
-                    crate::ToolDefinition::default_input_schema(),
-                    serde_json::json!({ "type": "object", "additionalProperties": true }),
-                )
-            })
+            .map(|index| terminal_tool_definition(index).manifest())
             .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        name.strip_prefix("terminal_tool_")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|index| *index < self.controls.len())
+            .map(|index| Arc::new(terminal_tool_definition(index).contract()))
     }
 
     async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -655,6 +667,15 @@ impl TerminalControlTool {
     }
 }
 
+fn terminal_tool_definition(index: usize) -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        format!("terminal_tool_{index}"),
+        "Return a terminal control result",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
 /// Tool that sleeps for 10 seconds unless its future is aborted or the
 /// execution-context cancellation token fires. Used to verify that turn
 /// cancellation unwinds in-flight tool tasks promptly.
@@ -664,13 +685,12 @@ pub(super) struct SlowTool {
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for SlowTool {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::raw(
-            "slow_tool",
-            "Sleep for a long time; respects cancellation.",
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({ "type": "object", "additionalProperties": true }),
-        )]
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![slow_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "slow_tool").then(|| Arc::new(slow_tool_definition().contract()))
     }
 
     async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -693,17 +713,25 @@ impl crate::ToolProvider for SlowTool {
     }
 }
 
+fn slow_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "slow_tool",
+        "Sleep for a long time; respects cancellation.",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
 pub(super) struct MemoryProbeTool;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for MemoryProbeTool {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::raw(
-            "memory_probe",
-            "probe",
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({ "type": "string" }),
-        )]
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![memory_probe_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "memory_probe").then(|| Arc::new(memory_probe_tool_definition().contract()))
     }
 
     async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -711,17 +739,25 @@ impl crate::ToolProvider for MemoryProbeTool {
     }
 }
 
+fn memory_probe_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "memory_probe",
+        "probe",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "string" }),
+    )
+}
+
 pub(super) struct ChildSessionTool;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for ChildSessionTool {
-    fn definitions(&self) -> Vec<crate::ToolDefinition> {
-        vec![crate::ToolDefinition::raw(
-            "spawn_child",
-            "spawn a child session",
-            crate::ToolDefinition::default_input_schema(),
-            serde_json::json!({ "type": "object", "additionalProperties": true }),
-        )]
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![child_session_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "spawn_child").then(|| Arc::new(child_session_tool_definition().contract()))
     }
 
     async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
@@ -780,6 +816,15 @@ impl crate::ToolProvider for ChildSessionTool {
             Err(err) => crate::ToolResult::err_fmt(format_args!("{err}")),
         }
     }
+}
+
+fn child_session_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "spawn_child",
+        "spawn a child session",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
 }
 
 pub(super) async fn standard_runtime_with_transport_and_background(

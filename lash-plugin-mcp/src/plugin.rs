@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash_core::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+use lash_core::{ToolCall, ToolContract, ToolManifest, ToolProvider, ToolResult};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -103,8 +103,20 @@ impl McpToolProvider {
 
 #[async_trait]
 impl ToolProvider for McpToolProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        self.pool.advertised_tools_blocking()
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        self.pool
+            .advertised_tools_blocking()
+            .into_iter()
+            .map(|tool| tool.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.pool
+            .advertised_tools_blocking()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| Arc::new(tool.contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

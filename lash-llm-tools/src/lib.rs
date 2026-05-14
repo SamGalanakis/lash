@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use lash_core::plugin::{PluginError, PluginFactory, PluginSessionContext};
 use lash_core::{
     DirectJsonSchema, DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
-    PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
-    ToolProvider, ToolResult,
+    PluginSpec, PluginSpecFactory, ToolCall, ToolContext, ToolContract, ToolDefinition,
+    ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -119,8 +119,12 @@ impl LlmToolsProvider {
 
 #[async_trait]
 impl ToolProvider for LlmToolsProvider {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![llm_query_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![llm_query_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "llm_query").then(|| Arc::new(llm_query_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -471,7 +475,7 @@ mod tests {
             model_variant: None,
         };
         let names = provider
-            .definitions()
+            .tool_manifests()
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();

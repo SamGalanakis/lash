@@ -6,6 +6,8 @@ fn tool_names(session: &lash_core::PluginSession) -> Vec<String> {
     session
         .tool_surface("root", ExecutionMode::standard())
         .tool_names()
+        .as_ref()
+        .clone()
 }
 
 #[test]

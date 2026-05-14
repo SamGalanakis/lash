@@ -90,10 +90,13 @@ fn find_llm_call(effects: &[Effect]) -> Option<&sansio::EffectId> {
 }
 
 fn find_llm_request(effects: &[Effect]) -> Option<&LlmRequest> {
-    effects.iter().find_map(|e| match e {
-        Effect::LlmCall { request, .. } => Some(request),
-        _ => None,
-    })
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::LlmCall { request, .. } => Some(request),
+            _ => None,
+        })
+        .map(|request| request.as_ref())
 }
 
 fn find_checkpoint(effects: &[Effect]) -> Option<(sansio::EffectId, CheckpointKind)> {

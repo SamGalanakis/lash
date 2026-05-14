@@ -23,7 +23,10 @@ use lash::{
         PromptTemplateSection,
     },
     provider::{ProviderHandle, ProviderOptions},
-    tools::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult},
+    tools::{
+        ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+        ToolResult,
+    },
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
@@ -1160,8 +1163,13 @@ struct OolongAsyncHandlesTool;
 
 #[async_trait]
 impl ToolProvider for OolongAsyncHandlesTool {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![oolong_list_async_handles_tool_definition()]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![oolong_list_async_handles_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "list_async_handles")
+            .then(|| Arc::new(oolong_list_async_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -1877,12 +1885,14 @@ mod tests {
             .template
             .expect("child prompt template")
             .render(&lash_core::PromptContext {
-                execution_prompt: "EXECUTION".to_string(),
+                execution_prompt: std::sync::Arc::from("EXECUTION"),
                 ..Default::default()
             });
 
         assert!(rendered.contains("You inherit no parent variables"));
-        assert!(rendered.contains("Do not assume `input`, `benchmark`, or any parent globals exist"));
+        assert!(
+            rendered.contains("Do not assume `input`, `benchmark`, or any parent globals exist")
+        );
         assert!(!rendered.contains("The context is available as `input.context`"));
         assert!(!rendered.contains("metadata as `benchmark`"));
     }
@@ -1891,7 +1901,9 @@ mod tests {
     fn fatal_provider_failure_detects_quota_and_auth_errors() {
         assert!(fatal_provider_failure_reason(
             "provider_error",
-            Some("OpenAI-compatible chat request failed with 403: Key limit exceeded (daily limit)")
+            Some(
+                "OpenAI-compatible chat request failed with 403: Key limit exceeded (daily limit)"
+            )
         ));
         assert!(fatal_provider_failure_reason(
             "provider_error",

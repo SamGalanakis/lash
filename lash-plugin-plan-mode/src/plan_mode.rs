@@ -12,8 +12,8 @@ use lash_core::plugin::{
 };
 use lash_core::{
     JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionCreateRequest,
-    SessionPluginMode, SessionStartPoint, ToolCall, ToolContext, ToolDefinition, ToolExecutionMode,
-    ToolProvider, ToolResult,
+    SessionPluginMode, SessionStartPoint, ToolCall, ToolContext, ToolContract, ToolDefinition,
+    ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
@@ -48,7 +48,6 @@ fn default_allowed_tools() -> BTreeSet<String> {
         "ls",
         "read_file",
         "search_tools",
-        "load_tools",
         "search_web",
         "apply_patch",
         "plan_exit",
@@ -697,18 +696,12 @@ impl PlanModeTools {
 
 #[async_trait::async_trait]
 impl ToolProvider for PlanModeTools {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
-                "plan_exit",
-                "Ask whether to exit plan mode.",
-                ToolDefinition::default_input_schema(),
-                serde_json::json!({ "type": "object", "additionalProperties": true }),
-            )
-            .with_examples(vec!["plan_exit()".into()])
-            .with_availability(lash_core::ToolAvailabilityConfig::off())
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![plan_exit_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        (name == "plan_exit").then(|| Arc::new(plan_exit_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -717,6 +710,18 @@ impl ToolProvider for PlanModeTools {
             other => ToolResult::err_fmt(format_args!("Unknown tool: {other}")),
         }
     }
+}
+
+fn plan_exit_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "plan_exit",
+        "Ask whether to exit plan mode.",
+        ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(vec!["plan_exit()".into()])
+    .with_availability(lash_core::ToolAvailabilityConfig::off())
+    .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 pub struct PlanModePluginFactory {

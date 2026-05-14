@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use lash_core::{ToolCall, ToolDefinition, ToolExecutionMode, ToolProvider, ToolResult};
+use lash_core::{
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult,
+};
 use lash_tool_support::{
     FS_DEFAULTS_PREAMBLE, build_path_entry, filesystem_entries_result, object_schema,
     parse_optional_bool, parse_optional_usize_arg, rg_file_list, run_blocking,
@@ -16,9 +19,82 @@ const MAX_ENTRIES: usize = 500;
 
 #[async_trait::async_trait]
 impl ToolProvider for Ls {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::raw(
+    fn tool_manifests(&self) -> Vec<ToolManifest> {
+        vec![ls_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
+        (name == "ls").then(|| std::sync::Arc::new(ls_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+        let args = call.args;
+        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+
+        let ignore_patterns: Vec<&str> = args
+            .get("ignore")
+            .and_then(|v| v.as_array())
+            .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+            .unwrap_or_default();
+
+        let max_depth = match parse_depth(args) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+        let limit = match parse_limit(args) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+        let with_lines = match parse_optional_bool(args, "with_lines", false) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let base = PathBuf::from(base_dir);
+        let ignore_patterns = ignore_patterns
+            .into_iter()
+            .map(|pattern| pattern.to_string())
+            .collect::<Vec<_>>();
+        run_blocking(move || {
+            if !base.is_dir() {
+                return ToolResult::err_fmt(format_args!("Not a directory: {}", base.display()));
+            }
+
+            let globs = ignore_patterns
+                .into_iter()
+                .map(|pattern| format!("!{pattern}"))
+                .collect::<Vec<_>>();
+
+            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &globs) {
+                Ok(files) => files,
+                Err(err) => return err,
+            };
+
+            let all_paths = collect_ls_paths(&base, &files, max_depth);
+            let total_entries = all_paths.len();
+            let shown_paths = match limit {
+                Some(limit) => all_paths.into_iter().take(limit).collect::<Vec<_>>(),
+                None => all_paths.into_iter().collect::<Vec<_>>(),
+            };
+            let items = shown_paths
+                .into_iter()
+                .map(|path| build_path_entry(&path, with_lines).0)
+                .collect();
+            ToolResult::ok(filesystem_entries_result(items, total_entries))
+        })
+        .await
+    }
+}
+
+fn ls_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
                 "ls",
                 [
                     "List filesystem entries. ",
@@ -78,73 +154,7 @@ impl ToolProvider for Ls {
                 "filesystem",
                 &["list_files", "list_directory"],
             ))
-            .with_execution_mode(ToolExecutionMode::Parallel),
-        ]
-    }
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let args = call.args;
-        let base_dir = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-
-        let ignore_patterns: Vec<&str> = args
-            .get("ignore")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        let max_depth = match parse_depth(args) {
-            Ok(d) => d,
-            Err(e) => return e,
-        };
-        let limit = match parse_limit(args) {
-            Ok(d) => d,
-            Err(e) => return e,
-        };
-        let with_lines = match parse_optional_bool(args, "with_lines", false) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let include_hidden = match parse_optional_bool(args, "include_hidden", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let respect_gitignore = match parse_optional_bool(args, "respect_gitignore", true) {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let base = PathBuf::from(base_dir);
-        let ignore_patterns = ignore_patterns
-            .into_iter()
-            .map(|pattern| pattern.to_string())
-            .collect::<Vec<_>>();
-
-        run_blocking(move || {
-            if !base.is_dir() {
-                return ToolResult::err_fmt(format_args!("Not a directory: {}", base.display()));
-            }
-
-            let globs = ignore_patterns
-                .into_iter()
-                .map(|pattern| format!("!{pattern}"))
-                .collect::<Vec<_>>();
-
-            let files = match rg_file_list(&base, include_hidden, respect_gitignore, None, &globs) {
-                Ok(files) => files,
-                Err(err) => return err,
-            };
-
-            let all_paths = collect_ls_paths(&base, &files, max_depth);
-            let total_entries = all_paths.len();
-            let shown_paths = match limit {
-                Some(limit) => all_paths.into_iter().take(limit).collect::<Vec<_>>(),
-                None => all_paths.into_iter().collect::<Vec<_>>(),
-            };
-            let items = shown_paths
-                .into_iter()
-                .map(|path| build_path_entry(&path, with_lines).0)
-                .collect();
-            ToolResult::ok(filesystem_entries_result(items, total_entries))
-        })
-        .await
-    }
+            .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
 fn parse_depth(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
