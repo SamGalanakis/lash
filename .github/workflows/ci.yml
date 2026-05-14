@@ -34,6 +34,8 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install system dependencies
         run: |
@@ -107,6 +109,8 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -151,6 +155,8 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install system dependencies
         run: |
@@ -219,6 +225,8 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Install system dependencies
         run: |
