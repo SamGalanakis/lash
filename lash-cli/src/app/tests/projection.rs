@@ -95,8 +95,7 @@ fn finish_turn_from_read_view_does_not_duplicate_assistant_text_after_tool_activ
                 {"step": "Verify auth fallback", "status": "completed"},
             ]
         }),
-        result: serde_json::json!({"ok": true}),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true})),
         duration_ms: 12,
         call_id: Some("tc-plan".into()),
     });
@@ -115,10 +114,8 @@ fn finish_turn_from_read_view_does_not_duplicate_assistant_text_after_tool_activ
                 {"step": "Verify auth fallback", "status": "completed"},
             ]
         }),
-        result: serde_json::json!({"ok": true}),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true})),
         duration_ms: 12,
-        control: None,
     }];
     let events = events_from_messages(&messages);
     app.finish_turn_from_read_view(&test_read_view(&events, &messages, &tool_calls));
@@ -394,13 +391,11 @@ fn rlm_trajectory_projects_tool_calls_after_own_reasoning() {
             call_id: None,
             tool: "exec_command".to_string(),
             args: serde_json::json!({ "cmd": "date -u" }),
-            result: serde_json::json!({
+            output: lash_core::ToolCallOutput::success(serde_json::json!({
                 "output": "2026-04-25 20:05:57 UTC\n",
                 "exit_code": 0
-            }),
-            success: true,
+            })),
             duration_ms: 12,
-            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -429,13 +424,11 @@ fn rlm_trajectory_owns_matching_raw_tool_call_projection() {
         call_id: Some("call-date".to_string()),
         tool: "exec_command".to_string(),
         args: serde_json::json!({ "cmd": "date" }),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "output": "Mon May 11 01:51:25 PM CEST 2026\n",
             "exit_code": 0
-        }),
-        success: true,
+        })),
         duration_ms: 5,
-        control: None,
     };
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
@@ -485,10 +478,10 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
             call_id: None,
             tool: "exec_command".to_string(),
             args: serde_json::json!({ "cmd": "date -u" }),
-            result: serde_json::json!({ "output": "time\n", "exit_code": 0 }),
-            success: true,
+            output: lash_core::ToolCallOutput::success(
+                serde_json::json!({ "output": "time\n", "exit_code": 0 }),
+            ),
             duration_ms: 3,
-            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -504,10 +497,10 @@ fn rlm_trajectory_steps_project_chronologically_with_tool_results() {
             call_id: None,
             tool: "ls".to_string(),
             args: serde_json::json!({ "path": "." }),
-            result: serde_json::json!({ "entries": ["Cargo.toml"] }),
-            success: true,
+            output: lash_core::ToolCallOutput::success(
+                serde_json::json!({ "entries": ["Cargo.toml"] }),
+            ),
             duration_ms: 4,
-            control: None,
         }],
         images: Vec::new(),
         error: None,
@@ -711,13 +704,11 @@ fn interrupted_read_view_hides_rlm_execution_result_user_message() {
         call_id: Some("rlm_exec_0".to_string()),
         tool: "execute_lashlang".to_string(),
         args: serde_json::json!({ "code": "print inspect" }),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "observations": "raw dump",
             "tool_calls": []
-        }),
-        success: true,
+        })),
         duration_ms: 0,
-        control: None,
     }];
     let messages = vec![text_message("m0", MessageRole::User, "go"), result_message];
     let events = events_from_messages(&messages);

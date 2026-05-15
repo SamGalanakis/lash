@@ -77,14 +77,13 @@ fn plan_exit_tool_queues_follow_up_turn() {
             call_id: Some("tc-plan-exit".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: serde_json::json!({
+            output: lash_core::ToolCallOutput::success(serde_json::json!({
                 "approved": true,
                 "confirmation_display": "Start implementing now\n\nNote: safe slice first",
                 "plan_path": ".lash/plans/session.md",
                 "execution_mode": "current_session",
                 "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
-            }),
-            success: true,
+            })),
             duration_ms: 5,
         }),
     );
@@ -135,13 +134,12 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
         call_id: Some("tc-plan-exit".into()),
         name: "plan_exit".into(),
         args: serde_json::json!({}),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "approved": true,
             "confirmation_display": "Start implementing now\n\nNote: safe slice first",
             "execution_mode": "current_session",
             "next_turn_input": "Execute the plan in `.lash/plans/session.md`."
-        }),
-        success: true,
+        })),
         duration_ms: 5,
     });
 
@@ -161,12 +159,11 @@ fn plan_exit_fresh_context_tool_does_not_queue_ui_turn_or_switch() {
             call_id: Some("tc-plan-exit-fresh".into()),
             name: "plan_exit".into(),
             args: serde_json::json!({}),
-            result: serde_json::json!({
+            output: lash_core::ToolCallOutput::success(serde_json::json!({
                 "approved": true,
                 "execution_mode": "fresh_context",
                 "session_id": "new-plan-session",
-            }),
-            success: true,
+            })),
             duration_ms: 5,
         }),
     );
@@ -475,8 +472,7 @@ fn injected_messages_committed_do_not_duplicate_user_input_after_assistant_work(
     app.handle_session_event(SessionEvent::ToolCall {
         name: "fs_read".into(),
         args: serde_json::json!({"path": "lash/src/plugin.rs"}),
-        result: serde_json::json!({"output": "..."}),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!({"output": "..."})),
         duration_ms: 12,
         call_id: None,
     });
@@ -996,8 +992,7 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
         call_id: None,
         name: "search_tools".into(),
         args: serde_json::json!({ "query": "queue" }),
-        result: serde_json::json!([]),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!([])),
         duration_ms: 1,
     });
 
@@ -1037,12 +1032,11 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
             "question": "Pick one",
             "options": ["red", "blue"]
         }),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "kind": "single",
             "selection": "blue",
             "note": "ship the blue path"
-        }),
-        success: true,
+        })),
         duration_ms: 1,
     });
 

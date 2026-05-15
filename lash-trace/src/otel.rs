@@ -253,12 +253,12 @@ where
             }
             TraceEvent::ToolCallCompleted {
                 duration_ms,
-                success,
+                output,
                 ..
             } => {
                 let ended = tool_key(&record.event)
                     .as_deref()
-                    .is_some_and(|key| self.end_active(key, record, *success));
+                    .is_some_and(|key| self.end_active(key, record, output.is_success()));
                 if !ended {
                     self.emit_instant(record, "lash.tool", Some(*duration_ms));
                 }
@@ -520,16 +520,24 @@ fn event_attributes(record: &TraceRecord, options: &OtelTraceOptions) -> Vec<Key
             call_id,
             name,
             args,
-            result,
-            success,
+            output,
             duration_ms,
         } => {
             push_opt(&mut attrs, "lash.tool.call_id", call_id);
             attrs.push(KeyValue::new("lash.tool.name", name.clone()));
-            attrs.push(KeyValue::new("lash.tool.success", *success));
+            attrs.push(KeyValue::new("lash.tool.success", output.is_success()));
+            attrs.push(KeyValue::new(
+                "lash.tool.status",
+                format!("{:?}", output.status()).to_ascii_lowercase(),
+            ));
             attrs.push(KeyValue::new("lash.tool.duration_ms", *duration_ms as i64));
             push_payload_json(&mut attrs, options, "lash.tool.args_json", args);
-            push_payload_json(&mut attrs, options, "lash.tool.result_json", result);
+            push_payload_json(
+                &mut attrs,
+                options,
+                "lash.tool.result_json",
+                &output.value_for_projection(),
+            );
         }
         TraceEvent::ModeStep { mode, payload } => {
             attrs.push(KeyValue::new("lash.mode", mode.clone()));
@@ -694,7 +702,7 @@ fn is_error_event(event: &TraceEvent) -> bool {
     match event {
         TraceEvent::LlmCallFailed { .. } => true,
         TraceEvent::ToolCallStarted { .. } => false,
-        TraceEvent::ToolCallCompleted { success, .. } => !success,
+        TraceEvent::ToolCallCompleted { output, .. } => !output.is_success(),
         TraceEvent::TurnCompleted { status, .. } => status == "failed",
         _ => false,
     }

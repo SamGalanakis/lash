@@ -60,11 +60,15 @@ impl AutonomousRenderer {
             }
             TurnEvent::ToolCallCompleted {
                 name,
-                success,
+                output,
                 duration_ms,
                 ..
             } => {
-                let status = if success { "ok" } else { "error" };
+                let status = match output.status() {
+                    lash_core::ToolCallStatus::Success => "ok",
+                    lash_core::ToolCallStatus::Failure => "error",
+                    lash_core::ToolCallStatus::Cancelled => "cancelled",
+                };
                 if let Some(duration_text) = util::format_duration_ms_if_visible(duration_ms) {
                     eprintln!("[tool] {name} · {status} · {duration_text}");
                 } else {

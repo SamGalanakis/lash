@@ -902,10 +902,10 @@ impl SessionPlugin for PlanModePlugin {
             let state = Arc::clone(&after_tool_state);
             Box::pin(async move {
                 let approved = ctx.tool_name == "plan_exit"
-                    && ctx.result.success
+                    && ctx.result.is_success()
                     && ctx
                         .result
-                        .result
+                        .value_for_projection()
                         .get("approved")
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
@@ -920,14 +920,14 @@ impl SessionPlugin for PlanModePlugin {
                     ])];
                     if ctx
                         .result
-                        .result
+                        .value_for_projection()
                         .get("execution_mode")
                         .and_then(|value| value.as_str())
                         == Some("fresh_context")
                     {
                         let plan_path = ctx
                             .result
-                            .result
+                            .value_for_projection()
                             .get("plan_path")
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
@@ -967,7 +967,7 @@ impl SessionPlugin for PlanModePlugin {
                     .lock()
                     .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
                     .enabled;
-                if !enabled || ctx.tool_name != "apply_patch" || !ctx.result.success {
+                if !enabled || ctx.tool_name != "apply_patch" || !ctx.result.is_success() {
                     return Ok(Vec::new());
                 }
 

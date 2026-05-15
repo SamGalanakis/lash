@@ -21,6 +21,7 @@ use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
 use crate::{MessageOrigin, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionEventRecord<ME = ()> {
     Conversation(ConversationRecord),
     Tool(ToolEvent),
@@ -116,6 +117,7 @@ pub struct ErrorEnvelope {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionEvent {
     #[serde(rename = "text_delta")]
     TextDelta { content: String },
@@ -131,8 +133,7 @@ pub enum SessionEvent {
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
-        result: serde_json::Value,
-        success: bool,
+        output: crate::ToolCallOutput,
         duration_ms: u64,
     },
     #[serde(rename = "tool_call_start")]
@@ -493,6 +494,32 @@ pub fn format_tool_result_content(success: bool, result: &serde_json::Value) -> 
             }
             other => serde_json::to_string(&serde_json::json!({ "error": other }))
                 .unwrap_or_else(|_| "{\"error\":\"tool execution failed\"}".to_string()),
+        }
+    }
+}
+
+pub fn format_tool_output_content(output: &crate::ToolCallOutput) -> String {
+    match &output.outcome {
+        crate::ToolCallOutcome::Success(value) => {
+            let value = value.to_json_value();
+            match value {
+                serde_json::Value::String(text) => text,
+                other => serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string()),
+            }
+        }
+        crate::ToolCallOutcome::Failure(failure) => {
+            if failure.message.is_empty() {
+                "[Tool execution failed]".to_string()
+            } else {
+                format!("[Tool execution failed]\n{}", failure.message)
+            }
+        }
+        crate::ToolCallOutcome::Cancelled(cancellation) => {
+            if cancellation.message.is_empty() {
+                "[Tool execution cancelled]".to_string()
+            } else {
+                format!("[Tool execution cancelled]\n{}", cancellation.message)
+            }
         }
     }
 }

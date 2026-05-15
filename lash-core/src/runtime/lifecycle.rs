@@ -186,7 +186,7 @@ impl LashRuntime {
                 crate::session::TurnInputInjectionBridge::new(),
                 store,
             );
-            match env.session_task_executor.as_ref() {
+            match env.background_task_host.as_ref() {
                 Some(executor) => {
                     let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
                     Self::from_persistent_background_state(policy, host, services, state).await?
@@ -197,7 +197,7 @@ impl LashRuntime {
             }
         } else {
             let services = RuntimeServices::new(plugin_session);
-            match env.session_task_executor.as_ref() {
+            match env.background_task_host.as_ref() {
                 Some(executor) => {
                     let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
                     Self::from_background_state(policy, host, services, state).await?

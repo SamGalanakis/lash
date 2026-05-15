@@ -271,7 +271,11 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
 
 pub(crate) fn submit_error_tool_result(args: &Value) -> ToolResult {
     ToolResult::ok(args.clone()).with_control(lash_core::ToolControl::Fail {
-        value: args.clone(),
+        failure: lash_core::ToolFailure::tool(
+            lash_core::ToolFailureClass::Execution,
+            "subagent_submit_error",
+            args.to_string(),
+        ),
     })
 }
 

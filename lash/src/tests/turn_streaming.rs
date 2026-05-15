@@ -251,8 +251,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
                 call_id: Some("call-1".to_string()),
                 name: "app_lookup".to_string(),
                 args: serde_json::json!({}),
-                result: serde_json::json!({ "ok": true }),
-                success: true,
+                output: lash_core::ToolCallOutput::success(serde_json::json!({ "ok": true })),
                 duration_ms: 3,
             },
         ))
@@ -279,8 +278,8 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     ));
     assert!(matches!(
         &activities[1].event,
-        TurnEvent::ToolCallCompleted { name, result, .. }
-            if name == "app_lookup" && *result == serde_json::json!({ "ok": true })
+        TurnEvent::ToolCallCompleted { name, output, .. }
+            if name == "app_lookup" && output.value_for_projection() == serde_json::json!({ "ok": true })
     ));
     assert_eq!(activities[0].correlation_id, activities[2].correlation_id);
     assert!(matches!(
@@ -325,8 +324,8 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
         .expect("tool completion");
     assert!(matches!(
         &tool_completed.event,
-        TurnEvent::ToolCallCompleted { name, result, .. }
-            if name == "app_lookup" && *result == serde_json::json!({ "ok": true })
+        TurnEvent::ToolCallCompleted { name, output, .. }
+            if name == "app_lookup" && output.value_for_projection() == serde_json::json!({ "ok": true })
     ));
     Ok(())
 }
@@ -393,10 +392,13 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
         .position(|event| matches!(&event.event, TurnEvent::ToolCallCompleted { .. }))
         .expect("tool completed event");
     assert!(started < completed);
-    let TurnEvent::ToolCallCompleted { result, .. } = &events[completed].event else {
+    let TurnEvent::ToolCallCompleted { output, .. } = &events[completed].event else {
         unreachable!();
     };
-    assert_eq!(*result, serde_json::json!({ "ok": true }));
+    assert_eq!(
+        output.value_for_projection(),
+        serde_json::json!({ "ok": true })
+    );
     let prose = events
         .into_iter()
         .filter_map(|event| match event.event {
@@ -461,10 +463,13 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallCompleted { .. }
     )));
 
-    let TurnEvent::ToolCallCompleted { result, .. } = &events[tool_completed].event else {
+    let TurnEvent::ToolCallCompleted { output, .. } = &events[tool_completed].event else {
         unreachable!();
     };
-    assert_eq!(*result, serde_json::json!({ "ok": true }));
+    assert_eq!(
+        output.value_for_projection(),
+        serde_json::json!({ "ok": true })
+    );
     let TurnEvent::CodeBlockCompleted {
         language,
         success,

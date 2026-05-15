@@ -266,9 +266,9 @@ impl TurnActivitySink for AppEvents {
                     .tools
                     .insert(correlation_id, row);
             }
-            TurnEvent::ToolCallCompleted { name, result, success, .. } =&gt; {
+            TurnEvent::ToolCallCompleted { name, output, .. } =&gt; {
                 let row = self.turn_state.lock().unwrap().tools.remove(&amp;correlation_id);
-                update_or_insert_tool_row(row, name, result, success).await;
+                update_or_insert_tool_row(row, name, output).await;
             }
             TurnEvent::CodeBlockStarted { language, code } =&gt; {
                 let row = insert_code_row(language, code).await;
@@ -589,7 +589,7 @@ let core = LashCore::rlm()
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p>The normal builder exposes app-facing setup. Use <code>.advanced()</code> only for runtime-host concerns such as custom plugin hosts, shared task executors, residency policy, imported <code>RuntimeCoreConfig</code>, and termination policy.</p>
+            <p>The normal builder exposes app-facing setup. Use <code>.advanced()</code> only for runtime-host concerns such as custom plugin hosts, shared background task hosts, residency policy, imported <code>RuntimeCoreConfig</code>, and termination policy.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)

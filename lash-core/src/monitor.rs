@@ -62,7 +62,7 @@ pub struct MonitorStatus {
     #[serde(default)]
     pub armed: bool,
     #[serde(default)]
-    pub run_state: MonitorRunState,
+    pub state: MonitorRunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

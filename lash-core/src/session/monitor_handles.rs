@@ -9,7 +9,7 @@ use crate::ToolCallRecord;
 use crate::tool_dispatch::ToolDispatchOutcome;
 
 impl ModeExecutionContext {
-    pub(super) async fn live_monitor_tasks(&self) -> Vec<crate::ManagedTaskStatus> {
+    pub(super) async fn live_monitor_tasks(&self) -> Vec<crate::BackgroundTaskRecord> {
         self.dispatch
             .host
             .list_background_tasks(&self.session_id)
@@ -17,24 +17,26 @@ impl ModeExecutionContext {
             .unwrap_or_default()
             .into_iter()
             .filter(|task| {
-                task.kind == crate::ManagedTaskKind::Monitor && !task.run_state.is_terminal()
+                task.kind == crate::BackgroundTaskKind::Monitor && !task.state.is_terminal()
             })
             .collect()
     }
 
     pub(super) fn background_task_status_value(
-        status: &crate::ManagedTaskStatus,
+        status: &crate::BackgroundTaskRecord,
     ) -> serde_json::Value {
         json!({
             "task_id": status.id,
             "kind": status.kind.as_str(),
             "producer": status.producer,
-            "run_state": match status.run_state {
-                crate::ManagedRunState::Running => "running",
-                crate::ManagedRunState::Idle => "idle",
-                crate::ManagedRunState::Completed => "completed",
-                crate::ManagedRunState::Failed => "failed",
-                crate::ManagedRunState::Cancelled => "cancelled",
+            "state": match status.state {
+                crate::BackgroundTaskState::Pending => "pending",
+                crate::BackgroundTaskState::Running => "running",
+                crate::BackgroundTaskState::Waiting => "idle",
+                crate::BackgroundTaskState::Completed => "completed",
+                crate::BackgroundTaskState::Failed => "failed",
+                crate::BackgroundTaskState::CancelRequested => "cancel_requested",
+                crate::BackgroundTaskState::Cancelled => "cancelled",
             },
         })
     }
@@ -48,7 +50,7 @@ impl ModeExecutionContext {
 
     pub(super) fn ensure_monitor_async_handle(
         &self,
-        status: &crate::ManagedTaskStatus,
+        status: &crate::BackgroundTaskRecord,
     ) -> serde_json::Value {
         let mut handles = self
             .async_tool_handles
@@ -74,41 +76,37 @@ impl ModeExecutionContext {
             .execute_tool_call(call_id, "monitor".to_string(), args, tc_num, None)
             .await;
 
-        let reply = if executed.completed.result.success {
+        let reply = if executed.completed.output.is_success() {
             let task_id = executed
                 .completed
-                .result
-                .result
+                .output
+                .value_for_projection()
                 .get("task_id")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
             match task_id {
                 Some(task_id) => {
-                    let status = crate::ManagedTaskStatus {
-                        id: task_id.clone(),
-                        kind: crate::ManagedTaskKind::Monitor,
-                        producer: "monitor".to_string(),
-                        run_state: crate::ManagedRunState::Running,
-                        started_at: std::time::SystemTime::now(),
-                    };
+                    let status = crate::BackgroundTaskRecord::local_session(
+                        self.session_id.clone(),
+                        task_id.clone(),
+                        crate::BackgroundTaskKind::Monitor,
+                        "monitor",
+                        crate::BackgroundTaskState::Running,
+                    );
                     ModeToolReply::success(self.ensure_monitor_async_handle(&status))
                 }
                 None => ModeToolReply::error(json!("monitor started but did not return a task_id")),
             }
         } else {
-            ModeToolReply::error(executed.completed.result.result.clone())
+            ModeToolReply::from_output(executed.completed.output.clone())
         };
 
-        ModeToolReply {
-            record: Some(executed.record),
-            images: executed.completed.result.images,
-            ..reply
-        }
+        reply.with_record(executed.record)
     }
 
     pub(super) fn list_async_handles(
         &self,
-        live_monitor_tasks: Vec<crate::ManagedTaskStatus>,
+        live_monitor_tasks: Vec<crate::BackgroundTaskRecord>,
     ) -> ModeToolReply {
         for task in &live_monitor_tasks {
             self.ensure_monitor_async_handle(task);
@@ -177,7 +175,7 @@ impl ModeExecutionContext {
             let Some(status) = tasks.into_iter().find(|task| task.id == task_id) else {
                 return ModeToolReply::error(json!(format!("Unknown monitor handle: {task_id}")));
             };
-            if status.run_state.is_terminal() {
+            if status.state.is_terminal() {
                 if let Some(entry) = self
                     .async_tool_handles
                     .lock()
@@ -186,9 +184,9 @@ impl ModeExecutionContext {
                 {
                     let mut guard = entry.state.lock().expect("async tool state lock");
                     if guard.terminal.is_none() {
-                        guard.terminal = Some(match status.run_state {
-                            crate::ManagedRunState::Cancelled => AsyncToolTerminal::Cancelled,
-                            crate::ManagedRunState::Failed => {
+                        guard.terminal = Some(match status.state {
+                            crate::BackgroundTaskState::Cancelled => AsyncToolTerminal::Cancelled,
+                            crate::BackgroundTaskState::Failed => {
                                 AsyncToolTerminal::Failed("monitor failed".to_string())
                             }
                             _ => AsyncToolTerminal::Completed(ToolDispatchOutcome {
@@ -196,20 +194,20 @@ impl ModeExecutionContext {
                                     call_id: None,
                                     tool: "monitor".into(),
                                     args: json!({}),
-                                    result: Self::background_task_status_value(&status),
-                                    success: true,
+                                    output: crate::ToolCallOutput::success(
+                                        Self::background_task_status_value(&status),
+                                    ),
                                     duration_ms: 0,
-                                    control: None,
                                 },
-                                images: Vec::new(),
                             }),
                         });
                     }
                 }
                 let value = Self::background_task_status_value(&status);
-                return match status.run_state {
-                    crate::ManagedRunState::Failed | crate::ManagedRunState::Cancelled => {
-                        ModeToolReply::error(value)
+                return match status.state {
+                    crate::BackgroundTaskState::Failed => ModeToolReply::error(value),
+                    crate::BackgroundTaskState::Cancelled => {
+                        ModeToolReply::cancelled("monitor was cancelled")
                     }
                     _ => ModeToolReply::success(value),
                 };

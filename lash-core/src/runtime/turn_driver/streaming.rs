@@ -465,7 +465,7 @@ impl RuntimeTurnDriver {
         let sink = self.host.core.trace_sink.clone();
         let base_context = self.host.core.trace_context.clone();
         let context = self.trace_context(mode_iteration);
-        let started_at = debug.started_at;
+        let created_at = debug.created_at;
         let sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         Some(LlmProviderTraceSender::new(
@@ -477,7 +477,7 @@ impl RuntimeTurnDriver {
                 let event = TraceProviderStreamEvent {
                     provider: provider_event.provider.to_string(),
                     sequence,
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: created_at.elapsed().as_millis() as u64,
                     event_name: provider_event.event_name,
                     item_id,
                     output_index,

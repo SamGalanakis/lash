@@ -17,7 +17,7 @@ pub type BeforeToolCallHook =
 pub type AfterToolCallHook =
     Arc<dyn Fn(ToolResultHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type ToolResultProjector =
-    Arc<dyn Fn(ToolResultProjectionContext) -> PluginFuture<ToolResult> + Send + Sync>;
+    Arc<dyn Fn(ToolResultProjectionContext) -> PluginFuture<crate::ModelToolReturn> + Send + Sync>;
 pub type AfterTurnHook =
     Arc<dyn Fn(TurnResultHookContext) -> PluginFuture<Vec<PluginDirective>> + Send + Sync>;
 pub type CheckpointHook =
@@ -189,9 +189,10 @@ impl ToolResultHookContext {
 #[derive(Clone)]
 pub struct ToolResultProjectionContext {
     pub session_id: String,
+    pub call_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
-    pub result: ToolResult,
+    pub output: crate::ToolCallOutput,
     pub duration_ms: u64,
 }
 

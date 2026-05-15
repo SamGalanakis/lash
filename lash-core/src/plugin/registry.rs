@@ -211,7 +211,7 @@ pub struct PluginSessionContext {
     pub standard_context_approach: Option<crate::StandardContextApproach>,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionAuthority>,
-    /// True when the host has a session background-task executor. Plugins that
+    /// True when the host has a background task host. Plugins that
     /// register background-managed tools should fail during plugin registration
     /// if this is false instead of surfacing tools that fail at call time.
     pub background_tasks_available: bool,

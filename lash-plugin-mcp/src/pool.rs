@@ -20,7 +20,11 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use lash_core::{ToolDefinition, ToolExecutionMode, ToolImage, ToolResult};
+use lash_core::{
+    AttachmentCreateMeta, MediaType, ToolCallOutput, ToolContext, ToolDefinition,
+    ToolExecutionMode, ToolFailure, ToolFailureClass, ToolFailureSource, ToolResult,
+    ToolRetryDisposition, ToolValue,
+};
 
 use crate::config::McpServerConfig;
 use crate::error::McpError;
@@ -136,7 +140,12 @@ impl McpConnectionPool {
 
     /// Route a prefixed tool call (`mcp__<server>__<tool>`) to the appropriate
     /// server and translate its result back to `ToolResult`.
-    pub async fn call_tool(&self, prefixed_name: &str, args: &Value) -> ToolResult {
+    pub async fn call_tool(
+        &self,
+        prefixed_name: &str,
+        args: &Value,
+        context: &ToolContext,
+    ) -> ToolResult {
         let (entry, original_name) = match self.lookup(prefixed_name).await {
             Some(found) => found,
             None => {
@@ -176,7 +185,7 @@ impl McpConnectionPool {
         .await;
 
         match response {
-            Ok(Ok(result)) => tool_result_from_rmcp(result),
+            Ok(Ok(result)) => tool_result_from_rmcp(result, context),
             Ok(Err(err)) => ToolResult::err_fmt(err),
             Err(_) => ToolResult::err_fmt(McpError::CallTimeout {
                 server: server_name,
@@ -337,16 +346,19 @@ fn import_tools(
     imported
 }
 
-fn tool_result_from_rmcp(result: rmcp::model::CallToolResult) -> ToolResult {
+fn tool_result_from_rmcp(result: rmcp::model::CallToolResult, context: &ToolContext) -> ToolResult {
     let is_error = result.is_error.unwrap_or(false);
 
     let mut text_parts = Vec::new();
-    let mut passthrough_items: Vec<Value> = Vec::new();
-    let mut images = Vec::new();
+    let mut content_items: Vec<ToolValue> = Vec::new();
+    let mut has_attachments = false;
 
     for Content { raw, .. } in result.content {
         match raw {
-            RawContent::Text(text) => text_parts.push(text.text),
+            RawContent::Text(text) => {
+                text_parts.push(text.text.clone());
+                content_items.push(ToolValue::String(text.text));
+            }
             RawContent::Image(image) => {
                 let data = match base64::engine::general_purpose::STANDARD.decode(image.data) {
                     Ok(bytes) => bytes,
@@ -354,41 +366,70 @@ fn tool_result_from_rmcp(result: rmcp::model::CallToolResult) -> ToolResult {
                         return ToolResult::err_fmt(McpError::Decode(err));
                     }
                 };
-                images.push(ToolImage {
-                    mime: image.mime_type,
-                    reference: None,
+                let Some(media_type) = MediaType::from_mime(&image.mime_type) else {
+                    return ToolResult::err_fmt(format!(
+                        "Unsupported MCP image MIME type: {}",
+                        image.mime_type
+                    ));
+                };
+                let reference = match context.put_attachment(
                     data,
-                    label: "MCP image".to_string(),
-                    width: None,
-                    height: None,
-                });
+                    AttachmentCreateMeta::new(media_type, None, None, Some("MCP image".into())),
+                ) {
+                    Ok(reference) => reference,
+                    Err(err) => {
+                        return ToolResult::err_fmt(format!(
+                            "Failed to store MCP image attachment: {err}"
+                        ));
+                    }
+                };
+                has_attachments = true;
+                content_items.push(ToolValue::Attachment(reference));
             }
             other => {
                 if let Ok(value) = serde_json::to_value(&other) {
-                    passthrough_items.push(value);
+                    content_items.push(ToolValue::from(value));
                 }
             }
         }
     }
 
     let value = if let Some(structured) = result.structured_content {
-        structured
-    } else if passthrough_items.is_empty() {
-        match text_parts.len() {
-            0 => Value::Null,
-            1 => Value::String(text_parts.into_iter().next().unwrap_or_default()),
-            _ => Value::String(text_parts.join("\n\n")),
+        if !has_attachments {
+            ToolValue::from(structured)
+        } else {
+            ToolValue::Object(
+                [
+                    ("structured".to_string(), ToolValue::from(structured)),
+                    ("content".to_string(), ToolValue::Array(content_items)),
+                ]
+                .into_iter()
+                .collect(),
+            )
         }
-    } else if text_parts.is_empty() {
-        Value::Array(passthrough_items)
+    } else if content_items.is_empty() {
+        ToolValue::Null
+    } else if content_items.len() == 1 {
+        content_items.into_iter().next().unwrap_or(ToolValue::Null)
     } else {
-        json!({
-            "text": text_parts.join("\n\n"),
-            "content": passthrough_items,
-        })
+        ToolValue::Array(content_items)
     };
-
-    ToolResult::with_images(!is_error, value, images)
+    if is_error {
+        ToolResult::from_output(ToolCallOutput::failure(ToolFailure {
+                class: ToolFailureClass::Execution,
+                code: "mcp_tool_error".into(),
+                message: if text_parts.is_empty() {
+                    "MCP tool returned an error".into()
+                } else {
+                    text_parts.join("\n\n")
+                },
+                source: ToolFailureSource::Tool,
+                retry: ToolRetryDisposition::Never,
+                raw: Some(value),
+            }))
+    } else {
+        ToolResult::from_output(ToolCallOutput::success(value))
+    }
 }
 
 impl Drop for McpConnectionPool {

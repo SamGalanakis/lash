@@ -104,7 +104,7 @@ impl lash_core::SessionPlugin for PromptContextPlugin {
         reg.tool_calls().after(Arc::new(move |ctx| {
             let instruction_source = Arc::clone(&instruction_source);
             Box::pin(async move {
-                if !ctx.result.success || ctx.tool_name != "read_file" {
+                if !ctx.result.is_success() || ctx.tool_name != "read_file" {
                     return Ok(Vec::new());
                 }
                 let Some(path) = ctx.args.get("path").and_then(|value| value.as_str()) else {

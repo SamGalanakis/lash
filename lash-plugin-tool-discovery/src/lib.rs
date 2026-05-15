@@ -1248,8 +1248,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{result:?}");
-        let results = result.result.as_array().expect("search result list");
+        assert!(result.is_success(), "{result:?}");
+        let value = result.value_for_projection();
+        let results = value.as_array().expect("search result list");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["name"], json!("read_file"));
         assert_eq!(results[0]["signature"], json!("read_file() -> any"));
@@ -1318,8 +1319,9 @@ mod tests {
                 progress: None,
             })
             .await;
-        assert!(result.success, "{result:?}");
-        let results = result.result.as_array().expect("spawn results");
+        assert!(result.is_success(), "{result:?}");
+        let value = result.value_for_projection();
+        let results = value.as_array().expect("spawn results");
         assert_eq!(results[0]["name"], json!("spawn_agent"));
         assert_eq!(
             results[0]["signature"],
@@ -1338,8 +1340,9 @@ mod tests {
                 progress: None,
             })
             .await;
-        assert!(result.success, "{result:?}");
-        let results = result.result.as_array().expect("llm results");
+        assert!(result.is_success(), "{result:?}");
+        let value = result.value_for_projection();
+        let results = value.as_array().expect("llm results");
         assert_eq!(results[0]["name"], json!("llm_query"));
         assert_eq!(
             results[0]["signature"],
@@ -1461,8 +1464,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{result:?}");
-        let results = result.result.as_array().expect("search result list");
+        assert!(result.is_success(), "{result:?}");
+        let value = result.value_for_projection();
+        let results = value.as_array().expect("search result list");
         assert_eq!(ranked_names(results), vec!["search_web"]);
         let requests = host
             .direct_requests

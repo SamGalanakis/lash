@@ -90,6 +90,33 @@ impl MediaType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachmentCreateMeta {
+    pub media_type: MediaType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl AttachmentCreateMeta {
+    pub fn new(
+        media_type: MediaType,
+        width: Option<u32>,
+        height: Option<u32>,
+        label: Option<String>,
+    ) -> Self {
+        Self {
+            media_type,
+            width,
+            height,
+            label,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentMeta {
     pub id: AttachmentId,
     pub media_type: MediaType,

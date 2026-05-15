@@ -573,9 +573,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{:?}", result.result);
-        assert_eq!(result.result["root_cause"], json!("missing config"));
-        assert_eq!(result.result["confidence"], json!(0.8));
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["root_cause"], json!("missing config"));
+        assert_eq!(result.value_for_projection()["confidence"], json!(0.8));
 
         let requests = manager.requests.lock().expect("requests");
         assert_eq!(requests.len(), 1);
@@ -632,7 +632,7 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{:?}", result.result);
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
         let requests = manager.requests.lock().expect("requests");
         assert_eq!(requests.len(), 1);
         let (request, usage_source) = &requests[0];
@@ -671,7 +671,7 @@ mod tests {
             })
             .await;
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert_eq!(result.result, json!("missing required evidence"));
     }
 }

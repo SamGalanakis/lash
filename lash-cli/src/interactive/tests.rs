@@ -43,28 +43,33 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
     .await;
 
     let first = pump.recv().await.expect("text event").event;
-    match first {
-        AppEvent::Session {
-            stream_id: 7,
-            activity:
-                TurnActivity {
-                    event: TurnEvent::AssistantProseDelta { text },
-                    ..
-                },
-        } => assert_eq!(text, "Hello, world"),
-        _ => panic!("expected coalesced text delta"),
-    }
+    let AppEvent::Session {
+        stream_id: 7,
+        activity,
+    } = first
+    else {
+        panic!("expected coalesced text delta");
+    };
+    let TurnActivity {
+        event: TurnEvent::AssistantProseDelta { text },
+        ..
+    } = *activity
+    else {
+        panic!("expected coalesced text delta");
+    };
+    assert_eq!(text, "Hello, world");
 
     let second = pump.recv().await.expect("structural event").event;
+    let AppEvent::Session {
+        stream_id: 7,
+        activity,
+    } = second
+    else {
+        panic!("expected structural event");
+    };
     assert!(matches!(
-        second,
-        AppEvent::Session {
-            stream_id: 7,
-            activity: TurnActivity {
-                event: TurnEvent::ModelRequestStarted { .. },
-                ..
-            },
-        }
+        (*activity).event,
+        TurnEvent::ModelRequestStarted { .. }
     ));
 }
 

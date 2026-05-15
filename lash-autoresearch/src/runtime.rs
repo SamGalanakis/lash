@@ -996,10 +996,12 @@ fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginActionFailure>
 where
     T: serde::de::DeserializeOwned,
 {
-    if !result.success {
-        return Err(PluginActionFailure::new(result.result.to_string()));
+    if !result.is_success() {
+        return Err(PluginActionFailure::new(
+            result.value_for_projection().to_string(),
+        ));
     }
-    serde_json::from_value(result.result)
+    serde_json::from_value(result.into_value_for_projection())
         .map_err(|err| PluginActionFailure::new(format!("invalid autoresearch output: {err}")))
 }
 
@@ -1044,7 +1046,7 @@ async fn start_mode_command(
         return result;
     }
     let result = start_mode(root, state, args);
-    if !result.success {
+    if !result.is_success() {
         let _ = set_autoresearch_tools_enabled(&ctx, false).await;
     }
     result
@@ -1059,7 +1061,7 @@ async fn stop_mode_command(
         return result;
     }
     let result = stop_mode(root, state);
-    if !result.success {
+    if !result.is_success() {
         let _ = set_autoresearch_tools_enabled(&ctx, true).await;
     }
     result
@@ -1074,7 +1076,7 @@ async fn clear_mode_command(
         return result;
     }
     let result = clear_mode(root, state);
-    if !result.success {
+    if !result.is_success() {
         let _ = set_autoresearch_tools_enabled(&ctx, true).await;
     }
     result

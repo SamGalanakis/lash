@@ -53,9 +53,9 @@ pub mod tools {
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
         StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolCallRecord, ToolContext, ToolContract,
-        ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
-        ToolProvider, ToolResult, ToolSourceHandle,
+        ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
+        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
+        ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
@@ -113,8 +113,8 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, EmbeddedRuntimeHost, EventSink, ExecutionMode, LashRuntime,
-        ManagedTaskStatus, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
+        AssembledTurn, BackgroundTaskRecord, EmbeddedRuntimeHost, EventSink, ExecutionMode,
+        LashRuntime, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
         NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency, RewriteTrigger,
         RuntimeCoreConfig, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError,
         RuntimeHandle, RuntimeObservation, SessionHandle, SessionPolicy, SessionStateEnvelope,

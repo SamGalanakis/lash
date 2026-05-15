@@ -216,15 +216,14 @@ impl TraceSessionEvent {
                 call_id,
                 name,
                 args,
-                result,
-                success,
+                output,
                 duration_ms,
             } => Some(Self::ToolCall {
                 call_id: call_id.clone(),
                 name: name.clone(),
                 args: args.clone(),
-                result: result.clone(),
-                success: *success,
+                result: output.value_for_projection(),
+                success: output.is_success(),
                 duration_ms: *duration_ms,
             }),
             TurnEvent::CodeBlockStarted { code, .. } => Some(Self::Message {

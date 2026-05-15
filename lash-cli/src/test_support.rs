@@ -178,15 +178,13 @@ fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
             call_id,
             name,
             args,
-            result,
-            success,
+            output,
             duration_ms,
         } => Some(TurnEvent::ToolCallCompleted {
             call_id: call_id.clone(),
             name: name.clone(),
             args: args.clone(),
-            result: result.clone(),
-            success: *success,
+            output: output.clone(),
             duration_ms: *duration_ms,
         }),
         SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginSurface {
@@ -267,12 +265,11 @@ mod tests {
                 "question": "Pick one",
                 "options": ["Alpha", "Beta", "Gamma"],
             }),
-            result: json!({
+            output: lash_core::ToolCallOutput::success(json!({
                 "kind": "single",
                 "selection": "Beta",
                 "note": "because",
-            }),
-            success: true,
+            })),
             duration_ms: 12,
         });
 

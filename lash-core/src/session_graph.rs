@@ -123,6 +123,7 @@ impl<'de> serde::Deserialize<'de> for SharedJsonValue {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionNodePayload {
     Event {
         event: SessionEventRecord,
@@ -1279,7 +1280,7 @@ fn stable_tool_call_key(record: &ToolCallRecord) -> String {
     {
         return call_id.clone();
     }
-    let raw = serde_json::to_vec(&(record.tool.clone(), &record.args, &record.result))
+    let raw = serde_json::to_vec(&(record.tool.clone(), &record.args, &record.output))
         .unwrap_or_else(|_| b"tool-call".to_vec());
     let digest = sha2::Sha256::digest(raw);
     format!("anon-{}", &format!("{digest:x}")[..12])

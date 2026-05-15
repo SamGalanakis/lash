@@ -140,7 +140,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
             session_id: "child".to_string(),
             parent_session_id: Some("root".to_string()),
             capability: Some("explore".to_string()),
-            run_state: "running".to_string(),
+            state: "running".to_string(),
             model: "gpt-5.4-mini".to_string(),
             model_variant: Some("low".to_string()),
             last_iterations: None,
@@ -1277,8 +1277,9 @@ fn live_reasoning_compacts_after_activity_appends_below_it() {
         call_id: None,
         name: "read_file".into(),
         args: serde_json::json!({ "path": "lash/src/provider.rs" }),
-        result: serde_json::json!({ "content": "provider code" }),
-        success: true,
+        output: lash_core::ToolCallOutput::success(
+            serde_json::json!({ "content": "provider code" }),
+        ),
         duration_ms: 0,
     });
 

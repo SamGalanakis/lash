@@ -1,3 +1,4 @@
+use lash_sansio::ToolCallOutput;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -94,6 +95,7 @@ pub(crate) fn plugin_surface_session_events(
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum PluginDirective {
     AbortTurn {
         code: String,
@@ -112,8 +114,7 @@ pub enum PluginDirective {
         args: serde_json::Value,
     },
     ShortCircuitTool {
-        result: serde_json::Value,
-        success: bool,
+        output: ToolCallOutput,
     },
     EmitEvents {
         events: Vec<PluginSurfaceEvent>,
@@ -130,19 +131,13 @@ pub enum PluginDirective {
 impl PluginDirective {
     pub fn short_circuit(result: ToolResult) -> Self {
         Self::ShortCircuitTool {
-            result: result.result,
-            success: result.success,
+            output: *result.output,
         }
     }
 
     pub fn into_tool_result(self) -> Option<ToolResult> {
         match self {
-            Self::ShortCircuitTool { result, success } => Some(ToolResult {
-                success,
-                result,
-                images: Vec::new(),
-                control: None,
-            }),
+            Self::ShortCircuitTool { output } => Some(ToolResult::from_output(output)),
             _ => None,
         }
     }

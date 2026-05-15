@@ -942,6 +942,7 @@ pub(crate) async fn run_app(
                 if stream_id != active_stream_id {
                     continue;
                 }
+                let activity = *activity;
                 if matches!(activity.event, TurnEvent::AssistantProseDelta { .. }) {
                     if let Some(recorder) = ui_trace.as_mut() {
                         recorder.record_turn_activity(&activity);

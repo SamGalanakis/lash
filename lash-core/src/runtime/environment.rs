@@ -28,7 +28,7 @@ use std::sync::Arc;
 use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
 
 use super::TerminationPolicy;
-use super::host::SessionTaskExecutor;
+use super::host::BackgroundTaskHost;
 
 /// Where session nodes live at runtime.
 ///
@@ -71,8 +71,8 @@ pub struct RuntimeEnvironment {
     // + `vacuum`.
     pub residency: Residency,
 
-    // Background task executor for `PluginSessionTask` futures.
-    pub session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
+    // Host-owned background task lifecycle and local execution support.
+    pub background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
 
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
@@ -94,7 +94,7 @@ impl Default for RuntimeEnvironment {
         Self {
             plugin_host: None,
             residency: Residency::default(),
-            session_task_executor: None,
+            background_task_host: None,
             session_store_factory: None,
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt: crate::PromptLayer::new(),
@@ -136,7 +136,7 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl RuntimeEnvironmentBuilder {
     pub fn with_plugin_host(mut self, host: Arc<crate::PluginHost>) -> Self {
-        self.env.plugin_host = Some(if self.env.session_task_executor.is_some() {
+        self.env.plugin_host = Some(if self.env.background_task_host.is_some() {
             Arc::new(host.as_ref().clone().with_background_tasks())
         } else {
             host
@@ -149,8 +149,11 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_session_task_executor(mut self, executor: Arc<dyn SessionTaskExecutor>) -> Self {
-        self.env.session_task_executor = Some(executor);
+    pub fn with_background_task_host(
+        mut self,
+        background_task_host: Arc<dyn BackgroundTaskHost>,
+    ) -> Self {
+        self.env.background_task_host = Some(background_task_host);
         if let Some(host) = self.env.plugin_host.take() {
             self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_background_tasks()));
         }

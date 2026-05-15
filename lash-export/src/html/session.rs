@@ -135,7 +135,7 @@ pub(crate) fn write_hero(out: &mut String, session: &LoadedSession, _stats: &Ses
 
 fn write_run_summary(out: &mut String, session: &LoadedSession, stats: &SessionStats) {
     let llm_calls = session.llm_prompts.len();
-    let total_calls = stats.tool_calls_ok + stats.tool_calls_err;
+    let total_calls = stats.tool_calls_ok + stats.tool_calls_err + stats.tool_calls_cancelled;
     let top_tools = stats
         .tool_freq
         .iter()
@@ -180,7 +180,7 @@ fn write_run_summary(out: &mut String, session: &LoadedSession, stats: &SessionS
 
 fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &SessionStats) {
     let total_msgs = stats.user_messages + stats.assistant_messages + stats.system_messages;
-    let total_calls = stats.tool_calls_ok + stats.tool_calls_err;
+    let total_calls = stats.tool_calls_ok + stats.tool_calls_err + stats.tool_calls_cancelled;
     let total_seconds = stats.tool_total_ms as f64 / 1000.0;
     out.push_str("<section class=\"session-bar\" aria-label=\"session statistics\">\n");
     let _ = writeln!(
@@ -192,16 +192,17 @@ fn write_session_bar(out: &mut String, _session: &LoadedSession, stats: &Session
     );
     // Tint just the err sub-line, not the whole stat — 526 ok / 3 err
     // shouldn't look like the whole tool-call counter is on fire.
-    let err_sub_class = if stats.tool_calls_err > 0 {
+    let err_sub_class = if stats.tool_calls_err > 0 || stats.tool_calls_cancelled > 0 {
         "stat-sub stat-sub--err"
     } else {
         "stat-sub"
     };
     let _ = writeln!(
         out,
-        "  <div class=\"stat\"><span class=\"stat-key\">tool calls</span><span class=\"stat-val\">{total_calls}</span><span class=\"{err_sub_class}\">{ok} ok · {er} err</span></div>",
+        "  <div class=\"stat\"><span class=\"stat-key\">tool calls</span><span class=\"stat-val\">{total_calls}</span><span class=\"{err_sub_class}\">{ok} ok · {er} err · {ca} cancelled</span></div>",
         ok = stats.tool_calls_ok,
         er = stats.tool_calls_err,
+        ca = stats.tool_calls_cancelled,
     );
     let _ = writeln!(
         out,

@@ -359,8 +359,7 @@ impl RuntimeTurnDriver {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
                 args: record.args.clone(),
-                result: record.result.clone(),
-                success: record.success,
+                output: crate::trace::trace_tool_call_output(&record.output),
                 duration_ms: record.duration_ms,
             },
         );
@@ -597,10 +596,8 @@ impl RuntimeTurnDriver {
                                     call_id: Some(outcome.call_id.clone()),
                                     tool: outcome.tool_name.clone(),
                                     args: outcome.args.clone(),
-                                    result: outcome.result.result.clone(),
-                                    success: outcome.result.success,
+                                    output: outcome.output.clone(),
                                     duration_ms: outcome.duration_ms,
-                                    control: outcome.result.control.clone(),
                                 };
                                 self.emit_tool_call_trace(machine.mode_iteration(), &record);
                             }
@@ -610,10 +607,8 @@ impl RuntimeTurnDriver {
                                 call_id: Some(outcome.call_id.clone()),
                                 tool: outcome.tool_name.clone(),
                                 args: outcome.args.clone(),
-                                result: outcome.result.result.clone(),
-                                success: outcome.result.success,
+                                output: outcome.output.clone(),
                                 duration_ms: outcome.duration_ms,
-                                control: outcome.result.control.clone(),
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
                     }
@@ -645,7 +640,7 @@ impl RuntimeTurnDriver {
                             },
                         )
                         .await;
-                        let exec_started_at = std::time::Instant::now();
+                        let exec_created_at = std::time::Instant::now();
                         let result = self
                             .run_exec_code(&code, machine.message_sequence(), iteration, &event_tx)
                             .await;
@@ -673,7 +668,7 @@ impl RuntimeTurnDriver {
                                         output: String::new(),
                                         error: Some(error.clone()),
                                         success: false,
-                                        duration_ms: exec_started_at.elapsed().as_millis() as u64,
+                                        duration_ms: exec_created_at.elapsed().as_millis() as u64,
                                     },
                                 )
                                 .await;

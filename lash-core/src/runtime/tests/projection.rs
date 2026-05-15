@@ -13,10 +13,13 @@ async fn tool_result_projector_only_changes_model_observation() {
             Ok(Arc::new(RuntimeTestPlugin {
                 before_turn: None,
                 checkpoint: None,
-                tool_result_projector: Some(Arc::new(|mut ctx| {
+                tool_result_projector: Some(Arc::new(|ctx| {
                     Box::pin(async move {
-                        ctx.result.result = serde_json::json!("model projection");
-                        Ok(ctx.result)
+                        Ok(crate::ModelToolReturn::text(
+                            ctx.call_id,
+                            ctx.tool_name,
+                            "model projection",
+                        ))
                     })
                 })),
                 runtime_event: Some(Arc::new(move |event| {
@@ -26,13 +29,13 @@ async fn tool_result_projector_only_changes_model_observation() {
                             committed_results.lock().await.push((
                                 turn.tool_calls
                                     .first()
-                                    .map(|call| call.result.clone())
+                                    .map(|call| call.output.value_for_projection().clone())
                                     .unwrap_or(serde_json::Value::Null),
                                 turn.state
                                     .read_model()
                                     .tool_calls
                                     .first()
-                                    .map(|call| call.result.clone())
+                                    .map(|call| call.output.value_for_projection().clone())
                                     .unwrap_or(serde_json::Value::Null),
                             ));
                         }
@@ -120,11 +123,13 @@ async fn tool_result_projector_only_changes_model_observation() {
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("tool-1"));
     assert_eq!(
-        active_tool_calls(&turn.state)[0].result,
+        active_tool_calls(&turn.state)[0]
+            .output
+            .value_for_projection(),
         serde_json::json!({ "payload": "raw:sample" })
     );
     assert_eq!(
-        turn.tool_calls[0].result,
+        turn.tool_calls[0].output.value_for_projection(),
         serde_json::json!({ "payload": "raw:sample" })
     );
 }

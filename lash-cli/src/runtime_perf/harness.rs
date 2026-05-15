@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use lash_core::provider::ProviderReliability;
 use lash_core::{
-    AppendSessionNodesRequest, LashRuntime, MessageRole, PluginHost, PluginMessage, PluginSpec,
-    ProviderHandle, ProviderOptions, RuntimePersistence, SessionAppendNode, SessionPolicy,
-    TokioSessionTaskExecutor, TurnOutcome,
+    AppendSessionNodesRequest, LashRuntime, LocalBackgroundTaskHost, MessageRole, PluginHost,
+    PluginMessage, PluginSpec, ProviderHandle, ProviderOptions, RuntimePersistence,
+    SessionAppendNode, SessionPolicy, TurnOutcome,
 };
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_provider_openai::OpenAiCompatibleProvider;
@@ -191,7 +191,7 @@ pub(crate) async fn build_runtime(
     let builder = LashRuntime::builder()
         .with_policy(policy.clone())
         .with_store(Arc::clone(&store))
-        .with_session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
+        .with_background_task_host(Arc::new(LocalBackgroundTaskHost::default()))
         .with_plugin_host(plugin_host);
     let runtime = builder.build().await?;
     Ok(BenchmarkRuntime {

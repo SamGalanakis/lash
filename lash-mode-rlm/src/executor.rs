@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use lash_core::plugin::project_observation_text;
 use lash_core::{
     AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
-    ModeToolReply, SessionError, TextProjectionMetadata, ToolImage, ToolOutputBudgetConfig,
+    ModeToolReply, RlmPrintImage, SessionError, TextProjectionMetadata, ToolOutputBudgetConfig,
 };
 use lash_rlm_types::PROJECTED_JSON_TAG;
 use lashlang::{
@@ -371,7 +371,7 @@ struct HostBridge {
     observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
     printed_images: Mutex<Vec<AttachmentRef>>,
     tool_calls: Mutex<Vec<lash_core::ToolCallRecord>>,
-    tool_images: Mutex<Vec<ToolImage>>,
+    tool_images: Mutex<Vec<RlmPrintImage>>,
     next_tool_index: Mutex<usize>,
 }
 
@@ -519,25 +519,22 @@ impl HostBridge {
                 .map_err(|_| ToolHostError::new("tool call buffer poisoned"))?
                 .push(record);
         }
-        if !reply.images.is_empty() {
-            self.tool_images
-                .lock()
-                .map_err(|_| ToolHostError::new("tool image buffer poisoned"))?
-                .extend(reply.images.clone());
-        }
-        if reply.success {
+        if reply.output.is_success() {
+            let value = reply.output.value_for_projection();
             for projector in &self.tool_result_projectors {
-                if let Some(value) = projector(&projected_tool_name, &reply.value) {
+                if let Some(value) = projector(&projected_tool_name, &value) {
                     return Ok(value);
                 }
             }
             Ok(lift_tool_result_to_flow_value(
-                reply.value,
-                reply.images,
+                value,
+                Vec::new(),
                 self.ctx.attachment_store().as_ref(),
             ))
         } else {
-            Err(ToolHostError::new(tool_error_message(reply.value)))
+            Err(ToolHostError::new(tool_error_message(
+                reply.output.value_for_projection(),
+            )))
         }
     }
 
@@ -557,7 +554,7 @@ struct CollectedExecutionOutput {
     observation_truncation: Vec<TextProjectionMetadata>,
     printed_images: Vec<AttachmentRef>,
     tool_calls: Vec<lash_core::ToolCallRecord>,
-    tool_images: Vec<ToolImage>,
+    tool_images: Vec<RlmPrintImage>,
 }
 
 async fn collect_printed_images(
@@ -621,7 +618,7 @@ fn collect_printed_images_inner<'a>(
 
 fn lift_tool_result_to_flow_value(
     result: Value,
-    tool_images: Vec<ToolImage>,
+    tool_images: Vec<RlmPrintImage>,
     attachment_store: &dyn lash_core::AttachmentStore,
 ) -> FlowValue {
     if tool_images.is_empty() {
@@ -630,8 +627,13 @@ fn lift_tool_result_to_flow_value(
 
     let image_values = tool_images
         .into_iter()
-        .map(|image| FlowValue::Image(register_tool_image(image, attachment_store)))
+        .filter_map(|image| register_tool_image(image, attachment_store).ok())
+        .map(FlowValue::Image)
         .collect::<Vec<_>>();
+
+    if image_values.is_empty() {
+        return json_to_flow_value(result);
+    }
 
     if is_image_only_tool_payload(&result) {
         return if image_values.len() == 1 {
@@ -658,47 +660,35 @@ fn lift_tool_result_to_flow_value(
 }
 
 fn register_tool_image(
-    mut image: ToolImage,
+    mut image: RlmPrintImage,
     attachment_store: &dyn lash_core::AttachmentStore,
-) -> ImageValue {
+) -> Result<ImageValue, lash_core::AttachmentStoreError> {
     let reference = if let Some(reference) = image.reference.take() {
         reference
     } else if let Some(media_type) = lash_core::MediaType::from_mime(&image.mime) {
-        let meta = lash_core::AttachmentMeta::new(
-            lash_core::AttachmentId::new("pending"),
+        let meta = lash_core::AttachmentCreateMeta::new(
             media_type,
-            image.data.len() as u64,
             image.width,
             image.height,
             Some(image.label.clone()),
         );
-        attachment_store
-            .put(std::mem::take(&mut image.data), meta)
-            .unwrap_or_else(|_| lash_core::AttachmentRef {
-                id: lash_core::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
-                media_type,
-                byte_len: 0,
-                width: image.width,
-                height: image.height,
-                label: Some(image.label.clone()),
-            })
+        attachment_store.put(std::mem::take(&mut image.data), meta)?
     } else {
-        lash_core::AttachmentRef {
-            id: lash_core::AttachmentId::new(uuid::Uuid::new_v4().to_string()),
-            media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-            byte_len: image.data.len() as u64,
-            width: image.width,
-            height: image.height,
-            label: Some(image.label.clone()),
-        }
+        let meta = lash_core::AttachmentCreateMeta::new(
+            lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+            image.width,
+            image.height,
+            Some(image.label.clone()),
+        );
+        attachment_store.put(std::mem::take(&mut image.data), meta)?
     };
-    ImageValue::new(
+    Ok(ImageValue::new(
         reference.id.to_string(),
         reference.label.clone().unwrap_or_default(),
         reference.byte_len,
         reference.width,
         reference.height,
-    )
+    ))
 }
 
 fn is_image_only_tool_payload(result: &Value) -> bool {

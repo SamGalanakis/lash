@@ -197,7 +197,7 @@ impl SessionBuilder {
             let mut factories = self.core.plugin_factories.as_ref().clone();
             factories.extend(self.plugin_factories);
             let mut plugin_host = PluginHost::new(factories);
-            if env.session_task_executor.is_some() {
+            if env.background_task_host.is_some() {
                 plugin_host = plugin_host.with_background_tasks();
             }
             env.plugin_host = Some(Arc::new(plugin_host));
@@ -376,7 +376,7 @@ impl ObservableSession {
             .unwrap_or_default()
     }
 
-    pub async fn list_background_tasks(&self) -> Vec<ManagedTaskStatus> {
+    pub async fn list_background_tasks(&self) -> Vec<BackgroundTaskRecord> {
         self.snapshot().list_background_tasks().await
     }
 }

@@ -187,6 +187,7 @@ fn compute_chain_stats(chain: &[&LoadedSessionNode]) -> SessionStats {
         s.system_messages += part.system_messages;
         s.tool_calls_ok += part.tool_calls_ok;
         s.tool_calls_err += part.tool_calls_err;
+        s.tool_calls_cancelled += part.tool_calls_cancelled;
         s.tool_total_ms = s.tool_total_ms.saturating_add(part.tool_total_ms);
         s.rlm_iterations += part.rlm_iterations;
         s.rlm_errors += part.rlm_errors;
@@ -589,8 +590,11 @@ fn render_drill_card(
         .filter_map(|p| p.usage.as_ref())
         .map(|u| u.input_tokens.max(0) + u.output_tokens.max(0))
         .sum();
-    let status_class = if edge.success { "ok" } else { "err" };
-    let status_label = if edge.success { "ok" } else { "error" };
+    let (status_class, status_label) = match edge.status {
+        lash_core::ToolCallStatus::Success => ("ok", "ok"),
+        lash_core::ToolCallStatus::Failure => ("err", "error"),
+        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
+    };
     let dur = format_duration(edge.duration_ms);
     let short_id = short_session_id(&child.meta.session_id);
 

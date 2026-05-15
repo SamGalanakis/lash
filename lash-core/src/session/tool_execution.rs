@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
-
 use super::execution_context::ModeExecutionContext;
-use crate::tool_dispatch::dispatch_tool_call_with_execution_context;
-use crate::{SessionEvent, ToolCallRecord, ToolContext, ToolImage, TurnActivityId, TurnEvent};
+use crate::tool_dispatch::{dispatch_tool_call_with_execution_context, schedule_tool_batch};
+use crate::{
+    ModelToolReturn, SessionEvent, ToolCallOutput, ToolCallRecord, ToolCancellation, ToolContext,
+    ToolFailure, ToolFailureClass, TurnActivityId, TurnEvent,
+};
 
 #[derive(Clone, Debug)]
 pub struct ModeToolBatchItem {
@@ -15,38 +16,45 @@ pub struct ModeToolBatchItem {
 
 #[derive(Clone, Debug)]
 pub struct ModeToolReply {
-    pub success: bool,
-    pub value: serde_json::Value,
-    pub images: Vec<ToolImage>,
+    pub output: ToolCallOutput,
     pub record: Option<ToolCallRecord>,
 }
 
 impl ModeToolReply {
     pub fn success(value: serde_json::Value) -> Self {
         Self {
-            success: true,
-            value,
-            images: Vec::new(),
-            record: None,
-        }
-    }
-
-    pub fn success_with_images(value: serde_json::Value, images: Vec<ToolImage>) -> Self {
-        Self {
-            success: true,
-            value,
-            images,
+            output: ToolCallOutput::success(value),
             record: None,
         }
     }
 
     pub fn error(value: serde_json::Value) -> Self {
+        let message = value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        let mut failure = ToolFailure::tool(ToolFailureClass::Execution, "tool_error", message);
+        failure.raw =
+            Some(serde_json::from_value(value).unwrap_or_else(|_| {
+                crate::ToolValue::String("unserializable tool error".to_string())
+            }));
         Self {
-            success: false,
-            value,
-            images: Vec::new(),
+            output: ToolCallOutput::failure(failure),
             record: None,
         }
+    }
+
+    pub fn from_output(output: ToolCallOutput) -> Self {
+        Self {
+            output,
+            record: None,
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::from_output(ToolCallOutput::cancelled(ToolCancellation::runtime(
+            message,
+        )))
     }
 
     pub(crate) fn with_record(mut self, record: ToolCallRecord) -> Self {
@@ -111,6 +119,7 @@ impl ModeExecutionContext {
             self.dispatch.session_id.clone(),
             Arc::clone(&self.dispatch.host),
             self.dispatch.turn_context.clone(),
+            Arc::clone(&self.dispatch.attachment_store),
             Some(call_id.clone()),
         );
         tool_context.cancellation_token = self.cancellation_token.clone();
@@ -126,26 +135,26 @@ impl ModeExecutionContext {
         drop(progress_tx);
         let _ = progress_handle.await;
 
-        let result = crate::ToolResult {
-            success: outcome.record.success,
-            result: outcome.record.result.clone(),
-            images: outcome.images.clone(),
-            control: outcome.record.control.clone(),
-        };
-        let model_result = match self
+        let output = outcome.record.output.clone();
+        let model_return = match self
             .dispatch
             .plugins
             .project_tool_result(crate::plugin::ToolResultProjectionContext {
                 session_id: self.dispatch.session_id.clone(),
                 tool_name: outcome.record.tool.clone(),
                 args: outcome.record.args.clone(),
-                result: result.clone(),
+                output: output.clone(),
                 duration_ms: outcome.record.duration_ms,
+                call_id: call_id.clone(),
             })
             .await
         {
             Ok(projected) => projected,
-            Err(err) => crate::ToolResult::err_fmt(err.to_string()),
+            Err(err) => ModelToolReturn::text(
+                call_id.clone(),
+                outcome.record.tool.clone(),
+                err.to_string(),
+            ),
         };
 
         self.emit_turn_activity(
@@ -154,8 +163,7 @@ impl ModeExecutionContext {
                 call_id: Some(call_id.clone()),
                 name: outcome.record.tool.clone(),
                 args: outcome.record.args.clone(),
-                result: result.result.clone(),
-                success: result.success,
+                output: output.clone(),
                 duration_ms: outcome.record.duration_ms,
             },
         )
@@ -165,10 +173,8 @@ impl ModeExecutionContext {
             call_id: Some(call_id.clone()),
             tool: outcome.record.tool.clone(),
             args: outcome.record.args.clone(),
-            result: result.result.clone(),
-            success: result.success,
+            output: output.clone(),
             duration_ms: outcome.record.duration_ms,
-            control: result.control.clone(),
         };
         CompletedModeToolCall {
             index,
@@ -176,8 +182,8 @@ impl ModeExecutionContext {
                 call_id,
                 tool_name: outcome.record.tool,
                 args: outcome.record.args,
-                result,
-                model_result,
+                output,
+                model_return,
                 duration_ms: outcome.record.duration_ms,
                 replay,
             },
@@ -202,32 +208,22 @@ impl ModeExecutionContext {
         let executed = self
             .execute_tool_call(call_id, name, args, index, None)
             .await;
-        let reply = if executed.completed.result.success {
-            ModeToolReply::success_with_images(
-                executed.completed.result.result.clone(),
-                executed.completed.result.images.clone(),
-            )
-        } else {
-            ModeToolReply::error(executed.completed.result.result.clone())
-        };
+        let reply = ModeToolReply::from_output(executed.completed.output);
         reply.with_record(executed.record)
     }
 
     pub async fn call_tool_batch(&self, calls: Vec<ModeToolBatchItem>) -> Vec<ModeToolReply> {
-        let mut pending = FuturesUnordered::new();
-        for (offset, call) in calls.into_iter().enumerate() {
-            let ctx = self.clone();
-            pending.push(async move {
-                let reply = ctx.call_tool(call.id, call.name, call.args, offset).await;
-                (offset, reply)
-            });
-        }
-        let mut replies = Vec::new();
-        while let Some(reply) = pending.next().await {
-            replies.push(reply);
-        }
-        replies.sort_by_key(|(offset, _)| *offset);
-        replies.into_iter().map(|(_, reply)| reply).collect()
+        let indexed_calls = calls.into_iter().enumerate().collect::<Vec<_>>();
+        schedule_tool_batch(
+            indexed_calls,
+            |(index, _)| *index,
+            |(_, call)| self.tool_execution_mode(&call.name),
+            |(index, call)| {
+                let ctx = self.clone();
+                async move { ctx.call_tool(call.id, call.name, call.args, index).await }
+            },
+        )
+        .await
     }
 
     pub async fn start_tool_call(

@@ -16,7 +16,7 @@ use crate::plugin::{
 };
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
-    MAX_MONITOR_TIMEOUT_MS, ManagedRunState, ManagedTaskKind, MonitorRunState, MonitorSpec,
+    BackgroundTaskKind, BackgroundTaskState, MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec,
     ProgressSender, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
 };
 
@@ -200,7 +200,7 @@ pub fn monitor_tool_definition() -> ToolDefinition {
 pub fn tasks_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tasks_list",
-        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and run_state. `run_state` is one of `running`, `idle`, `completed`, `failed`, or `cancelled`. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.",
+        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and state. `state` is one of `running`, `idle`, `completed`, `failed`, or `cancelled`. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.",
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
@@ -245,6 +245,7 @@ pub struct MonitorToolSpec {
 }
 
 impl MonitorToolSpec {
+    #[allow(clippy::result_large_err)]
     pub fn from_args(args: &Value) -> Result<Self, ToolResult> {
         let command = args
             .get("command")
@@ -315,7 +316,7 @@ pub async fn execute_monitor_tool_call(
                     "command": status.spec.command,
                     "persistent": status.spec.persistent,
                     "timeout_ms": status.spec.timeout_ms,
-                    "run_state": match status.run_state {
+                    "state": match status.state {
                         MonitorRunState::Idle => "idle",
                         MonitorRunState::Running => "running",
                         MonitorRunState::Stopped => "stopped",
@@ -340,14 +341,14 @@ pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext) -> Tool
             let entries: Vec<Value> = tasks
                 .into_iter()
                 .map(|task| {
-                    let started_at_iso = chrono::DateTime::<chrono::Utc>::from(task.started_at)
+                    let created_at_iso = chrono::DateTime::<chrono::Utc>::from(task.created_at)
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                     serde_json::json!({
                         "task_id": task.id,
                         "kind": kind_label(task.kind),
                         "producer": task.producer,
-                        "run_state": run_state_label(task.run_state),
-                        "started_at": started_at_iso,
+                        "state": state_label(task.state),
+                        "created_at": created_at_iso,
                     })
                 })
                 .collect();
@@ -377,22 +378,24 @@ pub async fn execute_tasks_stop_tool_call(
         Ok(status) => ToolResult::ok(serde_json::json!({
             "task_id": status.id,
             "kind": kind_label(status.kind),
-            "run_state": run_state_label(status.run_state),
+            "state": state_label(status.state),
         })),
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
 }
 
-fn run_state_label(state: ManagedRunState) -> &'static str {
+fn state_label(state: BackgroundTaskState) -> &'static str {
     match state {
-        ManagedRunState::Running => "running",
-        ManagedRunState::Idle => "idle",
-        ManagedRunState::Completed => "completed",
-        ManagedRunState::Failed => "failed",
-        ManagedRunState::Cancelled => "cancelled",
+        BackgroundTaskState::Pending => "pending",
+        BackgroundTaskState::Running => "running",
+        BackgroundTaskState::Waiting => "idle",
+        BackgroundTaskState::Completed => "completed",
+        BackgroundTaskState::Failed => "failed",
+        BackgroundTaskState::CancelRequested => "cancel_requested",
+        BackgroundTaskState::Cancelled => "cancelled",
     }
 }
 
-fn kind_label(kind: ManagedTaskKind) -> &'static str {
+fn kind_label(kind: BackgroundTaskKind) -> &'static str {
     kind.as_str()
 }

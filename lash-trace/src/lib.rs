@@ -178,8 +178,7 @@ pub enum TraceEvent {
         call_id: Option<String>,
         name: String,
         args: Value,
-        result: Value,
-        success: bool,
+        output: TraceToolCallOutput,
         duration_ms: u64,
     },
     ModeStep {
@@ -201,6 +200,51 @@ pub enum TraceEvent {
         name: String,
         payload: Value,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceToolCallOutput {
+    pub outcome: TraceToolCallOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<Value>,
+}
+
+impl TraceToolCallOutput {
+    pub fn status(&self) -> TraceToolCallStatus {
+        match self.outcome {
+            TraceToolCallOutcome::Success(_) => TraceToolCallStatus::Success,
+            TraceToolCallOutcome::Failure(_) => TraceToolCallStatus::Failure,
+            TraceToolCallOutcome::Cancelled(_) => TraceToolCallStatus::Cancelled,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status() == TraceToolCallStatus::Success
+    }
+
+    pub fn value_for_projection(&self) -> Value {
+        match &self.outcome {
+            TraceToolCallOutcome::Success(value)
+            | TraceToolCallOutcome::Failure(value)
+            | TraceToolCallOutcome::Cancelled(value) => value.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "payload", rename_all = "snake_case")]
+pub enum TraceToolCallOutcome {
+    Success(Value),
+    Failure(Value),
+    Cancelled(Value),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceToolCallStatus {
+    Success,
+    Failure,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -483,6 +527,42 @@ mod tests {
         let completed_json = serde_json::to_value(completed).unwrap();
         assert_eq!(completed_json["type"], "turn_completed");
         assert_eq!(completed_json["handoff"]["successor_session_id"], "child-1");
+    }
+
+    #[test]
+    fn tool_completion_serializes_typed_failure_output() {
+        let record = TraceRecord::new(
+            TraceContext::default().for_session("root"),
+            TraceEvent::ToolCallCompleted {
+                call_id: Some("call-1".to_string()),
+                name: "read_file".to_string(),
+                args: serde_json::json!({"path": "missing"}),
+                output: TraceToolCallOutput {
+                    outcome: TraceToolCallOutcome::Failure(serde_json::json!({
+                        "class": "invalid_request",
+                        "code": "invalid_tool_args",
+                        "message": "bad args",
+                        "source": "runtime",
+                        "retry": { "type": "never" },
+                        "raw": { "path": "missing" }
+                    })),
+                    control: None,
+                },
+                duration_ms: 3,
+            },
+        );
+
+        let json = serde_json::to_value(record).unwrap();
+        assert_eq!(json["type"], "tool_call_completed");
+        assert_eq!(json["output"]["outcome"]["status"], "failure");
+        assert_eq!(
+            json["output"]["outcome"]["payload"]["code"],
+            "invalid_tool_args"
+        );
+        assert_eq!(
+            json["output"]["outcome"]["payload"]["raw"]["path"],
+            "missing"
+        );
     }
 
     #[test]

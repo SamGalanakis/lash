@@ -39,6 +39,7 @@ pub enum ActivityKind {
 pub enum ActivityStatus {
     Completed,
     Failed,
+    Cancelled,
     Running,
     Partial,
 }
@@ -311,22 +312,35 @@ impl ActivityState {
         self.shell_handles.clear();
     }
 
-    pub fn project_tool_call(
+    pub fn project_tool_output(
         &mut self,
         name: &str,
         args: Value,
-        result: Value,
-        success: bool,
+        output: lash_core::ToolCallOutput,
         duration_ms: u64,
     ) -> Vec<ActivityBlock> {
         let name = activity_tool_name(name);
+        let result = match &output.outcome {
+            lash_core::ToolCallOutcome::Failure(failure) => failure
+                .raw
+                .as_ref()
+                .map(lash_core::ToolValue::to_json_value)
+                .unwrap_or_else(|| output.value_for_projection()),
+            lash_core::ToolCallOutcome::Cancelled(cancellation) => cancellation
+                .raw
+                .as_ref()
+                .map(lash_core::ToolValue::to_json_value)
+                .unwrap_or_else(|| output.value_for_projection()),
+            lash_core::ToolCallOutcome::Success(_) => output.value_for_projection(),
+        };
+        let success = output.is_success();
         if name == "batch" {
             return self.blocks_for_batch_tool_call(&args, &result);
         }
-        let status = if success {
-            ActivityStatus::Completed
-        } else {
-            ActivityStatus::Failed
+        let status = match output.status() {
+            lash_core::ToolCallStatus::Success => ActivityStatus::Completed,
+            lash_core::ToolCallStatus::Failure => ActivityStatus::Failed,
+            lash_core::ToolCallStatus::Cancelled => ActivityStatus::Cancelled,
         };
         let mut ctx = ProjectCtx {
             name,
@@ -337,6 +351,9 @@ impl ActivityState {
             shell_handles: &mut self.shell_handles,
             subagent_host: self.subagent_host.as_ref(),
         };
+        if status == ActivityStatus::Cancelled {
+            return vec![projectors::generic::fallback_block(&mut ctx, status)];
+        }
         if let Some(projector) = self.registry.get(name).cloned() {
             return projector.project(&mut ctx);
         }
@@ -352,11 +369,10 @@ impl ActivityState {
         timeline: &mut UiTimeline,
         name: &str,
         args: Value,
-        result: Value,
-        success: bool,
+        output: lash_core::ToolCallOutput,
         duration_ms: u64,
     ) -> Vec<ActivityBlock> {
-        let activities = self.project_tool_call(name, args, result, success, duration_ms);
+        let activities = self.project_tool_output(name, args, output, duration_ms);
         for activity in activities.iter().cloned() {
             Self::append_projected_activity_to_timeline(timeline, activity);
         }
@@ -411,15 +427,32 @@ impl ActivityState {
                     item.clone()
                 };
 
-                self.project_tool_call(
-                    &child_name,
-                    child_args,
-                    child_result,
-                    child_success,
-                    child_duration,
-                )
+                let child_output = if child_success {
+                    lash_core::ToolCallOutput::success(child_result)
+                } else {
+                    *lash_core::ToolResult::err(child_result).output
+                };
+
+                self.project_tool_output(&child_name, child_args, child_output, child_duration)
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub fn project_tool_call(
+        &mut self,
+        name: &str,
+        args: Value,
+        result: Value,
+        success: bool,
+        duration_ms: u64,
+    ) -> Vec<ActivityBlock> {
+        let output = if success {
+            lash_core::ToolCallOutput::success(result)
+        } else {
+            *lash_core::ToolResult::err(result).output
+        };
+        self.project_tool_output(name, args, output, duration_ms)
     }
 }
 
@@ -548,7 +581,7 @@ pub(crate) mod tests {
             session_id: "session".to_string(),
             parent_session_id: Some("root".to_string()),
             capability: Some(capability.into()),
-            run_state: "running".to_string(),
+            state: "running".to_string(),
             model: model.into(),
             model_variant: Some(variant.into()),
             last_iterations: None,
@@ -590,6 +623,22 @@ pub(crate) mod tests {
         assert!(blocks[1].result.detail_lines.is_empty());
         assert_ne!(blocks[0].call.tool_name, "batch");
         assert_ne!(blocks[1].call.tool_name, "batch");
+    }
+
+    #[test]
+    fn typed_cancelled_output_projects_cancelled_activity_status() {
+        let mut state = ActivityState::default();
+        let blocks = state.project_tool_output(
+            "read_file",
+            json!({ "path": "README.md" }),
+            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
+                "tool call cancelled",
+            )),
+            1,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].result.status, ActivityStatus::Cancelled);
     }
 
     #[test]

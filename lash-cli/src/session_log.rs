@@ -539,14 +539,12 @@ mod tests {
                 call_id: Some("call-shell".to_string()),
                 tool: "exec_command".to_string(),
                 args: serde_json::json!({"cmd":"git status --short"}),
-                result: serde_json::json!({
+                output: lash_core::ToolCallOutput::success(serde_json::json!({
                     "stdout":"",
                     "stderr":"",
                     "exit_code":0
-                }),
-                success: true,
+                })),
                 duration_ms: 42,
-                control: None,
             }];
             persist_root_snapshot(&store, messages, tool_calls, TokenUsage::default());
 

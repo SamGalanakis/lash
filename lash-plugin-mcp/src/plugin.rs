@@ -120,7 +120,9 @@ impl ToolProvider for McpToolProvider {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        self.pool.call_tool(call.name, call.args).await
+        self.pool
+            .call_tool(call.name, call.args, call.context)
+            .await
     }
 }
 
@@ -284,10 +286,17 @@ mod tests {
 
         let result = factory
             .pool()
-            .call_tool("mcp__docs__search_docs", &json!({ "query": "lash" }))
+            .call_tool(
+                "mcp__docs__search_docs",
+                &json!({ "query": "lash" }),
+                &lash_core::testing::mock_tool_context(),
+            )
             .await;
-        assert!(result.success, "{result:?}");
-        assert_eq!(result.result, json!({ "matches": ["matched"] }));
+        assert!(result.output.is_success(), "{result:?}");
+        assert_eq!(
+            result.output.value_for_projection(),
+            json!({ "matches": ["matched"] })
+        );
 
         factory.pool().shutdown_all().await;
     }

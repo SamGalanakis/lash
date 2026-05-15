@@ -1,4 +1,4 @@
-use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallRecord};
+use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallOutput, ToolCallRecord};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
@@ -75,8 +75,7 @@ pub enum RlmHistoryItem {
         id: String,
         tool: String,
         args: serde_json::Value,
-        result: serde_json::Value,
-        success: bool,
+        output: ToolCallOutput,
         duration_ms: u64,
     },
     RlmStep {

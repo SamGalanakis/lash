@@ -121,7 +121,7 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
     async fn spawn_managed_task(
         &self,
         session_id: &str,
-        spec: crate::ManagedTaskSpec,
+        spec: crate::BackgroundTaskRegistration,
         task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
         self.background
@@ -142,8 +142,8 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
     async fn register_background_task(
         &self,
         session_id: &str,
-        spec: crate::ManagedTaskSpec,
-        cancel: Option<crate::ManagedTaskCancel>,
+        spec: crate::BackgroundTaskRegistration,
+        cancel: Option<crate::LocalBackgroundTaskCancel>,
     ) -> Result<(), crate::PluginError> {
         self.background
             .register_background_task(&self.current, session_id, spec, cancel)
@@ -160,10 +160,10 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
         self.background
-            .complete_background_task(&self.current, session_id, task_id, run_state)
+            .complete_background_task(&self.current, session_id, task_id, state)
             .await;
     }
 
@@ -171,17 +171,17 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
         self.background
-            .transition_background_task_live_state(&self.current, session_id, task_id, run_state)
+            .transition_background_task_live_state(&self.current, session_id, task_id, state)
             .await;
     }
 
     async fn list_background_tasks(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         self.background
             .list_background_tasks(&self.current, session_id)
             .await
@@ -191,7 +191,7 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         task_id: &str,
-    ) -> Result<crate::ManagedTaskStatus, crate::PluginError> {
+    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.background
             .cancel_background_task(&self.current, Arc::new(self.clone()), session_id, task_id)
             .await
@@ -200,7 +200,7 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
     async fn cancel_all_background_tasks(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         self.background
             .cancel_all_background_tasks(&self.current, Arc::new(self.clone()), session_id)
             .await
@@ -237,7 +237,7 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         self.background
             .cancel_unreferenced_async_handles(
                 &self.current,

@@ -60,7 +60,7 @@ lash-provider-openai = { git = "https://github.com/SamGalanakis/lash.git" }
 anyhow = "1"
 tokio  = { version = "1", features = ["full"] }</code></pre>
           <p>Cargo resolves each <code>name</code> against packages inside that repo. Pin to a commit with <code>rev = "..."</code> or a tag with <code>tag = "..."</code> for reproducible builds.</p>
-          <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>TokioSessionTaskExecutor</code> values.</p>
+          <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>LocalBackgroundTaskHost</code> values.</p>
         </div>
 
         <div class="section" id="core-concepts">

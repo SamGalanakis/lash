@@ -24,9 +24,9 @@ use lash::{
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
 };
 use lash_core::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginHost, RuntimeCoreConfig, RuntimePersistence, SessionEvent,
-    SessionPolicy, StandardContextApproach, TokioSessionTaskExecutor,
+    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, LocalBackgroundTaskHost,
+    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
+    RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
     ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -622,7 +622,7 @@ async fn run_question(
                 .with_trace_jsonl_path(Some(trace_path.clone()))
                 .with_prompt_template(prompt_template(args.prompt_profile, args.session_tools)),
         ),
-        Arc::new(TokioSessionTaskExecutor::default()),
+        Arc::new(LocalBackgroundTaskHost::default()),
     );
     let mut runtime = LashRuntime::from_persistent_background_state(
         policy.clone(),

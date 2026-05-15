@@ -301,7 +301,7 @@ impl SessionPlugin for UpdatePlanPlugin {
                 if ctx.tool_name != "update_plan" {
                     return Ok(Vec::new());
                 }
-                if !ctx.result.success {
+                if !ctx.result.is_success() {
                     tracing::debug!(
                         target: "lash_core::update_plan",
                         "after_tool_call observed failed update_plan; skipping emit",

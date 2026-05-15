@@ -450,8 +450,11 @@ fn assembler_marks_tool_failure() {
         call_id: Some("tc1".to_string()),
         name: "x".to_string(),
         args: serde_json::json!({}),
-        result: serde_json::json!({"error": true}),
-        success: false,
+        output: crate::ToolCallOutput::failure(crate::ToolFailure::tool(
+            crate::ToolFailureClass::Execution,
+            "tool_error",
+            serde_json::json!({"error": true}).to_string(),
+        )),
         duration_ms: 1,
     });
     assembler.push(&SessionEvent::Error {

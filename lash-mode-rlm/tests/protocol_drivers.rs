@@ -214,11 +214,17 @@ fn standard_tool_calls_produce_effects_and_loop() {
     machine.handle_response(Response::ToolResults {
         id: tool_id,
         results: vec![sansio::CompletedToolCall {
-            call_id,
-            tool_name,
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
             args,
-            result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
-            model_result: lash_sansio::ToolResult::ok(serde_json::json!("file contents")),
+            output: lash_sansio::ToolCallOutput::success(serde_json::json!("file contents")),
+            model_return: lash_sansio::ModelToolReturn {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                parts: vec![lash_sansio::ModelToolReturnPart::Text(
+                    "file contents".to_string(),
+                )],
+            },
             duration_ms: 10,
             replay: None,
         }],
@@ -273,8 +279,14 @@ fn standard_empty_final_after_tool_result_finishes_without_error() {
             call_id: "tc1".to_string(),
             tool_name: "update_plan".to_string(),
             args: serde_json::json!({"plan":[{"step":"done","status":"completed"}]}),
-            result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
-            model_result: lash_sansio::ToolResult::ok(serde_json::json!("Plan updated")),
+            output: lash_sansio::ToolCallOutput::success(serde_json::json!("Plan updated")),
+            model_return: lash_sansio::ModelToolReturn {
+                call_id: "tc1".to_string(),
+                tool_name: "update_plan".to_string(),
+                parts: vec![lash_sansio::ModelToolReturnPart::Text(
+                    "Plan updated".to_string(),
+                )],
+            },
             duration_ms: 1,
             replay: None,
         }],
@@ -359,8 +371,12 @@ fn standard_max_turns_stops_iteration() {
             call_id: "tc1".to_string(),
             tool_name: "test".to_string(),
             args: serde_json::json!({}),
-            result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
-            model_result: lash_sansio::ToolResult::ok(serde_json::json!("ok")),
+            output: lash_sansio::ToolCallOutput::success(serde_json::json!("ok")),
+            model_return: lash_sansio::ModelToolReturn {
+                call_id: "tc1".to_string(),
+                tool_name: "test".to_string(),
+                parts: vec![lash_sansio::ModelToolReturnPart::Text("ok".to_string())],
+            },
             duration_ms: 1,
             replay: None,
         }],
@@ -605,10 +621,8 @@ fn rlm_exec_tool_call_events_keep_call_id() {
                 call_id: Some("rlm-call-1".to_string()),
                 tool: "read_file".to_string(),
                 args: serde_json::json!({"path": "foo"}),
-                result: serde_json::json!("contents"),
-                success: true,
+                output: lash_core::ToolCallOutput::success(serde_json::json!("contents")),
                 duration_ms: 7,
-                control: None,
             }],
             images: Vec::new(),
             printed_images: Vec::new(),
@@ -665,12 +679,11 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_handoff".to_string(),
                 args: serde_json::json!({}),
-                result: serde_json::json!({"ok": true}),
-                success: true,
+                output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true}))
+                    .with_control(lash_core::ToolControl::Handoff {
+                        session_id: "successor-session".to_string(),
+                    }),
                 duration_ms: 3,
-                control: Some(lash_core::ToolControl::Handoff {
-                    session_id: "successor-session".to_string(),
-                }),
             }],
             images: Vec::new(),
             printed_images: Vec::new(),
@@ -683,8 +696,8 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     let effects = drain_effects(&mut machine);
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::ToolCall { name, success: true, .. })
-            if name == "custom_handoff"
+        Effect::Emit(SessionEvent::ToolCall { name, output, .. })
+            if name == "custom_handoff" && output.is_success()
     )));
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
@@ -743,12 +756,15 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
                 call_id: Some("custom-call-1".to_string()),
                 tool: "custom_fail".to_string(),
                 args: serde_json::json!({}),
-                result: serde_json::json!({"ok": true}),
-                success: true,
+                output: lash_core::ToolCallOutput::success(serde_json::json!({"ok": true}))
+                    .with_control(lash_core::ToolControl::Fail {
+                        failure: lash_core::ToolFailure::tool(
+                            lash_core::ToolFailureClass::Execution,
+                            "custom_fail",
+                            "no valid result",
+                        ),
+                    }),
                 duration_ms: 3,
-                control: Some(lash_core::ToolControl::Fail {
-                    value: serde_json::json!({ "reason": "no valid result" }),
-                }),
             }],
             images: Vec::new(),
             printed_images: Vec::new(),
@@ -761,8 +777,8 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     let effects = drain_effects(&mut machine);
     assert!(effects.iter().any(|effect| matches!(
         effect,
-        Effect::Emit(SessionEvent::ToolCall { name, success: true, .. })
-            if name == "custom_fail"
+        Effect::Emit(SessionEvent::ToolCall { name, output, .. })
+            if name == "custom_fail" && output.is_success()
     )));
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
@@ -780,7 +796,7 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
                 tool_name: name,
                 value,
             })
-        }) if name == "custom_fail" && value == &serde_json::json!({ "reason": "no valid result" })
+        }) if name == "custom_fail" && value.get("message") == Some(&serde_json::json!("no valid result"))
     )));
     assert!(find_done(&effects).is_some());
 }

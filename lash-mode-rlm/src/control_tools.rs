@@ -391,7 +391,7 @@ mod tests {
             &self,
             _session_id: &str,
             keep_handle_ids: &[String],
-        ) -> Result<Vec<lash_core::ManagedTaskStatus>, PluginError> {
+        ) -> Result<Vec<lash_core::BackgroundTaskRecord>, PluginError> {
             self.cleanup_keep
                 .lock()
                 .expect("cleanup keep")
@@ -465,15 +465,15 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{:?}", result.result);
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
+        let value = result.value_for_projection();
         assert!(
-            result
-                .result
+            value
                 .get("session_id")
                 .and_then(Value::as_str)
                 .is_some()
         );
-        assert!(matches!(result.control, Some(ToolControl::Handoff { .. })));
+        assert!(matches!(result.output.control, Some(ToolControl::Handoff { .. })));
         let created = manager.created.lock().expect("created");
         assert_eq!(created.len(), 1);
         let request = &created[0];
@@ -560,7 +560,7 @@ mod tests {
                 progress: None,
             })
             .await;
-        assert!(result.success, "{:?}", result.result);
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
 
         let created = manager.created.lock().expect("created");
         let request = &created[0];
@@ -634,9 +634,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.success, "{:?}", result.result);
-        let successor = result
-            .result
+        assert!(result.is_success(), "{:?}", result.value_for_projection());
+        let value = result.value_for_projection();
+        let successor = value
             .get("session_id")
             .and_then(Value::as_str)
             .expect("successor")
@@ -685,7 +685,7 @@ mod tests {
             })
             .await;
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(manager.created.lock().expect("created").is_empty());
         assert!(manager.transferred.lock().expect("transferred").is_empty());
         assert!(

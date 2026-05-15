@@ -135,8 +135,7 @@ fn history_item_from_tool_call(record: &ToolCallRecord) -> RlmHistoryItem {
             .unwrap_or_else(|| tool_call_record_key(record)),
         tool: record.tool.clone(),
         args: record.args.clone(),
-        result: record.result.clone(),
-        success: record.success,
+        output: record.output.clone(),
         duration_ms: record.duration_ms,
     }
 }

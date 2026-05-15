@@ -1056,7 +1056,7 @@ impl StandardShell {
                 started.elapsed().as_secs_f64(),
                 params.allow_nonzero_exit,
             ),
-            Ok(PollOutcome::Cancelled) => ToolResult::err_fmt("tool call cancelled"),
+            Ok(PollOutcome::Cancelled) => ToolResult::cancelled("tool call cancelled"),
             Err(err) => ToolResult::err(json!(err)),
         }
     }
@@ -1124,7 +1124,7 @@ impl StandardShell {
             }
             Ok(PollOutcome::Cancelled) => {
                 self.runtime.remove_process(&handle_id);
-                ToolResult::err_fmt("tool call cancelled")
+                ToolResult::cancelled("tool call cancelled")
             }
             Err(err) => {
                 self.runtime.remove_process(&handle_id);
@@ -1220,7 +1220,7 @@ impl StandardShell {
             }
             Ok(PollOutcome::Cancelled) => {
                 self.runtime.remove_process(&id);
-                ToolResult::err_fmt("tool call cancelled")
+                ToolResult::cancelled("tool call cancelled")
             }
             Err(err) => ToolResult::err(json!(err)),
         }

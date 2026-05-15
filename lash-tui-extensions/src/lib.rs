@@ -995,7 +995,7 @@ fn monitor_effects(state: &MonitorTuiState) -> Vec<TuiHostEffect> {
 }
 
 fn monitor_state_label(status: &MonitorStatus) -> &'static str {
-    match status.run_state {
+    match status.state {
         MonitorRunState::Idle => "idle",
         MonitorRunState::Running => "running",
         MonitorRunState::Stopped => "stopped",
@@ -1101,18 +1101,13 @@ impl TuiExtension for PlanModeTuiExtension {
     }
 
     fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
-        let TurnEvent::ToolCallCompleted {
-            name,
-            result,
-            success,
-            ..
-        } = event
-        else {
+        let TurnEvent::ToolCallCompleted { name, output, .. } = event else {
             return Vec::new();
         };
-        if name != "plan_exit" || !success {
+        if name != "plan_exit" || !output.is_success() {
             return Vec::new();
         }
+        let result = output.value_for_projection();
         let approved = result
             .get("approved")
             .and_then(|value| value.as_bool())
@@ -1167,8 +1162,7 @@ mod tests {
             call_id: None,
             name: name.to_string(),
             args: json!({}),
-            result,
-            success: true,
+            output: lash::tools::ToolCallOutput::success(result),
             duration_ms: 12,
         }
     }

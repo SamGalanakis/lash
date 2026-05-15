@@ -18,6 +18,7 @@ pub struct ChronologicalEntry {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ChronologicalPayload {
     Message(Message),
     ToolCall(ToolCallRecord),
@@ -303,7 +304,7 @@ fn tool_call_record_key(record: &ToolCallRecord) -> String {
 mod tests {
     use super::*;
     use crate::session_model::ConversationRecord;
-    use crate::{ExecutionMode, PartKind, PruneState, ToolControl, shared_parts};
+    use crate::{ExecutionMode, PartKind, PruneState, shared_parts};
 
     fn text_message(id: &str, role: MessageRole, text: &str) -> Message {
         Message {
@@ -345,10 +346,8 @@ mod tests {
             call_id: call_id.map(str::to_string),
             tool: tool.to_string(),
             args: serde_json::json!({ "tool": tool }),
-            result: serde_json::json!({ "ok": true }),
-            success: true,
+            output: crate::ToolCallOutput::success(serde_json::json!({ "ok": true })),
             duration_ms: 7,
-            control: None::<ToolControl>,
         }
     }
 

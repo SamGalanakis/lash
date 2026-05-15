@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,10 +9,11 @@ use crate::plugin::{
     PluginDirective, PluginSession, ToolCallHookContext, ToolHookHost, ToolResultHookContext,
     emit_plugin_surface_events,
 };
+use crate::tool_executor::execute_tool_call;
 use crate::tool_schema::validate_tool_input;
 use crate::{
-    ProgressSender, SessionEvent, ToolCall, ToolCallRecord, ToolContext, ToolExecutionMode,
-    ToolImage, ToolManifest, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
+    ProgressSender, SessionEvent, ToolCallRecord, ToolContext, ToolExecutionMode, ToolFailure,
+    ToolFailureClass, ToolManifest, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
@@ -30,7 +32,6 @@ pub struct ToolDispatchContext {
 #[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
-    pub images: Vec<ToolImage>,
 }
 
 #[derive(Clone)]
@@ -44,7 +45,6 @@ pub struct ParallelToolCallSpec {
 pub struct ParallelToolCallOutcome {
     pub index: usize,
     pub record: ToolCallRecord,
-    pub images: Vec<ToolImage>,
 }
 
 pub(crate) async fn dispatch_tool_call(
@@ -57,6 +57,7 @@ pub(crate) async fn dispatch_tool_call(
         context.session_id.clone(),
         Arc::clone(&context.host),
         context.turn_context.clone(),
+        Arc::clone(&context.attachment_store),
         None,
     );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
@@ -70,14 +71,18 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext,
 ) -> ToolDispatchOutcome {
-    if resolve_callable_manifest(context, &tool_name).is_none() {
+    let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
         return outcome(
             tool_name,
             args,
-            ToolResult::err_fmt("Tool is unavailable in this session"),
+            runtime_failure(
+                ToolFailureClass::Unavailable,
+                "tool_unavailable",
+                "Tool is unavailable in this session",
+            ),
             0,
         );
-    }
+    };
     let mut args = args;
 
     let directives = match context
@@ -93,7 +98,16 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
     {
         Ok(directives) => directives,
         Err(err) => {
-            return outcome(tool_name, args, ToolResult::err_fmt(err.to_string()), 0);
+            return outcome(
+                tool_name,
+                args,
+                runtime_failure(
+                    ToolFailureClass::Internal,
+                    "before_tool_call_failed",
+                    err.to_string(),
+                ),
+                0,
+            );
         }
     };
 
@@ -117,13 +131,8 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             PluginDirective::ReplaceToolArgs { args: replacement } => {
                 args = replacement;
             }
-            PluginDirective::ShortCircuitTool { result, success } => {
-                short_circuit = Some(ToolResult {
-                    success,
-                    result,
-                    images: Vec::new(),
-                    control: None,
-                });
+            PluginDirective::ShortCircuitTool { output } => {
+                short_circuit = Some(ToolResult::from_output(output));
             }
             PluginDirective::AbortTurn { message, .. } => {
                 short_circuit = Some(ToolResult::err_fmt(message));
@@ -172,36 +181,33 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
         return outcome(
             tool_name,
             args,
-            ToolResult::err_fmt("Tool contract is unavailable in this session"),
+            runtime_failure(
+                ToolFailureClass::Unavailable,
+                "tool_contract_unavailable",
+                "Tool contract is unavailable in this session",
+            ),
             0,
         );
     };
     if let Err(err) = validate_tool_input(&contract, &args) {
-        return outcome(tool_name, args, ToolResult::err_fmt(err), 0);
+        return outcome(
+            tool_name,
+            args,
+            runtime_failure(ToolFailureClass::InvalidRequest, "invalid_tool_args", err),
+            0,
+        );
     }
 
     let tool_start = Instant::now();
-    let native_tools = context.plugins.mode_native_tools().to_vec();
-    let mut native_result = None;
-    for provider in native_tools {
-        if let Some(result) = provider.execute(context, &tool_name, &args, progress).await {
-            native_result = Some(result);
-            break;
-        }
-    }
-    let result = if let Some(result) = native_result {
-        result
-    } else {
-        context
-            .tools
-            .execute(ToolCall {
-                name: &tool_name,
-                args: &args,
-                context: &tool_context,
-                progress,
-            })
-            .await
-    };
+    let result = execute_tool_call(
+        context,
+        &manifest,
+        &tool_name,
+        &args,
+        progress,
+        tool_context,
+    )
+    .await;
     let duration_ms = tool_start.elapsed().as_millis() as u64;
 
     let result = match context
@@ -225,7 +231,11 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                 match directive {
                     PluginDirective::CreateSession { request } => {
                         if let Err(err) = context.host.create_session(*request).await {
-                            final_result = ToolResult::err_fmt(err.to_string());
+                            final_result = ToolResult::failure(ToolFailure::runtime(
+                                ToolFailureClass::Internal,
+                                "plugin_session_create_failed",
+                                err.to_string(),
+                            ));
                             break;
                         }
                     }
@@ -234,13 +244,8 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                             ToolResult::err_fmt("after_tool_call does not support session handoff");
                         break;
                     }
-                    PluginDirective::ShortCircuitTool { result, success } => {
-                        final_result = ToolResult {
-                            success,
-                            result,
-                            images: Vec::new(),
-                            control: None,
-                        };
+                    PluginDirective::ShortCircuitTool { output } => {
+                        final_result = ToolResult::from_output(output);
                     }
                     PluginDirective::AbortTurn { message, .. } => {
                         final_result = ToolResult::err_fmt(message);
@@ -283,11 +288,13 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             }
             final_result
         }
-        Err(err) => ToolResult::err_fmt(err.to_string()),
+        Err(err) => runtime_failure(
+            ToolFailureClass::Internal,
+            "after_tool_call_failed",
+            err.to_string(),
+        ),
     };
 
-    let mut result = result;
-    result.images = register_tool_images(result.images, context.attachment_store.as_ref());
     outcome(tool_name, args, result, duration_ms)
 }
 
@@ -342,7 +349,6 @@ pub(crate) async fn dispatch_parallel_tool_call(
     ParallelToolCallOutcome {
         index: spec.index,
         record: outcome.record,
-        images: outcome.images,
     }
 }
 
@@ -362,119 +368,106 @@ pub(crate) fn resolve_tool_execution_mode(
         .unwrap_or_default()
 }
 
+/// Schedule a batch using Lash's tool execution policy.
+///
+/// Parallel-safe tools run concurrently first, then serial tools run
+/// one-at-a-time in original index order. Returned outputs are sorted by the
+/// same original index so callers keep their source/model ordering.
+pub(crate) async fn schedule_tool_batch<T, O, IndexOf, ModeOf, Run, Fut>(
+    items: Vec<T>,
+    index_of: IndexOf,
+    mode_of: ModeOf,
+    run: Run,
+) -> Vec<O>
+where
+    T: Send + 'static,
+    O: Send + 'static,
+    IndexOf: Fn(&T) -> usize,
+    ModeOf: Fn(&T) -> ToolExecutionMode,
+    Run: Fn(T) -> Fut,
+    Fut: Future<Output = O> + Send,
+{
+    let mut parallel_items = Vec::new();
+    let mut serial_items = Vec::new();
+    for item in items {
+        let index = index_of(&item);
+        match mode_of(&item) {
+            ToolExecutionMode::Parallel => parallel_items.push((index, item)),
+            ToolExecutionMode::Serial => serial_items.push((index, item)),
+        }
+    }
+
+    let mut outcomes = Vec::new();
+
+    let mut pending = FuturesUnordered::new();
+    for (index, item) in parallel_items {
+        let future = run(item);
+        pending.push(async move { (index, future.await) });
+    }
+    while let Some(outcome) = pending.next().await {
+        outcomes.push(outcome);
+    }
+
+    serial_items.sort_by_key(|(index, _)| *index);
+    for (index, item) in serial_items {
+        outcomes.push((index, run(item).await));
+    }
+
+    outcomes.sort_by_key(|(index, _)| *index);
+    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
 /// Dispatch a batch of tool calls produced by one model response.
-///
-/// Strategy (Option A from the design doc): tools with
-/// [`ToolExecutionMode::Parallel`] run concurrently first; tools with
-/// [`ToolExecutionMode::Serial`] then run one-at-a-time after all parallel
-/// work has finished. Results are re-sorted by the caller-provided `index`
-/// so downstream consumers see them in the original model-emitted order.
-///
-/// We chose Option A because it preserves parallelism for read-only tools
-/// (`read_file`, `grep`, `glob`, ...) even when a single mutating tool
-/// (`apply_patch`, `exec_command`, ...) is mixed into the same batch. The
-/// alternative (Option B — serialise the whole batch when any call is
-/// serial) would throw away that parallelism unnecessarily.
 pub async fn dispatch_parallel_tool_calls(
     context: Arc<ToolDispatchContext>,
     specs: Vec<ParallelToolCallSpec>,
     progress: Option<&ProgressSender>,
 ) -> Vec<ParallelToolCallOutcome> {
     let progress = progress.cloned();
-
-    let mut parallel_specs = Vec::new();
-    let mut serial_specs = Vec::new();
-    for spec in specs {
-        match resolve_tool_execution_mode(&context, &spec.tool_name) {
-            ToolExecutionMode::Parallel => parallel_specs.push(spec),
-            ToolExecutionMode::Serial => serial_specs.push(spec),
-        }
-    }
-
-    let mut outcomes = Vec::new();
-
-    // 1. Run every parallel-safe call concurrently.
-    let mut pending = FuturesUnordered::new();
-    for spec in parallel_specs {
-        pending.push(dispatch_parallel_tool_call(
-            Arc::clone(&context),
-            spec,
-            progress.clone(),
-        ));
-    }
-    while let Some(outcome) = pending.next().await {
-        outcomes.push(outcome);
-    }
-
-    // 2. Run serial calls sequentially, in submission order. We preserve the
-    //    original emission order by sorting the serial bucket by its
-    //    caller-provided index before running — this way tools like
-    //    `apply_patch` that were emitted in sequence by the model also run
-    //    in that same sequence.
-    serial_specs.sort_by_key(|spec| spec.index);
-    for spec in serial_specs {
-        let outcome =
-            dispatch_parallel_tool_call(Arc::clone(&context), spec, progress.clone()).await;
-        outcomes.push(outcome);
-    }
-
-    outcomes.sort_by_key(|outcome| outcome.index);
-    outcomes
+    schedule_tool_batch(
+        specs,
+        |spec| spec.index,
+        {
+            let context = Arc::clone(&context);
+            move |spec| resolve_tool_execution_mode(&context, &spec.tool_name)
+        },
+        move |spec| dispatch_parallel_tool_call(Arc::clone(&context), spec, progress.clone()),
+    )
+    .await
 }
 
 fn outcome(
     tool_name: String,
     args: serde_json::Value,
-    mut result: ToolResult,
+    result: ToolResult,
     duration_ms: u64,
 ) -> ToolDispatchOutcome {
-    let images = std::mem::take(&mut result.images);
-    let control = result.control.take();
     let record = ToolCallRecord {
         call_id: None,
         tool: tool_name,
         args,
-        result: result.result,
-        success: result.success,
+        output: *result.output,
         duration_ms,
-        control,
     };
-    ToolDispatchOutcome { record, images }
+    ToolDispatchOutcome { record }
 }
 
-fn register_tool_images(
-    images: Vec<ToolImage>,
-    attachment_store: &dyn crate::AttachmentStore,
-) -> Vec<ToolImage> {
-    images
-        .into_iter()
-        .map(|mut image| {
-            if image.reference.is_none()
-                && let Some(media_type) = crate::MediaType::from_mime(&image.mime)
-            {
-                let meta = crate::AttachmentMeta::new(
-                    crate::AttachmentId::new("pending"),
-                    media_type,
-                    image.data.len() as u64,
-                    image.width,
-                    image.height,
-                    Some(image.label.clone()),
-                );
-                if let Ok(reference) = attachment_store.put(std::mem::take(&mut image.data), meta) {
-                    image.mime = reference.canonical_mime().to_string();
-                    image.reference = Some(reference);
-                }
-            }
-            image
-        })
-        .collect()
+fn runtime_failure(
+    class: ToolFailureClass,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> ToolResult {
+    ToolResult::failure(ToolFailure::runtime(class, code, message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugin::{PluginHost, StaticPluginFactory};
-    use crate::{ExecutionMode, ToolProvider};
+    use crate::{
+        ExecutionMode, ToolCall, ToolCallOutcome, ToolProvider, ToolRetryDisposition,
+        ToolRetryPolicy,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -540,6 +533,83 @@ mod tests {
             .into_iter()
             .find(|tool| tool.name == name)
             .map(|tool| Arc::new(tool.contract()))
+    }
+
+    #[derive(Clone)]
+    struct ScheduledProbe {
+        index: usize,
+        name: &'static str,
+        mode: ToolExecutionMode,
+        delay: Duration,
+    }
+
+    #[tokio::test]
+    async fn scheduler_runs_parallel_bucket_then_serial_and_preserves_order() {
+        let windows: Arc<std::sync::Mutex<Vec<(&'static str, Instant, Instant)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probes = vec![
+            ScheduledProbe {
+                index: 0,
+                name: "parallel_slow",
+                mode: ToolExecutionMode::Parallel,
+                delay: Duration::from_millis(40),
+            },
+            ScheduledProbe {
+                index: 1,
+                name: "serial",
+                mode: ToolExecutionMode::Serial,
+                delay: Duration::from_millis(10),
+            },
+            ScheduledProbe {
+                index: 2,
+                name: "parallel_fast",
+                mode: ToolExecutionMode::Parallel,
+                delay: Duration::from_millis(5),
+            },
+        ];
+
+        let outputs = schedule_tool_batch(probes, |probe| probe.index, |probe| probe.mode, {
+            let windows = Arc::clone(&windows);
+            move |probe| {
+                let windows = Arc::clone(&windows);
+                async move {
+                    let start = Instant::now();
+                    tokio::time::sleep(probe.delay).await;
+                    let end = Instant::now();
+                    windows
+                        .lock()
+                        .expect("windows")
+                        .push((probe.name, start, end));
+                    probe.name
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(outputs, ["parallel_slow", "serial", "parallel_fast"]);
+
+        let recorded = windows.lock().expect("windows").clone();
+        let parallel_slow = recorded
+            .iter()
+            .find(|(name, _, _)| *name == "parallel_slow")
+            .expect("parallel_slow");
+        let parallel_fast = recorded
+            .iter()
+            .find(|(name, _, _)| *name == "parallel_fast")
+            .expect("parallel_fast");
+        let serial = recorded
+            .iter()
+            .find(|(name, _, _)| *name == "serial")
+            .expect("serial");
+
+        assert!(
+            parallel_fast.1 < parallel_slow.2,
+            "parallel tools should overlap even when completion order differs"
+        );
+        assert!(
+            serial.1 >= parallel_slow.2 && serial.1 >= parallel_fast.2,
+            "serial tool should start after the parallel bucket completes"
+        );
     }
 
     struct MockTools;
@@ -712,6 +782,14 @@ mod tests {
         executed: Arc<AtomicUsize>,
     }
 
+    struct RetryProbeTools {
+        definition: crate::ToolDefinition,
+        attempts: Arc<AtomicUsize>,
+        successes_after: usize,
+        cancel_on_first: bool,
+        observed_attempts: Arc<std::sync::Mutex<Vec<(u32, u32, Option<String>)>>>,
+    }
+
     #[async_trait::async_trait]
     impl ToolProvider for CountingContractTools {
         fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
@@ -770,6 +848,38 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ToolProvider for RetryProbeTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![self.definition.clone()])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == self.definition.name).then(|| Arc::new(self.definition.contract()))
+        }
+
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            self.observed_attempts.lock().expect("attempts").push((
+                call.context.attempt_number(),
+                call.context.max_attempts(),
+                call.context.idempotency_key().map(str::to_string),
+            ));
+            let attempt_index = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.cancel_on_first {
+                return ToolResult::cancelled("cancelled");
+            }
+            if attempt_index >= self.successes_after {
+                return ToolResult::ok(json!({ "attempt": attempt_index }));
+            }
+            ToolResult::retryable_failure(
+                crate::ToolFailureClass::External,
+                "transient",
+                "transient failure",
+                Some(0),
+            )
+        }
+    }
+
     fn lazy_contract_dispatch_context(
         contracts_resolved: Arc<AtomicUsize>,
         executed: Arc<AtomicUsize>,
@@ -816,6 +926,28 @@ mod tests {
         }
     }
 
+    fn retry_tool(name: &str, retry_policy: ToolRetryPolicy) -> crate::ToolDefinition {
+        named_beta_tool(name)
+            .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_retry_policy(retry_policy)
+    }
+
+    fn retry_dispatch_context(
+        retry_policy: ToolRetryPolicy,
+        attempts: Arc<AtomicUsize>,
+        successes_after: usize,
+        cancel_on_first: bool,
+        observed_attempts: Arc<std::sync::Mutex<Vec<(u32, u32, Option<String>)>>>,
+    ) -> ToolDispatchContext {
+        exact_dispatch_context(Arc::new(RetryProbeTools {
+            definition: retry_tool("retry_probe", retry_policy),
+            attempts,
+            successes_after,
+            cancel_on_first,
+            observed_attempts,
+        }))
+    }
+
     fn parallel_dispatch_context(
         barrier: Arc<Barrier>,
         started: Arc<AtomicUsize>,
@@ -842,9 +974,9 @@ mod tests {
         let outcome =
             dispatch_tool_call(&dispatch_context(), "beta".to_string(), json!({}), None).await;
 
-        assert!(!outcome.record.success);
+        assert!(!outcome.record.output.is_success());
         assert_eq!(
-            outcome.record.result,
+            outcome.record.output.value_for_projection()["message"],
             json!("value: required property missing")
         );
     }
@@ -861,7 +993,7 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
+        assert!(outcome.record.output.is_success());
         assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
         assert_eq!(executed.load(Ordering::SeqCst), 1);
     }
@@ -883,8 +1015,8 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
-        assert_eq!(outcome.record.result, json!("host"));
+        assert!(outcome.record.output.is_success());
+        assert_eq!(outcome.record.output.value_for_projection(), json!("host"));
         assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
         assert_eq!(executed.load(Ordering::SeqCst), 1);
     }
@@ -906,9 +1038,9 @@ mod tests {
         )
         .await;
 
-        assert!(!outcome.record.success);
+        assert!(!outcome.record.output.is_success());
         assert_eq!(
-            outcome.record.result,
+            outcome.record.output.value_for_projection()["message"],
             json!("Tool contract is unavailable in this session")
         );
         assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
@@ -931,9 +1063,9 @@ mod tests {
         )
         .await;
 
-        assert!(!outcome.record.success);
+        assert!(!outcome.record.output.is_success());
         assert_eq!(
-            outcome.record.result,
+            outcome.record.output.value_for_projection()["message"],
             json!("Tool is unavailable in this session")
         );
         assert_eq!(contracts_resolved.load(Ordering::SeqCst), 0);
@@ -954,12 +1086,192 @@ mod tests {
         )
         .await;
 
-        assert!(!outcome.record.success);
+        assert!(!outcome.record.output.is_success());
         assert_eq!(
-            outcome.record.result,
+            outcome.record.output.value_for_projection()["message"],
             json!("min_datetime: unexpected property")
         );
         assert_eq!(executed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn default_retry_policy_never_retries_safe_failures() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = dispatch_tool_call(
+            &retry_dispatch_context(
+                ToolRetryPolicy::Never,
+                Arc::clone(&attempts),
+                usize::MAX,
+                false,
+                Arc::clone(&observed),
+            ),
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.output.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(observed.lock().expect("observed")[0].0, 1);
+    }
+
+    #[tokio::test]
+    async fn safe_retry_policy_retries_safe_failure_and_stops_on_success() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = dispatch_tool_call(
+            &retry_dispatch_context(
+                ToolRetryPolicy::safe(3, 0, 0),
+                Arc::clone(&attempts),
+                2,
+                false,
+                Arc::clone(&observed),
+            ),
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(outcome.record.output.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            observed
+                .lock()
+                .expect("observed")
+                .iter()
+                .map(|(attempt, max, _)| (*attempt, *max))
+                .collect::<Vec<_>>(),
+            vec![(1, 3), (2, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_retry_policy_marks_exhausted_after_final_attempt() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = dispatch_tool_call(
+            &retry_dispatch_context(
+                ToolRetryPolicy::safe(2, 0, 0),
+                Arc::clone(&attempts),
+                usize::MAX,
+                false,
+                Arc::clone(&observed),
+            ),
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.output.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let ToolCallOutcome::Failure(failure) = outcome.record.output.outcome else {
+            panic!("expected failure");
+        };
+        assert_eq!(
+            failure.retry,
+            ToolRetryDisposition::Exhausted { attempts: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_retry_immediately() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = dispatch_tool_call(
+            &retry_dispatch_context(
+                ToolRetryPolicy::safe(3, 0, 0),
+                Arc::clone(&attempts),
+                usize::MAX,
+                true,
+                Arc::clone(&observed),
+            ),
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.output.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            outcome.record.output.outcome,
+            ToolCallOutcome::Cancelled(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_context_has_stable_idempotency_key_across_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let context = retry_dispatch_context(
+            ToolRetryPolicy::safe(3, 0, 0),
+            Arc::clone(&attempts),
+            3,
+            false,
+            Arc::clone(&observed),
+        );
+        let tool_context = ToolContext::new(
+            context.session_id.clone(),
+            Arc::clone(&context.host),
+            context.turn_context.clone(),
+            Arc::clone(&context.attachment_store),
+            Some("call-1".to_string()),
+        );
+        let outcome = dispatch_tool_call_with_execution_context(
+            &context,
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+            tool_context,
+        )
+        .await;
+
+        assert!(outcome.record.output.is_success());
+        let observed = observed.lock().expect("observed");
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed
+                .iter()
+                .map(|(attempt, max, _)| (*attempt, *max))
+                .collect::<Vec<_>>(),
+            vec![(1, 3), (2, 3), (3, 3)]
+        );
+        let keys = observed
+            .iter()
+            .map(|(_, _, key)| key.clone())
+            .collect::<Vec<_>>();
+        assert!(keys.iter().all(|key| key == &keys[0]));
+        assert_eq!(
+            keys[0].as_deref(),
+            Some("lash-tool:session:call-1:retry_probe")
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_retry_policy_requires_stable_key() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = dispatch_tool_call(
+            &retry_dispatch_context(
+                ToolRetryPolicy::idempotent(3, 0, 0),
+                Arc::clone(&attempts),
+                usize::MAX,
+                false,
+                Arc::clone(&observed),
+            ),
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+        )
+        .await;
+
+        assert!(!outcome.record.output.is_success());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(observed.lock().expect("observed")[0].1, 1);
     }
 
     #[tokio::test]
@@ -978,11 +1290,10 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
+        assert!(outcome.record.output.is_success());
         assert_eq!(outcome.record.tool, "batch");
-        let results = outcome
-            .record
-            .result
+        let value = outcome.record.output.value_for_projection();
+        let results = value
             .get("results")
             .and_then(|value| value.as_array())
             .expect("results");
@@ -995,7 +1306,12 @@ mod tests {
             2
         );
         assert_eq!(results[0].get("tool"), Some(&json!("alpha")));
-        assert_eq!(results[2].get("error"), Some(&json!("beta failed")));
+        assert_eq!(
+            results[2]
+                .get("error")
+                .and_then(|value| value.get("message")),
+            Some(&json!("beta failed"))
+        );
     }
 
     #[tokio::test]
@@ -1012,10 +1328,9 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
-        let first = outcome
-            .record
-            .result
+        assert!(outcome.record.output.is_success());
+        let value = outcome.record.output.value_for_projection();
+        let first = value
             .get("results")
             .and_then(|value| value.as_array())
             .and_then(|items| items.first())
@@ -1040,8 +1355,12 @@ mod tests {
         )
         .await;
 
-        assert!(!outcome.record.success);
-        let error = outcome.record.result.as_str().expect("string error result");
+        assert!(!outcome.record.output.is_success());
+        let value = outcome.record.output.value_for_projection();
+        let error = value
+            .get("message")
+            .and_then(|value| value.as_str())
+            .expect("string error result");
         assert!(
             error.contains("tool_calls") && error.contains("items <= 25"),
             "{error}",
@@ -1065,11 +1384,10 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.record.success);
+        assert!(outcome.record.output.is_success());
         assert_eq!(started.load(Ordering::SeqCst), 2);
-        let results = outcome
-            .record
-            .result
+        let value = outcome.record.output.value_for_projection();
+        let results = value
             .get("results")
             .and_then(|value| value.as_array())
             .expect("results");
@@ -1167,7 +1485,11 @@ mod tests {
         let outcomes = dispatch_parallel_tool_calls(context, specs, None).await;
 
         assert_eq!(outcomes.len(), 2);
-        assert!(outcomes.iter().all(|outcome| outcome.record.success));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.record.output.is_success())
+        );
         // Outcomes are sorted by original index.
         assert_eq!(outcomes[0].index, 0);
         assert_eq!(outcomes[1].index, 1);
@@ -1189,6 +1511,127 @@ mod tests {
             first_end,
             second_start,
         );
+    }
+
+    struct SerialRetryProbeTools {
+        log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
+        attempts_a: Arc<AtomicUsize>,
+        attempts_b: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolProvider for SerialRetryProbeTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![
+                test_tool("serial_retry_a", ToolExecutionMode::Serial)
+                    .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
+                test_tool("serial_retry_b", ToolExecutionMode::Serial)
+                    .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
+            ])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            contract_from(
+                vec![
+                    test_tool("serial_retry_a", ToolExecutionMode::Serial)
+                        .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
+                    test_tool("serial_retry_b", ToolExecutionMode::Serial)
+                        .with_retry_policy(ToolRetryPolicy::safe(2, 0, 0)),
+                ],
+                name,
+            )
+        }
+
+        async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
+            let start = Instant::now();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let end = Instant::now();
+            self.log
+                .lock()
+                .expect("serial retry log")
+                .push((call.name.to_string(), start, end));
+
+            let attempt = match call.name {
+                "serial_retry_a" => self.attempts_a.fetch_add(1, Ordering::SeqCst) + 1,
+                "serial_retry_b" => self.attempts_b.fetch_add(1, Ordering::SeqCst) + 1,
+                _ => 1,
+            };
+            if attempt == 1 {
+                ToolResult::retryable_failure(
+                    crate::ToolFailureClass::External,
+                    "transient",
+                    "transient failure",
+                    Some(0),
+                )
+            } else {
+                ToolResult::ok(json!(call.name))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn serial_tool_retries_do_not_overlap_other_serial_calls() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let attempts_a = Arc::new(AtomicUsize::new(0));
+        let attempts_b = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(SerialRetryProbeTools {
+            log: Arc::clone(&log),
+            attempts_a: Arc::clone(&attempts_a),
+            attempts_b: Arc::clone(&attempts_b),
+        });
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let plugins = test_plugins(provider);
+        let tools = plugins.tools();
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let context = Arc::new(ToolDispatchContext {
+            plugins,
+            tools,
+            surface,
+            host: Arc::new(MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+
+        let outcomes = dispatch_parallel_tool_calls(
+            context,
+            vec![
+                ParallelToolCallSpec {
+                    index: 0,
+                    tool_name: "serial_retry_a".to_string(),
+                    args: json!({}),
+                },
+                ParallelToolCallSpec {
+                    index: 1,
+                    tool_name: "serial_retry_b".to_string(),
+                    args: json!({}),
+                },
+            ],
+            None,
+        )
+        .await;
+
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.record.output.is_success())
+        );
+        assert_eq!(attempts_a.load(Ordering::SeqCst), 2);
+        assert_eq!(attempts_b.load(Ordering::SeqCst), 2);
+
+        let mut entries = log.lock().expect("serial retry log").clone();
+        entries.sort_by_key(|(_, start, _)| *start);
+        assert_eq!(entries.len(), 4);
+        for window in entries.windows(2) {
+            assert!(
+                window[1].1 >= window[0].2,
+                "serial retry windows must not overlap: {:?} then {:?}",
+                window[0],
+                window[1],
+            );
+        }
     }
 
     /// When a batch contains a mix of parallel and serial tools, the
@@ -1296,11 +1739,13 @@ mod tests {
 
         assert_eq!(outcomes.len(), 3);
         assert!(
-            outcomes.iter().all(|outcome| outcome.record.success),
+            outcomes
+                .iter()
+                .all(|outcome| outcome.record.output.is_success()),
             "all tools should succeed: {:?}",
             outcomes
                 .iter()
-                .map(|outcome| (&outcome.record.tool, outcome.record.success))
+                .map(|outcome| (&outcome.record.tool, outcome.record.output.is_success()))
                 .collect::<Vec<_>>()
         );
 

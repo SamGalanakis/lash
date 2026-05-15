@@ -768,14 +768,18 @@ pub(crate) fn render_tool_call_entry(
     parent: Option<&str>,
 ) {
     let id = ctx.next_id();
-    let (status_key, status_label) = if record.success {
-        ("ok", "ok")
-    } else {
-        ("err", "error")
+    let (status_key, status_label) = match record.output.status() {
+        lash_core::ToolCallStatus::Success => ("ok", "ok"),
+        lash_core::ToolCallStatus::Failure => ("err", "error"),
+        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
     };
-    let glyph = if record.success { "•" } else { "×" };
+    let glyph = match record.output.status() {
+        lash_core::ToolCallStatus::Success => "•",
+        lash_core::ToolCallStatus::Failure => "×",
+        lash_core::ToolCallStatus::Cancelled => "◌",
+    };
     let summary = summarize_args(&record.args);
-    let result_size = json_byte_size(&record.result);
+    let result_size = json_byte_size(&record.output.value_for_projection());
     let args_size = json_byte_size(&record.args);
 
     let dur = format_duration(record.duration_ms);
@@ -795,7 +799,7 @@ pub(crate) fn render_tool_call_entry(
     search.push('\n');
     search.push_str(&pretty_json(&record.args).to_lowercase());
     search.push('\n');
-    search.push_str(&pretty_json(&record.result).to_lowercase());
+    search.push_str(&pretty_json(&record.output.value_for_projection()).to_lowercase());
 
     let _ = writeln!(
         out,
@@ -814,8 +818,10 @@ pub(crate) fn render_tool_call_entry(
     // is short. A 500-call trace at ~5kb each becomes a 200k-pixel document
     // if everything's open by default — collapse-first, expand-on-demand
     // is the right default for sessions of that scale.
-    let busy_session = ctx.stats.tool_calls_ok + ctx.stats.tool_calls_err > 30;
-    let auto_open = !record.success || (!busy_session && (args_size + result_size) <= 4096);
+    let busy_session =
+        ctx.stats.tool_calls_ok + ctx.stats.tool_calls_err + ctx.stats.tool_calls_cancelled > 30;
+    let auto_open =
+        !record.output.is_success() || (!busy_session && (args_size + result_size) <= 4096);
     let open_attr = if auto_open { " open" } else { "" };
 
     // The whole header row IS the summary — click anywhere on it to expand.
@@ -870,9 +876,9 @@ pub(crate) fn render_tool_call_entry(
 
 fn render_tool_call_payload(out: &mut String, record: &ToolCallRecord) {
     let args_size = json_byte_size(&record.args);
-    let result_size = json_byte_size(&record.result);
+    let result_size = json_byte_size(&record.output.value_for_projection());
     let args_str = pretty_json(&record.args);
-    let result_str = pretty_json(&record.result);
+    let result_str = pretty_json(&record.output.value_for_projection());
 
     out.push_str("          <div class=\"kv\">\n");
     out.push_str("            <div class=\"kv-head\"><span class=\"kv-tag\">arguments</span>");
@@ -895,7 +901,7 @@ fn render_tool_call_payload(out: &mut String, record: &ToolCallRecord) {
         "<span class=\"kv-size\">{}</span><button class=\"code-copy\" data-copy>copy</button></div>",
         format_count(result_size as u64)
     );
-    let result_class = if record.success {
+    let result_class = if record.output.is_success() {
         "json"
     } else {
         "json json--err"
@@ -1042,7 +1048,10 @@ fn render_inline_rlm_tool_calls(out: &mut String, step: &RlmTrajectoryEntry) {
     if step.tool_calls.is_empty() {
         return;
     }
-    let has_error = step.tool_calls.iter().any(|record| !record.success);
+    let has_error = step
+        .tool_calls
+        .iter()
+        .any(|record| !record.output.is_success());
     let open_attr = if has_error { " open" } else { "" };
     let total_ms: u64 = step
         .tool_calls
@@ -1068,14 +1077,17 @@ fn render_inline_rlm_tool_calls(out: &mut String, step: &RlmTrajectoryEntry) {
 }
 
 fn render_inline_tool_call(out: &mut String, ordinal: usize, record: &ToolCallRecord) {
-    let (status_key, status_label) = if record.success {
-        ("ok", "ok")
-    } else {
-        ("err", "error")
+    let (status_key, status_label) = match record.output.status() {
+        lash_core::ToolCallStatus::Success => ("ok", "ok"),
+        lash_core::ToolCallStatus::Failure => ("err", "error"),
+        lash_core::ToolCallStatus::Cancelled => ("cancelled", "cancelled"),
     };
     let summary = summarize_args(&record.args);
-    let result_size = json_byte_size(&record.result);
-    let open_attr = if record.success { "" } else { " open" };
+    let result_size = json_byte_size(&record.output.value_for_projection());
+    let open_attr = match record.output.status() {
+        lash_core::ToolCallStatus::Success => "",
+        lash_core::ToolCallStatus::Failure | lash_core::ToolCallStatus::Cancelled => " open",
+    };
     let _ = writeln!(
         out,
         "              <details class=\"tool-details rlm-tool-details rlm-tool-details--{status_key}\"{open_attr}>"

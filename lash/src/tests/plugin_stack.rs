@@ -254,7 +254,7 @@ async fn tool_completed_activity_is_canonical_while_model_observation_is_project
         .await
         .into_iter()
         .find_map(|event| match event.event {
-            TurnEvent::ToolCallCompleted { result, .. } => Some(result),
+            TurnEvent::ToolCallCompleted { output, .. } => Some(output.value_for_projection()),
             _ => None,
         })
         .expect("standard tool completion");
@@ -291,7 +291,7 @@ async fn tool_completed_activity_is_canonical_while_model_observation_is_project
         .await
         .into_iter()
         .find_map(|event| match event.event {
-            TurnEvent::ToolCallCompleted { result, .. } => Some(result),
+            TurnEvent::ToolCallCompleted { output, .. } => Some(output.value_for_projection()),
             _ => None,
         })
         .expect("rlm tool completion");

@@ -102,7 +102,7 @@ impl PluginFactory for SubagentsPluginFactory {
         let is_rlm = execution_mode == lash_core::ExecutionMode::new("rlm");
         if is_rlm && !ctx.background_tasks_available {
             return Err(PluginError::Registration(
-                "subagents require session background-task support; configure a SessionTaskExecutor before installing SubagentsPluginFactory"
+                "subagents require session background-task support; configure a BackgroundTaskHost before installing SubagentsPluginFactory"
                     .to_string(),
             ));
         }
@@ -150,8 +150,9 @@ mod tests {
     };
     use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
     use lash_core::{
-        BackgroundRuntimeHost, ExecutionMode, LashRuntime, PersistedSessionState, PluginFactory,
-        PluginHost, RuntimeCoreConfig, RuntimeServices, SessionPolicy, TokioSessionTaskExecutor,
+        BackgroundRuntimeHost, ExecutionMode, LashRuntime, LocalBackgroundTaskHost,
+        PersistedSessionState, PluginFactory, PluginHost, RuntimeCoreConfig, RuntimeServices,
+        SessionPolicy,
     };
     use lash_core::{SessionCreateRequest, ToolDefinition, ToolOutputContract, TurnInput};
     use lash_mode_rlm::RlmTurnInputExt;
@@ -573,7 +574,7 @@ submit result
             .expect("plugin session");
         let host = BackgroundRuntimeHost::new(
             lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-            Arc::new(TokioSessionTaskExecutor::default()),
+            Arc::new(LocalBackgroundTaskHost::default()),
         );
         let policy = SessionPolicy {
             provider: provider.into_handle(),

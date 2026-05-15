@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use super::{LashRuntime, ManagedTaskStatus, SessionTaskExecutor};
+use super::{BackgroundTaskHost, BackgroundTaskRecord, LashRuntime};
 
 #[derive(Clone)]
 pub struct RuntimeObservation {
@@ -15,7 +15,7 @@ pub struct RuntimeObservation {
     pub tool_state: Option<crate::ToolState>,
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub runtime_scope_id: Arc<str>,
-    pub session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
+    pub background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
 }
 
 impl RuntimeObservation {
@@ -29,7 +29,7 @@ impl RuntimeObservation {
             tool_state: runtime.tool_state().ok(),
             tool_catalog: runtime.active_tool_catalog_shared(),
             runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-            session_task_executor: runtime.host.session_task_executor.clone(),
+            background_task_host: runtime.host.background_task_host.clone(),
         }
     }
 
@@ -41,8 +41,8 @@ impl RuntimeObservation {
         format!("{}:{}", self.runtime_scope_id, self.session_id)
     }
 
-    pub async fn list_background_tasks(&self) -> Vec<ManagedTaskStatus> {
-        let Some(executor) = self.session_task_executor.as_ref() else {
+    pub async fn list_background_tasks(&self) -> Vec<BackgroundTaskRecord> {
+        let Some(executor) = self.background_task_host.as_ref() else {
             return Vec::new();
         };
         executor.list_managed(&self.background_scope_key()).await

@@ -42,18 +42,22 @@ fn tool_result_output<T>(result: ToolResult) -> Result<T, PluginActionFailure>
 where
     T: serde::de::DeserializeOwned,
 {
-    if !result.success {
-        return Err(PluginActionFailure::new(result.result.to_string()));
+    if !result.is_success() {
+        return Err(PluginActionFailure::new(
+            result.value_for_projection().to_string(),
+        ));
     }
-    serde_json::from_value(result.result)
+    serde_json::from_value(result.into_value_for_projection())
         .map_err(|err| PluginActionFailure::new(format!("invalid monitor output: {err}")))
 }
 
 fn tool_result_unit(result: ToolResult) -> Result<(), PluginActionFailure> {
-    if result.success {
+    if result.is_success() {
         Ok(())
     } else {
-        Err(PluginActionFailure::new(result.result.to_string()))
+        Err(PluginActionFailure::new(
+            result.value_for_projection().to_string(),
+        ))
     }
 }
 
@@ -209,7 +213,7 @@ impl MonitorPlugin {
             revision: state.snapshot.revision,
             active_count: monitors
                 .iter()
-                .filter(|status| status.run_state == MonitorRunState::Running)
+                .filter(|status| status.state == MonitorRunState::Running)
                 .count(),
             monitors,
         }
@@ -269,7 +273,7 @@ impl MonitorPlugin {
                         status: MonitorStatus {
                             spec,
                             armed: armed.unwrap_or(default_armed),
-                            run_state: MonitorRunState::Idle,
+                            state: MonitorRunState::Idle,
                             last_event: None,
                             last_error: None,
                             last_exit_status: None,
@@ -297,7 +301,7 @@ impl MonitorPlugin {
                 .monitors
                 .values()
                 .filter(|entry| {
-                    entry.status.armed && entry.status.run_state != MonitorRunState::Running
+                    entry.status.armed && entry.status.state != MonitorRunState::Running
                 })
                 .map(|entry| entry.status.spec.clone())
                 .collect::<Vec<_>>()
@@ -319,10 +323,12 @@ impl MonitorPlugin {
         let session_id_owned = session_id.to_string();
         let spec_clone = spec.clone();
         let task_host = host.clone();
-        let managed_spec = crate::ManagedTaskSpec {
+        let managed_spec = crate::BackgroundTaskRegistration {
             id: task_id.clone(),
-            kind: crate::ManagedTaskKind::Monitor,
+            kind: crate::BackgroundTaskKind::Monitor,
             producer: "monitor",
+            child_session_id: None,
+            parent_task_id: None,
         };
         match host
             .spawn_managed_task(
@@ -338,7 +344,7 @@ impl MonitorPlugin {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
                     entry.status.armed = true;
-                    entry.status.run_state = MonitorRunState::Running;
+                    entry.status.state = MonitorRunState::Running;
                     entry.status.last_error = None;
                     entry.status.last_exit_status = None;
                 }
@@ -348,7 +354,7 @@ impl MonitorPlugin {
             Err(err) if err.to_string().contains("already running") => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
-                    entry.status.run_state = MonitorRunState::Running;
+                    entry.status.state = MonitorRunState::Running;
                 }
                 Self::bump_revision(&mut state);
                 Ok(())
@@ -356,7 +362,7 @@ impl MonitorPlugin {
             Err(err) => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
-                    entry.status.run_state = MonitorRunState::Failed;
+                    entry.status.state = MonitorRunState::Failed;
                     entry.status.last_error = Some(err.to_string());
                     entry.status.armed = false;
                 }
@@ -422,7 +428,7 @@ impl MonitorPlugin {
             .snapshot
             .monitors
             .values()
-            .filter(|entry| entry.status.run_state == MonitorRunState::Running)
+            .filter(|entry| entry.status.state == MonitorRunState::Running)
             .count();
         ToolResult::ok(serde_json::json!(MonitorUpdateBatch {
             revision: state.snapshot.revision,
@@ -529,7 +535,7 @@ impl MonitorPlugin {
             return ToolResult::err_fmt(format_args!("unknown monitor `{}`", parsed.id));
         };
         entry.status.armed = false;
-        entry.status.run_state = MonitorRunState::Stopped;
+        entry.status.state = MonitorRunState::Stopped;
         entry.pending_wake = false;
         entry.runtime_pid = None;
         entry.status.last_error = None;
@@ -663,9 +669,9 @@ impl SessionPlugin for MonitorPlugin {
             entry.pending_wake = false;
             entry.runtime_pid = None;
             if entry.status.armed && entry.status.spec.restart_on_restore {
-                entry.status.run_state = MonitorRunState::Idle;
-            } else if entry.status.run_state == MonitorRunState::Running {
-                entry.status.run_state = MonitorRunState::Idle;
+                entry.status.state = MonitorRunState::Idle;
+            } else if entry.status.state == MonitorRunState::Running {
+                entry.status.state = MonitorRunState::Idle;
                 entry.status.armed = false;
             }
         }
@@ -790,8 +796,8 @@ async fn run_monitor_task(
         .lock()
         .map_err(|_| PluginError::Session("monitor state poisoned".to_string()))?;
     if let Some(entry) = state.snapshot.monitors.get_mut(&id) {
-        let was_stopped = entry.status.run_state == MonitorRunState::Stopped;
-        entry.status.run_state = if was_stopped {
+        let was_stopped = entry.status.state == MonitorRunState::Stopped;
+        entry.status.state = if was_stopped {
             MonitorRunState::Stopped
         } else if timed_out {
             MonitorRunState::Failed
@@ -818,7 +824,7 @@ async fn run_monitor_task(
         .snapshot
         .monitors
         .get(&id)
-        .map(|entry| entry.status.run_state != MonitorRunState::Stopped)
+        .map(|entry| entry.status.state != MonitorRunState::Stopped)
         .unwrap_or(false)
     {
         MonitorPlugin::queue_update(
@@ -947,7 +953,7 @@ mod tests {
                 status: MonitorStatus {
                     spec: spec.clone(),
                     armed: true,
-                    run_state: MonitorRunState::Running,
+                    state: MonitorRunState::Running,
                     last_event: None,
                     last_error: None,
                     last_exit_status: None,
@@ -990,7 +996,7 @@ mod tests {
             .monitors
             .get("slow")
             .expect("seeded monitor entry");
-        assert_eq!(entry.status.run_state, MonitorRunState::Failed);
+        assert_eq!(entry.status.state, MonitorRunState::Failed);
         assert!(!entry.status.armed);
         assert!(
             entry
