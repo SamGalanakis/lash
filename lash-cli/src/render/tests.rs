@@ -131,25 +131,7 @@ fn single_op_exploration_renders_as_one_line() {
 
 #[test]
 fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
-    use lash_subagents::AgentMetadata;
-    let host = std::sync::Arc::new(crate::activity::tests::MockSubagentHost::default());
-    host.insert(
-        "root",
-        "probe_repo_shape",
-        AgentMetadata {
-            session_id: "child".to_string(),
-            parent_session_id: Some("root".to_string()),
-            capability: Some("explore".to_string()),
-            state: "running".to_string(),
-            model: "gpt-5.4-mini".to_string(),
-            model_variant: Some("low".to_string()),
-            last_iterations: None,
-            last_tool_calls: None,
-            last_token_usage: None,
-        },
-    );
     let mut state = crate::activity::ActivityState::default();
-    state.set_subagent_host(host);
     let blocks = state.project_tool_call(
         "spawn_agent",
         serde_json::json!({

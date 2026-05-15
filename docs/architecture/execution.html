@@ -125,7 +125,7 @@ let result = session
     .await?;</code></pre>
           <div class="two-col">
             <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code> opens a <code>LashSession</code> from the chat id and store for each request, records projected <code>TurnEvent</code>s through a <code>TurnActivitySink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and browser streaming. The app-facing walkthrough lives in <a href="../embedding.html">Lash API</a>.</p></article>
-            <article class="panel"><h3>Boundary rule</h3><p>The <code>lash</code> API is intentionally above raw runtime internals but below an app framework. It should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
+            <article class="panel"><h3>Boundary rule</h3><p>The <code>lash</code> API is intentionally above raw runtime internals but below an app framework. The facade should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
           </div>
         </div>
 

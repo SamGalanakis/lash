@@ -75,17 +75,21 @@ OKLCH) plus four signal accents.
 
 ### Spacing
 
-A 4pt scale with semantic names. Always use these — never raw px.
+A 4pt scale with semantic names. Tokens are in `rem` so the whole layout
+scales with the fluid root `font-size`. Always use the tokens — never raw px.
 
 ```
---space-3xs: 2px    --space-md:  16px    --space-3xl: 64px
---space-2xs: 4px    --space-lg:  24px    --space-4xl: 96px
---space-xs:  8px    --space-xl:  32px    --space-5xl: 144px
---space-sm:  12px   --space-2xl: 48px
+--space-3xs: 0.125rem   --space-md:  1rem      --space-3xl: 4rem
+--space-2xs: 0.25rem    --space-lg:  1.5rem    --space-4xl: 6rem
+--space-xs:  0.5rem     --space-xl:  2rem      --space-5xl: 9rem
+--space-sm:  0.75rem    --space-2xl: 3rem
 ```
 
-Use `gap` for sibling spacing, not margins. Vary spacing for hierarchy — a
-heading with extra space above reads as more important.
+At base 16px these resolve to the same 2/4/8/12/16/24/32/48/64/96/144 px
+values as before. On larger viewports the root scales up via `clamp()`, and
+spacing scales with it. Use `gap` for sibling spacing, not margins. Vary
+spacing for hierarchy — a heading with extra space above reads as more
+important.
 
 ### Type
 

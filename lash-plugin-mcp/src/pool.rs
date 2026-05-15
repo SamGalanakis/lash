@@ -416,17 +416,17 @@ fn tool_result_from_rmcp(result: rmcp::model::CallToolResult, context: &ToolCont
     };
     if is_error {
         ToolResult::from_output(ToolCallOutput::failure(ToolFailure {
-                class: ToolFailureClass::Execution,
-                code: "mcp_tool_error".into(),
-                message: if text_parts.is_empty() {
-                    "MCP tool returned an error".into()
-                } else {
-                    text_parts.join("\n\n")
-                },
-                source: ToolFailureSource::Tool,
-                retry: ToolRetryDisposition::Never,
-                raw: Some(value),
-            }))
+            class: ToolFailureClass::Execution,
+            code: "mcp_tool_error".into(),
+            message: if text_parts.is_empty() {
+                "MCP tool returned an error".into()
+            } else {
+                text_parts.join("\n\n")
+            },
+            source: ToolFailureSource::Tool,
+            retry: ToolRetryDisposition::Never,
+            raw: Some(value),
+        }))
     } else {
         ToolResult::from_output(ToolCallOutput::success(value))
     }

@@ -574,7 +574,10 @@ mod tests {
             .await;
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
-        assert_eq!(result.value_for_projection()["root_cause"], json!("missing config"));
+        assert_eq!(
+            result.value_for_projection()["root_cause"],
+            json!("missing config")
+        );
         assert_eq!(result.value_for_projection()["confidence"], json!(0.8));
 
         let requests = manager.requests.lock().expect("requests");

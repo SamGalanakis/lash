@@ -102,7 +102,7 @@ let core = LashCore::builder()
     .store(Arc::new(my_custom_persistence))
     .open()
     .await?;</code></pre>
-          <p>If no <code>store_factory</code> is set, sessions run in-memory: they accept turns and produce results, but nothing is written to disk and nothing can be resumed after the process exits. There's no separate "in-memory" implementation — absence of a factory is the mechanism.</p>
+          <p>If no <code>store_factory</code> is set, sessions run in-memory: they accept turns and produce results, but nothing is written to disk and nothing can be resumed after the process exits. Lash ships no separate "in-memory" implementation — absence of a factory is the mechanism.</p>
         </div>
 
         <div class="section" id="whats-persisted">

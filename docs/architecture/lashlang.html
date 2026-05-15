@@ -136,7 +136,7 @@ call continue_as {
                 <tr><td><code>a + b</code>, <code>a - b</code>, <code>a * b</code>, <code>a / b</code>, <code>a % b</code></td><td>Numeric arithmetic. <code>+</code> also concatenates strings and lists where supported by runtime value semantics.</td></tr>
                 <tr><td><code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code></td><td>Comparison operators used in conditionals and filters.</td></tr>
                 <tr><td><code>a and b</code>, <code>a or b</code>, <code>!a</code>, <code>not a</code></td><td>Boolean composition and negation.</td></tr>
-                <tr><td><code>cond ? yes : no</code></td><td>Expression ternary. There is no expression-form <code>if</code>.</td></tr>
+                <tr><td><code>cond ? yes : no</code></td><td>Expression ternary. Lashlang has no expression-form <code>if</code>.</td></tr>
                 <tr><td><code>name(args...)</code></td><td>Builtin function call. User-defined functions are not part of the language surface.</td></tr>
                 <tr><td><code>(call tool { ... })?</code>, <code>(await handle)?</code></td><td>Fail-fast unwrap of a result wrapper: return <code>.value</code> on success or abort the block with the wrapper error.</td></tr>
               </tbody>

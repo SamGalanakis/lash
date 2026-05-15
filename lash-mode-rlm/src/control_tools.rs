@@ -467,13 +467,11 @@ mod tests {
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
-        assert!(
-            value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .is_some()
-        );
-        assert!(matches!(result.output.control, Some(ToolControl::Handoff { .. })));
+        assert!(value.get("session_id").and_then(Value::as_str).is_some());
+        assert!(matches!(
+            result.output.control,
+            Some(ToolControl::Handoff { .. })
+        ));
         let created = manager.created.lock().expect("created");
         assert_eq!(created.len(), 1);
         let request = &created[0];

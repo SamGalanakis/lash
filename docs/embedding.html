@@ -71,7 +71,7 @@
             <dt>Per-turn atomic commit</dt>
             <dd><code>RuntimeCommit</code> writes graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS on <code>expected_head_revision</code>. Partial turn = no commit.</dd>
             <dt>Typed plugin capabilities</dt>
-            <dd>Tools see a named <code>ToolContext</code> surface — <code>tasks()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. There is no <code>ToolContext::host()</code> escape hatch.</dd>
+            <dd>Tools see a named <code>ToolContext</code> surface — <code>tasks()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. The surface exposes no <code>ToolContext::host()</code> escape hatch.</dd>
             <dt>Sandboxed code load, ready</dt>
             <dd>RLM mode runs model-emitted Lashlang programs in a VM with no filesystem, process, or network surface. Every effect crosses <code>ToolHost</code>. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
             <dt>Subagent capability boundaries</dt>

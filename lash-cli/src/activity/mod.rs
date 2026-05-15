@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lash_subagents::SubagentHost;
 use serde_json::Value;
 
 use crate::app::{UiTimeline, UiTimelineItem};
@@ -254,11 +253,6 @@ pub struct ActivityState {
     /// `projectors::register_builtins`. Dispatch walks this map before
     /// falling through to the generic projector.
     registry: HashMap<&'static str, Arc<dyn ToolProjector>>,
-    /// Live subagent host, plumbed through to projectors via `ProjectCtx`
-    /// so they can fetch display-only metadata (capability, model, run
-    /// state, per-completion stats) by agent name. `None` in test
-    /// contexts that don't exercise subagent rendering.
-    subagent_host: Option<Arc<dyn SubagentHost>>,
 }
 
 impl Default for ActivityState {
@@ -284,17 +278,9 @@ impl ActivityState {
         let mut state = Self {
             shell_handles: HashMap::new(),
             registry: HashMap::new(),
-            subagent_host: None,
         };
         projectors::register_builtins(&mut state);
         state
-    }
-
-    /// Provide a live subagent host so subagent projectors can fetch
-    /// display metadata (capability, model, run state) by agent name.
-    /// Production code calls this once during App setup.
-    pub fn set_subagent_host(&mut self, host: Arc<dyn SubagentHost>) {
-        self.subagent_host = Some(host);
     }
 
     /// Register a projector under every name it claims. Intended for
@@ -349,7 +335,6 @@ impl ActivityState {
             success,
             duration_ms,
             shell_handles: &mut self.shell_handles,
-            subagent_host: self.subagent_host.as_ref(),
         };
         if status == ActivityStatus::Cancelled {
             return vec![projectors::generic::fallback_block(&mut ctx, status)];
@@ -506,89 +491,7 @@ fn batch_result_entries(result: &Value) -> Option<&Vec<Value>> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use lash_subagents::{
-        AgentMetadata, CloseAgentRequest, CloseAgentResponse, SpawnAgentRequest,
-        SpawnAgentResponse, SubagentHost, WaitAgentRequest, WaitAgentResponse,
-    };
     use serde_json::json;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    /// In-memory `SubagentHost` for projector tests. Pre-populate with
-    /// `insert(session_id, agent_name, AgentMetadata { … })` to feed the activity
-    /// projector's profile/model/run_state lookups.
-    #[derive(Default)]
-    pub(crate) struct MockSubagentHost {
-        metadata: Mutex<HashMap<String, AgentMetadata>>,
-    }
-
-    impl MockSubagentHost {
-        pub(crate) fn insert(
-            &self,
-            session_id: impl Into<String>,
-            agent_name: impl Into<String>,
-            meta: AgentMetadata,
-        ) {
-            self.metadata
-                .lock()
-                .expect("metadata lock")
-                .insert(format!("{}:{}", session_id.into(), agent_name.into()), meta);
-        }
-    }
-
-    #[async_trait]
-    impl SubagentHost for MockSubagentHost {
-        fn agent_metadata(&self, session_id: &str, agent_name: &str) -> Option<AgentMetadata> {
-            self.metadata
-                .lock()
-                .expect("metadata lock")
-                .get(&format!("{session_id}:{agent_name}"))
-                .cloned()
-        }
-
-        async fn spawn_agent(
-            &self,
-            _context: &lash_core::ToolContext,
-            _request: SpawnAgentRequest,
-        ) -> Result<SpawnAgentResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn wait_agent(
-            &self,
-            _context: &lash_core::ToolContext,
-            _request: WaitAgentRequest,
-        ) -> Result<WaitAgentResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-
-        async fn close_agent(
-            &self,
-            _context: &lash_core::ToolContext,
-            _request: CloseAgentRequest,
-        ) -> Result<CloseAgentResponse, String> {
-            unreachable!("MockSubagentHost is read-only")
-        }
-    }
-
-    pub(crate) fn explore_metadata(
-        capability: impl Into<String>,
-        model: impl Into<String>,
-        variant: impl Into<String>,
-    ) -> AgentMetadata {
-        AgentMetadata {
-            session_id: "session".to_string(),
-            parent_session_id: Some("root".to_string()),
-            capability: Some(capability.into()),
-            state: "running".to_string(),
-            model: model.into(),
-            model_variant: Some(variant.into()),
-            last_iterations: None,
-            last_tool_calls: None,
-            last_token_usage: None,
-        }
-    }
 
     #[test]
     fn batch_expands_into_child_tool_blocks() {
@@ -976,14 +879,7 @@ pub(crate) mod tests {
 
     #[test]
     fn spawn_agent_projects_compact_headline_and_labeled_details() {
-        let host = Arc::new(MockSubagentHost::default());
-        host.insert(
-            "root",
-            "probe_repo_shape",
-            explore_metadata("explore", "gpt-5.4-mini", "low"),
-        );
         let mut state = ActivityState::default();
-        state.set_subagent_host(host);
         let blocks = state.project_tool_call(
             "spawn_agent",
             json!({
