@@ -16,6 +16,18 @@ fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
     }
 }
 
+fn plugin_text_message(id: &str, role: MessageRole, plugin_id: &str, content: &str) -> Message {
+    Message {
+        id: id.to_string(),
+        role,
+        parts: vec![part(&format!("{id}.p0"), PartKind::Text, content)].into(),
+        origin: Some(lash_core::MessageOrigin::Plugin {
+            plugin_id: plugin_id.to_string(),
+            transient: false,
+        }),
+    }
+}
+
 fn part(id: &str, kind: PartKind, content: &str) -> Part {
     Part {
         id: id.to_string(),

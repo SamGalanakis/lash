@@ -13,7 +13,6 @@ use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHa
 use lash_core::session_model::Message;
 use lash_core::{CachedModelCatalog, TokenUsage, ToolState};
 use lash_sqlite_store::Store;
-use lash_subagents::SubagentHost;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
 use tokio_util::sync::CancellationToken;
@@ -86,11 +85,9 @@ pub(crate) async fn run_app(
     initial_model_variant: Option<String>,
     initial_execution_mode: ExecutionMode,
     startup_system_message: Option<String>,
-    subagent_host: Arc<dyn SubagentHost>,
 ) -> anyhow::Result<()> {
     let initial_session_id = session.session_id();
     let mut app = App::new(model, session_name, initial_session_id);
-    app.activity_state.set_subagent_host(subagent_host);
     let (chrome_ext, chrome_state) = crate::chrome_ui::ChromeTuiExtension::new();
     let extra_ui_extensions: Vec<Arc<dyn lash_tui_extensions::TuiExtension>> = vec![
         Arc::new(lash_autoresearch::AutoresearchTuiExtension::default()),

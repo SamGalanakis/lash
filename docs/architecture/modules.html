@@ -42,7 +42,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Crate Families</h2>
-            <p>These are the high-value ownership groups to inspect before changing behavior.</p>
+            <p>The high-value ownership groups to inspect before changing behavior.</p>
           </div>
           <div class="module-grid">
             <article class="panel"><small>Pure protocol</small><h3>lash-sansio</h3><p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>ModePreamble</code>, prompt templates, messages, attachments, the <code>TurnOutcome::{Finished, Handoff, Stopped}</code> contract, and tool definitions/output contracts. Top-level files cover turn, mode, prompt, plugin, attachment, session, and tool surfaces; the <code>sansio/</code>, <code>session_model/</code>, and <code>llm/</code> subdirectories hold the state machine, durable model, and provider request types.</p><code class="path">lash-sansio/src/{turn,mode,prompt,plugin,tool_surface,session,attachment}.rs, sansio/, session_model/, llm/</code></article>

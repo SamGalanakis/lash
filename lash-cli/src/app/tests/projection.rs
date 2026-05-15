@@ -326,7 +326,7 @@ fn rlm_trajectory_final_output_projects_as_assistant_text() {
 #[test]
 fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
     let user = text_message("u1", MessageRole::User, "hi");
-    let assistant = text_message("a1", MessageRole::Assistant, "Hi!");
+    let assistant = plugin_text_message("a1", MessageRole::Assistant, "mode_rlm", "Hi!");
     let entry = lash_rlm_types::RlmTrajectoryEntry {
         id: "rlm_step_0".to_string(),
         mode_iteration: 0,
@@ -361,8 +361,64 @@ fn rlm_final_answer_projects_after_reasoning_and_lashlang_code() {
             "AssistantReasoning",
             "LashlangCode",
             "AssistantText",
-            "AssistantText",
         ]
+    );
+    let assistant_texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["Hi!"]);
+}
+
+#[test]
+fn finish_turn_replaces_live_submitted_value_with_projection() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    let turn = PreparedTurn::new("What time is it".into(), Vec::new());
+    app.push_prepared_user_input(&turn);
+    app.start_turn();
+    app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+        value: serde_json::json!("Current system time: Fri May 15 11:35:52 PM CEST 2026"),
+    }));
+
+    let user = text_message("u1", MessageRole::User, "What time is it");
+    let entry = lash_rlm_types::RlmTrajectoryEntry {
+        id: "rlm_step_0".to_string(),
+        mode_iteration: 0,
+        reasoning:
+            "```lashlang\nsubmit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"\n```"
+                .to_string(),
+        code: "submit \"Current system time: Fri May 15 11:35:52 PM CEST 2026\"".to_string(),
+        output: Vec::new(),
+        tool_calls: Vec::new(),
+        images: Vec::new(),
+        error: None,
+        final_output: Some(serde_json::json!(
+            "Current system time: Fri May 15 11:35:52 PM CEST 2026"
+        )),
+    };
+    let events = vec![
+        conversation_event(user.clone()),
+        lash_core::SessionEventRecord::Mode(lash_mode_rlm::rlm_mode_event(
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry),
+        )),
+    ];
+
+    app.finish_turn_from_read_view(&test_read_view(&events, &[user], &[]));
+
+    let assistant_texts: Vec<&str> = app
+        .timeline
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        assistant_texts,
+        vec!["Current system time: Fri May 15 11:35:52 PM CEST 2026"]
     );
 }
 

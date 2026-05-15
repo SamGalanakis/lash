@@ -49,7 +49,7 @@
       <header class="hero">
         <div class="eyebrow">lash guide</div>
         <h1>writing<span class="slash">/</span>plugins</h1>
-        <p>A plugin is the unit of extension in lash. It can register tools, contribute to prompts, observe turn lifecycle hooks, apply tool-output budgets, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
+        <p>A plugin is the unit of extension in lash. Plugins register tools, contribute to prompts, observe turn lifecycle hooks, apply tool-output budgets, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
       </header>
 
       <section class="content" id="content">
@@ -310,7 +310,7 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
     }
 }</code></pre>
-          <p>There is no public <code>ToolContext::host()</code> escape hatch. Runtime bridge traits such as <code>ToolHookHost</code> remain internal <code>lash-core</code> wiring, not plugin-facing API. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
+          <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime bridge traits such as <code>ToolHookHost</code> remain internal <code>lash-core</code> wiring, not plugin-facing API. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
         </div>
 
         <div class="section" id="wiring">

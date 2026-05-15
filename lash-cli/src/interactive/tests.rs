@@ -68,7 +68,7 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
         panic!("expected structural event");
     };
     assert!(matches!(
-        (*activity).event,
+        activity.event,
         TurnEvent::ModelRequestStarted { .. }
     ));
 }

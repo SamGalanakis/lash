@@ -467,7 +467,7 @@ fn append_transcript_items(
     activity_state: &mut ActivityState,
     render_tool_results: bool,
 ) {
-    if is_internal_rlm_retry_message(message) {
+    if is_internal_rlm_message(message) {
         return;
     }
     match message.role {
@@ -532,7 +532,7 @@ fn append_transcript_items(
     }
 }
 
-fn is_internal_rlm_retry_message(message: &Message) -> bool {
+fn is_internal_rlm_message(message: &Message) -> bool {
     let Some(lash_core::MessageOrigin::Plugin { plugin_id, .. }) = &message.origin else {
         return false;
     };
@@ -540,6 +540,8 @@ fn is_internal_rlm_retry_message(message: &Message) -> bool {
         return false;
     }
     match message.role {
+        // RLM assistant conversation nodes are loop machinery. The visible
+        // answer is projected from the trajectory final_output instead.
         MessageRole::Assistant => true,
         MessageRole::System => {
             rendered_message_text(message).contains("Plain text outside a fence is not delivered.")

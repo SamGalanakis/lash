@@ -2657,13 +2657,13 @@ impl ToolResult {
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| result.to_string());
         Self::from_output(ToolCallOutput::failure(ToolFailure {
-                class: ToolFailureClass::Execution,
-                code: "tool_error".to_string(),
-                message,
-                source: ToolFailureSource::Tool,
-                retry: ToolRetryDisposition::Never,
-                raw: Some(ToolValue::from(result)),
-            }))
+            class: ToolFailureClass::Execution,
+            code: "tool_error".to_string(),
+            message,
+            source: ToolFailureSource::Tool,
+            retry: ToolRetryDisposition::Never,
+            raw: Some(ToolValue::from(result)),
+        }))
     }
 
     pub fn err_fmt(msg: impl std::fmt::Display) -> Self {
@@ -2684,7 +2684,9 @@ impl ToolResult {
     }
 
     pub fn cancelled(message: impl Into<String>) -> Self {
-        Self::from_output(ToolCallOutput::cancelled(ToolCancellation::runtime(message)))
+        Self::from_output(ToolCallOutput::cancelled(ToolCancellation::runtime(
+            message,
+        )))
     }
 
     pub fn cancelled_with_raw(message: impl Into<String>, raw: serde_json::Value) -> Self {

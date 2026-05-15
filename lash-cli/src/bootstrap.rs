@@ -70,12 +70,7 @@ struct PluginFactorySurfaceInput<'a> {
     prompt_bridge: CliPromptBridge,
 }
 
-struct PluginFactoriesForSurface {
-    stack: PluginStack,
-    subagent_host: Arc<dyn SubagentHost>,
-}
-
-fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginFactoriesForSurface {
+fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginStack {
     let PluginFactorySurfaceInput {
         autonomous,
         execution_mode,
@@ -136,10 +131,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginF
         SubagentsPluginFactory::new(capability_registry, Arc::clone(&subagent_host))
             .with_session_spec(SessionSpec::inherit()),
     ));
-    PluginFactoriesForSurface {
-        stack: plugin_stack,
-        subagent_host,
-    }
+    plugin_stack
 }
 
 fn autonomous_tool_allowed(name: &str) -> bool {
@@ -579,10 +571,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let tavily_key = lash_config.tavily_api_key().unwrap_or_default().to_string();
     let prompt_bridge = CliPromptBridge::default();
 
-    let PluginFactoriesForSurface {
-        stack: mut plugin_stack,
-        subagent_host,
-    } = plugin_factories_for_surface(PluginFactorySurfaceInput {
+    let mut plugin_stack = plugin_factories_for_surface(PluginFactorySurfaceInput {
         autonomous,
         execution_mode: execution_mode.clone(),
         tavily_key,
@@ -698,7 +687,6 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         initial_model_variant,
         execution_mode,
         startup_system_message,
-        subagent_host,
     )
     .await
 }
@@ -769,7 +757,6 @@ mod tests {
                 .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
             prompt_bridge: CliPromptBridge::default(),
         })
-        .stack
         .into_factories()
         .into_iter()
         .map(|factory| factory.id())

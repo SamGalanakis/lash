@@ -1837,7 +1837,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       sendText(`I played X in the ${cellName(index)}.`);
     }
     function applyToolBoard(event) {
-      const raw = event?.result;
+      const raw = toolResult(event);
       const board = raw?.board?.cells ? raw.board : raw;
       if (board?.cells) setBoard(board);
     }
@@ -1854,8 +1854,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       delete out.__session_id__;
       return out;
     }
+    function toolResult(event) {
+      return event?.result
+        ?? event?.output?.outcome?.payload
+        ?? event?.output?.value
+        ?? null;
+    }
+    function toolSucceeded(event) {
+      if (typeof event?.success === 'boolean') return event.success;
+      return event?.output?.outcome?.status === 'success';
+    }
     function compactToolPayload(event) {
-      const raw = event?.result;
+      const raw = toolResult(event);
       if (event.name === 'play_move') {
         return {
           args: cleanArgs(event.args),
@@ -1950,14 +1960,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function appendTool(event) {
       if (event.phase !== 'completed') return;
       applyToolBoard(event);
+      const ok = toolSucceeded(event);
       const el = document.createElement('div');
-      el.className = 'tool' + (event.success === false ? ' fail' : '');
+      el.className = 'tool' + (ok ? '' : ' fail');
       el.innerHTML = `<div class="tool-head"><strong></strong><span class="badge"></span><span></span></div><div class="tool-summary"></div><details><summary>JSON payload</summary><pre></pre></details>`;
       el.querySelector('strong').textContent = event.name;
       el.querySelector('.badge').textContent = 'completed';
-      el.querySelector('.tool-head span:last-child').textContent = `${event.success ? 'ok' : 'failed'} in ${event.duration_ms}ms`;
+      el.querySelector('.tool-head span:last-child').textContent = `${ok ? 'ok' : 'failed'} in ${event.duration_ms}ms`;
       const summary = el.querySelector('.tool-summary');
-      const raw = event?.result;
+      const raw = toolResult(event);
       if (event.name === 'play_move') {
         const terminal = terminalToolSummary(raw?.board);
         summary.textContent = raw?.accepted
