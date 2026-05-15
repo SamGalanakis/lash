@@ -69,9 +69,11 @@ use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, ManagedRunState, ManagedTaskCancel,
-    ManagedTaskKind, ManagedTaskSpec, ManagedTaskStatus, RuntimeCoreConfig, SessionTaskExecutor,
-    TokioSessionTaskExecutor,
+    BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
+    BackgroundTaskEvent, BackgroundTaskFilter, BackgroundTaskHost, BackgroundTaskId,
+    BackgroundTaskKind, BackgroundTaskOutcome, BackgroundTaskRecord, BackgroundTaskRegistration,
+    BackgroundTaskScope, BackgroundTaskState, EmbeddedRuntimeHost, LocalBackgroundTaskCancel,
+    LocalBackgroundTaskHost, RuntimeCoreConfig,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
@@ -555,6 +557,7 @@ impl TurnActivity {
 /// inside [`TurnActivity`] so every emitted item has identity.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum TurnEvent {
     ModelRequestStarted {
         mode_iteration: usize,
@@ -585,8 +588,7 @@ pub enum TurnEvent {
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
-        result: serde_json::Value,
-        success: bool,
+        output: crate::ToolCallOutput,
         duration_ms: u64,
     },
     SubmittedValue {

@@ -18,6 +18,7 @@ pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool_dispatch;
+mod tool_executor;
 mod tool_provider;
 pub mod tool_registry;
 mod tool_schema;
@@ -43,20 +44,23 @@ pub use direct::{
 };
 pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
 pub use lash_sansio::{
-    AcceptedInjectedTurnInput, AttachmentId, AttachmentMeta, AttachmentRef, BaseRenderCache,
-    CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecResponse, ExecutionMode,
-    ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence,
-    ModeBuildInput, Part, PartKind, PluginMessage, PluginSurfaceEvent, PreparedPrompt,
-    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
-    PromptContributionSet, PromptFingerprint, PromptLayer, PromptPanel, PromptRequest,
-    PromptResponse, PromptSelectionMode, PromptSlot, PromptSlotLayer, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer,
-    Response, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
-    ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallRecord, ToolContract,
-    ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolImage, ToolManifest,
-    ToolOutputContract, ToolResult, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
-    ToolSurfaceOverride, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
-    build_prompt, build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
+    AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
+    BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecResponse,
+    ExecutionMode, ImageMediaType, LlmCallError, MediaType, Message, MessageOrigin, MessageRole,
+    MessageSequence, ModeBuildInput, ModelToolReturn, ModelToolReturnPart, Part, PartKind,
+    PluginMessage, PluginSurfaceEvent, PreparedPrompt, PromptBuildInput, PromptBuiltin,
+    PromptContext, PromptContribution, PromptContributionGate, PromptContributionSet,
+    PromptFingerprint, PromptLayer, PromptPanel, PromptRequest, PromptResponse,
+    PromptSelectionMode, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, Response,
+    RlmPrintImage, SchemaProjectionOverride, SessionEvent, TextProjectionMetadata, TokenUsage,
+    ToolActivation, ToolAvailability, ToolAvailabilityConfig, ToolCallOutcome, ToolCallOutput,
+    ToolCallRecord, ToolCallStatus, ToolCancellation, ToolContract, ToolControl, ToolDefinition,
+    ToolDiscoveryMetadata, ToolExecutionMode, ToolFailure, ToolFailureClass, ToolFailureSource,
+    ToolManifest, ToolOutputContract, ToolResult, ToolRetryDisposition, ToolRetryPolicy,
+    ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, ToolValue,
+    TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part, build_prompt,
+    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
     execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
     prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
@@ -178,17 +182,19 @@ pub use provider::{
     VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
 pub use runtime::{
-    AssembledTurn, AssistantOutput, BackgroundRuntimeHost, CodeOutputRecord,
-    EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
-    InputItem, LashRuntime, ManagedRunState, ManagedTaskCancel, ManagedTaskKind, ManagedTaskSpec,
-    ManagedTaskStatus, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
-    ModeTurnExtensionHandle, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
-    PersistedSessionState, PromptUsage, Residency, RuntimeCoreConfig, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTaskExecutor,
-    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TokioSessionTaskExecutor,
-    TurnActivity, TurnActivityId, TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue,
-    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    AssembledTurn, AssistantOutput, BackgroundCancelPolicy, BackgroundClosePolicy,
+    BackgroundRuntimeHost, BackgroundTaskAttempt, BackgroundTaskEvent, BackgroundTaskFilter,
+    BackgroundTaskHost, BackgroundTaskId, BackgroundTaskKind, BackgroundTaskOutcome,
+    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskScope, BackgroundTaskState,
+    CodeOutputRecord, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
+    FollowedTurn, InputItem, LashRuntime, LocalBackgroundTaskCancel, LocalBackgroundTaskHost,
+    ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle,
+    NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState,
+    PromptUsage, Residency, RuntimeCoreConfig, RuntimeEnvironment, RuntimeEnvironmentBuilder,
+    RuntimeError, RuntimeHandle, RuntimeObservation, SessionStateEnvelope,
+    SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport, TerminationPolicy,
+    TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink, TurnContext, TurnEvent,
+    TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use schemars::JsonSchema;

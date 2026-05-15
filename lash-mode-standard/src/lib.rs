@@ -27,8 +27,7 @@ use lash_core::sansio::{
 use lash_core::session_model::message::PartAttachment;
 use lash_core::session_model::{
     ConversationRecord, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, format_tool_result_content, fresh_message_id, make_error_event,
-    reassign_part_ids, shared_parts,
+    SessionEventRecord, fresh_message_id, make_error_event, reassign_part_ids, shared_parts,
 };
 use lash_core::tool_dispatch::{
     ParallelToolCallSpec, ToolDispatchContext, dispatch_parallel_tool_calls,
@@ -197,29 +196,27 @@ async fn execute_batch_tool_call(
         });
     }
 
-    let mut images = Vec::new();
     let mut parallel_outcomes =
         dispatch_parallel_tool_calls(Arc::new(context.clone()), parallel_specs, progress).await;
     for outcome in parallel_outcomes.drain(..) {
-        images.extend(outcome.images);
         let mut record = serde_json::Map::new();
         record.insert("index".to_string(), serde_json::json!(outcome.index));
         record.insert("tool".to_string(), serde_json::json!(outcome.record.tool));
         record.insert(
             "success".to_string(),
-            serde_json::json!(outcome.record.success),
+            serde_json::json!(outcome.record.output.is_success()),
         );
         record.insert(
             "duration_ms".to_string(),
             serde_json::json!(outcome.record.duration_ms),
         );
         record.insert(
-            if outcome.record.success {
+            if outcome.record.output.is_success() {
                 "result".to_string()
             } else {
                 "error".to_string()
             },
-            outcome.record.result,
+            outcome.record.output.value_for_projection(),
         );
         immediate_outcomes.push(Value::Object(record));
     }
@@ -252,15 +249,12 @@ async fn execute_batch_tool_call(
             .and_then(|value| value.as_u64())
             .unwrap_or(u64::MAX)
     });
-    ToolResult::with_images(
-        true,
-        serde_json::json!({
-            "results": immediate_outcomes,
-        }),
-        images,
-    )
+    ToolResult::ok(serde_json::json!({
+        "results": immediate_outcomes,
+    }))
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_batch_specs(args: &Value) -> Result<Vec<BatchCallSpec>, ToolResult> {
     let Some(raw_calls) = args.get("tool_calls").and_then(|value| value.as_array()) else {
         return Err(ToolResult::err_fmt(
@@ -576,8 +570,8 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
         let mut terminal_outcome = None;
 
         for outcome in completed {
-            if terminal_outcome.is_none() && outcome.result.success {
-                terminal_outcome = match outcome.result.control.as_ref() {
+            if terminal_outcome.is_none() && outcome.output.is_success() {
+                terminal_outcome = match outcome.output.control.as_ref() {
                     Some(lash_core::ToolControl::Handoff { session_id })
                         if !session_id.trim().is_empty() =>
                     {
@@ -588,72 +582,20 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
                     Some(lash_core::ToolControl::Finish { value }) => {
                         Some(TurnOutcome::Finished(TurnFinish::ToolValue {
                             tool_name: outcome.tool_name.clone(),
-                            value: value.clone(),
+                            value: value.to_json_value(),
                         }))
                     }
-                    Some(lash_core::ToolControl::Fail { value }) => {
+                    Some(lash_core::ToolControl::Fail { failure }) => {
                         Some(TurnOutcome::Stopped(TurnStop::ToolError {
                             tool_name: outcome.tool_name.clone(),
-                            value: value.clone(),
+                            value: failure.to_json_value(),
                         }))
                     }
                     _ => None,
                 };
             }
 
-            result_parts.push(Part {
-                id: String::new(),
-                kind: PartKind::ToolResult,
-                content: format_tool_result_content(
-                    outcome.model_result.success,
-                    &outcome.model_result.result,
-                ),
-                attachment: None,
-                tool_call_id: Some(outcome.call_id.clone()),
-                tool_name: Some(outcome.tool_name.clone()),
-                tool_replay: None,
-                prune_state: PruneState::Intact,
-                reasoning_meta: None,
-                response_meta: None,
-            });
-
-            for (image_offset, image) in outcome.model_result.images.into_iter().enumerate() {
-                let Some(reference) = image.reference.clone() else {
-                    continue;
-                };
-                result_parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Text,
-                    content: format!("[Tool image: {}]", image.label),
-                    attachment: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-                result_parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::Image,
-                    content: String::new(),
-                    attachment: Some(PartAttachment {
-                        reference: lash_core::AttachmentRef {
-                            label: reference
-                                .label
-                                .clone()
-                                .or_else(|| Some(format!("tool-image-{image_offset}"))),
-                            ..reference
-                        },
-                    }),
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_replay: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
-            }
+            append_model_return_parts(&mut result_parts, outcome.model_return);
         }
 
         if !result_parts.is_empty() {
@@ -702,6 +644,44 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
         _result: Result<lash_core::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         Vec::new()
+    }
+}
+
+fn append_model_return_parts(parts: &mut Vec<Part>, model_return: lash_core::ModelToolReturn) {
+    for part in model_return.parts {
+        match part {
+            lash_core::ModelToolReturnPart::Text(content) => {
+                if content.is_empty() {
+                    continue;
+                }
+                parts.push(Part {
+                    id: String::new(),
+                    kind: PartKind::ToolResult,
+                    content,
+                    attachment: None,
+                    tool_call_id: Some(model_return.call_id.clone()),
+                    tool_name: Some(model_return.tool_name.clone()),
+                    tool_replay: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                    response_meta: None,
+                });
+            }
+            lash_core::ModelToolReturnPart::Attachment(reference) => {
+                parts.push(Part {
+                    id: String::new(),
+                    kind: PartKind::Image,
+                    content: String::new(),
+                    attachment: Some(PartAttachment { reference }),
+                    tool_call_id: Some(model_return.call_id.clone()),
+                    tool_name: Some(model_return.tool_name.clone()),
+                    tool_replay: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                    response_meta: None,
+                });
+            }
+        }
     }
 }
 

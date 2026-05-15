@@ -284,6 +284,7 @@ pub struct SubagentSessionAuthority {
 /// Per-execution-mode configuration carried on a `SessionCreateRequest`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionAppendNode {
     Message {
         message: PluginMessage,

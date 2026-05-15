@@ -24,7 +24,9 @@ use crate::session_model::{
     SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
     make_error_event, reassign_part_ids,
 };
-use crate::{CheckpointKind, PluginMessage, ToolResult, TurnOutcome, TurnStop};
+use crate::{
+    CheckpointKind, ModelToolReturn, PluginMessage, ToolCallOutput, TurnOutcome, TurnStop,
+};
 
 // ─── Public types ───
 
@@ -59,8 +61,8 @@ pub struct CompletedToolCall {
     pub call_id: String,
     pub tool_name: String,
     pub args: Value,
-    pub result: ToolResult,
-    pub model_result: ToolResult,
+    pub output: ToolCallOutput,
+    pub model_return: ModelToolReturn,
     pub duration_ms: u64,
     /// See [`PendingToolCall::replay`].
     pub replay: Option<ProviderReplayMeta>,
@@ -90,6 +92,7 @@ pub enum LogEvent {
 
 /// An effect the host must fulfil.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     /// Sync the live execution surface before the turn proceeds.
     ///
@@ -241,6 +244,7 @@ pub enum CheckpointResumeAction {
     Finish(TurnOutcome),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
     Emit(SessionEvent),
     AppendEvents(Vec<SessionEventRecord<M::Event>>),
@@ -1065,8 +1069,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 call_id: Some(outcome.call_id.clone()),
                 name: outcome.tool_name.clone(),
                 args: outcome.args.clone(),
-                result: outcome.result.result.clone(),
-                success: outcome.result.success,
+                output: outcome.output.clone(),
                 duration_ms: outcome.duration_ms,
             });
         }

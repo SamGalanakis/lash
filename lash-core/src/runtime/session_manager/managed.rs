@@ -110,7 +110,7 @@ impl ManagedSessionCapability {
             }
             None => None,
         };
-        let mut runtime = match (&current.host.session_task_executor, &session_store) {
+        let mut runtime = match (&current.host.background_task_host, &session_store) {
             (Some(executor), Some(store)) => {
                 let host = BackgroundRuntimeHost::new(
                     EmbeddedRuntimeHost {

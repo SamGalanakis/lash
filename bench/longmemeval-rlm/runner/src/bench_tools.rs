@@ -371,9 +371,9 @@ mod tests {
     #[test]
     fn search_sessions_finds_matching_session() {
         let result = sample_context().search_sessions("Business", 5);
-        assert!(result.success);
-        let matches = result
-            .result
+        assert!(result.is_success());
+        let value = result.value_for_projection();
+        let matches = value
             .get("matches")
             .and_then(|value| value.as_array())
             .expect("matches");
@@ -383,9 +383,9 @@ mod tests {
     #[test]
     fn grep_sessions_returns_snippet() {
         let result = sample_context().grep_sessions(r"\\$40|Business", 10);
-        assert!(result.success);
-        let matches = result
-            .result
+        assert!(result.is_success());
+        let value = result.value_for_projection();
+        let matches = value
             .get("matches")
             .and_then(|value| value.as_array())
             .expect("matches");
@@ -408,9 +408,9 @@ mod tests {
             }]],
         });
         let result = ctx.grep_sessions("바운시|앱", 10);
-        assert!(result.success);
-        let matches = result
-            .result
+        assert!(result.is_success());
+        let value = result.value_for_projection();
+        let matches = value
             .get("matches")
             .and_then(|value| value.as_array())
             .expect("matches");

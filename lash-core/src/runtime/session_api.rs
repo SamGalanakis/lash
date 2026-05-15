@@ -109,7 +109,7 @@ impl LashRuntime {
         manager
             .await_hidden_tasks(&self.state.session_id)
             .await
-            .map_err(|err| SessionError::Protocol(format!("session task failed: {err}")))?;
+            .map_err(|err| SessionError::Protocol(format!("background task failed: {err}")))?;
         if self.background_sync_needed.swap(false, Ordering::AcqRel) {
             self.refresh_session_graph_from_store().await;
         }

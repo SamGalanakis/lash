@@ -644,9 +644,13 @@ impl PluginSession {
     pub async fn project_tool_result(
         &self,
         ctx: ToolResultProjectionContext,
-    ) -> Result<ToolResult, PluginError> {
+    ) -> Result<crate::ModelToolReturn, PluginError> {
         let Some(projector) = &self.tool_result_projector else {
-            return Ok(ctx.result);
+            return Ok(crate::ModelToolReturn::from_output(
+                ctx.call_id.clone(),
+                ctx.tool_name.clone(),
+                &ctx.output,
+            ));
         };
         (projector.hook)(ctx).await
     }
@@ -954,14 +958,14 @@ impl PluginSession {
             .invoke_plugin_action(Op::NAME, args, session_id, default_to_current_session, host)
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))?;
-        if !result.success {
+        if !result.is_success() {
             return Err(PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
-                result.result
+                result.value_for_projection()
             )));
         }
-        serde_json::from_value(result.result)
+        serde_json::from_value(result.into_value_for_projection())
             .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
     }
 }

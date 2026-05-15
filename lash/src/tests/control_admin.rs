@@ -44,7 +44,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .max_context_tokens(200_000)
         .tools(Arc::new(AppTools))
         .advanced()
-        .session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
+        .background_task_host(Arc::new(LocalBackgroundTaskHost::default()))
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
     let turn_session = session.clone();
@@ -134,7 +134,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
         .model("mock-model", None)
         .max_context_tokens(200_000)
         .advanced()
-        .session_task_executor(Arc::new(TokioSessionTaskExecutor::default()))
+        .background_task_host(Arc::new(LocalBackgroundTaskHost::default()))
         .build()?;
     let session = core.session("child-observation-parent").open().await?;
     let children = session.control().children();

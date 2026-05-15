@@ -14,6 +14,7 @@ pub(crate) struct SessionStats {
     pub(crate) system_messages: usize,
     pub(crate) tool_calls_ok: usize,
     pub(crate) tool_calls_err: usize,
+    pub(crate) tool_calls_cancelled: usize,
     pub(crate) tool_total_ms: u64,
     pub(crate) rlm_iterations: usize,
     pub(crate) rlm_errors: usize,
@@ -72,10 +73,10 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
     let record_tool_call = |s: &mut SessionStats,
                             tool_counts: &mut HashMap<String, usize>,
                             record: &ToolCallRecord| {
-        if record.success {
-            s.tool_calls_ok += 1;
-        } else {
-            s.tool_calls_err += 1;
+        match record.output.status() {
+            lash_core::ToolCallStatus::Success => s.tool_calls_ok += 1,
+            lash_core::ToolCallStatus::Failure => s.tool_calls_err += 1,
+            lash_core::ToolCallStatus::Cancelled => s.tool_calls_cancelled += 1,
         }
         s.tool_total_ms = s.tool_total_ms.saturating_add(record.duration_ms);
         *tool_counts.entry(record.tool.clone()).or_insert(0) += 1;

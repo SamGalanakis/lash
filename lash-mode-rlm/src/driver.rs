@@ -499,8 +499,7 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             id: _,
             tool,
             args,
-            result,
-            success,
+            output,
             duration_ms,
         } => append_history_tool_call(
             &mut rendered,
@@ -508,8 +507,12 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
                 index,
                 tool,
                 args,
-                result,
-                success: *success,
+                result: output.value_for_projection(),
+                status: match output.status() {
+                    lash_core::ToolCallStatus::Success => "ok",
+                    lash_core::ToolCallStatus::Failure => "error",
+                    lash_core::ToolCallStatus::Cancelled => "cancelled",
+                },
                 duration_ms: *duration_ms,
                 max_output_chars,
             },
@@ -576,8 +579,12 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
                 index: entry.index,
                 tool: &record.tool,
                 args: &record.args,
-                result: &record.result,
-                success: record.success,
+                result: record.output.value_for_projection(),
+                status: match record.output.status() {
+                    lash_core::ToolCallStatus::Success => "ok",
+                    lash_core::ToolCallStatus::Failure => "error",
+                    lash_core::ToolCallStatus::Cancelled => "cancelled",
+                },
                 duration_ms: record.duration_ms,
                 max_output_chars,
             },
@@ -655,8 +662,12 @@ fn render_borrowed_history_entry(
                 index: entry.index,
                 tool: &record.tool,
                 args: &record.args,
-                result: &record.result,
-                success: record.success,
+                result: record.output.value_for_projection(),
+                status: match record.output.status() {
+                    lash_core::ToolCallStatus::Success => "ok",
+                    lash_core::ToolCallStatus::Failure => "error",
+                    lash_core::ToolCallStatus::Cancelled => "cancelled",
+                },
                 duration_ms: record.duration_ms,
                 max_output_chars,
             },
@@ -702,8 +713,8 @@ struct HistoryToolCallRender<'a> {
     index: usize,
     tool: &'a str,
     args: &'a serde_json::Value,
-    result: &'a serde_json::Value,
-    success: bool,
+    result: serde_json::Value,
+    status: &'static str,
     duration_ms: u64,
     max_output_chars: usize,
 }
@@ -714,12 +725,12 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
         tool,
         args,
         result,
-        success,
+        status,
         duration_ms,
         max_output_chars,
     } = call;
     let args = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
-    let result = serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string());
+    let result = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     let (args_preview, args_raw_len) = head_tail_truncate(&args, max_output_chars);
     let (result_preview, result_raw_len) = head_tail_truncate(&result, max_output_chars);
     let args_ref = truncated_ref(
@@ -732,7 +743,6 @@ fn append_history_tool_call(out: &mut String, call: HistoryToolCallRender<'_>) {
         max_output_chars,
         &format!("history[{index}].result"),
     );
-    let status = if success { "ok" } else { "error" };
     let _ = write!(
         out,
         "--- history[{index}] · tool_call · {tool} · {status} · {duration_ms} ms ---\n\nArguments ({args_raw_len} chars{args_ref}):\n{args_preview}\n\nResult ({result_raw_len} chars{result_ref}):\n{result_preview}"
@@ -1072,10 +1082,8 @@ mod tests {
                 call_id: Some("call_1".to_string()),
                 tool: "lookup".to_string(),
                 args: serde_json::json!({"q": "first"}),
-                result: serde_json::json!({"answer": "done"}),
-                success: true,
+                output: lash_core::ToolCallOutput::success(serde_json::json!({"answer": "done"})),
                 duration_ms: 4,
-                control: None,
             },
         })
     }

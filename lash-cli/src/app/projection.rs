@@ -560,8 +560,7 @@ fn append_tool_call_record_items(
         timeline,
         &record.tool,
         record.args.clone(),
-        record.result.clone(),
-        record.success,
+        record.output.clone(),
         record.duration_ms,
     );
 }
@@ -599,8 +598,7 @@ fn append_tool_result_items(
         timeline,
         &record.tool,
         record.args.clone(),
-        record.result.clone(),
-        record.success,
+        record.output.clone(),
         record.duration_ms,
     );
 }

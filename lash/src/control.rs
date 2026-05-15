@@ -223,14 +223,14 @@ impl SessionControl {
                 })?,
             )
             .await?;
-        if !result.success {
+        if !result.is_success() {
             return Err(EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "{} failed: {}",
                 Op::NAME,
-                result.result
+                result.value_for_projection()
             ))));
         }
-        serde_json::from_value(result.result).map_err(|err| {
+        serde_json::from_value(result.into_value_for_projection()).map_err(|err| {
             EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "invalid {} output: {err}",
                 Op::NAME
@@ -255,7 +255,7 @@ impl SessionControl {
         Ok(state)
     }
 
-    async fn list_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+    async fn list_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
         Ok(self.runtime.observe().list_background_tasks().await)
     }
 
@@ -268,7 +268,7 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+    async fn cancel_background_task(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
@@ -279,7 +279,7 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_all_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+    async fn cancel_all_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
@@ -611,7 +611,7 @@ impl BackgroundTasks {
         Self { control }
     }
 
-    pub async fn list(&self) -> Result<Vec<ManagedTaskStatus>> {
+    pub async fn list(&self) -> Result<Vec<BackgroundTaskRecord>> {
         self.control.list_background_tasks().await
     }
 
@@ -619,11 +619,11 @@ impl BackgroundTasks {
         self.control.await_background_work().await
     }
 
-    pub async fn cancel(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+    pub async fn cancel(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
         self.control.cancel_background_task(task_id).await
     }
 
-    pub async fn cancel_all(&self) -> Result<Vec<ManagedTaskStatus>> {
+    pub async fn cancel_all(&self) -> Result<Vec<BackgroundTaskRecord>> {
         self.control.cancel_all_background_tasks().await
     }
 }
@@ -676,7 +676,7 @@ impl StateControl {
         self.control.persist_current_state().await
     }
 
-    pub async fn list_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+    pub async fn list_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
         self.control.list_background_tasks().await
     }
 
@@ -684,11 +684,11 @@ impl StateControl {
         self.control.session_manager().await
     }
 
-    pub async fn cancel_background_task(&self, task_id: &str) -> Result<ManagedTaskStatus> {
+    pub async fn cancel_background_task(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
         self.control.cancel_background_task(task_id).await
     }
 
-    pub async fn cancel_all_background_tasks(&self) -> Result<Vec<ManagedTaskStatus>> {
+    pub async fn cancel_all_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
         self.control.cancel_all_background_tasks().await
     }
 

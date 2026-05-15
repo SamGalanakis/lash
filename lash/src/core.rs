@@ -61,7 +61,7 @@ pub struct LashCoreBuilder {
     trace_level: Option<lash_trace::TraceLevel>,
     trace_context: Option<lash_trace::TraceContext>,
     residency: Option<Residency>,
-    session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
+    background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
     termination: Option<TerminationPolicy>,
     prompt: PromptLayer,
 }
@@ -283,12 +283,12 @@ impl LashCoreBuilder {
         };
         let plugin_host = PluginHost::new(plugin_factories.clone());
 
-        let executor = self
-            .session_task_executor
-            .unwrap_or_else(|| Arc::new(TokioSessionTaskExecutor::default()));
+        let background_task_host = self
+            .background_task_host
+            .unwrap_or_else(|| Arc::new(LocalBackgroundTaskHost::default()));
         let mut env_builder = RuntimeEnvironment::builder()
             .with_plugin_host(Arc::new(plugin_host.with_background_tasks()))
-            .with_session_task_executor(executor)
+            .with_background_task_host(background_task_host)
             .with_prompt_layer(self.prompt);
         if let Some(attachment_store) = self.attachment_store {
             env_builder = env_builder.with_attachment_store(attachment_store);
@@ -330,8 +330,11 @@ impl LashCoreBuilder {
         AdvancedLashCoreBuilder { builder: self }
     }
 
-    pub fn session_task_executor(mut self, executor: Arc<dyn SessionTaskExecutor>) -> Self {
-        self.session_task_executor = Some(executor);
+    pub fn background_task_host(
+        mut self,
+        background_task_host: Arc<dyn BackgroundTaskHost>,
+    ) -> Self {
+        self.background_task_host = Some(background_task_host);
         self
     }
 }
@@ -361,8 +364,11 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
-    pub fn session_task_executor(mut self, executor: Arc<dyn SessionTaskExecutor>) -> Self {
-        self.builder.session_task_executor = Some(executor);
+    pub fn background_task_host(
+        mut self,
+        background_task_host: Arc<dyn BackgroundTaskHost>,
+    ) -> Self {
+        self.builder.background_task_host = Some(background_task_host);
         self
     }
 

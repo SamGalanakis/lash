@@ -21,10 +21,10 @@ use lash::{
 use lash_cli::config::LashConfig;
 use lash_core::{
     AppendSessionNodesRequest, BackgroundRuntimeHost, EmbeddedRuntimeHost, FollowedTurn, InputItem,
-    LashRuntime, NoopEventSink, PersistedSessionState, PersistentRuntimeServices, PluginHost,
-    RuntimeCoreConfig, RuntimePersistence, SessionAppendNode, SessionEventRecord, SessionPolicy,
-    StandardContextApproach, TokioSessionTaskExecutor, ToolOutputBudgetPluginFactory,
-    TurnInjectionBridge, TurnInputInjectionBridge,
+    LashRuntime, LocalBackgroundTaskHost, NoopEventSink, PersistedSessionState,
+    PersistentRuntimeServices, PluginHost, RuntimeCoreConfig, RuntimePersistence,
+    SessionAppendNode, SessionEventRecord, SessionPolicy, StandardContextApproach,
+    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
@@ -138,7 +138,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
                     CLBENCH_MEMORY_GUIDANCE,
                 )),
         ),
-        Arc::new(TokioSessionTaskExecutor::default()),
+        Arc::new(LocalBackgroundTaskHost::default()),
     );
     let state = lash_core::load_persisted_session_state(store.as_ref())
         .await

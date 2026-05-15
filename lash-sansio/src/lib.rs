@@ -6,6 +6,7 @@ pub mod prompt;
 pub mod sansio;
 pub mod session;
 pub mod session_model;
+pub mod tool_output;
 pub mod tool_surface;
 pub mod turn;
 
@@ -13,7 +14,9 @@ use std::sync::Arc;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub use attachment::{AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType};
+pub use attachment::{
+    AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
+};
 pub use mode::{
     ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
@@ -45,6 +48,11 @@ pub use session_model::{
     PruneState, RenderedPrompt, ResolvedPromptLayer, SessionEvent, SessionEventRecord,
     StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish, TurnOutcome, TurnStop,
     default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
+};
+pub use tool_output::{
+    ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallStatus,
+    ToolCancellation, ToolControl, ToolFailure, ToolFailureClass, ToolFailureSource,
+    ToolRetryDisposition, ToolValue,
 };
 pub use tool_surface::{
     ToolContractResolver, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceContribution,
@@ -138,6 +146,96 @@ fn default_tool_execution_mode() -> ToolExecutionMode {
 
 fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
     *mode == ToolExecutionMode::default()
+}
+
+/// Automatic retry policy for a tool's execution.
+///
+/// This is intentionally separate from [`ToolExecutionMode`]: scheduling
+/// decides whether different tool calls may run together, while retry policy
+/// decides whether one failed call may be attempted again inside its scheduled
+/// slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolRetryPolicy {
+    /// Never retry automatically. This is the default for every tool.
+    #[default]
+    Never,
+    /// Retry only failures that explicitly report a safe retry disposition.
+    Safe {
+        max_attempts: u32,
+        base_delay_ms: u64,
+        max_delay_ms: u64,
+    },
+    /// Retry only failures that explicitly report a safe retry disposition,
+    /// and only when the runtime can provide a stable idempotency key.
+    Idempotent {
+        max_attempts: u32,
+        base_delay_ms: u64,
+        max_delay_ms: u64,
+    },
+}
+
+impl ToolRetryPolicy {
+    pub fn safe(max_attempts: u32, base_delay_ms: u64, max_delay_ms: u64) -> Self {
+        Self::Safe {
+            max_attempts,
+            base_delay_ms,
+            max_delay_ms,
+        }
+    }
+
+    pub fn idempotent(max_attempts: u32, base_delay_ms: u64, max_delay_ms: u64) -> Self {
+        Self::Idempotent {
+            max_attempts,
+            base_delay_ms,
+            max_delay_ms,
+        }
+    }
+
+    pub fn max_attempts(self) -> u32 {
+        match self {
+            Self::Never => 1,
+            Self::Safe { max_attempts, .. } | Self::Idempotent { max_attempts, .. } => {
+                max_attempts.max(1)
+            }
+        }
+    }
+
+    pub fn delay_ms_for_retry(self, retry_index: u32, requested_after_ms: Option<u64>) -> u64 {
+        let (base_delay_ms, max_delay_ms) = match self {
+            Self::Never => return 0,
+            Self::Safe {
+                base_delay_ms,
+                max_delay_ms,
+                ..
+            }
+            | Self::Idempotent {
+                base_delay_ms,
+                max_delay_ms,
+                ..
+            } => (base_delay_ms, max_delay_ms),
+        };
+        let multiplier = 1_u64.checked_shl(retry_index).unwrap_or(u64::MAX);
+        let backoff = base_delay_ms.saturating_mul(multiplier);
+        let delay = requested_after_ms.unwrap_or(backoff);
+        if max_delay_ms == 0 {
+            delay
+        } else {
+            delay.min(max_delay_ms)
+        }
+    }
+
+    pub fn requires_idempotency_key(self) -> bool {
+        matches!(self, Self::Idempotent { .. })
+    }
+}
+
+fn default_tool_retry_policy() -> ToolRetryPolicy {
+    ToolRetryPolicy::default()
+}
+
+fn is_default_tool_retry_policy(policy: &ToolRetryPolicy) -> bool {
+    *policy == ToolRetryPolicy::default()
 }
 
 #[derive(
@@ -350,6 +448,11 @@ pub struct ToolManifest {
         skip_serializing_if = "is_default_tool_execution_mode"
     )]
     pub execution_mode: ToolExecutionMode,
+    #[serde(
+        default = "default_tool_retry_policy",
+        skip_serializing_if = "is_default_tool_retry_policy"
+    )]
+    pub retry_policy: ToolRetryPolicy,
 }
 
 impl ToolManifest {
@@ -476,6 +579,13 @@ pub struct ToolDefinition {
         skip_serializing_if = "is_default_tool_execution_mode"
     )]
     pub execution_mode: ToolExecutionMode,
+    /// Whether this tool may be retried automatically after a failure that
+    /// explicitly opts into safe retry.
+    #[serde(
+        default = "default_tool_retry_policy",
+        skip_serializing_if = "is_default_tool_retry_policy"
+    )]
+    pub retry_policy: ToolRetryPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -604,6 +714,7 @@ impl ToolDefinition {
             availability_override: None,
             discovery: ToolDiscoveryMetadata::default(),
             execution_mode: ToolExecutionMode::Parallel,
+            retry_policy: ToolRetryPolicy::Never,
         }
     }
 
@@ -642,6 +753,11 @@ impl ToolDefinition {
 
     pub fn with_execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
         self.execution_mode = execution_mode;
+        self
+    }
+
+    pub fn with_retry_policy(mut self, retry_policy: ToolRetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
         self
     }
 
@@ -746,6 +862,7 @@ impl ToolDefinition {
             availability_override: self.availability_override,
             discovery: self.discovery.clone(),
             execution_mode: self.execution_mode,
+            retry_policy: self.retry_policy,
         }
     }
 
@@ -775,6 +892,7 @@ impl ToolDefinition {
             availability_override: manifest.availability_override,
             discovery: manifest.discovery,
             execution_mode: manifest.execution_mode,
+            retry_policy: manifest.retry_policy,
         }
     }
 
@@ -1439,6 +1557,48 @@ mod tests {
             model_tool.output_schema["properties"]["hits"]["type"],
             serde_json::json!("array")
         );
+    }
+
+    #[test]
+    fn tool_retry_policy_defaults_to_never_and_is_omitted_from_manifest_json() {
+        let tool = ToolDefinition::raw(
+            "demo",
+            "Demo",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        );
+
+        assert_eq!(tool.retry_policy, ToolRetryPolicy::Never);
+        let manifest = tool.manifest();
+        assert_eq!(manifest.retry_policy, ToolRetryPolicy::Never);
+        let encoded = serde_json::to_value(&manifest).expect("manifest json");
+        assert!(encoded.get("retry_policy").is_none());
+    }
+
+    #[test]
+    fn tool_retry_policy_propagates_through_manifest_and_definition_roundtrip() {
+        let tool = ToolDefinition::raw(
+            "demo",
+            "Demo",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_retry_policy(ToolRetryPolicy::safe(3, 10, 100));
+
+        let manifest = tool.manifest();
+        assert_eq!(
+            manifest.retry_policy,
+            ToolRetryPolicy::Safe {
+                max_attempts: 3,
+                base_delay_ms: 10,
+                max_delay_ms: 100,
+            }
+        );
+
+        let roundtrip = ToolDefinition::from_manifest_and_contract(manifest, tool.contract());
+        assert_eq!(roundtrip.retry_policy, tool.retry_policy);
+        let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
+        assert_eq!(encoded["retry_policy"]["type"], serde_json::json!("safe"));
     }
 
     #[test]
@@ -2181,17 +2341,22 @@ mod tests {
     #[test]
     fn tool_result_from_result_serializes_success_values() {
         let result: ToolResult = Result::<_, std::io::Error>::Ok(vec!["alpha", "beta"]).into();
-        assert!(result.success);
-        assert_eq!(result.result, serde_json::json!(["alpha", "beta"]));
-        assert!(result.images.is_empty());
+        assert!(result.is_success());
+        assert_eq!(
+            result.value_for_projection(),
+            serde_json::json!(["alpha", "beta"])
+        );
     }
 
     #[test]
     fn tool_result_from_result_formats_errors() {
         let result: ToolResult =
             Result::<serde_json::Value, _>::Err(std::io::Error::other("nope")).into();
-        assert!(!result.success);
-        assert_eq!(result.result, serde_json::json!("nope"));
+        assert!(!result.is_success());
+        assert_eq!(
+            result.value_for_projection()["message"],
+            serde_json::json!("nope")
+        );
     }
 
     #[test]
@@ -2208,9 +2373,9 @@ mod tests {
         }
 
         let result: ToolResult = Result::<BrokenValue, std::io::Error>::Ok(BrokenValue).into();
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert_eq!(
-            result.result,
+            result.value_for_projection()["message"],
             serde_json::json!("Failed to serialize tool result: boom")
         );
     }
@@ -2451,7 +2616,7 @@ fn display_default_value(value: &serde_json::Value) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ToolImage {
+pub struct RlmPrintImage {
     pub mime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<AttachmentRef>,
@@ -2464,49 +2629,101 @@ pub struct ToolImage {
     pub height: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
+    pub output: Box<ToolCallOutput>,
     pub success: bool,
     pub result: serde_json::Value,
-    pub images: Vec<ToolImage>,
-    pub control: Option<ToolControl>,
 }
 
 impl ToolResult {
-    pub fn ok(result: serde_json::Value) -> Self {
+    pub fn from_output(output: ToolCallOutput) -> Self {
+        let success = output.is_success();
+        let result = legacy_tool_result_value(&output);
         Self {
-            success: true,
+            output: Box::new(output),
+            success,
             result,
-            images: vec![],
-            control: None,
         }
     }
 
+    pub fn ok(result: serde_json::Value) -> Self {
+        Self::from_output(ToolCallOutput::success(result))
+    }
+
     pub fn err(result: serde_json::Value) -> Self {
-        Self {
-            success: false,
-            result,
-            images: vec![],
-            control: None,
-        }
+        let message = result
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| result.to_string());
+        Self::from_output(ToolCallOutput::failure(ToolFailure {
+                class: ToolFailureClass::Execution,
+                code: "tool_error".to_string(),
+                message,
+                source: ToolFailureSource::Tool,
+                retry: ToolRetryDisposition::Never,
+                raw: Some(ToolValue::from(result)),
+            }))
     }
 
     pub fn err_fmt(msg: impl std::fmt::Display) -> Self {
         Self::err(serde_json::json!(msg.to_string()))
     }
 
-    pub fn with_images(success: bool, result: serde_json::Value, images: Vec<ToolImage>) -> Self {
-        Self {
-            success,
-            result,
-            images,
-            control: None,
-        }
+    pub fn failure(failure: ToolFailure) -> Self {
+        Self::from_output(ToolCallOutput::failure(failure))
+    }
+
+    pub fn retryable_failure(
+        class: ToolFailureClass,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        after_ms: Option<u64>,
+    ) -> Self {
+        Self::failure(ToolFailure::safe_retry(class, code, message, after_ms))
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::from_output(ToolCallOutput::cancelled(ToolCancellation::runtime(message)))
+    }
+
+    pub fn cancelled_with_raw(message: impl Into<String>, raw: serde_json::Value) -> Self {
+        let mut cancellation = ToolCancellation::runtime(message);
+        cancellation.raw = Some(ToolValue::from(raw));
+        Self::from_output(ToolCallOutput::cancelled(cancellation))
     }
 
     pub fn with_control(mut self, control: ToolControl) -> Self {
-        self.control = Some(control);
+        self.output.control = Some(control);
         self
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.success
+    }
+
+    pub fn value_for_projection(&self) -> serde_json::Value {
+        self.output.value_for_projection()
+    }
+
+    pub fn into_value_for_projection(self) -> serde_json::Value {
+        self.output.value_for_projection()
+    }
+}
+
+fn legacy_tool_result_value(output: &ToolCallOutput) -> serde_json::Value {
+    match &output.outcome {
+        ToolCallOutcome::Success(value) => value.to_json_value(),
+        ToolCallOutcome::Failure(failure) => failure
+            .raw
+            .as_ref()
+            .map(ToolValue::to_json_value)
+            .unwrap_or_else(|| serde_json::Value::String(failure.message.clone())),
+        ToolCallOutcome::Cancelled(cancellation) => cancellation
+            .raw
+            .as_ref()
+            .map(ToolValue::to_json_value)
+            .unwrap_or_else(|| serde_json::Value::String(cancellation.message.clone())),
     }
 }
 
@@ -2527,24 +2744,13 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ToolControl {
-    Handoff { session_id: String },
-    Finish { value: serde_json::Value },
-    Fail { value: serde_json::Value },
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
     pub tool: String,
     pub args: serde_json::Value,
-    pub result: serde_json::Value,
-    pub success: bool,
+    pub output: ToolCallOutput,
     pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control: Option<ToolControl>,
 }
 
 pub fn head_tail_truncate(value: &str, max_chars: usize) -> (String, usize) {

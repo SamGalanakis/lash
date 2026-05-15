@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use lash_sansio::{AttachmentId, AttachmentMeta, AttachmentRef};
+use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +30,7 @@ pub trait AttachmentStore: Send + Sync {
     fn put(
         &self,
         bytes: Vec<u8>,
-        meta: AttachmentMeta,
+        meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError>;
 
     fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError>;
@@ -51,10 +51,9 @@ impl AttachmentStore for InMemoryAttachmentStore {
     fn put(
         &self,
         bytes: Vec<u8>,
-        mut meta: AttachmentMeta,
+        meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError> {
-        meta.id = content_id(&bytes);
-        meta.byte_len = bytes.len() as u64;
+        let meta = stored_meta(&bytes, meta);
         let reference = meta.as_ref();
         let stored = StoredAttachment { meta, bytes };
         self.attachments
@@ -106,10 +105,9 @@ impl AttachmentStore for FileAttachmentStore {
     fn put(
         &self,
         bytes: Vec<u8>,
-        mut meta: AttachmentMeta,
+        meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError> {
-        meta.id = content_id(&bytes);
-        meta.byte_len = bytes.len() as u64;
+        let meta = stored_meta(&bytes, meta);
         let path = self.path_for_id(&meta.id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| AttachmentStoreError::Io {
@@ -182,6 +180,17 @@ pub fn content_id(bytes: &[u8]) -> AttachmentId {
     AttachmentId::new(format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
+    AttachmentMeta::new(
+        content_id(bytes),
+        meta.media_type,
+        bytes.len() as u64,
+        meta.width,
+        meta.height,
+        meta.label,
+    )
+}
+
 pub fn resolve_llm_request_attachments(
     mut request: crate::llm::types::LlmRequest,
     store: &dyn AttachmentStore,
@@ -205,11 +214,9 @@ mod tests {
     use super::*;
     use lash_sansio::{ImageMediaType, MediaType};
 
-    fn meta() -> AttachmentMeta {
-        AttachmentMeta::new(
-            AttachmentId::new("pending"),
+    fn meta() -> AttachmentCreateMeta {
+        AttachmentCreateMeta::new(
             MediaType::Image(ImageMediaType::Png),
-            0,
             Some(1),
             Some(1),
             Some("pixel".to_string()),
@@ -222,7 +229,17 @@ mod tests {
         let a = store.put(vec![1, 2, 3], meta()).expect("put a");
         let b = store.put(vec![1, 2, 3], meta()).expect("put b");
         assert_eq!(a.id, b.id);
+        assert_eq!(a.byte_len, 3);
         assert_eq!(store.get(&a.id).expect("get").bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn memory_store_assigns_identity_and_byte_len_from_bytes() {
+        let store = InMemoryAttachmentStore::new();
+        let reference = store.put(vec![4, 5, 6, 7], meta()).expect("put");
+
+        assert_eq!(reference.id, content_id(&[4, 5, 6, 7]));
+        assert_eq!(reference.byte_len, 4);
     }
 
     #[test]

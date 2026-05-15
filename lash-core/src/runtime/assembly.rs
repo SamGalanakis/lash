@@ -31,7 +31,7 @@ pub(super) struct StandardStreamAccumulator {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LlmStreamDebugState {
-    pub(super) started_at: Instant,
+    pub(super) created_at: Instant,
     pub(super) sequence: u64,
     pub(super) summary: LlmStreamSummary,
 }
@@ -88,7 +88,7 @@ pub(super) struct LlmStreamSummary {
 impl LlmStreamDebugState {
     pub(super) fn new() -> Self {
         Self {
-            started_at: Instant::now(),
+            created_at: Instant::now(),
             sequence: 0,
             summary: LlmStreamSummary::default(),
         }
@@ -101,7 +101,7 @@ impl LlmStreamDebugState {
     }
 
     pub(super) fn elapsed_ms(&self) -> u64 {
-        self.started_at.elapsed().as_millis() as u64
+        self.created_at.elapsed().as_millis() as u64
     }
 }
 
@@ -546,20 +546,17 @@ impl TurnAssembler {
                 call_id,
                 name,
                 args,
-                result,
-                success,
+                output,
                 duration_ms,
             } => {
                 self.tool_calls.push(ToolCallRecord {
                     call_id: call_id.clone(),
                     tool: name.clone(),
                     args: args.clone(),
-                    result: result.clone(),
-                    success: *success,
+                    output: output.clone(),
                     duration_ms: *duration_ms,
-                    control: None,
                 });
-                if !success {
+                if !output.is_success() {
                     self.saw_tool_failure = true;
                 }
             }

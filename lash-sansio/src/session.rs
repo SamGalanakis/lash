@@ -1,4 +1,4 @@
-use crate::{AttachmentRef, ToolCallRecord, ToolImage};
+use crate::{AttachmentRef, RlmPrintImage, ToolCallRecord};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TextProjectionMetadata {
@@ -18,7 +18,7 @@ pub struct ExecResponse {
     pub observations: Vec<String>,
     pub observation_truncation: Vec<TextProjectionMetadata>,
     pub tool_calls: Vec<ToolCallRecord>,
-    pub images: Vec<ToolImage>,
+    pub images: Vec<RlmPrintImage>,
     pub printed_images: Vec<AttachmentRef>,
     pub error: Option<String>,
     pub duration_ms: u64,

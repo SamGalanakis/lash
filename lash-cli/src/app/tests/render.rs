@@ -3,29 +3,33 @@ use super::*;
 #[test]
 fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let started_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
-    app.update_background_tasks(vec![lash_core::ManagedTaskStatus {
-        id: "subagent:smoke".into(),
-        kind: lash_core::ManagedTaskKind::Subagent,
-        producer: "subagent".into(),
-        run_state: lash_core::ManagedRunState::Running,
-        started_at,
-    }]);
+    let created_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
+    let mut running = lash_core::BackgroundTaskRecord::local_session(
+        "test-session-id",
+        "subagent:smoke",
+        lash_core::BackgroundTaskKind::Subagent,
+        "subagent",
+        lash_core::BackgroundTaskState::Running,
+    );
+    running.created_at = created_at;
+    app.update_background_tasks(vec![running]);
     assert_eq!(app.background_tasks.len(), 1);
     assert_eq!(app.background_tasks[0].terminal_duration, None);
 
-    app.update_background_tasks(vec![lash_core::ManagedTaskStatus {
-        id: "subagent:smoke".into(),
-        kind: lash_core::ManagedTaskKind::Subagent,
-        producer: "subagent".into(),
-        run_state: lash_core::ManagedRunState::Completed,
-        started_at,
-    }]);
+    let mut completed = lash_core::BackgroundTaskRecord::local_session(
+        "test-session-id",
+        "subagent:smoke",
+        lash_core::BackgroundTaskKind::Subagent,
+        "subagent",
+        lash_core::BackgroundTaskState::Completed,
+    );
+    completed.created_at = created_at;
+    app.update_background_tasks(vec![completed]);
 
     assert_eq!(app.background_tasks.len(), 1);
     assert_eq!(
-        app.background_tasks[0].run_state,
-        lash_core::ManagedRunState::Completed
+        app.background_tasks[0].state,
+        lash_core::BackgroundTaskState::Completed
     );
     assert!(app.background_tasks[0].transient_until.is_some());
     assert!(
@@ -202,8 +206,7 @@ fn llm_request_flushes_intermediate_stream_text() {
         call_id: Some("tc1".into()),
         name: "read_file".into(),
         args: serde_json::json!({"path":"src/main.rs"}),
-        result: serde_json::json!("ok"),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!("ok")),
         duration_ms: 1,
     });
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -230,8 +233,7 @@ fn tool_call_flushes_intermediate_stream_text_immediately() {
         call_id: Some("tc2".into()),
         name: "read_file".into(),
         args: serde_json::json!({"path":"lash-cli/src/app/mod.rs"}),
-        result: serde_json::json!("ok"),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!("ok")),
         duration_ms: 1,
     });
 
@@ -910,16 +912,16 @@ fn handle_tool_call_merges_contiguous_exploration_activity() {
         call_id: Some("tc3".into()),
         name: "grep".into(),
         args: serde_json::json!({"query": "ctx"}),
-        result: serde_json::json!("match"),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!("match")),
         duration_ms: 10,
     });
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc4".into()),
         name: "read_file".into(),
         args: serde_json::json!({"path": "lash-cli/src/render/mod.rs"}),
-        result: serde_json::json!("==> lash-cli/src/render/mod.rs <==\nline"),
-        success: true,
+        output: lash_core::ToolCallOutput::success(serde_json::json!(
+            "==> lash-cli/src/render/mod.rs <==\nline"
+        )),
         duration_ms: 5,
     });
 
@@ -957,7 +959,7 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
         call_id: Some("tc5".into()),
         name: "apply_patch".into(),
         args: serde_json::json!({}),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "summary": "Applied patch to 1 file",
             "added": 1,
             "removed": 1,
@@ -968,15 +970,14 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
                 "removed": 1,
                 "diff": "--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-old\n+new"
             }]
-        }),
-        success: true,
+        })),
         duration_ms: 7,
     });
     app.handle_session_event(SessionEvent::ToolCall {
         call_id: Some("tc6".into()),
         name: "apply_patch".into(),
         args: serde_json::json!({}),
-        result: serde_json::json!({
+        output: lash_core::ToolCallOutput::success(serde_json::json!({
             "summary": "Applied patch to 1 file",
             "added": 2,
             "removed": 0,
@@ -987,8 +988,7 @@ fn handle_tool_call_merges_contiguous_edit_activity() {
                 "removed": 0,
                 "diff": "--- a/b.rs\n+++ b/b.rs\n@@ -0,0 +1,2 @@\n+fn one() {}\n+fn two() {}"
             }]
-        }),
-        success: true,
+        })),
         duration_ms: 5,
     });
 
@@ -1027,11 +1027,10 @@ fn live_batch_tool_call_expands_children_without_parent_batch_block() {
                 }
             ]
         }),
-        result: serde_json::json!([
+        output: lash_core::ToolCallOutput::success(serde_json::json!([
             {"success": true, "result": "README body", "duration_ms": 8},
             {"success": true, "result": "match", "duration_ms": 13}
-        ]),
-        success: true,
+        ])),
         duration_ms: 21,
     });
 

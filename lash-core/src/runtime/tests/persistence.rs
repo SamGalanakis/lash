@@ -244,10 +244,10 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(TerminalControlTool {
         controls: vec![
             crate::ToolControl::Finish {
-                value: json!("first"),
+                value: json!("first").into(),
             },
             crate::ToolControl::Finish {
-                value: json!("second"),
+                value: json!("second").into(),
             },
         ],
     });
@@ -339,7 +339,11 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
     ]);
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(TerminalControlTool {
         controls: vec![crate::ToolControl::Fail {
-            value: json!({ "reason": "failed" }),
+            failure: crate::ToolFailure::tool(
+                crate::ToolFailureClass::Execution,
+                "terminal_control_failed",
+                "failed",
+            ),
         }],
     });
     let mut runtime = runtime_with_plugins_and_tools(Vec::new(), tools, transport).await;
@@ -370,7 +374,9 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
         TurnOutcome::Stopped(TurnStop::ToolError {
             ref tool_name,
             ref value,
-        }) if tool_name == "terminal_tool_0" && value == &json!({ "reason": "failed" })
+        }) if tool_name == "terminal_tool_0"
+            && value["code"] == "terminal_control_failed"
+            && value["message"] == "failed"
         ),
         "outcome={:?} calls={:?}",
         turn.outcome,
@@ -441,7 +447,9 @@ async fn standard_runtime_executes_streamed_tool_call_when_final_response_is_emp
         Some("tool-1")
     );
     assert_eq!(
-        active_tool_calls(&turn.state)[0].result,
+        active_tool_calls(&turn.state)[0]
+            .output
+            .value_for_projection(),
         serde_json::json!({
             "payload": "raw:sample"
         })

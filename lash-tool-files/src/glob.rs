@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use lash_core::{
     ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult,
+    ToolResult, ToolRetryPolicy,
 };
 
 use lash_tool_support::{
@@ -171,6 +171,7 @@ fn glob_tool_definition() -> ToolDefinition {
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["find_files"]))
             .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<Option<usize>, ToolResult> {
@@ -183,9 +184,13 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
-    fn items(result: &ToolResult) -> &Vec<serde_json::Value> {
-        let obj = result.result.as_object().unwrap();
-        obj.get("items").and_then(|v| v.as_array()).unwrap()
+    fn items(result: &ToolResult) -> Vec<serde_json::Value> {
+        let value = result.output.value_for_projection();
+        value
+            .get("items")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .clone()
     }
 
     #[tokio::test]
@@ -200,7 +205,7 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
             .iter()
@@ -233,7 +238,7 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         assert!(items(&result).is_empty());
     }
 
@@ -248,7 +253,7 @@ mod tests {
             &json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
             .iter()
@@ -269,14 +274,11 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": 2}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         let arr = items(&result);
         assert_eq!(arr.len(), 2);
-        let truncated = result
-            .result
-            .get("truncated")
-            .and_then(|v| v.as_object())
-            .unwrap();
+        let value = result.output.value_for_projection();
+        let truncated = value.get("truncated").and_then(|v| v.as_object()).unwrap();
         assert_eq!(truncated.get("shown").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(truncated.get("total").and_then(|v| v.as_u64()), Some(3));
         assert_eq!(truncated.get("omitted").and_then(|v| v.as_u64()), Some(1));
@@ -294,12 +296,13 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "limit": null}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         let arr = items(&result);
         assert_eq!(arr.len(), 3);
         assert!(
             result
-                .result
+                .output
+                .value_for_projection()
                 .get("truncated")
                 .map(|v| v.is_null())
                 .unwrap_or(false)
@@ -316,7 +319,7 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap(), "with_lines": true}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         let arr = items(&result);
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("lines").and_then(|v| v.as_u64()), Some(3));
@@ -332,10 +335,10 @@ mod tests {
             &json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
-        let paths: Vec<&str> = items(&result)
+        assert!(result.output.is_success());
+        let paths: Vec<String> = items(&result)
             .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
             .collect();
         assert!(paths.iter().any(|p| p.ends_with("/.hidden.rs")));
     }
@@ -360,10 +363,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.success);
-        let paths: Vec<&str> = items(&result)
+        assert!(result.output.is_success());
+        let paths: Vec<String> = items(&result)
             .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
             .collect();
         assert!(paths.iter().any(|p| p.ends_with("/ignored.rs")));
     }
@@ -387,10 +390,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.success);
-        let paths: Vec<&str> = items(&result)
+        assert!(result.output.is_success());
+        let paths: Vec<String> = items(&result)
             .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
             .collect();
         assert!(!paths.iter().any(|p| p.ends_with("/ignored.rs")));
     }
@@ -409,10 +412,10 @@ mod tests {
             &json!({"pattern": ".git/**", "path": dir.path().to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
-        let paths: Vec<&str> = items(&result)
+        assert!(result.output.is_success());
+        let paths: Vec<String> = items(&result)
             .iter()
-            .filter_map(|v| v.get("path").and_then(|x| x.as_str()))
+            .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
             .collect();
         assert!(paths.iter().any(|p| p.contains("/.git/")));
     }

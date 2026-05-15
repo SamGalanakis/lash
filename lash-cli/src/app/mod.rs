@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use lash_core::{
-    ManagedRunState, ManagedTaskKind, ManagedTaskStatus, Message, MessageRole, PartKind,
+    BackgroundTaskKind, BackgroundTaskRecord, BackgroundTaskState, Message, MessageRole, PartKind,
     PluginMessage, PromptUsage, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
@@ -97,17 +97,17 @@ impl PlanDockState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundTaskView {
     pub task_id: String,
-    pub kind: ManagedTaskKind,
+    pub kind: BackgroundTaskKind,
     pub label: String,
-    pub run_state: ManagedRunState,
-    pub started_at: std::time::SystemTime,
+    pub state: BackgroundTaskState,
+    pub created_at: std::time::SystemTime,
     pub terminal_duration: Option<std::time::Duration>,
     pub transient_until: Option<std::time::Instant>,
 }
 
 impl BackgroundTaskView {
     fn from_status(
-        status: ManagedTaskStatus,
+        status: BackgroundTaskRecord,
         terminal_duration: Option<std::time::Duration>,
         transient_until: Option<std::time::Instant>,
     ) -> Self {
@@ -115,15 +115,15 @@ impl BackgroundTaskView {
             task_id: status.id.clone(),
             kind: status.kind,
             label: status.id,
-            run_state: status.run_state,
-            started_at: status.started_at,
+            state: status.state,
+            created_at: status.created_at,
             terminal_duration,
             transient_until,
         }
     }
 
     pub fn is_visible(&self) -> bool {
-        !self.run_state.is_terminal()
+        !self.state.is_terminal()
             || self
                 .transient_until
                 .is_some_and(|until| until > std::time::Instant::now())
@@ -543,7 +543,7 @@ impl App {
             self.invalidate_height_cache();
             self.dirty = true;
         }
-        // The background dock renders a live `started_at.elapsed()` per
+        // The background dock renders a live `created_at.elapsed()` per
         // task. Without this nudge, the dock freezes between session
         // events: the tick task wakes us up but `dirty` never flips, so
         // the second-floor `Mm Ss` reading sticks until the next event
@@ -733,7 +733,7 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn update_background_tasks(&mut self, tasks: Vec<ManagedTaskStatus>) {
+    pub fn update_background_tasks(&mut self, tasks: Vec<BackgroundTaskRecord>) {
         let now = std::time::Instant::now();
         let previous: HashMap<String, BackgroundTaskView> = self
             .background_tasks
@@ -743,22 +743,21 @@ impl App {
             .collect();
         let mut next = Vec::new();
         for task in tasks {
-            let old_state = previous.get(&task.id).map(|item| item.run_state);
-            let terminal_duration = if task.run_state.is_terminal() {
+            let old_state = previous.get(&task.id).map(|item| item.state);
+            let terminal_duration = if task.state.is_terminal() {
                 previous
                     .get(&task.id)
                     .and_then(|item| item.terminal_duration)
-                    .or_else(|| task.started_at.elapsed().ok())
+                    .or_else(|| task.created_at.elapsed().ok())
             } else {
                 None
             };
-            let transient_until = if task.run_state.is_terminal()
-                && old_state.is_some_and(|state| state != task.run_state)
-            {
-                Some(now + std::time::Duration::from_secs(10))
-            } else {
-                previous.get(&task.id).and_then(|item| item.transient_until)
-            };
+            let transient_until =
+                if task.state.is_terminal() && old_state.is_some_and(|state| state != task.state) {
+                    Some(now + std::time::Duration::from_secs(10))
+                } else {
+                    previous.get(&task.id).and_then(|item| item.transient_until)
+                };
             next.push(BackgroundTaskView::from_status(
                 task,
                 terminal_duration,

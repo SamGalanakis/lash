@@ -45,6 +45,7 @@ pub(super) struct AsyncToolHandleState {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(super) enum AsyncToolTerminal {
     Completed(ToolDispatchOutcome),
     Cancelled,
@@ -317,6 +318,7 @@ impl ModeExecutionContext {
                 dispatch.session_id.clone(),
                 Arc::clone(&dispatch.host),
                 dispatch.turn_context.clone(),
+                Arc::clone(&dispatch.attachment_store),
                 Some(async_call_id),
             )
             .with_async_task(task_handle_id.clone(), cancellation.clone());
@@ -345,10 +347,8 @@ impl ModeExecutionContext {
             call_id: Some(call_id),
             tool: tool_name,
             args,
-            result: handle_value.clone(),
-            success: true,
+            output: crate::ToolCallOutput::success(handle_value.clone()),
             duration_ms: 0,
-            control: None,
         };
         ModeToolReply::success(handle_value).with_record(record)
     }
@@ -407,14 +407,10 @@ impl ModeExecutionContext {
 
         match terminal {
             Some(AsyncToolTerminal::Completed(outcome)) => {
-                if outcome.record.success {
-                    ModeToolReply::success_with_images(outcome.record.result, outcome.images)
-                } else {
-                    ModeToolReply::error(outcome.record.result)
-                }
+                ModeToolReply::from_output(outcome.record.output)
             }
             Some(AsyncToolTerminal::Cancelled) => {
-                ModeToolReply::error(json!("async task was cancelled"))
+                ModeToolReply::cancelled("async task was cancelled")
             }
             Some(AsyncToolTerminal::Failed(err)) => ModeToolReply::error(json!(err)),
             None => ModeToolReply::error(json!("async task did not produce a result")),

@@ -1,5 +1,5 @@
 use crossterm::event::Event as TermEvent;
-use lash_core::{ManagedTaskStatus, PromptRequest, PromptResponse, TurnActivity};
+use lash_core::{BackgroundTaskRecord, PromptRequest, PromptResponse, TurnActivity};
 use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
 
@@ -15,7 +15,7 @@ pub enum AppEvent {
     },
     Session {
         stream_id: u64,
-        activity: TurnActivity,
+        activity: Box<TurnActivity>,
     },
     Prompt {
         request: PromptRequest,
@@ -40,7 +40,7 @@ pub enum AppEvent {
 
 pub struct UiSnapshotResult {
     pub effects: Vec<TuiHostEffect>,
-    pub background_tasks: Option<Vec<ManagedTaskStatus>>,
+    pub background_tasks: Option<Vec<BackgroundTaskRecord>>,
     pub duration: std::time::Duration,
     pub timed_out: bool,
     pub diagnostics: Vec<String>,

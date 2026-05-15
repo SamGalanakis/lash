@@ -479,8 +479,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
                         call_id: tool_call.call_id.clone(),
                         name: tool_call.tool.clone(),
                         args: tool_call.args.clone(),
-                        result: tool_call.result.clone(),
-                        success: tool_call.success,
+                        output: tool_call.output.clone(),
                         duration_ms: tool_call.duration_ms,
                     }));
                 }
@@ -590,10 +589,10 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
 }
 
 fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutcome> {
-    if !record.success {
+    if !record.output.is_success() {
         return None;
     }
-    match record.control.as_ref()? {
+    match record.output.control.as_ref()? {
         lash_core::ToolControl::Handoff { session_id } if !session_id.trim().is_empty() => {
             Some(TurnOutcome::Handoff {
                 session_id: session_id.clone(),
@@ -602,13 +601,15 @@ fn terminal_outcome_from_tool_result(record: &ToolCallRecord) -> Option<TurnOutc
         lash_core::ToolControl::Finish { value } => {
             Some(TurnOutcome::Finished(TurnFinish::ToolValue {
                 tool_name: record.tool.clone(),
-                value: value.clone(),
+                value: value.to_json_value(),
             }))
         }
-        lash_core::ToolControl::Fail { value } => Some(TurnOutcome::Stopped(TurnStop::ToolError {
-            tool_name: record.tool.clone(),
-            value: value.clone(),
-        })),
+        lash_core::ToolControl::Fail { failure } => {
+            Some(TurnOutcome::Stopped(TurnStop::ToolError {
+                tool_name: record.tool.clone(),
+                value: failure.to_json_value(),
+            }))
+        }
         lash_core::ToolControl::Handoff { .. } => None,
     }
 }

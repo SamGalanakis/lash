@@ -700,7 +700,7 @@ impl crate::ToolProvider for SlowTool {
             tokio::select! {
                 _ = token.cancelled() => {
                     observed.store(true, Ordering::SeqCst);
-                    crate::ToolResult::err_fmt("cancelled")
+                    crate::ToolResult::cancelled("cancelled")
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
                     crate::ToolResult::ok(serde_json::json!({"status": "completed"}))
@@ -833,7 +833,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
-        Arc::new(TokioSessionTaskExecutor::default()),
+        Arc::new(LocalBackgroundTaskHost::default()),
     );
     let mut runtime = LashRuntime::from_background_state(
         standard_test_policy(),
@@ -853,7 +853,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
 
 pub(super) async fn standard_runtime_with_shared_background_executor(
     transport: TestProvider,
-    executor: Arc<dyn SessionTaskExecutor>,
+    executor: Arc<dyn BackgroundTaskHost>,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(test_host_config(), executor);

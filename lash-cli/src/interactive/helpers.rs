@@ -54,10 +54,10 @@ impl TurnActivityBridge {
                                 .unwrap_or_else(TurnActivityId::fresh);
                             let _ = app_tx.send(AppEvent::Session {
                                 stream_id,
-                                activity: TurnActivity::new(
+                                activity: Box::new(TurnActivity::new(
                                     correlation_id,
                                     TurnEvent::AssistantProseDelta { text },
-                                ),
+                                )),
                             });
                             if coalesced > 0 {
                                 tracing::trace!(stream_id, coalesced, "coalesced runtime text deltas");
@@ -92,10 +92,10 @@ impl TurnActivityBridge {
                                         .unwrap_or_else(TurnActivityId::fresh);
                                     let _ = app_tx.send(AppEvent::Session {
                                         stream_id,
-                                        activity: TurnActivity::new(
+                                        activity: Box::new(TurnActivity::new(
                                             correlation_id,
                                             TurnEvent::AssistantProseDelta { text },
-                                        ),
+                                        )),
                                     });
                                     if coalesced > 0 {
                                         tracing::trace!(stream_id, coalesced, "coalesced runtime text deltas before structural event");
@@ -105,10 +105,10 @@ impl TurnActivityBridge {
                                 }
                                 let _ = app_tx.send(AppEvent::Session {
                                     stream_id,
-                                    activity: TurnActivity {
+                                    activity: Box::new(TurnActivity {
                                         event,
                                         ..activity
-                                    },
+                                    }),
                                 });
                             }
                         }
@@ -122,10 +122,10 @@ impl TurnActivityBridge {
                     .unwrap_or_else(TurnActivityId::fresh);
                 let _ = app_tx.send(AppEvent::Session {
                     stream_id,
-                    activity: TurnActivity::new(
+                    activity: Box::new(TurnActivity::new(
                         correlation_id,
                         TurnEvent::AssistantProseDelta { text: pending_text },
-                    ),
+                    )),
                 });
             }
         });

@@ -7,8 +7,8 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolImage, ToolManifest,
-    ToolProvider, ToolResult,
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
+    ToolResult, ToolRetryPolicy,
 };
 
 use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
@@ -98,7 +98,8 @@ impl ToolProvider for ReadFile {
             Err(e) => return e,
         };
 
-        run_blocking(move || execute_read_file_sync(&path_str, offset, limit)).await
+        let context = call.context.clone();
+        run_blocking(move || execute_read_file_sync(&path_str, offset, limit, &context)).await
     }
 }
 
@@ -131,6 +132,7 @@ fn read_file_tool_definition() -> ToolDefinition {
             ])
             .with_discovery(lash_tool_support::discovery_metadata("filesystem", &["cat", "view_file"]))
             .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 
 fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
@@ -140,7 +142,12 @@ fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
     )
 }
 
-fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolResult {
+fn execute_read_file_sync(
+    path_str: &str,
+    offset: usize,
+    limit: usize,
+    context: &lash_core::ToolContext,
+) -> ToolResult {
     let path = Path::new(path_str);
     if !path.exists() {
         return ToolResult::err_fmt(format_args!(
@@ -151,8 +158,9 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolRe
     // Directory — still works but nudges toward ls
     if path.is_dir() {
         let mut result = list_directory(path, offset, limit);
-        if result.success
-            && let serde_json::Value::String(ref mut s) = result.result
+        if result.is_success()
+            && let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::String(s)) =
+                &mut result.output.outcome
         {
             s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
         }
@@ -161,7 +169,7 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ToolRe
 
     // Image files — return as visual attachment
     if let Some(mime) = image_mime(path) {
-        return read_image(path, path_str, mime);
+        return read_image(path, path_str, mime, context);
     }
 
     // PDF files — extract text via pdf-extract (pure Rust)
@@ -258,8 +266,14 @@ fn image_mime(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Read an image file, extract dimensions from the header, and return as a ToolImage.
-fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
+/// Read image metadata. Image bytes must be attached through ToolContext by
+/// callers that need model-visible attachments.
+fn read_image(
+    path: &Path,
+    path_str: &str,
+    mime: &str,
+    context: &lash_core::ToolContext,
+) -> ToolResult {
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => return ToolResult::err_fmt(format_args!("Failed to read image: {e}")),
@@ -272,16 +286,26 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ToolResult {
         None => format!("{} ({}KB)", path_str, size_kb),
     };
 
-    let image = ToolImage {
-        mime: mime.to_string(),
-        reference: None,
-        data,
-        label: label.clone(),
-        width: dims.map(|(width, _)| width),
-        height: dims.map(|(_, height)| height),
+    let Some(media_type) = lash_core::MediaType::from_mime(mime) else {
+        return ToolResult::err_fmt(format_args!("Unsupported image MIME type: {mime}"));
     };
-
-    ToolResult::with_images(true, json!(format!("[Image: {}]", label)), vec![image])
+    let reference = match context.put_attachment(
+        data,
+        lash_core::AttachmentCreateMeta::new(
+            media_type,
+            dims.map(|(width, _)| width),
+            dims.map(|(_, height)| height),
+            Some(label),
+        ),
+    ) {
+        Ok(reference) => reference,
+        Err(err) => {
+            return ToolResult::err_fmt(format_args!("Failed to store image attachment: {err}"));
+        }
+    };
+    ToolResult::from_output(lash_core::ToolCallOutput::success(
+        lash_core::ToolValue::Attachment(reference),
+    ))
 }
 
 /// Extract text from a PDF file using the pdf-extract crate (pure Rust).
@@ -522,6 +546,7 @@ fn truncate_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lash_core::AttachmentStore;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -536,8 +561,9 @@ mod tests {
             &json!({"path": path.to_str().unwrap()}),
         )
         .await;
-        assert!(result.success);
-        let text = result.result.as_str().unwrap();
+        assert!(result.output.is_success());
+        let value = result.output.value_for_projection();
+        let text = value.as_str().unwrap();
         assert!(text.contains("1: line1"));
         assert!(text.contains("2: line2"));
         assert!(text.contains("3: line3"));
@@ -555,8 +581,9 @@ mod tests {
             &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
         )
         .await;
-        assert!(result.success);
-        let text = result.result.as_str().unwrap();
+        assert!(result.output.is_success());
+        let value = result.output.value_for_projection();
+        let text = value.as_str().unwrap();
         assert!(text.contains("2: line2"));
         assert!(text.contains("3: line3"));
         assert!(!text.contains("1: line1"));
@@ -580,8 +607,9 @@ mod tests {
             &json!({"path": path.to_str().unwrap(), "limit": 200}),
         )
         .await;
-        assert!(result.success);
-        let text = result.result.as_str().unwrap();
+        assert!(result.output.is_success());
+        let value = result.output.value_for_projection();
+        let text = value.as_str().unwrap();
         assert!(text.contains("output capped at 50 KB"));
         assert!(text.contains("Use offset="));
     }
@@ -594,7 +622,7 @@ mod tests {
             &json!({"path": "/nonexistent/path/to/file.txt"}),
         )
         .await;
-        assert!(!result.success);
+        assert!(!result.output.is_success());
     }
 
     // ── PNG dimensions ──
@@ -693,5 +721,44 @@ mod tests {
         assert_eq!(image_mime(Path::new("photo.bmp")), Some("image/bmp"));
         assert_eq!(image_mime(Path::new("file.txt")), None);
         assert_eq!(image_mime(Path::new("noext")), None);
+    }
+
+    #[tokio::test]
+    async fn test_read_image_returns_attachment_value() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tiny.png");
+        let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        data.extend_from_slice(&[0, 0, 0, 13]);
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
+        std::fs::write(&path, &data).unwrap();
+
+        let store = Arc::new(lash_core::InMemoryAttachmentStore::new());
+        let context = lash_core::ToolContext::__for_testing(
+            "test-session".into(),
+            Arc::new(lash_core::testing::MockSessionManager::default()),
+            lash_core::TurnContext::new(),
+            store.clone(),
+            None,
+        );
+        let result = ReadFile
+            .execute(lash_core::ToolCall {
+                name: "read_file",
+                args: &json!({"path": path.to_str().unwrap()}),
+                context: &context,
+                progress: None,
+            })
+            .await;
+
+        let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::Attachment(reference)) =
+            result.output.outcome
+        else {
+            panic!("expected attachment result");
+        };
+        assert_eq!(reference.byte_len, data.len() as u64);
+        assert_eq!(reference.width, Some(1));
+        assert_eq!(reference.height, Some(1));
+        assert_eq!(store.get(&reference.id).unwrap().bytes, data);
     }
 }

@@ -317,9 +317,12 @@ mod tests {
             )
             .await
             .expect("invoke");
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
-            result.result.get("session_id").and_then(|v| v.as_str()),
+            result
+                .value_for_projection()
+                .get("session_id")
+                .and_then(|v| v.as_str()),
             Some("root")
         );
     }
@@ -450,14 +453,17 @@ mod tests {
             )
             .await
             .expect("invoke");
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
-            result.result.get("session_id").and_then(|v| v.as_str()),
+            result
+                .value_for_projection()
+                .get("session_id")
+                .and_then(|v| v.as_str()),
             Some("root")
         );
         assert_eq!(
             result
-                .result
+                .value_for_projection()
                 .get("plugin_session_id")
                 .and_then(|v| v.as_str()),
             Some("root")
@@ -485,14 +491,17 @@ mod tests {
             )
             .await
             .expect("invoke");
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
-            result.result.get("session_id").and_then(|v| v.as_str()),
+            result
+                .value_for_projection()
+                .get("session_id")
+                .and_then(|v| v.as_str()),
             Some("child")
         );
         assert_eq!(
             result
-                .result
+                .value_for_projection()
                 .get("plugin_session_id")
                 .and_then(|v| v.as_str()),
             Some("child")
@@ -576,8 +585,15 @@ mod tests {
         }
 
         fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
-            reg.tool_results()
-                .projector(Arc::new(|ctx| Box::pin(async move { Ok(ctx.result) })))
+            reg.tool_results().projector(Arc::new(|ctx| {
+                Box::pin(async move {
+                    Ok(crate::ModelToolReturn::from_output(
+                        ctx.call_id,
+                        ctx.tool_name,
+                        &ctx.output,
+                    ))
+                })
+            }))
         }
     }
 

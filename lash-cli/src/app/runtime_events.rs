@@ -200,20 +200,15 @@ impl App {
             TurnEvent::ToolCallCompleted {
                 name,
                 args,
-                result,
-                success,
+                output,
                 duration_ms,
                 ..
             } => {
                 self.finalize_live_markdown();
                 self.clear_live_tool_output();
-                let activities = self.activity_state.project_tool_call(
-                    &name,
-                    args,
-                    result,
-                    success,
-                    duration_ms,
-                );
+                let activities =
+                    self.activity_state
+                        .project_tool_output(&name, args, output, duration_ms);
                 let renders_prompt_response_inline = activities
                     .iter()
                     .any(Self::activity_renders_prompt_response_inline);
@@ -441,15 +436,13 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
             call_id,
             name,
             args,
-            result,
-            success,
+            output,
             duration_ms,
         } => TurnEvent::ToolCallCompleted {
             call_id,
             name,
             args,
-            result,
-            success,
+            output,
             duration_ms,
         },
         SessionEvent::Message { text, kind } if kind == "lashlang_code" => {

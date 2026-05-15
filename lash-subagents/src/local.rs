@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    AssembledTurn, ManagedRunState, ManagedTaskKind, ManagedTaskSpec, SessionToolAccess,
-    SubagentSessionAuthority, ToolSessionControl, ToolTaskControl,
+    AssembledTurn, BackgroundTaskKind, BackgroundTaskRegistration, BackgroundTaskState,
+    SessionToolAccess, SubagentSessionAuthority, ToolSessionControl, ToolTaskControl,
 };
 use std::collections::BTreeSet;
 
@@ -347,7 +347,7 @@ impl LocalSubagentHost {
                 .complete_background_task_for_session(
                     owner_session_id,
                     &format!("subagent:{path}"),
-                    ManagedRunState::Cancelled,
+                    BackgroundTaskState::Cancelled,
                 )
                 .await;
         }
@@ -416,7 +416,7 @@ impl LocalSubagentHost {
                 .transition_background_task_live_state_for_session(
                     &owner,
                     &format!("subagent:{path}"),
-                    ManagedRunState::Running,
+                    BackgroundTaskState::Running,
                 )
                 .await;
         }
@@ -544,18 +544,18 @@ impl LocalSubagentHost {
 
 fn subagent_terminal_state(
     outcome: &Result<AssembledTurn, lash_core::PluginError>,
-) -> ManagedRunState {
+) -> BackgroundTaskState {
     let Ok(turn) = outcome else {
-        return ManagedRunState::Failed;
+        return BackgroundTaskState::Failed;
     };
     match &turn.outcome {
         lash_core::TurnOutcome::Finished(_) | lash_core::TurnOutcome::Handoff { .. } => {
-            ManagedRunState::Completed
+            BackgroundTaskState::Completed
         }
         lash_core::TurnOutcome::Stopped(lash_core::TurnStop::Cancelled) => {
-            ManagedRunState::Cancelled
+            BackgroundTaskState::Cancelled
         }
-        lash_core::TurnOutcome::Stopped(_) => ManagedRunState::Failed,
+        lash_core::TurnOutcome::Stopped(_) => BackgroundTaskState::Failed,
     }
 }
 
@@ -568,7 +568,7 @@ impl SubagentHost for LocalSubagentHost {
             .trees
             .values()
             .find_map(|tree| tree.agents.get(&path))?;
-        let run_state = if agent.closing {
+        let state = if agent.closing {
             "closed"
         } else if agent.active_turn.is_some() {
             "running"
@@ -579,7 +579,7 @@ impl SubagentHost for LocalSubagentHost {
             session_id: agent.session_id.clone(),
             parent_session_id: agent.parent_session_id.clone(),
             capability: agent.capability.clone(),
-            run_state: run_state.to_string(),
+            state: state.to_string(),
             model: agent.model.clone(),
             model_variant: agent.model_variant.clone(),
             last_iterations: agent.last_iterations,
@@ -717,7 +717,7 @@ impl SubagentHost for LocalSubagentHost {
         let cancel_self = self.clone();
         let cancel_root = root_session_id.clone();
         let cancel_path = path.clone();
-        let cancel: lash_core::ManagedTaskCancel = Arc::new(move || {
+        let cancel: lash_core::LocalBackgroundTaskCancel = Arc::new(move || {
             let sessions = cancel_sessions.clone();
             let tasks = cancel_tasks.clone();
             let this = cancel_self.clone();
@@ -739,10 +739,12 @@ impl SubagentHost for LocalSubagentHost {
         if let Err(err) = context
             .tasks()
             .register_background_task(
-                ManagedTaskSpec {
+                BackgroundTaskRegistration {
                     id: format!("subagent:{path}"),
-                    kind: ManagedTaskKind::Subagent,
+                    kind: BackgroundTaskKind::Subagent,
                     producer: "subagent",
+                    child_session_id: Some(session.session_id.clone()),
+                    parent_task_id: None,
                 },
                 Some(cancel),
             )

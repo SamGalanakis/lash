@@ -5,6 +5,7 @@ fn activity_style(status: ActivityStatus) -> Style {
     match status {
         ActivityStatus::Completed => theme::tool_success(),
         ActivityStatus::Failed => theme::tool_failure(),
+        ActivityStatus::Cancelled => theme::text_subtle_style(),
         ActivityStatus::Running => theme::turn_status_state(),
         ActivityStatus::Partial => theme::text_subtle_style(),
     }
@@ -82,6 +83,11 @@ fn activity_prefix(activity: &ActivityBlock) -> (&'static str, Style, Style) {
             ActivityStatus::Failed => (
                 "× ",
                 theme::tool_failure(),
+                activity_style(activity.result.status),
+            ),
+            ActivityStatus::Cancelled => (
+                "◌ ",
+                theme::text_subtle_style(),
                 activity_style(activity.result.status),
             ),
             ActivityStatus::Running => (
@@ -225,6 +231,7 @@ pub(super) fn render_activity_block(
                 &child.call.summary,
                 match child.result.status {
                     ActivityStatus::Failed => theme::error(),
+                    ActivityStatus::Cancelled => theme::text_subtle_style(),
                     ActivityStatus::Running => theme::turn_status_state(),
                     ActivityStatus::Partial => theme::text_subtle_style(),
                     ActivityStatus::Completed => theme::subagent_child(),

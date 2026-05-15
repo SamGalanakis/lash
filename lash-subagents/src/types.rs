@@ -79,7 +79,7 @@ pub struct AgentMetadata {
     pub session_id: String,
     pub parent_session_id: Option<String>,
     pub capability: Option<String>,
-    pub run_state: String,
+    pub state: String,
     pub model: String,
     pub model_variant: Option<String>,
     pub last_iterations: Option<usize>,

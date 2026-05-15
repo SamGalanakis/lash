@@ -18,7 +18,7 @@ use lash::tools::{
 use lash::tracing::TraceLevel;
 use lash::{PluginStack, SessionSpec};
 use lash_core::{
-    FileAttachmentStore, PromptLayer, SessionPolicy, TokioSessionTaskExecutor, ToolState,
+    FileAttachmentStore, LocalBackgroundTaskHost, PromptLayer, SessionPolicy, ToolState,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
@@ -626,7 +626,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
         trace_path,
         trace_level,
-        Arc::new(TokioSessionTaskExecutor::default()),
+        Arc::new(LocalBackgroundTaskHost::default()),
     );
     let opened_session = runtime_factory
         .open(

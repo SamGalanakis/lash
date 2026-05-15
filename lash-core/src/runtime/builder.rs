@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, LashRuntime, PersistedSessionState,
-    PersistentRuntimeServices, PluginStack, RuntimeCoreConfig, RuntimePersistence, RuntimeServices,
-    SessionError, SessionPolicy, SessionStoreFactory, SessionTaskExecutor, TerminationPolicy,
-    TurnInjectionBridge, TurnInputInjectionBridge,
+    BackgroundRuntimeHost, BackgroundTaskHost, EmbeddedRuntimeHost, LashRuntime,
+    PersistedSessionState, PersistentRuntimeServices, PluginStack, RuntimeCoreConfig,
+    RuntimePersistence, RuntimeServices, SessionError, SessionPolicy, SessionStoreFactory,
+    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -24,7 +24,7 @@ pub struct EmbeddedRuntimeBuilder {
     core: RuntimeCoreConfig,
     session_store_factory: Option<Arc<dyn SessionStoreFactory>>,
     store: Option<Arc<dyn RuntimePersistence>>,
-    session_task_executor: Option<Arc<dyn SessionTaskExecutor>>,
+    background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
 }
 
 impl Default for EmbeddedRuntimeBuilder {
@@ -39,7 +39,7 @@ impl Default for EmbeddedRuntimeBuilder {
             core: RuntimeCoreConfig::default(),
             session_store_factory: None,
             store: None,
-            session_task_executor: None,
+            background_task_host: None,
         }
     }
 }
@@ -73,7 +73,7 @@ impl EmbeddedRuntimeBuilder {
     }
 
     pub fn with_plugin_host(mut self, plugin_host: PluginHost) -> Self {
-        self.plugin_source = PluginSource::Host(if self.session_task_executor.is_some() {
+        self.plugin_source = PluginSource::Host(if self.background_task_host.is_some() {
             plugin_host.with_background_tasks()
         } else {
             plugin_host
@@ -88,7 +88,7 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_plugin_factories(mut self, factories: Vec<Arc<dyn PluginFactory>>) -> Self {
         let host = PluginHost::new(factories);
-        self.plugin_source = PluginSource::Host(if self.session_task_executor.is_some() {
+        self.plugin_source = PluginSource::Host(if self.background_task_host.is_some() {
             host.with_background_tasks()
         } else {
             host
@@ -190,11 +190,11 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_session_task_executor(
+    pub fn with_background_task_host(
         mut self,
-        session_task_executor: Arc<dyn SessionTaskExecutor>,
+        background_task_host: Arc<dyn BackgroundTaskHost>,
     ) -> Self {
-        self.session_task_executor = Some(session_task_executor);
+        self.background_task_host = Some(background_task_host);
         if let PluginSource::Host(host) = &mut self.plugin_source {
             *host = host.clone().with_background_tasks();
         }
@@ -275,11 +275,11 @@ impl EmbeddedRuntimeBuilder {
         let plugins = self.resolve_plugins(&state)?;
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
             .with_session_store_factory_option(self.session_store_factory.clone());
-        match (self.store, self.session_task_executor) {
-            (Some(store), Some(session_task_executor)) => {
+        match (self.store, self.background_task_host) {
+            (Some(store), Some(background_task_host)) => {
                 LashRuntime::from_persistent_background_state(
                     state.policy.clone(),
-                    BackgroundRuntimeHost::new(embedded_host, session_task_executor),
+                    BackgroundRuntimeHost::new(embedded_host, background_task_host),
                     PersistentRuntimeServices::new_with_bridges(
                         plugins,
                         self.turn_injection_bridge,
@@ -304,10 +304,10 @@ impl EmbeddedRuntimeBuilder {
                 )
                 .await
             }
-            (None, Some(session_task_executor)) => {
+            (None, Some(background_task_host)) => {
                 LashRuntime::from_background_state(
                     state.policy.clone(),
-                    BackgroundRuntimeHost::new(embedded_host, session_task_executor),
+                    BackgroundRuntimeHost::new(embedded_host, background_task_host),
                     RuntimeServices::new_with_bridges(
                         plugins,
                         self.turn_injection_bridge,
@@ -335,7 +335,7 @@ impl EmbeddedRuntimeBuilder {
 
     pub async fn build_ephemeral(mut self) -> Result<LashRuntime, SessionError> {
         self.store = None;
-        self.session_task_executor = None;
+        self.background_task_host = None;
         if let PluginSource::Host(host) = &mut self.plugin_source {
             *host = host.clone().with_background_tasks_available(false);
         }
@@ -347,7 +347,7 @@ impl EmbeddedRuntimeBuilder {
         store: Arc<dyn RuntimePersistence>,
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);
-        self.session_task_executor = None;
+        self.background_task_host = None;
         if let PluginSource::Host(host) = &mut self.plugin_source {
             *host = host.clone().with_background_tasks_available(false);
         }
@@ -357,10 +357,10 @@ impl EmbeddedRuntimeBuilder {
     pub async fn build_background_persistent(
         mut self,
         store: Arc<dyn RuntimePersistence>,
-        session_task_executor: Arc<dyn SessionTaskExecutor>,
+        background_task_host: Arc<dyn BackgroundTaskHost>,
     ) -> Result<LashRuntime, SessionError> {
         self.store = Some(store);
-        self = self.with_session_task_executor(session_task_executor);
+        self = self.with_background_task_host(background_task_host);
         self.build().await
     }
 }

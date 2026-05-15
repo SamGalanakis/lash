@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use lash::{InputItem, LashSession, TurnInput};
 use lash_core::session_model::{Part, PartKind, PruneState};
 use lash_core::{
-    AttachmentId, AttachmentMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, MediaType,
-    Message, MessageRole, PluginMessage, ToolState,
+    AttachmentCreateMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, MediaType, Message,
+    MessageRole, PluginMessage, ToolState,
 };
 
 use super::helpers::TurnActivityBridge;
@@ -46,10 +46,8 @@ pub(crate) fn make_injected_plugin_message(turn: &PreparedTurn) -> PluginMessage
                     continue;
                 }
                 image_ids.push(id.clone());
-                let meta = AttachmentMeta::new(
-                    AttachmentId::new("pending"),
+                let meta = AttachmentCreateMeta::new(
                     MediaType::Image(ImageMediaType::Png),
-                    bytes.len() as u64,
                     None,
                     None,
                     Some(id.clone()),

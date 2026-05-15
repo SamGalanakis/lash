@@ -310,6 +310,7 @@ pub fn mock_tool_context_with_host(
         "test-session".to_string(),
         host,
         crate::TurnContext::new(),
+        Arc::new(crate::InMemoryAttachmentStore::new()),
         None,
     )
 }
@@ -826,30 +827,28 @@ mod test_mode_fakes {
             });
         }
 
-        let mut images = Vec::new();
         let outcomes =
             dispatch_parallel_tool_calls(Arc::new(context.clone()), parallel_specs, progress).await;
         for outcome in outcomes {
-            images.extend(outcome.images);
             let mut record = serde_json::Map::new();
             record.insert("index".to_string(), serde_json::json!(outcome.index));
             record.insert("tool".to_string(), serde_json::json!(outcome.record.tool));
             record.insert(
                 "success".to_string(),
-                serde_json::json!(outcome.record.success),
+                serde_json::json!(outcome.record.output.is_success()),
             );
             record.insert(
                 "duration_ms".to_string(),
                 serde_json::json!(outcome.record.duration_ms),
             );
             record.insert(
-                if outcome.record.success {
+                if outcome.record.output.is_success() {
                     "result"
                 } else {
                     "error"
                 }
                 .to_string(),
-                outcome.record.result,
+                outcome.record.output.value_for_projection(),
             );
             results.push(serde_json::Value::Object(record));
         }
@@ -873,7 +872,7 @@ mod test_mode_fakes {
                 .and_then(|value| value.as_u64())
                 .unwrap_or(u64::MAX)
         });
-        crate::ToolResult::with_images(true, serde_json::json!({ "results": results }), images)
+        crate::ToolResult::ok(serde_json::json!({ "results": results }))
     }
 
     struct TestProtocolDriver {
@@ -1076,15 +1075,13 @@ mod test_mode_fakes {
             use crate::{
                 CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
             };
-            use lash_sansio::session_model::{
-                format_tool_result_content, fresh_message_id, reassign_part_ids,
-            };
+            use lash_sansio::session_model::{fresh_message_id, reassign_part_ids};
             let mut actions = Vec::new();
             let mut result_parts = Vec::new();
             let mut terminal_outcome = None;
             for outcome in completed {
-                if terminal_outcome.is_none() && outcome.result.success {
-                    terminal_outcome = match outcome.result.control.as_ref() {
+                if terminal_outcome.is_none() && outcome.output.is_success() {
+                    terminal_outcome = match outcome.output.control.as_ref() {
                         Some(crate::ToolControl::Handoff { session_id })
                             if !session_id.trim().is_empty() =>
                         {
@@ -1095,33 +1092,55 @@ mod test_mode_fakes {
                         Some(crate::ToolControl::Finish { value }) => {
                             Some(TurnOutcome::Finished(TurnFinish::ToolValue {
                                 tool_name: outcome.tool_name.clone(),
-                                value: value.clone(),
+                                value: value.to_json_value(),
                             }))
                         }
-                        Some(crate::ToolControl::Fail { value }) => {
+                        Some(crate::ToolControl::Fail { failure }) => {
                             Some(TurnOutcome::Stopped(TurnStop::ToolError {
                                 tool_name: outcome.tool_name.clone(),
-                                value: value.clone(),
+                                value: failure.to_json_value(),
                             }))
                         }
                         _ => None,
                     };
                 }
-                result_parts.push(Part {
-                    id: String::new(),
-                    kind: PartKind::ToolResult,
-                    content: format_tool_result_content(
-                        outcome.model_result.success,
-                        &outcome.model_result.result,
-                    ),
-                    attachment: None,
-                    tool_call_id: Some(outcome.call_id.clone()),
-                    tool_name: Some(outcome.tool_name.clone()),
-                    tool_replay: None,
-                    prune_state: PruneState::Intact,
-                    reasoning_meta: None,
-                    response_meta: None,
-                });
+                for part in &outcome.model_return.parts {
+                    match part {
+                        lash_sansio::ModelToolReturnPart::Text(content) => {
+                            if content.is_empty() {
+                                continue;
+                            }
+                            result_parts.push(Part {
+                                id: String::new(),
+                                kind: PartKind::ToolResult,
+                                content: content.clone(),
+                                attachment: None,
+                                tool_call_id: Some(outcome.call_id.clone()),
+                                tool_name: Some(outcome.tool_name.clone()),
+                                tool_replay: None,
+                                prune_state: PruneState::Intact,
+                                reasoning_meta: None,
+                                response_meta: None,
+                            });
+                        }
+                        lash_sansio::ModelToolReturnPart::Attachment(reference) => {
+                            result_parts.push(Part {
+                                id: String::new(),
+                                kind: PartKind::Image,
+                                content: String::new(),
+                                attachment: Some(lash_sansio::PartAttachment {
+                                    reference: reference.clone(),
+                                }),
+                                tool_call_id: Some(outcome.call_id.clone()),
+                                tool_name: Some(outcome.tool_name.clone()),
+                                tool_replay: None,
+                                prune_state: PruneState::Intact,
+                                reasoning_meta: None,
+                                response_meta: None,
+                            });
+                        }
+                    }
+                }
             }
             if !result_parts.is_empty() {
                 let user_id = fresh_message_id();

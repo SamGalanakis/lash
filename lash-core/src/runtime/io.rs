@@ -22,10 +22,8 @@ pub(super) fn normalize_input_items(
                 let Some(blob) = image_blobs.get(id) else {
                     return Err(format!("Invalid image_ref: missing blob for id '{id}'"));
                 };
-                let meta = crate::AttachmentMeta::new(
-                    crate::AttachmentId::new("pending"),
+                let meta = crate::AttachmentCreateMeta::new(
                     crate::MediaType::Image(crate::ImageMediaType::Png),
-                    blob.len() as u64,
                     None,
                     None,
                     Some(id.clone()),

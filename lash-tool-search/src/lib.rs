@@ -15,8 +15,8 @@ use fff_search::{
 use serde_json::json;
 
 use lash_core::{
-    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider,
-    ToolResult,
+    ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolFailureClass, ToolManifest,
+    ToolProvider, ToolResult, ToolRetryPolicy,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -329,6 +329,7 @@ fn grep_tool_definition() -> ToolDefinition {
                 &["search_files", "ripgrep"],
             ))
             .with_execution_mode(ToolExecutionMode::Parallel)
+            .with_retry_policy(ToolRetryPolicy::safe(2, 50, 150))
 }
 
 impl Grep {
@@ -1122,7 +1123,7 @@ fn make_grep_options(
 }
 
 fn timeout_grep_result(query: &str, stage: &str, budget: Duration, message: &str) -> ToolResult {
-    ToolResult::err(json!({
+    let raw = json!({
         "query": query,
         "query_used": query,
         "broadened_from": null,
@@ -1144,32 +1145,43 @@ fn timeout_grep_result(query: &str, stage: &str, budget: Duration, message: &str
             "stage": stage,
             "budget_ms": budget.as_millis() as u64,
         },
-    }))
+    });
+    let mut failure = lash_core::ToolFailure::safe_retry(
+        ToolFailureClass::Timeout,
+        "grep_timeout",
+        message,
+        Some(50),
+    );
+    failure.raw = Some(lash_core::ToolValue::from(raw));
+    ToolResult::failure(failure)
 }
 
 fn cancelled_grep_result(query: &str) -> ToolResult {
-    ToolResult::err(json!({
-        "query": query,
-        "query_used": query,
-        "broadened_from": null,
-        "regex_fallback_error": null,
-        "matches": [],
-        "files": [],
-        "count": 0,
-        "shown": 0,
-        "files_with_matches": 0,
-        "truncated": false,
-        "cursor": null,
-        "suggested_path": null,
-        "approximate": false,
-        "timed_out": false,
-        "cancelled": true,
-        "error": {
-            "kind": "cancelled",
-            "message": "grep cancelled",
-            "stage": "grep",
-        },
-    }))
+    ToolResult::cancelled_with_raw(
+        "grep cancelled",
+        json!({
+            "query": query,
+            "query_used": query,
+            "broadened_from": null,
+            "regex_fallback_error": null,
+            "matches": [],
+            "files": [],
+            "count": 0,
+            "shown": 0,
+            "files_with_matches": 0,
+            "truncated": false,
+            "cursor": null,
+            "suggested_path": null,
+            "approximate": false,
+            "timed_out": false,
+            "cancelled": true,
+            "error": {
+                "kind": "cancelled",
+                "message": "grep cancelled",
+                "stage": "grep",
+            },
+        }),
+    )
 }
 
 #[derive(Default)]
@@ -1437,11 +1449,20 @@ mod tests {
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "hello"})).await;
-        assert!(result.success);
-        assert_eq!(result.result["count"], 2);
-        assert_eq!(result.result["matches"][0]["path"], "test.txt");
-        assert_eq!(result.result["matches"][0]["excerpt"], "hello world");
-        assert_eq!(result.result["matches"][1]["excerpt"], "hello again");
+        assert!(result.output.is_success());
+        assert_eq!(result.output.value_for_projection()["count"], 2);
+        assert_eq!(
+            result.output.value_for_projection()["matches"][0]["path"],
+            "test.txt"
+        );
+        assert_eq!(
+            result.output.value_for_projection()["matches"][0]["excerpt"],
+            "hello world"
+        );
+        assert_eq!(
+            result.output.value_for_projection()["matches"][1]["excerpt"],
+            "hello again"
+        );
     }
 
     #[tokio::test]
@@ -1451,10 +1472,16 @@ mod tests {
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "thing"})).await;
-        assert!(result.success);
-        assert_eq!(result.result["files"][0]["path"], "alpha.rs");
-        assert_eq!(result.result["files"][0]["count"], 1);
-        assert_eq!(result.result["suggested_path"], "alpha.rs");
+        assert!(result.output.is_success());
+        assert_eq!(
+            result.output.value_for_projection()["files"][0]["path"],
+            "alpha.rs"
+        );
+        assert_eq!(result.output.value_for_projection()["files"][0]["count"], 1);
+        assert_eq!(
+            result.output.value_for_projection()["suggested_path"],
+            "alpha.rs"
+        );
     }
 
     #[tokio::test]
@@ -1464,9 +1491,9 @@ mod tests {
 
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
-        assert!(result.success);
-        assert_eq!(result.result["count"], 2);
-        assert_eq!(result.result["files"][0]["count"], 2);
+        assert!(result.output.is_success());
+        assert_eq!(result.output.value_for_projection()["count"], 2);
+        assert_eq!(result.output.value_for_projection()["files"][0]["count"], 2);
     }
 
     #[tokio::test]
@@ -1477,10 +1504,16 @@ mod tests {
         let tool = Grep::with_base_path(dir.path().to_path_buf());
         let result =
             lash_core::testing::run_tool(&tool, "grep", &json!({"query": "missing"})).await;
-        assert!(result.success);
-        assert_eq!(result.result["matches"].as_array().unwrap().len(), 0);
-        assert!(result.result["broadened_from"].is_null());
-        assert!(result.result["regex_fallback_error"].is_null());
+        assert!(result.output.is_success());
+        assert_eq!(
+            result.output.value_for_projection()["matches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(result.output.value_for_projection()["broadened_from"].is_null());
+        assert!(result.output.value_for_projection()["regex_fallback_error"].is_null());
     }
 
     #[tokio::test]
@@ -1493,9 +1526,9 @@ mod tests {
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": query})).await;
 
         assert!(
-            result.success,
+            result.output.is_success(),
             "long query should not panic or fail: {:?}",
-            result.result
+            result.output.value_for_projection()
         );
     }
 
@@ -1517,7 +1550,7 @@ mod tests {
         assert!(tool.backend.get().is_none());
 
         let result = lash_core::testing::run_tool(&tool, "grep", &json!({"query": "ctx"})).await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         assert!(tool.backend.get().is_some());
     }
 
@@ -1535,24 +1568,24 @@ mod tests {
             &json!({"query": "banana", "path": "inner"}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         assert!(
-            result.result["matches"]
+            result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["path"] == "inner.txt"),
             "expected inner.txt match, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
         assert!(
-            !result.result["matches"]
+            !result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["path"] == "outer.txt"),
             "path scope should exclude outer.txt, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
     }
 
@@ -1569,18 +1602,18 @@ mod tests {
             &json!({"query": "banana", "path": "notes.txt"}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         assert!(
-            result.result["matches"]
+            result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["path"] == "notes.txt"),
             "expected notes.txt match, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
         assert!(
-            !result.result["matches"]
+            !result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1591,8 +1624,11 @@ mod tests {
             tool.backend.get().is_none(),
             "single-file grep should bypass the indexed backend"
         );
-        assert_eq!(result.result["timed_out"], false);
-        assert_eq!(result.result["error"], serde_json::Value::Null);
+        assert_eq!(result.output.value_for_projection()["timed_out"], false);
+        assert_eq!(
+            result.output.value_for_projection()["error"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]
@@ -1621,20 +1657,30 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "direct grep failed: {:?}", result.result);
-        assert_eq!(result.result["count"], 1);
-        assert_eq!(result.result["shown"], 1);
-        assert_eq!(result.result["matches"][0]["path"], "bottle.py");
+        assert!(
+            result.output.is_success(),
+            "direct grep failed: {:?}",
+            result.output.value_for_projection()
+        );
+        assert_eq!(result.output.value_for_projection()["count"], 1);
+        assert_eq!(result.output.value_for_projection()["shown"], 1);
         assert_eq!(
-            result.result["matches"][0]["match"],
+            result.output.value_for_projection()["matches"][0]["path"],
+            "bottle.py"
+        );
+        assert_eq!(
+            result.output.value_for_projection()["matches"][0]["match"],
             "header cookie static_file abort redirect request response"
         );
         assert!(
             tool.backend.get().is_none(),
             "single-file grep should not initialize fff"
         );
-        assert_eq!(result.result["timed_out"], false);
-        assert_eq!(result.result["error"], serde_json::Value::Null);
+        assert_eq!(result.output.value_for_projection()["timed_out"], false);
+        assert_eq!(
+            result.output.value_for_projection()["error"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]
@@ -1654,18 +1700,18 @@ mod tests {
         )
         .await;
         assert!(
-            result.success,
+            result.output.is_success(),
             "expected search outside workspace to succeed, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
         assert!(
-            result.result["matches"]
+            result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["path"] == "external.txt"),
             "expected external.txt match, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
     }
 
@@ -1682,15 +1728,15 @@ mod tests {
             &json!({"query": format!("{} banana", outside.path().display())}),
         )
         .await;
-        assert!(result.success);
+        assert!(result.output.is_success());
         assert!(
-            result.result["matches"]
+            result.output.value_for_projection()["matches"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["path"] == "external.txt"),
             "expected inferred path search to find external.txt, got {:?}",
-            result.result
+            result.output.value_for_projection()
         );
     }
 
@@ -1708,8 +1754,11 @@ mod tests {
             &json!({"query": format!("{} banana", file.display())}),
         )
         .await;
-        assert!(result.success);
-        assert_eq!(result.result["matches"][0]["path"], "external.txt");
+        assert!(result.output.is_success());
+        assert_eq!(
+            result.output.value_for_projection()["matches"][0]["path"],
+            "external.txt"
+        );
         assert!(
             tool.backend.get().is_none(),
             "inferred single-file grep should bypass fff"
@@ -1725,9 +1774,12 @@ mod tests {
 
         let result = direct_file_grep_sync("banana", &file, Some(dir.path()), 20, &abort);
 
-        assert!(!result.success);
-        assert_eq!(result.result["cancelled"], true);
-        assert_eq!(result.result["error"]["kind"], "cancelled");
+        assert!(!result.output.is_success());
+        let value = result.output.value_for_projection();
+        assert_eq!(value["raw"]["cancelled"], true);
+        assert_eq!(value["message"], "grep cancelled");
+        assert_eq!(value["source"], "cancellation");
+        assert_eq!(value["raw"]["error"]["kind"], "cancelled");
     }
 
     #[tokio::test]
@@ -1740,8 +1792,9 @@ mod tests {
             &json!({"query": "banana", "path": "/nonexistent/totally/fake"}),
         )
         .await;
-        assert!(!result.success);
-        let message = result.result.as_str().unwrap_or("");
+        assert!(!result.output.is_success());
+        let value = result.output.value_for_projection();
+        let message = value["message"].as_str().unwrap_or("");
         assert!(
             message.contains("does not exist"),
             "expected missing-path error, got {message:?}"

@@ -10,6 +10,7 @@ use crate::llm::types::{
     LlmToolChoice, LlmUsage,
 };
 use crate::session_model::TokenUsage;
+use crate::{ToolCallOutcome, ToolCallOutput};
 
 pub(crate) fn emit_trace(
     sink: &Option<Arc<dyn TraceSink>>,
@@ -110,6 +111,27 @@ pub(crate) fn trace_llm_request(req: &LlmRequest) -> TraceLlmRequest {
         .to_string(),
         output_spec: req.output_spec.as_ref().map(trace_output_spec),
         stream: req.stream_events.is_some(),
+    }
+}
+
+pub(crate) fn trace_tool_call_output(output: &ToolCallOutput) -> lash_trace::TraceToolCallOutput {
+    let outcome = match &output.outcome {
+        ToolCallOutcome::Success(value) => {
+            lash_trace::TraceToolCallOutcome::Success(value.to_json_value())
+        }
+        ToolCallOutcome::Failure(failure) => {
+            lash_trace::TraceToolCallOutcome::Failure(failure.to_json_value())
+        }
+        ToolCallOutcome::Cancelled(cancellation) => {
+            lash_trace::TraceToolCallOutcome::Cancelled(cancellation.to_json_value())
+        }
+    };
+    lash_trace::TraceToolCallOutput {
+        outcome,
+        control: output
+            .control
+            .as_ref()
+            .and_then(|control| serde_json::to_value(control).ok()),
     }
 }
 

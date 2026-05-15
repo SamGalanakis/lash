@@ -201,7 +201,9 @@ impl TraceStats {
             match &record.event {
                 lash_trace::TraceEvent::LlmCallStarted { .. } => stats.llm_calls += 1,
                 lash_trace::TraceEvent::LlmCallFailed { .. } => stats.failures += 1,
-                lash_trace::TraceEvent::ToolCallCompleted { success, .. } if !success => {
+                lash_trace::TraceEvent::ToolCallCompleted { output, .. }
+                    if !output.is_success() =>
+                {
                     stats.failures += 1;
                 }
                 lash_trace::TraceEvent::TurnCompleted { status, .. } if status == "failed" => {

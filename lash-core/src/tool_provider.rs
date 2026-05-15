@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::plugin::{DirectCompletion, PluginError, SessionHandle, SessionSnapshot, ToolHookHost};
-use crate::{ToolContract, ToolManifest, ToolResult};
+use crate::{
+    AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError, ToolContract,
+    ToolManifest, ToolResult,
+};
 
 /// A message sent from the sandbox to the host during execution.
 #[derive(Clone, Debug)]
@@ -24,11 +27,15 @@ pub struct ToolContext {
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_task_id: Option<String>,
     pub(crate) turn_context: crate::TurnContext,
+    pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
     /// `DirectRequest::originating_tool_call_id` they issue so the trace
     /// renderer can group fan-out LLM calls under the parent tool entry.
     pub(crate) tool_call_id: Option<String>,
+    pub(crate) attempt_number: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,8 +101,8 @@ pub struct ToolTaskControl {
 impl ToolTaskControl {
     pub async fn register_background_task(
         &self,
-        spec: crate::ManagedTaskSpec,
-        cancel: Option<crate::ManagedTaskCancel>,
+        spec: crate::BackgroundTaskRegistration,
+        cancel: Option<crate::LocalBackgroundTaskCancel>,
     ) -> Result<(), PluginError> {
         self.host
             .register_background_task(&self.session_id, spec, cancel)
@@ -107,22 +114,18 @@ impl ToolTaskControl {
             .await;
     }
 
-    pub async fn complete_background_task(&self, task_id: &str, run_state: crate::ManagedRunState) {
-        self.complete_background_task_for_session(&self.session_id, task_id, run_state)
+    pub async fn complete_background_task(&self, task_id: &str, state: crate::BackgroundTaskState) {
+        self.complete_background_task_for_session(&self.session_id, task_id, state)
             .await;
     }
 
     pub async fn transition_background_task_live_state(
         &self,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
-        self.transition_background_task_live_state_for_session(
-            &self.session_id,
-            task_id,
-            run_state,
-        )
-        .await;
+        self.transition_background_task_live_state_for_session(&self.session_id, task_id, state)
+            .await;
     }
 
     pub async fn unregister_background_task_for_session(&self, session_id: &str, task_id: &str) {
@@ -135,10 +138,10 @@ impl ToolTaskControl {
         &self,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
         self.host
-            .complete_background_task(session_id, task_id, run_state)
+            .complete_background_task(session_id, task_id, state)
             .await;
     }
 
@@ -146,10 +149,10 @@ impl ToolTaskControl {
         &self,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
         self.host
-            .transition_background_task_live_state(session_id, task_id, run_state)
+            .transition_background_task_live_state(session_id, task_id, state)
             .await;
     }
 
@@ -175,7 +178,7 @@ impl ToolTaskControl {
     pub async fn cancel_unreferenced_async_handles(
         &self,
         keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
         self.host
             .cancel_unreferenced_async_handles(&self.session_id, keep_handle_ids)
             .await
@@ -187,6 +190,7 @@ impl ToolContext {
         session_id: String,
         host: Arc<dyn ToolHookHost>,
         turn_context: crate::TurnContext,
+        attachment_store: Arc<dyn AttachmentStore>,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
@@ -195,7 +199,11 @@ impl ToolContext {
             cancellation_token: None,
             async_task_id: None,
             turn_context,
+            attachment_store,
             tool_call_id,
+            attempt_number: 1,
+            max_attempts: 1,
+            idempotency_key: None,
         }
     }
 
@@ -283,6 +291,26 @@ impl ToolContext {
         self.tool_call_id.as_deref()
     }
 
+    pub fn attempt_number(&self) -> u32 {
+        self.attempt_number
+    }
+
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
+    }
+
+    pub fn put_attachment(
+        &self,
+        data: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        self.attachment_store.put(data, meta)
+    }
+
     /// Shortcut for [`TurnContext::plugin_input`](crate::TurnContext::plugin_input).
     pub fn plugin_input<T: 'static>(&self, plugin_id: &'static str) -> Option<&T> {
         self.turn_context.plugin_input::<T>(plugin_id)
@@ -298,6 +326,21 @@ impl ToolContext {
         self
     }
 
+    pub(crate) fn with_retry_context(
+        mut self,
+        tool_name: &str,
+        attempt_number: u32,
+        max_attempts: u32,
+    ) -> Self {
+        self.attempt_number = attempt_number.max(1);
+        self.max_attempts = max_attempts.max(1);
+        self.idempotency_key = self
+            .tool_call_id
+            .as_ref()
+            .map(|call_id| format!("lash-tool:{}:{call_id}:{tool_name}", self.session_id));
+        self
+    }
+
     /// Constructor reserved for `lash_core::testing` helpers. Do not call directly;
     /// use [`lash_core::testing::mock_tool_context`] instead.
     #[cfg(any(test, feature = "testing"))]
@@ -306,9 +349,16 @@ impl ToolContext {
         session_id: String,
         host: Arc<dyn ToolHookHost>,
         turn_context: crate::TurnContext,
+        attachment_store: Arc<dyn AttachmentStore>,
         tool_call_id: Option<String>,
     ) -> Self {
-        Self::new(session_id, host, turn_context, tool_call_id)
+        Self::new(
+            session_id,
+            host,
+            turn_context,
+            attachment_store,
+            tool_call_id,
+        )
     }
 }
 

@@ -696,12 +696,12 @@ fn background_task_summary(app: &App) -> Option<String> {
     let running = app
         .background_tasks
         .iter()
-        .filter(|task| task.run_state == lash_core::ManagedRunState::Running)
+        .filter(|task| task.state == lash_core::BackgroundTaskState::Running)
         .count();
     let idle = app
         .background_tasks
         .iter()
-        .filter(|task| task.run_state == lash_core::ManagedRunState::Idle)
+        .filter(|task| task.state == lash_core::BackgroundTaskState::Waiting)
         .count();
     match (running, idle) {
         (0, 0) => None,

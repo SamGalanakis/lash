@@ -18,7 +18,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use lash_core::{ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta};
+use lash_core::{
+    ChronologicalEntry, ChronologicalPayload, SessionGraph, SessionMeta, ToolCallStatus,
+};
 use lash_sqlite_store::Store;
 
 use crate::trace::{LlmPromptSnapshot, load_prompts_from_trace};
@@ -63,7 +65,7 @@ pub struct SubagentEdge {
     pub agent_name: Option<String>,
     pub capability: Option<String>,
     pub call_id: Option<String>,
-    pub success: bool,
+    pub status: ToolCallStatus,
     pub duration_ms: u64,
 }
 
@@ -229,13 +231,15 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             };
             match record.tool.as_str() {
                 "spawn_agent" => {
-                    if let Some(child_id) = extract_session_id(&record.result) {
+                    if let Some(child_id) =
+                        extract_session_id(&record.output.value_for_projection())
+                    {
                         edges.push(SubagentEdge {
                             child_session_id: child_id.clone(),
                             agent_name: extract_str(&record.args, "agent_name"),
                             capability: extract_str(&record.args, "capability"),
                             call_id: record.call_id.clone(),
-                            success: record.success,
+                            status: record.output.status(),
                             duration_ms: record.duration_ms,
                         });
                         node_kinds.insert(
@@ -250,7 +254,9 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                     }
                 }
                 "continue_as" => {
-                    if let Some(child_id) = extract_session_id(&record.result) {
+                    if let Some(child_id) =
+                        extract_session_id(&record.output.value_for_projection())
+                    {
                         handoff_targets.insert(parent_sid.clone(), child_id.clone());
                         node_kinds.insert(
                             child_id,

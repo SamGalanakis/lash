@@ -20,9 +20,9 @@ impl BackgroundTaskCapability {
     ) -> Result<(), crate::PluginError> {
         self.ensure_known_background_session(current, managed, session_id)
             .await?;
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return Err(crate::PluginError::Session(
-                "session tasks are unavailable in this runtime".to_string(),
+                "background tasks are unavailable in this runtime".to_string(),
             ));
         };
         self.mark_current_background_sync_needed(current, session_id);
@@ -36,7 +36,7 @@ impl BackgroundTaskCapability {
         current: &CurrentSessionCapability,
         session_id: &str,
     ) -> Result<(), crate::PluginError> {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return Ok(());
         };
         executor
@@ -49,14 +49,14 @@ impl BackgroundTaskCapability {
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
         session_id: &str,
-        spec: crate::ManagedTaskSpec,
+        spec: crate::BackgroundTaskRegistration,
         task: crate::plugin::PluginSessionTask,
     ) -> Result<(), crate::PluginError> {
         self.ensure_known_background_session(current, managed, session_id)
             .await?;
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return Err(crate::PluginError::Session(
-                "managed session tasks are unavailable in this runtime".to_string(),
+                "managed background tasks are unavailable in this runtime".to_string(),
             ));
         };
         self.mark_current_background_sync_needed(current, session_id);
@@ -71,7 +71,7 @@ impl BackgroundTaskCapability {
         session_id: &str,
         task_id: &str,
     ) -> Result<(), crate::PluginError> {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return Ok(());
         };
         executor
@@ -83,10 +83,10 @@ impl BackgroundTaskCapability {
         &self,
         current: &CurrentSessionCapability,
         session_id: &str,
-        spec: crate::ManagedTaskSpec,
-        cancel: Option<crate::ManagedTaskCancel>,
+        spec: crate::BackgroundTaskRegistration,
+        cancel: Option<crate::LocalBackgroundTaskCancel>,
     ) -> Result<(), crate::PluginError> {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -102,7 +102,7 @@ impl BackgroundTaskCapability {
         session_id: &str,
         task_id: &str,
     ) {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return;
         };
         executor
@@ -115,13 +115,13 @@ impl BackgroundTaskCapability {
         current: &CurrentSessionCapability,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return;
         };
         executor
-            .mark_terminal(&self.background_scope_key(session_id), task_id, run_state)
+            .mark_terminal(&self.background_scope_key(session_id), task_id, state)
             .await;
     }
 
@@ -130,13 +130,13 @@ impl BackgroundTaskCapability {
         current: &CurrentSessionCapability,
         session_id: &str,
         task_id: &str,
-        run_state: crate::ManagedRunState,
+        state: crate::BackgroundTaskState,
     ) {
-        let Some(executor) = &current.host.session_task_executor else {
+        let Some(executor) = &current.host.background_task_host else {
             return;
         };
         executor
-            .mark_live_state(&self.background_scope_key(session_id), task_id, run_state)
+            .mark_live_state(&self.background_scope_key(session_id), task_id, state)
             .await;
     }
 
@@ -144,8 +144,8 @@ impl BackgroundTaskCapability {
         &self,
         current: &CurrentSessionCapability,
         session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
-        let Some(executor) = &current.host.session_task_executor else {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
+        let Some(executor) = &current.host.background_task_host else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -161,8 +161,8 @@ impl BackgroundTaskCapability {
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         task_id: &str,
-    ) -> Result<crate::ManagedTaskStatus, crate::PluginError> {
-        let Some(executor) = &current.host.session_task_executor else {
+    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+        let Some(executor) = &current.host.background_task_host else {
             return Err(crate::PluginError::Session(
                 "background task registry is unavailable in this runtime".to_string(),
             ));
@@ -173,8 +173,11 @@ impl BackgroundTaskCapability {
                 "unknown background task `{task_id}`"
             )));
         };
+        let _ = executor
+            .request_cancel(task_id, Some("requested by host".to_string()))
+            .await;
         match status.kind {
-            crate::ManagedTaskKind::Monitor => {
+            crate::BackgroundTaskKind::Monitor => {
                 let monitor_id = task_id
                     .strip_prefix("monitor:")
                     .unwrap_or(task_id)
@@ -182,19 +185,19 @@ impl BackgroundTaskCapability {
                 self.stop_monitor(current, host, session_id, &monitor_id)
                     .await?;
                 executor
-                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .mark_terminal(&scope_key, task_id, crate::BackgroundTaskState::Cancelled)
                     .await;
             }
-            crate::ManagedTaskKind::Subagent => {
+            crate::BackgroundTaskKind::Subagent => {
                 executor.cancel_managed(&scope_key, task_id).await?;
                 executor
-                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .mark_terminal(&scope_key, task_id, crate::BackgroundTaskState::Cancelled)
                     .await;
             }
             _ => {
                 executor.cancel_managed(&scope_key, task_id).await?;
                 executor
-                    .mark_terminal(&scope_key, task_id, crate::ManagedRunState::Cancelled)
+                    .mark_terminal(&scope_key, task_id, crate::BackgroundTaskState::Cancelled)
                     .await;
             }
         }
@@ -210,11 +213,11 @@ impl BackgroundTaskCapability {
         current: &CurrentSessionCapability,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         let tasks = self.list_background_tasks(current, session_id).await?;
         let mut cancelled = Vec::new();
         for task in tasks {
-            if task.run_state.is_terminal() {
+            if task.state.is_terminal() {
                 continue;
             }
             cancelled.push(
@@ -243,10 +246,10 @@ impl BackgroundTaskCapability {
         {
             visible.extend(crate::session::async_handles::live_session_async_handle_ids(&map));
         }
-        if let Some(executor) = &current.host.session_task_executor {
+        if let Some(executor) = &current.host.background_task_host {
             let scope_key = self.background_scope_key(session_id);
             for task in executor.list_managed(&scope_key).await {
-                if !task.run_state.is_terminal() {
+                if !task.state.is_terminal() {
                     visible.insert(task.id);
                 }
             }
@@ -281,7 +284,7 @@ impl BackgroundTaskCapability {
             crate::session::async_handles::transfer_session_async_handles(&from_map, &to_map, &ids)
                 .map_err(crate::PluginError::Session)?;
         }
-        if let Some(executor) = &current.host.session_task_executor {
+        if let Some(executor) = &current.host.background_task_host {
             executor
                 .transfer_managed(
                     &self.background_scope_key(from_session_id),
@@ -300,7 +303,7 @@ impl BackgroundTaskCapability {
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
         keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::ManagedTaskStatus>, crate::PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         let keep = keep_handle_ids.iter().cloned().collect::<HashSet<_>>();
         if let Some(map) = self
             .async_handle_map_for_session(current, managed, session_id)
@@ -313,7 +316,7 @@ impl BackgroundTaskCapability {
         let tasks = self.list_background_tasks(current, session_id).await?;
         let mut cancelled = Vec::new();
         for task in tasks {
-            if task.run_state.is_terminal() || keep.contains(&task.id) {
+            if task.state.is_terminal() || keep.contains(&task.id) {
                 continue;
             }
             cancelled.push(

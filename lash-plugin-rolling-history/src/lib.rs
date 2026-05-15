@@ -25,7 +25,6 @@ use lash_core::plugin::{
     TurnTransformContext,
 };
 use lash_core::session_model::context::PreparedContext;
-use lash_core::session_model::format_tool_result_content;
 use lash_core::{
     ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
     RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,
@@ -206,7 +205,7 @@ fn retained_output_hint(path: &Path) -> String {
 }
 
 fn normalize_tool_result_content(record: &ToolCallRecord) -> String {
-    let rendered = format_tool_result_content(record.success, &record.result);
+    let rendered = lash_core::session_model::format_tool_output_content(&record.output);
     match record.tool.as_str() {
         "exec_command" | "write_stdin" | "batch" => strip_ansi_escapes(&rendered),
         _ => rendered,
@@ -220,7 +219,7 @@ fn tool_output_file_name(record: &ToolCallRecord) -> String {
     } else {
         hasher.update(record.tool.as_bytes());
         hasher.update(record.args.to_string().as_bytes());
-        hasher.update(record.result.to_string().as_bytes());
+        hasher.update(record.output.value_for_projection().to_string().as_bytes());
     }
     let digest = format!("{:x}", hasher.finalize());
     let stem = record
@@ -261,7 +260,8 @@ fn spill_tool_output_to_dir(
 
 fn existing_tool_output_path(record: &ToolCallRecord) -> Option<PathBuf> {
     record
-        .result
+        .output
+        .value_for_projection()
         .get("full_output_path")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
@@ -985,10 +985,11 @@ mod tests {
             call_id: Some("call-123".to_string()),
             tool: "exec_command".to_string(),
             args: json!({"cmd":"cat giant.log"}),
-            result: json!(format!("{}\nend", "line\n".repeat(2_500))),
-            success: true,
+            output: lash_core::ToolCallOutput::success(json!(format!(
+                "{}\nend",
+                "line\n".repeat(2_500)
+            ))),
             duration_ms: 5,
-            control: None,
         };
 
         let normalized = normalize_tool_result_content(&record);
@@ -1014,13 +1015,11 @@ mod tests {
             call_id: Some("call-123".to_string()),
             tool: "exec_command".to_string(),
             args: json!({"cmd":"cat giant.log"}),
-            result: json!({
+            output: lash_core::ToolCallOutput::success(json!({
                 "output": format!("{}\nend", "line\n".repeat(2_500)),
                 "full_output_path": "/tmp/existing-shell-output.log",
-            }),
-            success: true,
+            })),
             duration_ms: 5,
-            control: None,
         };
 
         let preview = render_tool_result_preview_for_session(&record);
@@ -1061,17 +1060,15 @@ mod tests {
                 call_id: Some(format!("call-{idx}")),
                 tool: "exec_command".to_string(),
                 args: json!({"cmd": format!("echo {idx}")}),
-                result: json!(format!(
+                output: lash_core::ToolCallOutput::success(json!(format!(
                     "{}\n{}",
                     (0..600)
                         .map(|_| "line".repeat(64))
                         .collect::<Vec<_>>()
                         .join("\n"),
                     idx
-                )),
-                success: true,
+                ))),
                 duration_ms: 1,
-                control: None,
             })
             .collect::<Vec<_>>();
         let mut messages = vec![text_message("u0", MessageRole::User, "older")];

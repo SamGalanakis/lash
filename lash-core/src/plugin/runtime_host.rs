@@ -121,7 +121,7 @@ pub trait TaskHost: Send + Sync {
         _task: PluginSessionTask,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
-            "session tasks are unavailable in this session".to_string(),
+            "background tasks are unavailable in this session".to_string(),
         ))
     }
     async fn await_hidden_tasks(&self, _session_id: &str) -> Result<(), PluginError> {
@@ -130,11 +130,11 @@ pub trait TaskHost: Send + Sync {
     async fn spawn_managed_task(
         &self,
         _session_id: &str,
-        _spec: crate::ManagedTaskSpec,
+        _spec: crate::BackgroundTaskRegistration,
         _task: PluginSessionTask,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
-            "managed session tasks are unavailable in this session".to_string(),
+            "managed background tasks are unavailable in this session".to_string(),
         ))
     }
     async fn cancel_managed_task(
@@ -143,14 +143,14 @@ pub trait TaskHost: Send + Sync {
         _task_id: &str,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
-            "managed session tasks are unavailable in this session".to_string(),
+            "managed background tasks are unavailable in this session".to_string(),
         ))
     }
     async fn register_background_task(
         &self,
         _session_id: &str,
-        _spec: crate::ManagedTaskSpec,
-        _cancel: Option<crate::ManagedTaskCancel>,
+        _spec: crate::BackgroundTaskRegistration,
+        _cancel: Option<crate::LocalBackgroundTaskCancel>,
     ) -> Result<(), PluginError> {
         Err(PluginError::Session(
             "background task registry is unavailable in this session".to_string(),
@@ -161,7 +161,7 @@ pub trait TaskHost: Send + Sync {
         &self,
         _session_id: &str,
         _task_id: &str,
-        _run_state: crate::ManagedRunState,
+        _state: crate::BackgroundTaskState,
     ) {
     }
     /// Transition a still-live background task between the non-terminal
@@ -172,13 +172,13 @@ pub trait TaskHost: Send + Sync {
         &self,
         _session_id: &str,
         _task_id: &str,
-        _run_state: crate::ManagedRunState,
+        _state: crate::BackgroundTaskState,
     ) {
     }
     async fn list_background_tasks(
         &self,
         _session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
         Err(PluginError::Session(
             "background task registry is unavailable in this session".to_string(),
         ))
@@ -190,7 +190,7 @@ pub trait TaskHost: Send + Sync {
         &self,
         _session_id: &str,
         _task_id: &str,
-    ) -> Result<crate::ManagedTaskStatus, PluginError> {
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         Err(PluginError::Session(
             "background task registry is unavailable in this session".to_string(),
         ))
@@ -198,11 +198,11 @@ pub trait TaskHost: Send + Sync {
     async fn cancel_all_background_tasks(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
         let tasks = self.list_background_tasks(session_id).await?;
         let mut cancelled = Vec::new();
         for task in tasks {
-            if task.run_state.is_terminal() {
+            if task.state.is_terminal() {
                 continue;
             }
             cancelled.push(self.cancel_background_task(session_id, &task.id).await?);
@@ -228,7 +228,7 @@ pub trait TaskHost: Send + Sync {
         &self,
         _session_id: &str,
         _keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::ManagedTaskStatus>, PluginError> {
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
         Ok(Vec::new())
     }
 }

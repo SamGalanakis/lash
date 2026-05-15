@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::ToolResult;
 use crate::plugin::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
     ToolResultProjectionContext,
 };
+use crate::{ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolValue};
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 pub const DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES: usize = 16 * 1024;
@@ -101,71 +101,143 @@ fn register_projector(
 fn project_tool_result(
     config: &ToolOutputBudgetConfig,
     ctx: ToolResultProjectionContext,
-) -> ToolResult {
-    let result = project_model_value(config, &ctx);
-    ToolResult {
-        success: ctx.result.success,
-        result,
-        images: ctx.result.images,
-        control: ctx.result.control,
+) -> ModelToolReturn {
+    let parts = project_model_parts(config, &ctx);
+    ModelToolReturn {
+        call_id: ctx.call_id.clone(),
+        tool_name: ctx.tool_name.clone(),
+        parts,
     }
 }
 
-fn project_model_value(
+fn project_model_parts(
     config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
-) -> serde_json::Value {
+) -> Vec<ModelToolReturnPart> {
     if ctx.tool_name == "batch" {
-        return project_batch_value(config, ctx);
+        let value = project_batch_value(config, ctx);
+        return vec![ModelToolReturnPart::Text(render_projected_model_value(
+            &value,
+        ))];
     }
-    let rendered = render_tool_result_payload(ctx.result.success, &ctx.result.result);
-    if !needs_truncation(&rendered, config) {
-        return project_json_value(&ctx.result.result, config, ctx);
+
+    match &ctx.output.outcome {
+        ToolCallOutcome::Success(value) => project_tool_value_parts(config, ctx, value),
+        ToolCallOutcome::Failure(failure) => {
+            let mut parts = vec![ModelToolReturnPart::Text(
+                crate::session_model::format_tool_output_content(&ctx.output),
+            )];
+            if let Some(raw) = &failure.raw {
+                parts.extend(
+                    raw.attachments()
+                        .into_iter()
+                        .map(ModelToolReturnPart::Attachment),
+                );
+            }
+            parts
+        }
+        ToolCallOutcome::Cancelled(cancellation) => {
+            let mut parts = vec![ModelToolReturnPart::Text(
+                crate::session_model::format_tool_output_content(&ctx.output),
+            )];
+            if let Some(raw) = &cancellation.raw {
+                parts.extend(
+                    raw.attachments()
+                        .into_iter()
+                        .map(ModelToolReturnPart::Attachment),
+                );
+            }
+            parts
+        }
     }
-    serde_json::Value::String(formatted_truncate_text(
-        &rendered,
-        config,
-        tool_projection_direction(&ctx.tool_name),
-        Some(ctx),
-    ))
 }
 
-fn render_tool_result_payload(success: bool, value: &serde_json::Value) -> String {
-    if success {
-        match value {
-            serde_json::Value::String(text) => text.clone(),
-            other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
-        }
-    } else {
-        match value {
-            serde_json::Value::String(text) => text.clone(),
-            other => serde_json::to_string(&serde_json::json!({ "error": other }))
-                .unwrap_or_else(|_| "{\"error\":\"tool execution failed\"}".to_string()),
-        }
+fn render_projected_model_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
     }
 }
 
-fn project_json_value(
-    value: &serde_json::Value,
+fn project_tool_value_parts(
     config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
-) -> serde_json::Value {
+    value: &ToolValue,
+) -> Vec<ModelToolReturnPart> {
+    let mut parts = Vec::new();
     match value {
-        serde_json::Value::String(text) => {
-            serde_json::Value::String(project_text(text, config, ctx))
+        ToolValue::String(text) => {
+            parts.push(ModelToolReturnPart::Text(project_text(text, config, ctx)))
         }
-        serde_json::Value::Array(items) => serde_json::Value::Array(
-            items
-                .iter()
-                .map(|item| project_json_value(item, config, ctx))
-                .collect(),
+        ToolValue::Attachment(reference) => {
+            parts.push(ModelToolReturnPart::Attachment(reference.clone()));
+        }
+        ToolValue::Null
+        | ToolValue::Bool(_)
+        | ToolValue::Number(_)
+        | ToolValue::Array(_)
+        | ToolValue::Object(_) => {
+            push_projected_tool_value_parts(value, &mut parts, config, ctx);
+        }
+    }
+    parts
+}
+
+fn push_projected_tool_value_parts(
+    value: &ToolValue,
+    parts: &mut Vec<ModelToolReturnPart>,
+    config: &ToolOutputBudgetConfig,
+    ctx: &ToolResultProjectionContext,
+) {
+    match value {
+        ToolValue::Null => push_text_part(parts, "null"),
+        ToolValue::Bool(value) => push_text_part(parts, value.to_string()),
+        ToolValue::Number(value) => push_text_part(parts, value.to_string()),
+        ToolValue::String(text) => push_text_part(
+            parts,
+            serde_json::to_string(&project_text(text, config, ctx))
+                .unwrap_or_else(|_| "\"\"".to_string()),
         ),
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                .map(|(key, value)| (key.clone(), project_json_value(value, config, ctx)))
-                .collect(),
-        ),
-        other => other.clone(),
+        ToolValue::Attachment(reference) => {
+            parts.push(ModelToolReturnPart::Attachment(reference.clone()));
+        }
+        ToolValue::Array(items) => {
+            push_text_part(parts, "[");
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    push_text_part(parts, ",");
+                }
+                push_projected_tool_value_parts(item, parts, config, ctx);
+            }
+            push_text_part(parts, "]");
+        }
+        ToolValue::Object(map) => {
+            push_text_part(parts, "{");
+            for (index, (key, value)) in map.iter().enumerate() {
+                if index > 0 {
+                    push_text_part(parts, ",");
+                }
+                push_text_part(
+                    parts,
+                    serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()),
+                );
+                push_text_part(parts, ":");
+                push_projected_tool_value_parts(value, parts, config, ctx);
+            }
+            push_text_part(parts, "}");
+        }
+    }
+}
+
+fn push_text_part(parts: &mut Vec<ModelToolReturnPart>, text: impl Into<String>) {
+    let text = text.into();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(ModelToolReturnPart::Text(existing)) = parts.last_mut() {
+        existing.push_str(&text);
+    } else {
+        parts.push(ModelToolReturnPart::Text(text));
     }
 }
 
@@ -193,18 +265,6 @@ fn needs_truncation(text: &str, config: &ToolOutputBudgetConfig) -> bool {
         ToolOutputBudgetMode::Bytes => text.len() > config.limit,
         ToolOutputBudgetMode::Tokens => approx_token_count(text) > config.limit,
     }
-}
-
-fn formatted_truncate_text(
-    text: &str,
-    config: &ToolOutputBudgetConfig,
-    direction: ProjectionDirection,
-    ctx: Option<&ToolResultProjectionContext>,
-) -> String {
-    if !needs_truncation(text, config) {
-        return text.to_string();
-    }
-    truncate_text_with_hint(text, config, direction, truncation_hint(ctx, text))
 }
 
 pub fn truncate_observation_text(text: &str, config: &ToolOutputBudgetConfig) -> String {
@@ -406,8 +466,8 @@ fn observation_truncation_hint(text: &str, config: &ToolOutputBudgetConfig) -> S
 }
 
 fn existing_tool_output_path(ctx: &ToolResultProjectionContext) -> Option<PathBuf> {
-    ctx.result
-        .result
+    ctx.output
+        .value_for_projection()
         .get("full_output_path")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
@@ -461,8 +521,9 @@ fn project_batch_value(
     config: &ToolOutputBudgetConfig,
     ctx: &ToolResultProjectionContext,
 ) -> serde_json::Value {
-    let Some(map) = ctx.result.result.as_object() else {
-        return project_json_value(&ctx.result.result, config, ctx);
+    let value = ctx.output.value_for_projection();
+    let Some(map) = value.as_object() else {
+        return project_json_value(&value, config, ctx);
     };
 
     let mut projected = serde_json::Map::new();
@@ -515,29 +576,24 @@ fn project_batch_child_value(
     };
     let child_args = batch_child_args(&ctx.args, index);
 
-    let projected_child = if tool_name == "batch" {
-        ToolResult {
-            success,
-            result: project_json_value(&child_value, config, ctx),
-            images: Vec::new(),
-            control: None,
-        }
+    let projected_child = if tool_name == "batch" || !success {
+        project_json_value(&child_value, config, ctx)
     } else {
-        project_tool_result(
+        let model_return = project_tool_result(
             config,
             ToolResultProjectionContext {
                 session_id: ctx.session_id.clone(),
+                call_id: format!("{}.{}", ctx.call_id, index),
                 tool_name: tool_name.clone(),
                 args: child_args,
-                result: ToolResult {
-                    success,
-                    result: child_value,
-                    images: Vec::new(),
-                    control: None,
-                },
+                output: crate::ToolCallOutput::success(child_value.clone()),
                 duration_ms,
             },
-        )
+        );
+        let rendered = render_model_return_parts(&model_return.parts);
+        rendered
+            .parse::<serde_json::Value>()
+            .unwrap_or(serde_json::Value::String(rendered))
     };
 
     let mut projected = serde_json::Map::new();
@@ -553,9 +609,53 @@ fn project_batch_child_value(
         } else {
             "error".to_string()
         },
-        projected_child.result,
+        projected_child,
     );
     serde_json::Value::Object(projected)
+}
+
+fn render_model_return_parts(parts: &[ModelToolReturnPart]) -> String {
+    let mut rendered = String::new();
+    for part in parts {
+        match part {
+            ModelToolReturnPart::Text(text) => rendered.push_str(text),
+            ModelToolReturnPart::Attachment(reference) => {
+                rendered.push_str("[Attachment: ");
+                rendered.push_str(
+                    reference
+                        .label
+                        .as_deref()
+                        .unwrap_or_else(|| reference.id.as_str()),
+                );
+                rendered.push(']');
+            }
+        }
+    }
+    rendered
+}
+
+fn project_json_value(
+    value: &serde_json::Value,
+    config: &ToolOutputBudgetConfig,
+    ctx: &ToolResultProjectionContext,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(project_text(text, config, ctx))
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| project_json_value(item, config, ctx))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), project_json_value(value, config, ctx)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn batch_child_tool_name(batch_args: &serde_json::Value, index: usize) -> Option<&str> {
@@ -594,9 +694,10 @@ mod tests {
             &config,
             &ToolResultProjectionContext {
                 session_id: "root".to_string(),
+                call_id: "call".to_string(),
                 tool_name: "grep".to_string(),
                 args: json!({}),
-                result: ToolResult::ok(json!("unused")),
+                output: crate::ToolCallOutput::success(json!("unused")),
                 duration_ms: 1,
             },
         );
@@ -614,16 +715,17 @@ mod tests {
             &config,
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
+                call_id: "call".to_string(),
                 tool_name: "exec_command".to_string(),
                 args: json!({}),
-                result: ToolResult::ok(json!({
+                output: crate::ToolCallOutput::success(json!({
                     "output": "x".repeat(20_000),
                     "full_output_path": "/tmp/existing-shell-output.log",
                 })),
                 duration_ms: 1,
             },
         );
-        let output = projected.result.as_str().unwrap_or_default();
+        let output = render_model_return_parts(&projected.parts);
         assert!(output.contains("Full output saved to: /tmp/existing-shell-output.log"));
     }
 
@@ -638,22 +740,16 @@ mod tests {
             &config,
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
+                call_id: "call".to_string(),
                 tool_name: "search_tools".to_string(),
                 args: json!({}),
-                result: ToolResult::ok(json!({
+                output: crate::ToolCallOutput::success(json!({
                     "results": [{"output": "x".repeat(200)}]
                 })),
                 duration_ms: 1,
             },
         );
-        assert!(projected.result.is_string());
-        assert!(
-            projected
-                .result
-                .as_str()
-                .unwrap_or_default()
-                .contains("bytes truncated")
-        );
+        assert!(render_model_return_parts(&projected.parts).contains("bytes truncated"));
     }
 
     #[test]
@@ -662,9 +758,10 @@ mod tests {
             &ToolOutputBudgetConfig::default(),
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
+                call_id: "call".to_string(),
                 tool_name: "batch".to_string(),
                 args: json!({}),
-                result: ToolResult::ok(json!({
+                output: crate::ToolCallOutput::success(json!({
                     "results": [
                         {"tool": "read_file", "success": true, "duration_ms": 1, "result": "very long child payload"},
                         {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
@@ -673,8 +770,9 @@ mod tests {
                 duration_ms: 1,
             },
         );
-        let results = projected
-            .result
+        let projected_value: serde_json::Value =
+            serde_json::from_str(&render_model_return_parts(&projected.parts)).unwrap();
+        let results = projected_value
             .get("results")
             .and_then(|value| value.as_array())
             .expect("results");
@@ -695,9 +793,10 @@ mod tests {
             },
             ToolResultProjectionContext {
                 session_id: "root".to_string(),
+                call_id: "call".to_string(),
                 tool_name: "batch".to_string(),
                 args: json!({}),
-                result: ToolResult::ok(json!({
+                output: crate::ToolCallOutput::success(json!({
                     "results": [
                         {"tool": "read_file", "success": true, "duration_ms": 1, "result": "child payload"},
                         {"tool": "grep", "success": false, "duration_ms": 1, "error": "boom"}
@@ -706,8 +805,9 @@ mod tests {
                 duration_ms: 1,
             },
         );
-        let details = projected
-            .result
+        let projected_value: serde_json::Value =
+            serde_json::from_str(&render_model_return_parts(&projected.parts)).unwrap();
+        let details = projected_value
             .get("results")
             .and_then(|value| value.as_array())
             .expect("results");

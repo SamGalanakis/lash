@@ -849,6 +849,7 @@ mod tests {
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
             crate::TurnContext::default(),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
             None,
         );
         let args = json!({});
@@ -860,8 +861,8 @@ mod tests {
                 progress: None,
             })
             .await;
-        assert!(result.success);
-        assert_eq!(result.result, json!("host_only"));
+        assert!(result.is_success());
+        assert_eq!(result.value_for_projection(), json!("host_only"));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
     }
 
@@ -887,6 +888,7 @@ mod tests {
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
             crate::TurnContext::default(),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
             None,
         );
         let args = json!({ "query": "hello" });
@@ -898,9 +900,15 @@ mod tests {
                 progress: None,
             })
             .await;
-        assert!(result.success);
-        assert_eq!(result.result["tool"], json!("mcp__demo__search"));
-        assert_eq!(result.result["args"]["query"], json!("hello"));
+        assert!(result.is_success());
+        assert_eq!(
+            result.value_for_projection()["tool"],
+            json!("mcp__demo__search")
+        );
+        assert_eq!(
+            result.value_for_projection()["args"]["query"],
+            json!("hello")
+        );
     }
 
     #[test]

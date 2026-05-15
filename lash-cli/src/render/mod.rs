@@ -269,26 +269,30 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
         theme::text_faint_style().add_modifier(Modifier::Dim),
     )]));
     for task in &app.background_tasks {
-        let state = match task.run_state {
-            lash_core::ManagedRunState::Running => "running",
-            lash_core::ManagedRunState::Idle => "idle",
-            lash_core::ManagedRunState::Completed => "success",
-            lash_core::ManagedRunState::Failed => "error",
-            lash_core::ManagedRunState::Cancelled => "cancelled",
+        let state = match task.state {
+            lash_core::BackgroundTaskState::Pending => "pending",
+            lash_core::BackgroundTaskState::Running => "running",
+            lash_core::BackgroundTaskState::Waiting => "idle",
+            lash_core::BackgroundTaskState::Completed => "success",
+            lash_core::BackgroundTaskState::Failed => "error",
+            lash_core::BackgroundTaskState::CancelRequested => "cancelling",
+            lash_core::BackgroundTaskState::Cancelled => "cancelled",
         };
         let kind = task.kind.as_str();
         let elapsed_duration = task
             .terminal_duration
-            .or_else(|| task.started_at.elapsed().ok())
+            .or_else(|| task.created_at.elapsed().ok())
             .unwrap_or_default();
         let elapsed =
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
-        let state_style = match task.run_state {
-            lash_core::ManagedRunState::Running => theme::turn_status_state(),
-            lash_core::ManagedRunState::Idle => theme::text_subtle_style(),
-            lash_core::ManagedRunState::Completed => theme::tool_success(),
-            lash_core::ManagedRunState::Failed | lash_core::ManagedRunState::Cancelled => {
+        let state_style = match task.state {
+            lash_core::BackgroundTaskState::Pending => theme::text_subtle_style(),
+            lash_core::BackgroundTaskState::Running => theme::turn_status_state(),
+            lash_core::BackgroundTaskState::Waiting => theme::text_subtle_style(),
+            lash_core::BackgroundTaskState::Completed => theme::tool_success(),
+            lash_core::BackgroundTaskState::CancelRequested => theme::text_subtle_style(),
+            lash_core::BackgroundTaskState::Failed | lash_core::BackgroundTaskState::Cancelled => {
                 theme::tool_failure()
             }
         };

@@ -667,17 +667,17 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
         .invoke_plugin_action("test.spawn", json!({}), None)
         .await
         .expect("invoke");
-    assert!(result.success);
+    assert!(result.is_success());
     assert_eq!(
         result
-            .result
+            .value_for_projection()
             .get("session_id")
             .and_then(|value| value.as_str()),
         Some("branched")
     );
     assert_eq!(
         result
-            .result
+            .value_for_projection()
             .get("message_count")
             .and_then(|value| value.as_u64()),
         Some(2)
