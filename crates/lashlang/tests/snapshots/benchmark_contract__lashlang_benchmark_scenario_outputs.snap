@@ -1,0 +1,252 @@
+---
+source: crates/lashlang/tests/benchmark_contract.rs
+assertion_line: 31
+expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs should serialize\")"
+---
+{
+  "async_await": "alpha,beta,gamma",
+  "baseline": "user=sam;attempt=3;active=alpha:1,gamma:3;total=6;count=3;seen=3;indexes=4",
+  "cache_pressure": "alpha:3|beta:3|gamma:7|delta:6|epsilon:7|zeta:7",
+  "continue_as_seed_surface": {
+    "global_count": 4,
+    "handle_count": 2,
+    "projected_count": 1,
+    "seed_keys": [
+      "projected_problem",
+      "nested_projected",
+      "computed_summary",
+      "live_agent",
+      "started_agent"
+    ],
+    "session_id": "handoff:bench",
+    "task": "continue from compact state"
+  },
+  "direct_unwrap": "alpha,alpha:beta",
+  "general_parallel": "alpha:3|beta:3",
+  "indexed_assignment": {
+    "counts": {
+      "alpha": 3,
+      "beta": 2,
+      "delta": 1,
+      "gamma": 2
+    },
+    "state": {
+      "groups": {
+        "alpha": {
+          "count": 3
+        },
+        "beta": {
+          "count": 2
+        },
+        "delta": {
+          "count": 1
+        },
+        "gamma": {
+          "count": 2
+        }
+      }
+    },
+    "summary": "alpha:3,beta:2,gamma:2,delta:1"
+  },
+  "language_surface": {
+    "awaited": "awaited",
+    "beta_index": 6,
+    "direct": "sam",
+    "first_two": [
+      "alpha",
+      "beta"
+    ],
+    "line_matches": [
+      {
+        "end": 1,
+        "line": 1,
+        "match": "a",
+        "start": 0,
+        "text": "alpha"
+      },
+      {
+        "end": 4,
+        "line": 2,
+        "match": "a",
+        "start": 3,
+        "text": "beta"
+      },
+      {
+        "end": 2,
+        "line": 3,
+        "match": "a",
+        "start": 1,
+        "text": "gamma"
+      }
+    ],
+    "lookup": "alpha,beta,gamma",
+    "positional": [
+      "left:alpha",
+      {
+        "ok": true,
+        "value": "beta"
+      },
+      3
+    ],
+    "stringified": "{\"choice\":\"yes\",\"counts\":{\"alpha\":1,\"beta\":1,\"delta\":1,\"gamma\":1},\"kept\":[\"alpha\",\"gamma\"],\"maybe\":null,\"tags\":[\"alpha\",\"beta\",\"gamma\",\"delta\"],\"user\":\"sam\"}",
+    "summary": "sam:3",
+    "validated": {
+      "choice": "yes",
+      "counts": {
+        "alpha": 1,
+        "beta": 1,
+        "delta": 1,
+        "gamma": 1
+      },
+      "kept": [
+        "alpha",
+        "gamma"
+      ],
+      "maybe": null,
+      "tags": [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta"
+      ],
+      "user": "sam"
+    },
+    "values": [
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "large_data": {
+    "count": 512,
+    "evens": 256,
+    "groups": {
+      "bucket_0": 32,
+      "bucket_1": 32,
+      "bucket_10": 32,
+      "bucket_11": 32,
+      "bucket_12": 32,
+      "bucket_13": 32,
+      "bucket_14": 32,
+      "bucket_15": 32,
+      "bucket_2": 32,
+      "bucket_3": 32,
+      "bucket_4": 32,
+      "bucket_5": 32,
+      "bucket_6": 32,
+      "bucket_7": 32,
+      "bucket_8": 32,
+      "bucket_9": 32
+    },
+    "odds": 256,
+    "summary": "bucket_0:32|bucket_1:32|bucket_2:32|bucket_3:32|bucket_4:32|bucket_5:32|bucket_6:32|bucket_7:32|bucket_8:32|bucket_9:32|bucket_10:32|bucket_11:32|bucket_12:32|bucket_13:32|bucket_14:32|bucket_15:32",
+    "total": 130816
+  },
+  "loop_control": {
+    "kept": 43,
+    "outer": "restored",
+    "skipped": 32
+  },
+  "projected_operations": {
+    "as_float": 4,
+    "as_int": 4,
+    "contains": true,
+    "empty": false,
+    "ends": true,
+    "field": "bench",
+    "first": "alpha",
+    "join": "alpha,beta,gamma,delta",
+    "keys": [
+      "topic",
+      "count"
+    ],
+    "len": 4,
+    "parsed": {
+      "count": 4,
+      "ok": true
+    },
+    "pushed": [
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon"
+    ],
+    "slice_list": [
+      "beta",
+      "gamma"
+    ],
+    "slice_text": "beta",
+    "split_count": 4,
+    "starts": true,
+    "trim": "alpha",
+    "values": [
+      "bench",
+      4
+    ]
+  },
+  "projected_values": {
+    "body_head": "l",
+    "body_match_index": 5,
+    "body_matches": [
+      {
+        "end": 13,
+        "line": 1,
+        "match": "markdown",
+        "start": 5,
+        "text": "lazy markdown body"
+      }
+    ],
+    "body_text": "lazy markdown body",
+    "body_truthy": true,
+    "doc_summary": "Rules for editing workflow JSON drafts.",
+    "doc_title": "Authoring Rules",
+    "first_content": "alpha request",
+    "first_role": "user",
+    "history_len": 3,
+    "second_content": "beta response",
+    "second_matches": [
+      {
+        "end": 13,
+        "line": 1,
+        "match": "response",
+        "start": 5,
+        "text": "beta response"
+      }
+    ]
+  },
+  "snapshot_projected_state": {
+    "count": 8,
+    "head": "projected body s",
+    "id": "snapshot-mixed",
+    "materialized_len": 24,
+    "nested_head": "Nested Projection",
+    "normal_title": "Snapshot Rules",
+    "tags": "snapshot,projected,mixed"
+  },
+  "tool_control_surface": {
+    "first": "done:chunk_1",
+    "llm": "benchmark summary",
+    "monitor": "app log",
+    "second": "done:chunk_2",
+    "stopped": "cancelled",
+    "subagents": 2,
+    "tasks": 2
+  },
+  "type_system_stress": {
+    "count": 64,
+    "first": "item-0",
+    "last": "item-63",
+    "tags": "alpha,beta,gamma"
+  },
+  "wrapped_error_paths": {
+    "boom_error": true,
+    "boom_ok": false,
+    "missing_error": true,
+    "missing_ok": false,
+    "ok_value": "still-running",
+    "probe_done": true,
+    "probe_exit": 1
+  }
+}

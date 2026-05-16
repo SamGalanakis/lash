@@ -1,0 +1,36 @@
+---
+source: crates/lashlang/src/runtime/tests.rs
+expression: compiled_program_snapshot(GOLDEN_CONTRACT_SOURCE)
+---
+compile_stats: total=1 const_folded=1 dynamic=0 refs=0
+slots: [source, history, beta_index, matches, counts, token, Payload]
+names: [beta_index, matches, counts]
+constants:
+  c0: ","
+  c1: "beta"
+  c2: "beta"
+  c3: {}
+  c4: {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
+code:
+  0000: load_name 1:history
+  0001: push_const c0 ","
+  0002: intrinsic join argc=2
+  0003: store_name 0:source
+  0004: load_name 0:source
+  0005: push_const c1 "beta"
+  0006: intrinsic find argc=2
+  0007: store_name 2:beta_index
+  0008: load_name 0:source
+  0009: push_const c2 "beta"
+  0010: intrinsic grep_text argc=2
+  0011: store_name 3:matches
+  0012: store_const 4:counts c3 {}
+  0013: lowered_loop #0 5:token values ops=1
+  0014: push_const c4 {"$lash_type":{"additionalProperties":false,"properties":{"beta_index":{"anyOf":[{"type":"integer"},{"type":"null"}]},"counts":{"type":"object"},"matches":{"items":{"type":"object"},"type":"array"}},"required":["beta_index","matches","counts"],"type":"object"}}
+  0015: store_name 6:Payload
+  0016: load_name 2:beta_index
+  0017: load_name 3:matches
+  0018: load_name 4:counts
+  0019: build_record [beta_index, matches, counts]
+  0020: intrinsic validate_compiled schema#0
+  0021: submit
