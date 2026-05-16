@@ -29,18 +29,46 @@ fn generate_model_snapshot() {
             .arg("https://models.dev/api.json")
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("Warning: could not download models.dev/api.json");
+            eprintln!("Warning: could not download models.dev/api.json; checking cached copy");
         }
     }
 
-    let snapshot = if cache_path.exists() {
-        std::fs::read_to_string(&cache_path).unwrap_or_else(|_| "{}".to_string())
-    } else {
-        println!(
-            "cargo:warning=no context-window data loaded from models.dev; lash will fail fast for uncataloged models"
+    let snapshot = std::fs::read_to_string(&cache_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to load models.dev/api.json for bundled model snapshot: {}. \
+             Ensure the build can fetch https://models.dev/api.json or provide a valid cached copy.",
+            err
+        )
+    });
+    if !has_context_window_data(&snapshot) {
+        panic!(
+            "models.dev/api.json did not contain usable context-window data. \
+             Refusing to build lash with an empty model catalog."
         );
-        "{}".to_string()
-    };
+    }
 
     std::fs::write(&snapshot_path, snapshot).expect("Failed to write models_snapshot.json");
+}
+
+fn has_context_window_data(raw: &str) -> bool {
+    let Ok(providers) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    let Some(obj) = providers.as_object() else {
+        return false;
+    };
+    obj.values().any(|provider_info| {
+        provider_info
+            .get("models")
+            .and_then(|models| models.as_object())
+            .map(|models| {
+                models.values().any(|info| {
+                    info.get("limit")
+                        .and_then(|limit| limit.get("context"))
+                        .and_then(|context| context.as_u64())
+                        .is_some()
+                })
+            })
+            .unwrap_or(false)
+    })
 }
