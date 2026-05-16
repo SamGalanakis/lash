@@ -5,10 +5,19 @@
 // matches the docs design system.
 
 (function () {
-  // The path to the search-index module relative to the current page. Same
-  // depth math as nav.js's rootPrefix() so the docs work both at the hosting
-  // root and under a subpath like /lash/docs/.
+  // Resolve the pagefind module against the docs root. Same approach as
+  // nav.js's rootPrefix(): read this script's own tag (search.js sits at the
+  // docs root). Works at the host root AND when served under a project
+  // subpath. `defer` scripts can't use `document.currentScript`, so we look
+  // the tag up by filename.
   function indexUrl() {
+    const tag = document.querySelector('script[src*="search.js"]');
+    if (tag) {
+      const url = new URL(tag.getAttribute("src"), location.href);
+      const root = url.pathname.replace(/search\.js(\?.*)?$/, "");
+      return root + "pagefind/pagefind.js";
+    }
+    // Fallback: legacy depth math.
     const slashes = (location.pathname.match(/\//g) || []).length;
     const depth = Math.max(0, slashes - 1);
     const prefix = depth === 0 ? "./" : "../".repeat(depth);
