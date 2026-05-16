@@ -43,6 +43,31 @@
     max-width: 42rem;
     margin: 0 0 var(--space-lg);
   }
+  .status-alpha {
+    display: inline-block;
+    padding: 1px 6px;
+    background: color-mix(in oklch, var(--accent) 14%, transparent);
+    color: var(--accent-strong);
+    border: 1px solid color-mix(in oklch, var(--accent) 36%, transparent);
+    border-radius: 3px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    font-size: 0.62rem;
+    vertical-align: 1px;
+  }
+  .home-hero p.status-note {
+    font-size: 0.94rem;
+    color: var(--ink-mid);
+    background: var(--bg-elev);
+    border-left: 2px solid var(--accent);
+    padding: var(--space-sm) var(--space-md);
+    max-width: 38rem;
+    margin: calc(var(--space-md) * -1) 0 var(--space-lg);
+  }
+  .home-hero p.status-note strong {
+    color: var(--ink);
+    font-weight: 700;
+  }
   .home-cta {
     display: inline-flex;
     align-items: center;
@@ -167,9 +192,10 @@
     <div class="frame">
       <header class="hero home-hero">
         <div>
-          <div class="eyebrow">lash · documentation</div>
+          <div class="eyebrow">lash · documentation · <span class="status-alpha">alpha</span></div>
           <h1>system<span class="slash">/</span>manual</h1>
           <p>Three views of the same agent runtime — the app-facing <code>lash</code> API, the lower-level runtime architecture, and the design language for long working sessions in the TUI.</p>
+          <p class="status-note"><strong>Status: alpha.</strong> Everything documented works today, but the public API is still in flux — expect breaking changes between releases. Pin to a specific commit when you embed.</p>
           <a class="home-cta" href="./quickstart.html">Start with Quickstart <span class="arrow">→</span></a>
         </div>
       </header>
