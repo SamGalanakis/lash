@@ -5,91 +5,112 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 <style>
-  /* docs root · hero adjustments and the 4-card entry rail */
-  /* The shared .frame grid expects a sidebar in column 1; this page has none.
-     Collapse to a single-column flow so the hero, rail, and footer stack instead of
-     the rail being auto-placed into the empty sidebar cell beneath the hero. */
+  /* docs landing · stand-alone layout (no sidebar) */
   main.page > .frame {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "hero"
       "content"
       "footer";
+    column-gap: 0;
   }
-  .entry-rail { grid-area: content; }
   .home-hero {
-    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-4xl) 0 var(--space-2xl);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: var(--space-2xl);
   }
   .home-hero h1 {
-    font-size: clamp(3.4rem, 8vw, 6rem);
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: clamp(2.8rem, 5.4vw, 4.6rem);
+    line-height: 0.96;
+    letter-spacing: -0.02em;
+    text-transform: uppercase;
+    margin-bottom: var(--space-lg);
   }
   .home-hero p {
-    font-size: 1.18rem;
-    line-height: 1.6;
+    font-size: 1.22rem;
+    line-height: 1.55;
+    color: var(--ink-mid);
+    max-width: 42rem;
+    margin: 0 0 var(--space-lg);
   }
   .home-cta {
     display: inline-flex;
-    align-items: baseline;
-    gap: var(--space-sm);
-    margin-top: var(--space-md);
-    padding: var(--space-sm) 0;
-    color: var(--sodium);
-    font-family: var(--font-ui);
-    font-size: 0.86rem;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    border-bottom: 1px solid var(--line-strong);
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-sm) var(--space-lg);
+    background: var(--ink);
+    color: var(--bg);
+    font-size: 0.94rem;
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: 4px;
+    transition: background 120ms ease;
   }
-  .home-cta:hover { color: var(--sodium); text-decoration: none; }
+  .home-cta:hover {
+    background: var(--accent-strong);
+    color: var(--bg);
+    text-decoration: none;
+  }
   .home-cta:focus-visible {
     outline: none;
-    color: var(--sodium);
+    background: var(--accent-strong);
     box-shadow: var(--focus-ring);
   }
-  .home-cta .arrow { font-family: var(--font-ui); }
-  .entry-rail {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: var(--space-md);
-    padding: var(--space-xl);
+  .home-cta .arrow {
+    font-family: var(--font-mono);
+    transition: transform 200ms ease;
   }
-  @media (max-width: 1280px) {
-    .entry-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-cta:hover .arrow { transform: translateX(3px); }
+
+  .entry-rail {
+    grid-area: content;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: var(--space-md);
+    padding: 0 0 var(--space-4xl);
   }
   .entry {
     position: relative;
     display: grid;
-    grid-template-rows: auto 1fr auto;
-    gap: var(--space-md);
-    min-height: 280px;
-    padding: var(--space-xl);
-    border: 1px solid var(--line);
-    background: var(--form-raised);
-    color: var(--chalk);
-    transition: border-color 200ms ease, transform 200ms ease;
-  }
-  .entry::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(135deg, transparent 0, transparent 70%, oklch(0.74 0.155 65 / 0.06) 100%);
-    pointer-events: none;
+    grid-template-rows: auto auto 1fr auto;
+    gap: var(--space-sm);
+    padding: var(--space-lg) var(--space-xl);
+    border: 1px solid var(--rule);
+    background: var(--bg-elev);
+    color: var(--ink);
+    border-radius: 6px;
+    transition: border-color 160ms ease, background 160ms ease;
   }
   .entry:hover {
-    border-color: var(--line-strong);
-    transform: translateY(-2px);
+    border-color: var(--rule-strong);
+    background: var(--bg-faint);
   }
   .entry:focus-within {
-    border-color: var(--line-strong);
-    transform: translateY(-2px);
+    border-color: var(--accent);
     box-shadow: var(--focus-ring);
+  }
+  .entry .micro-label {
+    margin-bottom: 0;
   }
   .entry h2 {
     margin: 0;
-    font-size: clamp(2.4rem, 5vw, 3.2rem);
-    line-height: 0.92;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.875rem;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    text-transform: uppercase;
+    color: var(--ink);
   }
   .entry-link {
     color: inherit;
@@ -99,46 +120,44 @@
     content: "";
     position: absolute;
     inset: 0;
+    border-radius: 6px;
   }
-  .entry-link:focus-visible {
-    outline: none;
-  }
+  .entry-link:focus-visible { outline: none; }
+  .entry .accent { color: var(--accent); }
   .entry p {
     margin: 0;
-    color: var(--chalk-mid);
-    font-family: var(--font-body);
-    font-size: 1rem;
+    color: var(--ink-mid);
+    font-size: 0.94rem;
+    line-height: 1.55;
     max-width: none;
   }
   .entry p a {
     position: relative;
     z-index: 1;
-    color: var(--sodium);
+    color: var(--accent-strong);
   }
   .entry-foot {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
-    color: var(--ash-text);
+    margin-top: var(--space-sm);
+    color: var(--ink-dim);
     font-size: 0.74rem;
-    letter-spacing: 0.18em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
   .entry-arrow {
-    color: var(--sodium);
-    font-family: var(--font-ui);
+    color: var(--ink-dim);
+    font-family: var(--font-mono);
     font-size: 1.1rem;
-    transition: transform 200ms ease;
+    font-weight: 400;
+    transition: transform 200ms ease, color 200ms ease;
   }
   .entry:hover .entry-arrow,
   .entry:focus-within .entry-arrow {
-    transform: translateX(4px);
-  }
-  @media (max-width: 860px) {
-    .home-hero,
-    .entry-rail {
-      grid-template-columns: 1fr;
-    }
+    color: var(--accent-strong);
+    transform: translateX(3px);
   }
 </style>
 </head>

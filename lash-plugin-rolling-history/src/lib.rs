@@ -847,53 +847,6 @@ impl HistoryRewriter for RollingHistoryRewriter {
                 }
                 Ok(input)
             }
-            RewriteTrigger::OverflowRecovery => {
-                strip_all_image_attachments(&mut input.messages, COMPACTED_IMAGE_PLACEHOLDER);
-                let tool_calls = tool_record_map(&input.tool_calls);
-                prune_old_tool_results(&mut input.messages, &tool_calls);
-                if let Some(compacted) = compact_messages_core(
-                    &session_id,
-                    &ctx.state.to_owned_state(),
-                    &input.messages,
-                    None,
-                    host,
-                )
-                .await?
-                {
-                    input.metadata.produced_summary = true;
-                    input.messages = compacted;
-                }
-                if let Some(max) = ctx.state.policy().max_context_tokens {
-                    let total: usize = input
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.parts.iter())
-                        .map(|p| approx_token_count(&p.content))
-                        .sum();
-                    if total > max.saturating_sub(COMPACTION_BUFFER_TOKENS) {
-                        for msg_idx in (0..input.messages.len()).rev() {
-                            let recent_user_turns = input.messages[msg_idx + 1..]
-                                .iter()
-                                .filter(|msg| msg.role == MessageRole::User)
-                                .count();
-                            if recent_user_turns < PRUNE_RECENT_USER_TURNS {
-                                continue;
-                            }
-                            for part in std::sync::Arc::make_mut(&mut input.messages[msg_idx].parts)
-                                .iter_mut()
-                            {
-                                if matches!(part.kind, PartKind::ToolResult)
-                                    && matches!(part.prune_state, lash_core::PruneState::Intact)
-                                {
-                                    part.prune_state = lash_core::PruneState::Cleared;
-                                    part.content.clear();
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(input)
-            }
             RewriteTrigger::WindowShrink { .. } => {
                 if !compaction_needed(
                     ctx.state.last_prompt_usage(),

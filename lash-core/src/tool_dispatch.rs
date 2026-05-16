@@ -474,6 +474,11 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio::time::{Duration, timeout};
 
+    type ExecutionWindow = (&'static str, Instant, Instant);
+    type SharedExecutionWindows = Arc<std::sync::Mutex<Vec<ExecutionWindow>>>;
+    type AttemptObservation = (u32, u32, Option<String>);
+    type SharedAttemptObservations = Arc<std::sync::Mutex<Vec<AttemptObservation>>>;
+
     fn test_tool(name: &str, execution_mode: ToolExecutionMode) -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
             name,
@@ -545,8 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_runs_parallel_bucket_then_serial_and_preserves_order() {
-        let windows: Arc<std::sync::Mutex<Vec<(&'static str, Instant, Instant)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let windows: SharedExecutionWindows = Arc::new(std::sync::Mutex::new(Vec::new()));
         let probes = vec![
             ScheduledProbe {
                 index: 0,
@@ -787,7 +791,7 @@ mod tests {
         attempts: Arc<AtomicUsize>,
         successes_after: usize,
         cancel_on_first: bool,
-        observed_attempts: Arc<std::sync::Mutex<Vec<(u32, u32, Option<String>)>>>,
+        observed_attempts: SharedAttemptObservations,
     }
 
     #[async_trait::async_trait]
@@ -937,7 +941,7 @@ mod tests {
         attempts: Arc<AtomicUsize>,
         successes_after: usize,
         cancel_on_first: bool,
-        observed_attempts: Arc<std::sync::Mutex<Vec<(u32, u32, Option<String>)>>>,
+        observed_attempts: SharedAttemptObservations,
     ) -> ToolDispatchContext {
         exact_dispatch_context(Arc::new(RetryProbeTools {
             definition: retry_tool("retry_probe", retry_policy),

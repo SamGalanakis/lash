@@ -33,7 +33,7 @@ use super::{
     error_value, eval_binary_values, eval_binary_values_async, eval_compare_values,
     eval_compare_values_async, eval_number_binary_values, eval_number_compare_values,
     eval_number_numeric_binary_value, eval_pure_expr, execute_compiled_format,
-    execute_compiled_format_direct, execute_compiled_format_one_number_direct,
+    execute_compiled_format_direct, execute_compiled_format_one_number_compact_direct,
     execute_integer_div_builtin, execute_intrinsic, execute_len_direct, execute_push_builtin_async,
     execute_range_builtin, is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
     materialize_projected_async, materialize_value, range_bounds, range_bounds_async, read_field,
@@ -689,7 +689,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     restore: self.slots.capture_temporary(binding),
                 });
             }
-            Instruction::LoweredLoop(_) => return Ok(None),
+            Instruction::LoweredLoop(index) => {
+                if !self.execute_lowered_loop_direct(&self.chunk.lowered_loops[index])? {
+                    return Ok(None);
+                }
+            }
             Instruction::IterNext { jump_to } => {
                 let Some(iter_state) = self.iter_stack.last_mut() else {
                     return Err(RuntimeError::ValueError {
@@ -1427,18 +1431,19 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             IntrinsicOp::FormatCompiledSlotNumber { template, slot } => {
                 let template = &self.chunk.format_templates[template];
                 let value = match self.load_slot(slot)? {
-                    Value::Number(value) => {
-                        execute_compiled_format_one_number_direct(template, *value)?
-                    }
+                    Value::Number(value) => Value::String(
+                        execute_compiled_format_one_number_compact_direct(template, *value)?,
+                    ),
                     value => {
-                        if matches!(value, Value::Projected(_)) {
+                        let value = if matches!(value, Value::Projected(_)) {
                             execute_compiled_format(template, std::slice::from_ref(value)).await?
                         } else {
                             execute_compiled_format_direct(template, std::slice::from_ref(value))?
-                        }
+                        };
+                        Value::String(value.into())
                     }
                 };
-                self.stack.push(Value::String(value.into()));
+                self.stack.push(value);
             }
             IntrinsicOp::FormatCompiledSlotNumberBinary {
                 template,
@@ -1448,22 +1453,25 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             } => {
                 let template = &self.chunk.format_templates[template];
                 let value = match self.load_slot(slot)? {
-                    Value::Number(left) => execute_compiled_format_one_number_direct(
-                        template,
-                        eval_number_numeric_binary_value(*left, op, right),
-                    )?,
+                    Value::Number(left) => {
+                        Value::String(execute_compiled_format_one_number_compact_direct(
+                            template,
+                            eval_number_numeric_binary_value(*left, op, right),
+                        )?)
+                    }
                     left => {
                         let value =
                             eval_binary_values_async(left.clone(), op, Value::Number(right))
                                 .await?;
-                        if matches!(value, Value::Projected(_)) {
+                        let value = if matches!(value, Value::Projected(_)) {
                             execute_compiled_format(template, &[value]).await?
                         } else {
                             execute_compiled_format_direct(template, &[value])?
-                        }
+                        };
+                        Value::String(value.into())
                     }
                 };
-                self.stack.push(Value::String(value.into()));
+                self.stack.push(value);
             }
             _ => {
                 let argc = op.argc();
@@ -1518,6 +1526,56 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
+    fn execute_lowered_loop_direct(
+        &mut self,
+        lowered_loop: &LoweredLoop,
+    ) -> Result<bool, RuntimeError> {
+        if !self.lowered_loop_can_eval_direct(lowered_loop) {
+            return Ok(false);
+        }
+        match &lowered_loop.iterable {
+            LoopIterable::Range(args) => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args.iter() {
+                    values.push(self.eval_loop_expr_direct(arg)?);
+                }
+                let (start, end, step) = range_bounds(&values)?;
+                self.execute_lowered_range_loop_direct(
+                    lowered_loop.binding,
+                    &lowered_loop.body,
+                    start,
+                    end,
+                    step,
+                )?;
+            }
+            LoopIterable::Values(expr) => {
+                let value = self.eval_loop_expr_direct(expr)?;
+                let Value::List(values) = value else {
+                    return Err(RuntimeError::NonListIteration);
+                };
+                self.execute_lowered_value_loop_direct(
+                    lowered_loop.binding,
+                    &lowered_loop.body,
+                    values,
+                )?;
+            }
+            LoopIterable::Keys(expr) => {
+                let value = self.eval_loop_expr_direct(expr)?;
+                let Some(Value::List(values)) =
+                    execute_intrinsic_direct(IntrinsicOp::Keys, &[value])?
+                else {
+                    return Ok(false);
+                };
+                self.execute_lowered_value_loop_direct(
+                    lowered_loop.binding,
+                    &lowered_loop.body,
+                    values,
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
     async fn execute_lowered_range_loop(
         &mut self,
         binding: usize,
@@ -1538,6 +1596,48 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             self.slots
                 .assign_loop_binding(binding, Value::Number(next as f64));
             match Box::pin(self.execute_loop_ops(body)).await {
+                Ok(LoopFlow::Continue) => {}
+                Ok(LoopFlow::ContinueLoop) => {}
+                Ok(LoopFlow::BreakLoop) => break,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+            next = match next.checked_add(step) {
+                Some(next) => next,
+                None => {
+                    result = Err(RuntimeError::ValueError {
+                        message: "`range` overflowed".to_string(),
+                    });
+                    break;
+                }
+            };
+        }
+        self.slots.restore_temporary(binding, restore);
+        result
+    }
+
+    fn execute_lowered_range_loop_direct(
+        &mut self,
+        binding: usize,
+        body: &[LoopOp],
+        start: i64,
+        end: i64,
+        step: i64,
+    ) -> Result<(), RuntimeError> {
+        if !range_has_next(start, end, step) {
+            return Ok(());
+        }
+        self.slots
+            .ensure_assignable(binding, &self.chunk.slot_names)?;
+        let restore = self.slots.capture_temporary(binding);
+        let mut next = start;
+        let mut result = Ok(());
+        while range_has_next(next, end, step) {
+            self.slots
+                .assign_loop_binding(binding, Value::Number(next as f64));
+            match self.execute_loop_ops_direct(body) {
                 Ok(LoopFlow::Continue) => {}
                 Ok(LoopFlow::ContinueLoop) => {}
                 Ok(LoopFlow::BreakLoop) => break,
@@ -1589,9 +1689,48 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         result
     }
 
+    fn execute_lowered_value_loop_direct(
+        &mut self,
+        binding: usize,
+        body: &[LoopOp],
+        values: ListValue,
+    ) -> Result<(), RuntimeError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        self.slots
+            .ensure_assignable(binding, &self.chunk.slot_names)?;
+        let restore = self.slots.capture_temporary(binding);
+        let mut result = Ok(());
+        for value in values.iter().cloned() {
+            self.slots.assign_loop_binding(binding, value);
+            match self.execute_loop_ops_direct(body) {
+                Ok(LoopFlow::Continue) => {}
+                Ok(LoopFlow::ContinueLoop) => continue,
+                Ok(LoopFlow::BreakLoop) => break,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        self.slots.restore_temporary(binding, restore);
+        result
+    }
+
     async fn execute_loop_ops(&mut self, ops: &[LoopOp]) -> Result<LoopFlow, RuntimeError> {
         for op in ops {
             match self.execute_loop_op(op).await? {
+                LoopFlow::Continue => {}
+                flow => return Ok(flow),
+            }
+        }
+        Ok(LoopFlow::Continue)
+    }
+
+    fn execute_loop_ops_direct(&mut self, ops: &[LoopOp]) -> Result<LoopFlow, RuntimeError> {
+        for op in ops {
+            match self.execute_loop_op_direct(op)? {
                 LoopFlow::Continue => {}
                 flow => return Ok(flow),
             }
@@ -1680,6 +1819,98 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             }
             LoopOp::Loop(lowered_loop) => {
                 Box::pin(self.execute_lowered_loop(lowered_loop)).await?;
+            }
+            LoopOp::Break => return Ok(LoopFlow::BreakLoop),
+            LoopOp::Continue => return Ok(LoopFlow::ContinueLoop),
+        }
+        Ok(LoopFlow::Continue)
+    }
+
+    fn execute_loop_op_direct(&mut self, op: &LoopOp) -> Result<LoopFlow, RuntimeError> {
+        match op {
+            LoopOp::Assign { slot, expr } => {
+                let value = self.eval_loop_expr_direct(expr)?;
+                self.slots
+                    .assign(*slot, value.clone(), &self.chunk.slot_names)?;
+                self.record_assignment(*slot);
+                self.last_value = Some(value);
+            }
+            LoopOp::PathAssign {
+                slot,
+                path,
+                indexes,
+                expr,
+            } => {
+                let value = self.eval_loop_expr_direct(expr)?;
+                let last_value = value.clone();
+                let mut index_values = Vec::with_capacity(indexes.len());
+                for index in indexes.iter() {
+                    index_values.push(self.eval_loop_expr_direct(index)?);
+                }
+                let root_name = &self.chunk.slot_names[*slot];
+                self.slots
+                    .ensure_assignable(*slot, &self.chunk.slot_names)?;
+                let root =
+                    self.slots
+                        .get_mut(*slot)
+                        .ok_or_else(|| RuntimeError::UndefinedVariable {
+                            name: root_name.text.to_string(),
+                        })?;
+                assign_path(
+                    root,
+                    &self.chunk.assign_paths[*path],
+                    &index_values,
+                    value,
+                    &self.chunk.names,
+                )?;
+                self.record_assignment(*slot);
+                self.last_value = Some(last_value);
+            }
+            LoopOp::AddAssign { slot, expr } => {
+                let right = self.eval_loop_expr_direct(expr)?;
+                self.add_assign_value(*slot, right)?;
+            }
+            LoopOp::AddAssignNumber { slot, right } => {
+                self.add_assign_value(*slot, Value::Number(*right))?;
+            }
+            LoopOp::AddAssignSlot { slot, right } => {
+                let right = self.load_slot(*right)?.clone();
+                self.add_assign_value(*slot, right)?;
+            }
+            LoopOp::AddAssignIndexNumber { slot, index, right } => {
+                let index = self.eval_loop_expr_direct(index)?;
+                self.add_assign_index_number(*slot, &index, *right)?;
+            }
+            LoopOp::AddAssignIndexSlotNumber { slot, index, right } => {
+                let index = self.load_slot(*index)?.clone();
+                self.add_assign_index_number(*slot, &index, *right)?;
+            }
+            LoopOp::AppendAssign { slot, expr } => {
+                let item = self.eval_loop_expr_direct(expr)?;
+                self.append_assign_value(*slot, item)?;
+            }
+            LoopOp::Expr(expr) => {
+                self.last_value = Some(self.eval_loop_expr_direct(expr)?);
+            }
+            LoopOp::If {
+                condition,
+                then_ops,
+                else_ops,
+            } => {
+                let condition = self.eval_loop_expr_direct(condition)?;
+                let ops = if is_truthy(&condition) {
+                    then_ops
+                } else {
+                    else_ops
+                };
+                match self.execute_loop_ops_direct(ops)? {
+                    LoopFlow::Continue => {}
+                    flow => return Ok(flow),
+                }
+            }
+            LoopOp::Loop(lowered_loop) => {
+                debug_assert!(self.lowered_loop_can_eval_direct(lowered_loop));
+                self.execute_lowered_loop_direct(lowered_loop)?;
             }
             LoopOp::Break => return Ok(LoopFlow::BreakLoop),
             LoopOp::Continue => return Ok(LoopFlow::ContinueLoop),
@@ -1808,6 +2039,13 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
+    fn eval_loop_expr_direct(&mut self, expr: &LoopExpr) -> Result<Value, RuntimeError> {
+        self.eval_loop_expr_fast(expr)?
+            .ok_or_else(|| RuntimeError::ValueError {
+                message: "lowered loop direct path reached an async expression".to_string(),
+            })
+    }
+
     fn eval_loop_expr_fast(&mut self, expr: &LoopExpr) -> Result<Option<Value>, RuntimeError> {
         match expr {
             LoopExpr::Const(value) => Ok(Some(value.clone())),
@@ -1855,6 +2093,28 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 Ok(Some(value))
             }
             LoopExpr::Format { template, args } => {
+                if let [arg] = args.as_ref() {
+                    let Some(value) = self.eval_loop_expr_fast(arg)? else {
+                        return Ok(None);
+                    };
+                    let start = self.profile.as_ref().map(|_| Instant::now());
+                    let value = match value {
+                        Value::Number(value) => {
+                            execute_compiled_format_one_number_compact_direct(template, value)?
+                        }
+                        value => {
+                            execute_compiled_format_direct(template, std::slice::from_ref(&value))?
+                                .into()
+                        }
+                    };
+                    if let Some(start) = start {
+                        self.record_builtin_profile(
+                            IntrinsicOp::Format(args.len()),
+                            start.elapsed().as_nanos(),
+                        );
+                    }
+                    return Ok(Some(Value::String(value)));
+                }
                 let Some(values) = self.eval_loop_exprs_fast(args)? else {
                     return Ok(None);
                 };
@@ -1965,6 +2225,90 @@ impl<'a, H: ToolHost> Vm<'a, H> {
             values.push(value);
         }
         Ok(Some(values))
+    }
+
+    fn lowered_loop_can_eval_direct(&self, lowered_loop: &LoweredLoop) -> bool {
+        let iterable_direct = match &lowered_loop.iterable {
+            LoopIterable::Range(args) => args.iter().all(|arg| self.loop_expr_can_eval_direct(arg)),
+            LoopIterable::Values(expr) | LoopIterable::Keys(expr) => {
+                self.loop_expr_can_eval_direct(expr)
+            }
+        };
+        iterable_direct && self.loop_ops_can_eval_direct(&lowered_loop.body)
+    }
+
+    fn loop_ops_can_eval_direct(&self, ops: &[LoopOp]) -> bool {
+        ops.iter().all(|op| self.loop_op_can_eval_direct(op))
+    }
+
+    fn loop_op_can_eval_direct(&self, op: &LoopOp) -> bool {
+        match op {
+            LoopOp::Assign { expr, .. }
+            | LoopOp::AddAssign { expr, .. }
+            | LoopOp::AppendAssign { expr, .. }
+            | LoopOp::Expr(expr) => self.loop_expr_can_eval_direct(expr),
+            LoopOp::PathAssign { indexes, expr, .. } => {
+                self.loop_expr_can_eval_direct(expr)
+                    && indexes
+                        .iter()
+                        .all(|index| self.loop_expr_can_eval_direct(index))
+            }
+            LoopOp::AddAssignNumber { .. } | LoopOp::AddAssignIndexSlotNumber { .. } => true,
+            LoopOp::AddAssignSlot { right, .. } => self.slot_can_eval_direct(*right),
+            LoopOp::AddAssignIndexNumber { index, .. } => self.loop_expr_can_eval_direct(index),
+            LoopOp::If {
+                condition,
+                then_ops,
+                else_ops,
+            } => {
+                self.loop_expr_can_eval_direct(condition)
+                    && self.loop_ops_can_eval_direct(then_ops)
+                    && self.loop_ops_can_eval_direct(else_ops)
+            }
+            LoopOp::Loop(lowered_loop) => self.lowered_loop_can_eval_direct(lowered_loop),
+            LoopOp::Break | LoopOp::Continue => true,
+        }
+    }
+
+    fn loop_expr_can_eval_direct(&self, expr: &LoopExpr) -> bool {
+        match expr {
+            LoopExpr::Const(_) => true,
+            LoopExpr::Slot(slot) => self.slot_can_eval_direct(*slot),
+            LoopExpr::List(items) => items
+                .iter()
+                .all(|item| self.loop_expr_can_eval_direct(item)),
+            LoopExpr::Record(entries) => entries
+                .iter()
+                .all(|(_, value)| self.loop_expr_can_eval_direct(value)),
+            LoopExpr::Intrinsic { op, args } => {
+                intrinsic_can_eval_direct(*op)
+                    && args.iter().all(|arg| self.loop_expr_can_eval_direct(arg))
+            }
+            LoopExpr::Format { args, .. } => {
+                args.iter().all(|arg| self.loop_expr_can_eval_direct(arg))
+            }
+            LoopExpr::Field { target, .. } => self.loop_expr_can_eval_direct(target),
+            LoopExpr::Index { target, index } => {
+                self.loop_expr_can_eval_direct(target) && self.loop_expr_can_eval_direct(index)
+            }
+            LoopExpr::Unary { expr, .. } => self.loop_expr_can_eval_direct(expr),
+            LoopExpr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.loop_expr_can_eval_direct(condition)
+                    && self.loop_expr_can_eval_direct(then_expr)
+                    && self.loop_expr_can_eval_direct(else_expr)
+            }
+            LoopExpr::Binary { left, right, .. } => {
+                self.loop_expr_can_eval_direct(left) && self.loop_expr_can_eval_direct(right)
+            }
+        }
+    }
+
+    fn slot_can_eval_direct(&self, slot: usize) -> bool {
+        !self.slots.projected.get(slot).copied().unwrap_or(false)
     }
 
     async fn resolve_effect(&mut self, effect: VmEffect) -> Result<(), RuntimeError> {
@@ -2194,31 +2538,11 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         branches_index: usize,
     ) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.named_parallel_call_sets[branches_index];
-        match branches.len() {
-            0 => return Ok(Value::Record(Arc::new(Record::default()))),
-            1 => {
-                let call = self.prepare_named_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_named_call(self.chunk, call, self.host).await?;
-                let mut record = record_with_capacity(1);
-                self.insert_named_parallel_call_result(&mut record, result);
-                return Ok(Value::Record(Arc::new(record)));
-            }
-            2 => {
-                let left_call = self.prepare_named_parallel_call(&branches[0])?;
-                let right_call = self.prepare_named_parallel_call(&branches[1])?;
-                let calls = [left_call, right_call];
-                let results =
-                    Self::run_prepared_named_calls_batch_2(self.chunk, &calls, self.host).await?;
-                let mut record = record_with_capacity(2);
-                for result in results {
-                    self.insert_named_parallel_call_result(&mut record, result);
-                }
-                return Ok(Value::Record(Arc::new(record)));
-            }
-            _ => {}
+        if branches.is_empty() {
+            return Ok(Value::Record(Arc::new(Record::default())));
         }
 
-        let mut calls = Vec::with_capacity(branches.len());
+        let mut calls = SmallVec::<[PreparedNamedParallelCall; 4]>::with_capacity(branches.len());
         for branch in branches {
             calls.push(self.prepare_named_parallel_call(branch)?);
         }
@@ -2233,49 +2557,22 @@ impl<'a, H: ToolHost> Vm<'a, H> {
 
     async fn exec_parallel_calls(&mut self, branches_index: usize) -> Result<(), RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
-        match branches.len() {
-            0 => Ok(()),
-            1 => {
-                let call = self.prepare_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
-                self.slots
-                    .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                self.record_assignment(result.slot);
-                Ok(())
-            }
-            2 => {
-                let left_call = self.prepare_parallel_call(&branches[0])?;
-                let right_call = self.prepare_parallel_call(&branches[1])?;
-                let calls = [left_call, right_call];
-                if calls[0].slot == calls[1].slot {
-                    return Err(RuntimeError::ParallelConflict {
-                        name: self.chunk.slot_names[calls[0].slot].text.to_string(),
-                    });
-                }
-                let results =
-                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host).await?;
-                for result in results {
-                    self.slots
-                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                    self.record_assignment(result.slot);
-                }
-                Ok(())
-            }
-            _ => {
-                let mut calls = Vec::with_capacity(branches.len());
-                for branch in branches {
-                    calls.push(self.prepare_parallel_call(branch)?);
-                }
-                self.ensure_distinct_parallel_call_slots(&calls)?;
-                let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
-                for result in results {
-                    self.slots
-                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                    self.record_assignment(result.slot);
-                }
-                Ok(())
-            }
+        if branches.is_empty() {
+            return Ok(());
         }
+
+        let mut calls = SmallVec::<[PreparedParallelCall; 4]>::with_capacity(branches.len());
+        for branch in branches {
+            calls.push(self.prepare_parallel_call(branch)?);
+        }
+        self.ensure_distinct_parallel_call_slots(&calls)?;
+        let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
+        for result in results {
+            self.slots
+                .assign(result.slot, result.output, &self.chunk.slot_names)?;
+            self.record_assignment(result.slot);
+        }
+        Ok(())
     }
 
     async fn exec_parallel_calls_value(
@@ -2283,54 +2580,24 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         branches_index: usize,
     ) -> Result<Value, RuntimeError> {
         let branches = &self.chunk.parallel_call_sets[branches_index];
-        match branches.len() {
-            0 => Ok(Value::List(Vec::<Value>::new().into())),
-            1 => {
-                let call = self.prepare_parallel_call(&branches[0])?;
-                let result = Self::run_prepared_call(self.chunk, call, self.host).await?;
-                let output = result.output.clone();
-                self.slots
-                    .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                self.record_assignment(result.slot);
-                Ok(Value::List(vec![output].into()))
-            }
-            2 => {
-                let left_call = self.prepare_parallel_call(&branches[0])?;
-                let right_call = self.prepare_parallel_call(&branches[1])?;
-                let calls = [left_call, right_call];
-                if calls[0].slot == calls[1].slot {
-                    return Err(RuntimeError::ParallelConflict {
-                        name: self.chunk.slot_names[calls[0].slot].text.to_string(),
-                    });
-                }
-                let results =
-                    Self::run_prepared_calls_batch_2(self.chunk, &calls, self.host).await?;
-                let mut outputs = Vec::with_capacity(2);
-                for result in results {
-                    outputs.push(result.output.clone());
-                    self.slots
-                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                    self.record_assignment(result.slot);
-                }
-                Ok(Value::List(outputs.into()))
-            }
-            _ => {
-                let mut calls = Vec::with_capacity(branches.len());
-                for branch in branches {
-                    calls.push(self.prepare_parallel_call(branch)?);
-                }
-                self.ensure_distinct_parallel_call_slots(&calls)?;
-                let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
-                let mut outputs = Vec::with_capacity(results.len());
-                for result in results {
-                    outputs.push(result.output.clone());
-                    self.slots
-                        .assign(result.slot, result.output, &self.chunk.slot_names)?;
-                    self.record_assignment(result.slot);
-                }
-                Ok(Value::List(outputs.into()))
-            }
+        if branches.is_empty() {
+            return Ok(Value::List(Vec::<Value>::new().into()));
         }
+
+        let mut calls = SmallVec::<[PreparedParallelCall; 4]>::with_capacity(branches.len());
+        for branch in branches {
+            calls.push(self.prepare_parallel_call(branch)?);
+        }
+        self.ensure_distinct_parallel_call_slots(&calls)?;
+        let results = Self::run_prepared_calls_batch(self.chunk, &calls, self.host).await?;
+        let mut outputs = Vec::with_capacity(results.len());
+        for result in results {
+            outputs.push(result.output.clone());
+            self.slots
+                .assign(result.slot, result.output, &self.chunk.slot_names)?;
+            self.record_assignment(result.slot);
+        }
+        Ok(Value::List(outputs.into()))
     }
 
     fn prepare_parallel_call(
@@ -2403,13 +2670,10 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), result.output);
     }
 
-    async fn run_host_batch<const N: usize>(
+    async fn run_host_batch(
         host_calls: Vec<ToolHostCall>,
         host: &'a H,
-    ) -> Result<HostBatchResults<N>, RuntimeError>
-    where
-        [HostBatchItemResult; N]: smallvec::Array<Item = HostBatchItemResult>,
-    {
+    ) -> Result<HostBatchResults, RuntimeError> {
         let run = std::panic::AssertUnwindSafe(host.call_batch(host_calls))
             .catch_unwind()
             .await;
@@ -2433,27 +2697,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 args: call.args.clone(),
             })
             .collect::<Vec<_>>();
-        let results = Self::run_host_batch::<4>(host_calls, host).await?;
+        let results = Self::run_host_batch(host_calls, host).await?;
         Self::finish_prepared_calls_batch(calls, results)
-    }
-
-    async fn run_prepared_calls_batch_2(
-        chunk: &'a Chunk,
-        calls: &[PreparedParallelCall; 2],
-        host: &'a H,
-    ) -> Result<[ParallelCallResult; 2], RuntimeError> {
-        let host_calls = vec![
-            ToolHostCall {
-                name: chunk.names[calls[0].name].text.to_string(),
-                args: calls[0].args.clone(),
-            },
-            ToolHostCall {
-                name: chunk.names[calls[1].name].text.to_string(),
-                args: calls[1].args.clone(),
-            },
-        ];
-        let results = Self::run_host_batch::<2>(host_calls, host).await?;
-        Self::finish_prepared_calls_batch_2(calls, results)
     }
 
     fn finish_prepared_call_result(
@@ -2469,35 +2714,9 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
-    fn finish_host_batch_pair(
-        results: HostBatchResults<2>,
-    ) -> Result<[HostBatchItemResult; 2], RuntimeError> {
-        if results.len() != 2 {
-            return Err(RuntimeError::ValueError {
-                message: "parallel call batch returned the wrong number of results".to_string(),
-            });
-        }
-        let mut results = results.into_iter();
-        Ok([
-            results.next().expect("length checked"),
-            results.next().expect("length checked"),
-        ])
-    }
-
-    fn finish_prepared_calls_batch_2(
-        calls: &[PreparedParallelCall; 2],
-        results: HostBatchResults<2>,
-    ) -> Result<[ParallelCallResult; 2], RuntimeError> {
-        let [left, right] = Self::finish_host_batch_pair(results)?;
-        Ok([
-            Self::finish_prepared_call_result(&calls[0], left),
-            Self::finish_prepared_call_result(&calls[1], right),
-        ])
-    }
-
     fn finish_prepared_calls_batch(
         calls: &[PreparedParallelCall],
-        results: HostBatchResults<4>,
+        results: HostBatchResults,
     ) -> Result<SmallVec<[ParallelCallResult; 4]>, RuntimeError> {
         if results.len() != calls.len() {
             return Err(RuntimeError::ValueError {
@@ -2523,27 +2742,8 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 args: call.args.clone(),
             })
             .collect::<Vec<_>>();
-        let results = Self::run_host_batch::<4>(host_calls, host).await?;
+        let results = Self::run_host_batch(host_calls, host).await?;
         Self::finish_prepared_named_calls_batch(calls, results)
-    }
-
-    async fn run_prepared_named_calls_batch_2(
-        chunk: &'a Chunk,
-        calls: &[PreparedNamedParallelCall; 2],
-        host: &'a H,
-    ) -> Result<[NamedParallelCallResult; 2], RuntimeError> {
-        let host_calls = vec![
-            ToolHostCall {
-                name: chunk.names[calls[0].name].text.to_string(),
-                args: calls[0].args.clone(),
-            },
-            ToolHostCall {
-                name: chunk.names[calls[1].name].text.to_string(),
-                args: calls[1].args.clone(),
-            },
-        ];
-        let results = Self::run_host_batch::<2>(host_calls, host).await?;
-        Self::finish_prepared_named_calls_batch_2(calls, results)
     }
 
     fn finish_prepared_named_call_result(
@@ -2559,20 +2759,9 @@ impl<'a, H: ToolHost> Vm<'a, H> {
         }
     }
 
-    fn finish_prepared_named_calls_batch_2(
-        calls: &[PreparedNamedParallelCall; 2],
-        results: HostBatchResults<2>,
-    ) -> Result<[NamedParallelCallResult; 2], RuntimeError> {
-        let [left, right] = Self::finish_host_batch_pair(results)?;
-        Ok([
-            Self::finish_prepared_named_call_result(&calls[0], left),
-            Self::finish_prepared_named_call_result(&calls[1], right),
-        ])
-    }
-
     fn finish_prepared_named_calls_batch(
         calls: &[PreparedNamedParallelCall],
-        results: HostBatchResults<4>,
+        results: HostBatchResults,
     ) -> Result<SmallVec<[NamedParallelCallResult; 4]>, RuntimeError> {
         if results.len() != calls.len() {
             return Err(RuntimeError::ValueError {
@@ -2602,56 +2791,6 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                 message: "parallel branch panicked".to_string(),
             }),
         }
-    }
-
-    async fn run_prepared_call(
-        chunk: &'a Chunk,
-        call: PreparedParallelCall,
-        host: &'a H,
-    ) -> Result<ParallelCallResult, RuntimeError> {
-        let slot = call.slot;
-        let name = chunk.names[call.name].text.to_string();
-        let run = std::panic::AssertUnwindSafe(host.call(name, call.args))
-            .catch_unwind()
-            .await;
-        match run {
-            Ok(result) => match result {
-                Ok(value) => Ok(success(value)),
-                Err(error) => Ok(error_value(error.to_string())),
-            },
-            Err(_) => Err(RuntimeError::ValueError {
-                message: "parallel branch panicked".to_string(),
-            }),
-        }
-        .map(|value| ParallelCallResult {
-            slot,
-            output: value,
-        })
-    }
-
-    async fn run_prepared_named_call(
-        chunk: &'a Chunk,
-        call: PreparedNamedParallelCall,
-        host: &'a H,
-    ) -> Result<NamedParallelCallResult, RuntimeError> {
-        let output_name = call.output_name;
-        let name = chunk.names[call.name].text.to_string();
-        let run = std::panic::AssertUnwindSafe(host.call(name, call.args))
-            .catch_unwind()
-            .await;
-        match run {
-            Ok(result) => match result {
-                Ok(value) => Ok(success(value)),
-                Err(error) => Ok(error_value(error.to_string())),
-            },
-            Err(_) => Err(RuntimeError::ValueError {
-                message: "parallel branch panicked".to_string(),
-            }),
-        }
-        .map(|output| NamedParallelCallResult {
-            output_name,
-            output,
-        })
     }
 
     fn merge_branch_result(
@@ -2877,7 +3016,7 @@ struct PreparedNamedParallelCall {
 }
 
 type HostBatchItemResult = Result<Value, ToolHostError>;
-type HostBatchResults<const N: usize> = SmallVec<[HostBatchItemResult; N]>;
+type HostBatchResults = SmallVec<[HostBatchItemResult; 4]>;
 
 pub(crate) struct IterState {
     cursor: IterCursor,
@@ -2892,6 +3031,19 @@ enum IterCursor {
 
 fn range_has_next(start: i64, end: i64, step: i64) -> bool {
     (step > 0 && start < end) || (step < 0 && start > end)
+}
+
+fn intrinsic_can_eval_direct(op: IntrinsicOp) -> bool {
+    matches!(
+        op,
+        IntrinsicOp::Len
+            | IntrinsicOp::Keys
+            | IntrinsicOp::Values
+            | IntrinsicOp::Range(_)
+            | IntrinsicOp::CeilDiv
+            | IntrinsicOp::FloorDiv
+            | IntrinsicOp::Push
+    )
 }
 
 fn execute_intrinsic_direct(

@@ -104,7 +104,7 @@ impl ModeExecutionContext {
         let event_tx = self.dispatch.event_tx.clone();
         let progress_handle = tokio::spawn(async move {
             while let Some(sandbox_msg) = progress_rx.recv().await {
-                if sandbox_msg.kind != "final" && sandbox_msg.kind != "lashlang_code" {
+                if sandbox_msg.kind != "lashlang_code" {
                     let _ = event_tx
                         .send(SessionEvent::Message {
                             text: sandbox_msg.text,

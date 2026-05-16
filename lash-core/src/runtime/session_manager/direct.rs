@@ -61,6 +61,7 @@ impl DirectCompletionCapability {
                             error: lash_trace::TraceError {
                                 message: err.message.clone(),
                                 retryable: err.retryable,
+                                terminal_reason: Some(err.terminal_reason.code().to_string()),
                                 code: err.code.clone(),
                                 raw: err.raw.clone(),
                             },
@@ -80,6 +81,7 @@ impl DirectCompletionCapability {
                     response: crate::trace::trace_llm_response(
                         response.full_text.clone(),
                         0,
+                        Some(response.terminal_reason),
                         crate::trace::trace_output_parts(&response.parts),
                     ),
                     usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
@@ -148,6 +150,7 @@ impl DirectCompletionCapability {
                             error: lash_trace::TraceError {
                                 message: err.message.clone(),
                                 retryable: err.retryable,
+                                terminal_reason: Some(err.terminal_reason.code().to_string()),
                                 code: err.code.clone(),
                                 raw: err.raw.clone(),
                             },
@@ -169,6 +172,7 @@ impl DirectCompletionCapability {
                     response: crate::trace::trace_llm_response(
                         response.full_text.clone(),
                         0,
+                        Some(response.terminal_reason),
                         crate::trace::trace_output_parts(&response.parts),
                     ),
                     usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),

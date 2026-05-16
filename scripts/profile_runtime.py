@@ -64,7 +64,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Limit to one or more runtime perf scenarios: standard, rlm, "
             "rlm_tool_calls, rlm_globals, rlm_large_tool_surface, "
-            "observational_memory, openai_compat_stream, embed_standard, embed_rlm, all."
+            "observational_memory, openai_compat_stream, embed_standard, embed_rlm, "
+            "turn_checkpoint, all."
         ),
     )
     parser.add_argument(

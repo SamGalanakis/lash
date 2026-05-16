@@ -1,42 +1,6 @@
 use super::*;
 
 #[test]
-fn assembler_prefers_final_message() {
-    let mut assembler = TurnAssembler::default();
-    assembler.push(&SessionEvent::TextDelta {
-        content: "stream".to_string(),
-    });
-    assembler.push_turn_activity(&TurnActivity::new(
-        TurnActivityId::new("assistant:stream"),
-        TurnEvent::AssistantProseDelta {
-            text: "semantic".to_string(),
-        },
-    ));
-    assembler.push(&SessionEvent::Message {
-        text: "final".to_string(),
-        kind: "final".to_string(),
-    });
-    assembler.push(&SessionEvent::Done);
-    let out = assembler.finish(
-        default_state().export_state(),
-        false,
-        None,
-        &TerminationPolicy::default(),
-    );
-    assert!(matches!(
-        &out.outcome,
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
-    ));
-    assert!(matches!(
-        &out.outcome,
-        TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
-    ));
-    assert_eq!(out.assistant_output.safe_text, "final");
-    assert_eq!(out.assistant_output.raw_text, "final");
-    assert_eq!(out.assistant_output.state, OutputState::Usable);
-}
-
-#[test]
 fn assembler_uses_last_semantic_assistant_prose_group() {
     let mut assembler = TurnAssembler::default();
     assembler.push_turn_activity(&TurnActivity::new(
@@ -141,7 +105,7 @@ fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
 }
 
 #[test]
-fn assembler_keeps_explicit_terminal_value_when_semantic_prose_streamed() {
+fn assembler_uses_submitted_value_for_assistant_output_when_semantic_prose_streamed() {
     let mut assembler = TurnAssembler::default();
     assembler.push_turn_activity(&TurnActivity::new(
         TurnActivityId::new("assistant:before-submit"),
@@ -169,7 +133,7 @@ fn assembler_keeps_explicit_terminal_value_when_semantic_prose_streamed() {
             value: serde_json::json!({ "ok": true })
         })
     );
-    assert_eq!(out.assistant_output.safe_text, "thinking before submit");
+    assert_eq!(out.assistant_output.safe_text, "{\n  \"ok\": true\n}");
 }
 
 #[test]
@@ -552,6 +516,7 @@ fn output_state_recovered_from_error() {
     let issues = vec![TurnIssue {
         kind: "runtime".to_string(),
         code: Some("example".to_string()),
+        terminal_reason: None,
         message: "something failed".to_string(),
         raw: None,
     }];

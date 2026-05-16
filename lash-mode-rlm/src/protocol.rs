@@ -62,14 +62,6 @@ submit "The bound version is 0.2.61."
 
 "#;
 
-fn render_terminal_output_value(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-    }
-}
-
 pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
 
 - Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
@@ -277,10 +269,10 @@ fn rlm_termination(options: &lash_core::ModeTurnOptions) -> RlmTermination {
         .unwrap_or_default()
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct RlmDriverState {
     reasoning: String,
-    tool_calls: Vec<ToolCallRecord>,
+    tool_call_ids: Vec<String>,
     images: Vec<AttachmentRef>,
     /// One entry per `print` from the executed lashlang block (plus any
     /// raw stdout-style emission). Replaces the old split between a
@@ -308,7 +300,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
     fn handle_llm_success(
         &self,
         ctx: DriverContextView<'_>,
-        mut waiting: WaitingLlmState,
+        mut waiting: WaitingLlmState<lash_core::HostModeProtocol>,
         llm_response: LlmResponse,
         _text_streamed: bool,
     ) -> Vec<DriverAction> {
@@ -357,25 +349,16 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
         let Some(fence) = extraction else {
             let termination = rlm_termination(ctx.termination());
             if matches!(termination, RlmTermination::ProseOrSubmit) {
-                actions.push(DriverAction::AppendEvents(vec![
-                    diagnostic_event(
-                        "llm_extraction",
-                        serde_json::json!({
-                            "found_lashlang_fence": false,
-                            "prose_only_ends_turn": true,
-                            "assistant_text_chars": assistant_text.chars().count(),
-                            "reasoning_chars": reasoning_text.chars().count(),
-                            "finalization_reason": "prose_or_submit",
-                        }),
-                    ),
-                    conversation_event(internal_assistant_prose_message(assistant_text.clone())),
-                ]));
-                if !assistant_text.trim().is_empty() {
-                    actions.push(DriverAction::Emit(SessionEvent::Message {
-                        text: assistant_text.clone(),
-                        kind: "final".to_string(),
-                    }));
-                }
+                actions.push(DriverAction::AppendEvents(vec![diagnostic_event(
+                    "llm_extraction",
+                    serde_json::json!({
+                        "found_lashlang_fence": false,
+                        "prose_only_ends_turn": true,
+                        "assistant_text_chars": assistant_text.chars().count(),
+                        "reasoning_chars": reasoning_text.chars().count(),
+                        "finalization_reason": "prose_or_submit",
+                    }),
+                )]));
                 actions.push(DriverAction::StartCheckpoint {
                     checkpoint: CheckpointKind::BeforeCompletion,
                     on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
@@ -460,7 +443,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
     fn handle_exec_result(
         &self,
         ctx: DriverContextView<'_>,
-        waiting: WaitingExecState,
+        waiting: WaitingExecState<lash_core::HostModeProtocol>,
         result: Result<ExecResponse, String>,
     ) -> Vec<DriverAction> {
         let mut state = waiting
@@ -474,16 +457,12 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
                     .tool_calls
                     .iter()
                     .find_map(terminal_outcome_from_tool_result);
-                for tool_call in &response.tool_calls {
-                    actions.push(DriverAction::Emit(SessionEvent::ToolCall {
-                        call_id: tool_call.call_id.clone(),
-                        name: tool_call.tool.clone(),
-                        args: tool_call.args.clone(),
-                        output: tool_call.output.clone(),
-                        duration_ms: tool_call.duration_ms,
-                    }));
-                }
-                state.tool_calls.extend(response.tool_calls);
+                state.tool_call_ids.extend(
+                    response
+                        .tool_calls
+                        .iter()
+                        .filter_map(|record| record.call_id.clone()),
+                );
                 state.images.extend(response.printed_images);
                 if !response.output.is_empty() {
                     // Raw lashlang-runtime stdout (rare); treat as an
@@ -543,7 +522,6 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
                 return actions;
             }
 
-            let rendered = render_terminal_output_value(finish_value);
             actions.push(DriverAction::AppendEvents(vec![trajectory_event(
                 trajectory_entry(
                     ctx.mode_iteration(),
@@ -552,12 +530,6 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
                     Some(finish_value.clone()),
                 ),
             )]));
-            if !rendered.trim().is_empty() {
-                actions.push(DriverAction::Emit(SessionEvent::Message {
-                    text: rendered.clone(),
-                    kind: "final".to_string(),
-                }));
-            }
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
@@ -626,7 +598,7 @@ fn trajectory_entry(
         reasoning: state.reasoning.clone(),
         code: state.executed_code.clone().unwrap_or_default(),
         output: state.output.clone(),
-        tool_calls: state.tool_calls.clone(),
+        tool_call_ids: state.tool_call_ids.clone(),
         images: state.images.clone(),
         error: validation_error.or_else(|| state.exec_error.clone()),
         final_output,

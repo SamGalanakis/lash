@@ -313,9 +313,7 @@ impl PreparedExecutionSurface {
                     &self.mode_preamble.execution_prompt,
                 ),
                 execution_prompt: Arc::clone(&self.mode_preamble.execution_prompt),
-                tool_names_fingerprint: crate::prompt_tool_names_fingerprint(
-                    &self.mode_preamble.tool_names,
-                ),
+                tool_names_fingerprint: self.mode_preamble.tool_names_fingerprint,
                 tool_names: Arc::clone(&self.mode_preamble.tool_names),
                 omitted_tool_count: self.mode_preamble.omitted_tool_count,
                 contributions,
@@ -655,6 +653,11 @@ impl RuntimeTurnDriver {
                                         error: output.error.clone(),
                                         success: output.error.is_none(),
                                         duration_ms: output.duration_ms,
+                                        tool_call_ids: output
+                                            .tool_calls
+                                            .iter()
+                                            .filter_map(|record| record.call_id.clone())
+                                            .collect(),
                                     },
                                 )
                                 .await;
@@ -669,6 +672,7 @@ impl RuntimeTurnDriver {
                                         error: Some(error.clone()),
                                         success: false,
                                         duration_ms: exec_created_at.elapsed().as_millis() as u64,
+                                        tool_call_ids: Vec::new(),
                                     },
                                 )
                                 .await;

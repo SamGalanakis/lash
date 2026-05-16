@@ -128,12 +128,6 @@ impl TurnProgress {
         self.graph.graph_commit(graph_replace_required)
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn mark_graph_commit_persisted(&mut self, graph: &crate::store::GraphCommitDelta) {
-        self.graph.mark_graph_commit_persisted(graph);
-    }
-
     pub(super) fn mark_node_ids_persisted<I>(&mut self, node_ids: I)
     where
         I: IntoIterator<Item = String>,
@@ -146,12 +140,6 @@ impl TurnProgress {
         I: IntoIterator<Item = String>,
     {
         self.graph.replace_persisted_node_ids(node_ids);
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn into_session_graph(self) -> crate::SessionGraph {
-        self.graph.into_session_graph()
     }
 
     fn apply_message_projection(&mut self, messages: &MessageSequence) {

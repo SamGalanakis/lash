@@ -132,6 +132,67 @@ pub(crate) fn has_response_content(parts: &[lash_core::llm::types::LlmOutputPart
     })
 }
 
+pub(crate) fn terminal_reason_from_parts(
+    parts: &[lash_core::llm::types::LlmOutputPart],
+) -> lash_core::llm::types::LlmTerminalReason {
+    if parts
+        .iter()
+        .any(|part| matches!(part, lash_core::llm::types::LlmOutputPart::ToolCall { .. }))
+    {
+        lash_core::llm::types::LlmTerminalReason::ToolUse
+    } else {
+        lash_core::llm::types::LlmTerminalReason::Stop
+    }
+}
+
+pub(crate) fn terminal_reason_from_chat_value(
+    value: &Value,
+    parts: &[lash_core::llm::types::LlmOutputPart],
+) -> lash_core::llm::types::LlmTerminalReason {
+    let finish = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match finish {
+        "stop" => lash_core::llm::types::LlmTerminalReason::Stop,
+        "tool_calls" | "function_call" => lash_core::llm::types::LlmTerminalReason::ToolUse,
+        "length" | "max_tokens" => lash_core::llm::types::LlmTerminalReason::OutputLimit,
+        "content_filter" | "safety" => lash_core::llm::types::LlmTerminalReason::ContentFilter,
+        "" => terminal_reason_from_parts(parts),
+        _ => lash_core::llm::types::LlmTerminalReason::ProviderError,
+    }
+}
+
+pub(crate) fn terminal_reason_from_responses_value(
+    value: &Value,
+    parts: &[lash_core::llm::types::LlmOutputPart],
+) -> lash_core::llm::types::LlmTerminalReason {
+    let incomplete_details = value
+        .get("incomplete_details")
+        .or_else(|| value.get("incompleteDetails"));
+    if incomplete_details
+        .and_then(|details| details.get("reason").and_then(Value::as_str))
+        .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
+    {
+        return lash_core::llm::types::LlmTerminalReason::ContentFilter;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("incomplete")
+        || incomplete_details.is_some_and(|details| !details.is_null())
+    {
+        return lash_core::llm::types::LlmTerminalReason::OutputLimit;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("cancelled") {
+        return lash_core::llm::types::LlmTerminalReason::Cancelled;
+    }
+    if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return lash_core::llm::types::LlmTerminalReason::ProviderError;
+    }
+    terminal_reason_from_parts(parts)
+}
+
 pub(crate) fn empty_response_error(raw: String) -> lash_core::llm::transport::LlmTransportError {
     lash_core::llm::transport::LlmTransportError::new("OpenAI-compatible empty_response")
         .retryable(true)

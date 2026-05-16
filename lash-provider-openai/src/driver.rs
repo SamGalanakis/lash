@@ -235,6 +235,11 @@ fn complete_buffered_responses(
             tx.send(LlmStreamEvent::Delta(state.full_text.clone()));
         }
     }
+    let terminal_reason = state
+        .final_response
+        .as_ref()
+        .map(|value| terminal_reason_from_responses_value(value, &parts))
+        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
         deltas: (!state.full_text.is_empty())
             .then_some(state.full_text.clone())
@@ -243,6 +248,8 @@ fn complete_buffered_responses(
         full_text: state.full_text,
         parts,
         usage: state.usage,
+        terminal_reason,
+        terminal_diagnostic: None,
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, false)),
@@ -267,6 +274,7 @@ fn complete_buffered_chat(
         state.provider_usage = value.get("usage").cloned();
         state.usage = usage_from_response_value(&value);
         let parts = OpenAiCompatibleProvider::chat_response_parts_from_value(&value);
+        let terminal_reason = terminal_reason_from_chat_value(&value, &parts);
         state.full_text = parts
             .iter()
             .filter_map(|part| match part {
@@ -276,6 +284,7 @@ fn complete_buffered_chat(
             .collect::<String>();
         parsed_parts = Some(parts);
         state.final_response_raw = Some(text.clone());
+        state.terminal_reason = terminal_reason;
     }
     let parts = parsed_parts.unwrap_or_else(|| state.parts());
     if !has_response_content(&parts) {
@@ -303,6 +312,11 @@ fn complete_buffered_chat(
             tx.send(LlmStreamEvent::Part(part.clone()));
         }
     }
+    let terminal_reason = if state.terminal_reason == LlmTerminalReason::Unknown {
+        terminal_reason_from_parts(&parts)
+    } else {
+        state.terminal_reason
+    };
     Ok(LlmResponse {
         deltas: (!state.full_text.is_empty())
             .then_some(state.full_text.clone())
@@ -311,6 +325,8 @@ fn complete_buffered_chat(
         full_text: state.full_text,
         parts,
         usage: state.usage,
+        terminal_reason,
+        terminal_diagnostic: None,
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, false)),
@@ -410,11 +426,18 @@ async fn drive_streaming_responses(
                 .unwrap_or_default(),
         ));
     }
+    let terminal_reason = state
+        .final_response
+        .as_ref()
+        .map(|value| terminal_reason_from_responses_value(value, &parts))
+        .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
         deltas: state.deltas,
         full_text: state.full_text,
         parts,
         usage: state.usage,
+        terminal_reason,
+        terminal_diagnostic: None,
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::Responses.http_summary(&url, true)),
@@ -475,11 +498,18 @@ async fn drive_streaming_chat(
             tx.send(LlmStreamEvent::Part(part.clone()));
         }
     }
+    let terminal_reason = if state.terminal_reason == LlmTerminalReason::Unknown {
+        terminal_reason_from_parts(&parts)
+    } else {
+        state.terminal_reason
+    };
     Ok(LlmResponse {
         deltas: state.deltas,
         full_text: state.full_text,
         parts,
         usage: state.usage,
+        terminal_reason,
+        terminal_diagnostic: None,
         provider_usage: state.provider_usage,
         request_body: None,
         http_summary: Some(CompletionEndpoint::ChatCompletions.http_summary(&url, true)),

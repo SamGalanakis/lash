@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Using the CLI - lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -26,8 +32,6 @@
             <li><a href="./plugins.html">Plugins</a></li>
             <li><a href="./persistence.html">Persistence</a></li>
             <li><a href="./tracing.html">Tracing</a></li>
-            <li><a href="./architecture/">Architecture</a></li>
-            <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
@@ -205,7 +209,7 @@
         <div class="section" id="print-mode">
           <div class="section-header">
             <h2>Print Mode</h2>
-            <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the assistant's prose to stdout, and exits. Print mode runs without a TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
+            <p><code>lash --print "&lt;prompt&gt;"</code> runs Lash autonomously: it boots, executes the prompt, prints the settled <code>TurnFinish::AssistantMessage</code> prose to stdout, and exits. Print mode runs without a TUI; status and tool output go to stderr. An autonomous system prompt is injected so the assistant completes the task without asking for input.</p>
           </div>
           <pre><code>$ lash --print "Summarise this branch's changes in two bullets."
 # Assistant prose to stdout, tool/lifecycle logs to stderr.

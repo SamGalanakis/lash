@@ -25,6 +25,7 @@ fn trace_fields_from_outcome(
 fn trace_stop_reason(stop: &TurnStop) -> &'static str {
     match stop {
         TurnStop::Cancelled => "cancelled",
+        TurnStop::Incomplete => "incomplete",
         TurnStop::InvalidInput => "invalid_input",
         TurnStop::MaxTurns => "max_turns",
         TurnStop::ToolFailure => "tool_failure",
@@ -37,18 +38,6 @@ fn trace_stop_reason(stop: &TurnStop) -> &'static str {
 }
 
 impl LashRuntime {
-    fn has_overflow_error(assembled: &AssembledTurn) -> bool {
-        assembled.errors.iter().any(|issue| {
-            let lower = issue.message.to_lowercase();
-            lower.contains("prompt is too long")
-                || lower.contains("context_length_exceeded")
-                || lower.contains("maximum context length")
-                || lower.contains("too many tokens")
-                || lower.contains("exceeds the maximum number of tokens")
-                || lower.contains("request too large")
-        })
-    }
-
     fn max_context_tokens(&self) -> usize {
         self.policy
             .max_context_tokens
@@ -72,8 +61,6 @@ impl LashRuntime {
     }
 
     /// Run a single turn and stream events to the host sink.
-    /// Includes overflow recovery: if the LLM rejects the prompt as too long,
-    /// the context is force-compacted and the turn is retried once.
     pub async fn stream_turn(
         &mut self,
         input: TurnInput,
@@ -106,42 +93,8 @@ impl LashRuntime {
                 )
                 .await;
         }
-        // Capture lengths instead of Arcs: holding the read-model Arcs across
-        // the turn forces every progress-boundary persist to clone the whole
-        // read_messages / read_tool_calls Vec via Arc::make_mut.
-        let saved_read_model = self.state.read_model();
-        let saved_messages_len = saved_read_model.messages.len();
-        let saved_tool_calls_len = saved_read_model.tool_calls.len();
-        let saved_prompt_usage = self.state.last_prompt_usage.clone();
-
-        let assembled = self
-            .stream_turn_inner(input.clone(), events, turn_events, cancel.clone())
-            .await?;
-
-        if !self.overflow_recovery_attempted && Self::has_overflow_error(&assembled) {
-            self.overflow_recovery_attempted = true;
-            // Restore pre-turn state so the retry appends the user message cleanly.
-            // The turn only appends to the active read state, so the original pre-turn
-            // state is exactly the prefix of the current read state.
-            let current_read_model = self.state.read_model();
-            let saved_messages: Vec<_> = current_read_model.messages[..saved_messages_len].to_vec();
-            let saved_tool_calls: Vec<_> =
-                current_read_model.tool_calls[..saved_tool_calls_len].to_vec();
-            self.state
-                .replace_active_read_state(&saved_messages, &saved_tool_calls);
-            self.state.last_prompt_usage = saved_prompt_usage;
-            // Force-compact: strip images, prune, summarize.
-            let _ = self
-                .rewrite_history(crate::RewriteTrigger::OverflowRecovery)
-                .await;
-            let retry = self
-                .stream_turn_inner(input, events, turn_events, cancel)
-                .await?;
-            self.overflow_recovery_attempted = false;
-            return Ok(retry);
-        }
-        self.overflow_recovery_attempted = false;
-        Ok(assembled)
+        self.stream_turn_inner(input.clone(), events, turn_events, cancel.clone())
+            .await
     }
 
     async fn active_handoff_leaf(&self, session_id: &str) -> Option<String> {
@@ -320,6 +273,7 @@ impl LashRuntime {
                     envelope: Some(crate::session_model::ErrorEnvelope {
                         kind: "input_validation".to_string(),
                         code: Some("invalid_turn_input".to_string()),
+                        terminal_reason: None,
                         user_message: e.clone(),
                         raw: None,
                     }),
@@ -621,6 +575,7 @@ impl LashRuntime {
             let issue = TurnIssue {
                 kind: "plugin".to_string(),
                 code: Some(abort.code),
+                terminal_reason: None,
                 message: abort.message.clone(),
                 raw: None,
             };
@@ -629,6 +584,7 @@ impl LashRuntime {
                 envelope: Some(crate::session_model::ErrorEnvelope {
                     kind: "plugin".to_string(),
                     code: issue.code.clone(),
+                    terminal_reason: None,
                     user_message: issue.message.clone(),
                     raw: None,
                 }),
@@ -726,6 +682,7 @@ impl LashRuntime {
                             let issue = TurnIssue {
                                 kind: "runtime".to_string(),
                                 code: Some("run_task_join_failed".to_string()),
+                                terminal_reason: None,
                                 message: format!("Runtime turn task failed: {e}"),
                                 raw: None,
                             };

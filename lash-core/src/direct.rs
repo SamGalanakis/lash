@@ -98,13 +98,7 @@ pub enum DirectLlmError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("transport error: {0}")]
-    Transport(String),
-}
-
-impl From<LlmTransportError> for DirectLlmError {
-    fn from(value: LlmTransportError) -> Self {
-        Self::Transport(value.message)
-    }
+    Transport(#[from] LlmTransportError),
 }
 
 pub struct DirectLlmClient {
@@ -177,6 +171,7 @@ impl DirectLlmClient {
                             response: crate::trace::trace_llm_response(
                                 response.full_text.clone(),
                                 0,
+                                Some(response.terminal_reason),
                                 crate::trace::trace_output_parts(&response.parts),
                             ),
                             usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
@@ -197,6 +192,7 @@ impl DirectLlmClient {
                             error: TraceError {
                                 message: error.message.clone(),
                                 retryable: error.retryable,
+                                terminal_reason: Some(error.terminal_reason.code().to_string()),
                                 code: error.code.clone(),
                                 raw: error.raw.clone(),
                             },

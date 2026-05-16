@@ -60,7 +60,9 @@ pub mod tools {
 }
 
 pub mod direct {
-    pub use lash_core::llm::types::{LlmAttachment, LlmEventSender, LlmOutputPart, LlmUsage};
+    pub use lash_core::llm::types::{
+        LlmAttachment, LlmEventSender, LlmOutputPart, LlmTerminalReason, LlmUsage,
+    };
     pub use lash_core::{
         DirectCompletion, DirectJsonSchema, DirectLlmClient, DirectLlmCompletion, DirectLlmError,
         DirectMessage, DirectOutputSpec, DirectPart, DirectRequest, DirectRole, LlmResponse,

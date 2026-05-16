@@ -1,4 +1,4 @@
-use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallOutput, ToolCallRecord};
+use lash_sansio::{AttachmentRef, ModeProtocol, ToolCallOutput};
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RlmTrajectoryEntry {
@@ -14,8 +14,8 @@ pub struct RlmTrajectoryEntry {
     /// iteration.
     #[serde(default, alias = "observations")]
     pub output: Vec<String>,
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<AttachmentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +87,7 @@ pub enum RlmHistoryItem {
         #[serde(default, alias = "observations")]
         output: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<ToolCallRecord>,
+        tool_call_ids: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<RlmImageRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,6 +277,7 @@ pub struct RlmModeProtocol;
 impl ModeProtocol for RlmModeProtocol {
     type Event = RlmModeEvent;
     type Termination = RlmTermination;
+    type DriverState = serde_json::Value;
 }
 
 #[cfg(test)]

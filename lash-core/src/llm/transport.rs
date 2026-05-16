@@ -9,6 +9,7 @@ pub struct ProviderFailure {
     pub status: Option<u16>,
     pub raw: Option<String>,
     pub code: Option<String>,
+    pub terminal_reason: lash_sansio::llm::types::LlmTerminalReason,
     pub headers: Vec<(String, String)>,
     pub retry_after: Option<std::time::Duration>,
     pub request_body: Option<String>,
@@ -36,6 +37,7 @@ impl ProviderFailure {
             status: None,
             raw: None,
             code: None,
+            terminal_reason: lash_sansio::llm::types::LlmTerminalReason::ProviderError,
             headers: Vec::new(),
             retry_after: None,
             request_body: None,
@@ -67,6 +69,14 @@ impl ProviderFailure {
 
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
+        self
+    }
+
+    pub fn with_terminal_reason(
+        mut self,
+        reason: lash_sansio::llm::types::LlmTerminalReason,
+    ) -> Self {
+        self.terminal_reason = reason;
         self
     }
 

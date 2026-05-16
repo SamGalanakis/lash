@@ -70,7 +70,7 @@ mod tests {
     use crate::{
         ExecutionMode, PromptBuildInput, PromptContribution, PromptContributionSet, ToolDefinition,
         ToolExecutionMode, build_prompt, default_prompt_template, prompt_template_fingerprint,
-        prompt_text_fingerprint, prompt_tool_names_fingerprint,
+        prompt_text_fingerprint,
     };
 
     fn tool(name: &str) -> ToolDefinition {
@@ -136,6 +136,7 @@ mod tests {
             config: ModeConfig::chat(Arc::new(NoopDriver), false),
             tool_specs: tool_surface.model_tool_specs(),
             tool_names: tool_surface.tool_names(),
+            tool_names_fingerprint: tool_surface.tool_names_fingerprint(),
             omitted_tool_count: 0,
             execution_prompt: Arc::from("test prompt"),
             prompt_contributions: Vec::new(),
@@ -149,7 +150,7 @@ mod tests {
             template,
             execution_prompt_fingerprint: prompt_text_fingerprint(&mode_preamble.execution_prompt),
             execution_prompt: Arc::clone(&mode_preamble.execution_prompt),
-            tool_names_fingerprint: prompt_tool_names_fingerprint(&mode_preamble.tool_names),
+            tool_names_fingerprint: mode_preamble.tool_names_fingerprint,
             tool_names: Arc::clone(&mode_preamble.tool_names),
             omitted_tool_count: mode_preamble.omitted_tool_count,
             contributions: prompt_contributions,

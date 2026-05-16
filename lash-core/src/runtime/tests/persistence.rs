@@ -55,6 +55,12 @@ async fn standard_runtime_assembles_stream_only_text_response() {
         TurnOutcome::Finished(TurnFinish::AssistantMessage { .. })
     ));
     assert_eq!(turn.assistant_output.safe_text, "What time is it?");
+    let assistant_messages = active_conversation_messages(&turn.state)
+        .into_iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].parts[0].content, "What time is it?");
 
     let streamed_text: String = sink
         .snapshot()
@@ -112,6 +118,12 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
     ));
     assert_eq!(turn.assistant_output.safe_text, expected);
     assert!(turn.errors.is_empty());
+    let assistant_messages = active_conversation_messages(&turn.state)
+        .into_iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].parts[0].content, expected);
 
     let streamed_text: String = sink
         .snapshot()

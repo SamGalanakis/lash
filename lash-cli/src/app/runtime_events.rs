@@ -404,11 +404,6 @@ impl App {
                 self.mark_visible_output();
                 self.scroll_to_bottom();
             }
-        } else if let SessionEvent::Message { text, kind } = &event
-            && kind == "final"
-        {
-            self.set_live_assistant_from_final(text);
-            self.scroll_to_bottom();
         } else if let Some(activity) = test_session_event_to_turn_activity(event) {
             self.handle_turn_activity(activity);
         }

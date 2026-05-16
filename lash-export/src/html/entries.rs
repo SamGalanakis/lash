@@ -83,6 +83,27 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
         }
     }
 
+    let tool_call_map = session
+        .chronological
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ChronologicalPayload::ToolCall(record) => record
+                .call_id
+                .as_ref()
+                .map(|call_id| (call_id.clone(), record)),
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ModeEvent(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let rlm_owned_tool_call_ids = session
+        .chronological
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ChronologicalPayload::ModeEvent(event) => chronological_rlm_step(event),
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
+        })
+        .flat_map(|step| step.tool_call_ids)
+        .collect::<HashSet<_>>();
+
     let emit_prompt = |entries: &mut String,
                        spine: &mut String,
                        ctx: &mut RenderCtx<'_>,
@@ -176,6 +197,13 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                 render_message(&mut entries, &mut spine, ctx, message);
             }
             ChronologicalPayload::ToolCall(record) => {
+                if record
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id))
+                {
+                    continue;
+                }
                 render_tool_call_entry(&mut entries, &mut spine, ctx, record, None);
                 if let Some(call_id) = record.call_id.as_deref()
                     && let Some(children) = fanout_index.get(call_id)
@@ -199,10 +227,13 @@ pub(crate) fn render_entries(session: &LoadedSession, ctx: &mut RenderCtx<'_>) -
                     &mut entries,
                     &mut spine,
                     ctx,
-                    &step,
-                    &fanout_index,
-                    &session.llm_prompts,
-                    session.context_window_tokens,
+                    RlmStepFanoutInput {
+                        step: &step,
+                        tool_call_map: &tool_call_map,
+                        fanout_index: &fanout_index,
+                        prompts: &session.llm_prompts,
+                        context_window_tokens: session.context_window_tokens,
+                    },
                 );
             }
         }
@@ -328,20 +359,32 @@ fn render_tool_fanout(
 /// children (RLM mode invokes tools from inside a lashlang block; if any
 /// of those tools issue direct_completion calls, those should fold under
 /// the inline tool entry, not appear as flat peers).
+struct RlmStepFanoutInput<'a> {
+    step: &'a RlmTrajectoryEntry,
+    tool_call_map: &'a HashMap<String, &'a ToolCallRecord>,
+    fanout_index: &'a HashMap<String, Vec<usize>>,
+    prompts: &'a [LlmPromptSnapshot],
+    context_window_tokens: Option<u64>,
+}
+
 fn render_rlm_step_with_fanout(
     out: &mut String,
     spine: &mut String,
     ctx: &mut RenderCtx<'_>,
-    step: &RlmTrajectoryEntry,
-    fanout_index: &HashMap<String, Vec<usize>>,
-    prompts: &[LlmPromptSnapshot],
-    context_window_tokens: Option<u64>,
+    input: RlmStepFanoutInput<'_>,
 ) {
-    render_rlm_step(out, spine, ctx, step);
+    let RlmStepFanoutInput {
+        step,
+        tool_call_map,
+        fanout_index,
+        prompts,
+        context_window_tokens,
+    } = input;
+    render_rlm_step(out, spine, ctx, step, tool_call_map);
     // After the RLM step's body, render fan-outs for any of its inline
     // tool calls that have direct_completion children.
-    for record in &step.tool_calls {
-        if let Some(call_id) = record.call_id.as_deref()
+    for call_id in &step.tool_call_ids {
+        if let Some(record) = tool_call_map.get(call_id)
             && let Some(children) = fanout_index.get(call_id)
         {
             render_tool_fanout(
@@ -921,11 +964,16 @@ pub(crate) fn render_rlm_step(
     spine: &mut String,
     ctx: &mut RenderCtx<'_>,
     step: &RlmTrajectoryEntry,
+    tool_call_map: &HashMap<String, &ToolCallRecord>,
 ) {
     let id = ctx.next_id();
     let has_err = step.error.is_some();
     let status_key = if has_err { "err" } else { "ok" };
-    let nested_calls = step.tool_calls.len();
+    let nested_calls = step
+        .tool_call_ids
+        .iter()
+        .filter(|call_id| tool_call_map.contains_key(*call_id))
+        .count();
     let reasoning = strip_first_lashlang_fence(&step.reasoning);
     let has_reasoning_body = !reasoning.trim().is_empty();
     let output_preview = if has_reasoning_body {
@@ -1021,7 +1069,7 @@ pub(crate) fn render_rlm_step(
             json_highlight(&pretty),
         );
     }
-    render_inline_rlm_tool_calls(out, step);
+    render_inline_rlm_tool_calls(out, step, tool_call_map);
 
     out.push_str("        </div>\n");
     out.push_str("      </div>\n");
@@ -1039,25 +1087,29 @@ pub(crate) fn render_rlm_step(
     );
 
     // Render nested tool calls as child entries.
-    for record in &step.tool_calls {
-        render_tool_call_entry(out, spine, ctx, record, Some(&id));
+    for call_id in &step.tool_call_ids {
+        if let Some(record) = tool_call_map.get(call_id) {
+            render_tool_call_entry(out, spine, ctx, record, Some(&id));
+        }
     }
 }
 
-fn render_inline_rlm_tool_calls(out: &mut String, step: &RlmTrajectoryEntry) {
-    if step.tool_calls.is_empty() {
+fn render_inline_rlm_tool_calls(
+    out: &mut String,
+    step: &RlmTrajectoryEntry,
+    tool_call_map: &HashMap<String, &ToolCallRecord>,
+) {
+    let records = step
+        .tool_call_ids
+        .iter()
+        .filter_map(|call_id| tool_call_map.get(call_id).copied())
+        .collect::<Vec<_>>();
+    if records.is_empty() {
         return;
     }
-    let has_error = step
-        .tool_calls
-        .iter()
-        .any(|record| !record.output.is_success());
+    let has_error = records.iter().any(|record| !record.output.is_success());
     let open_attr = if has_error { " open" } else { "" };
-    let total_ms: u64 = step
-        .tool_calls
-        .iter()
-        .map(|record| record.duration_ms)
-        .sum();
+    let total_ms: u64 = records.iter().map(|record| record.duration_ms).sum();
     let _ = writeln!(
         out,
         "          <details class=\"rlm-tool-list\"{open_attr}>"
@@ -1065,11 +1117,11 @@ fn render_inline_rlm_tool_calls(out: &mut String, step: &RlmTrajectoryEntry) {
     let _ = writeln!(
         out,
         "            <summary class=\"code-bar\"><span class=\"code-tag\">tool calls</span><span class=\"code-size\">{} · {}</span></summary>",
-        step.tool_calls.len(),
+        records.len(),
         format_duration(total_ms),
     );
     out.push_str("            <div class=\"rlm-tool-stack\">\n");
-    for (idx, record) in step.tool_calls.iter().enumerate() {
+    for (idx, record) in records.iter().enumerate() {
         render_inline_tool_call(out, idx + 1, record);
     }
     out.push_str("            </div>\n");

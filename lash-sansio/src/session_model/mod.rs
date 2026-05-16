@@ -110,12 +110,14 @@ pub struct ErrorEnvelope {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<crate::llm::types::LlmTerminalReason>,
     pub user_message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
 pub enum SessionEvent {
@@ -237,6 +239,7 @@ pub enum TurnFinish {
 #[serde(rename_all = "snake_case")]
 pub enum TurnStop {
     Cancelled,
+    Incomplete,
     InvalidInput,
     MaxTurns,
     ToolFailure,
@@ -373,6 +376,7 @@ pub enum PromptResponse {
     },
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnTerminationPolicyState {
     max_steps_final: bool,
 }
@@ -436,6 +440,7 @@ impl TurnTerminationPolicyState {
 pub fn make_error_envelope(
     kind: &str,
     code: Option<&str>,
+    terminal_reason: Option<crate::llm::types::LlmTerminalReason>,
     user_message: impl Into<String>,
     raw: Option<String>,
 ) -> ErrorEnvelope {
@@ -443,6 +448,7 @@ pub fn make_error_envelope(
     ErrorEnvelope {
         kind: kind.to_string(),
         code: code.map(str::to_string),
+        terminal_reason,
         user_message,
         raw: raw.map(|s| truncate_raw_error(s.trim())),
     }
@@ -457,7 +463,7 @@ pub fn make_error_event(
     let user_message = user_message.into();
     SessionEvent::Error {
         message: user_message.clone(),
-        envelope: Some(make_error_envelope(kind, code, user_message, raw)),
+        envelope: Some(make_error_envelope(kind, code, None, user_message, raw)),
     }
 }
 

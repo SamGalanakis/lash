@@ -387,25 +387,6 @@ impl App {
         false
     }
 
-    #[cfg(test)]
-    pub(super) fn set_live_assistant_from_final(&mut self, text: &str) {
-        let cleaned = crate::assistant_text::normalize_assistant_text(text);
-        if cleaned.is_empty() {
-            self.live_assistant.clear();
-            return;
-        }
-
-        let final_text = match self.live_assistant_normalized_text() {
-            Some(existing) if !existing.is_empty() && !cleaned.starts_with(existing.as_str()) => {
-                existing
-            }
-            _ => cleaned,
-        };
-        self.live_assistant.clear();
-        self.live_assistant.append(&final_text);
-        self.mark_visible_output();
-    }
-
     pub(super) fn commit_live_assistant_block(&mut self) {
         let Some(cleaned) = self.live_assistant.take_normalized_text() else {
             return;

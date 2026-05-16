@@ -25,6 +25,33 @@ async fn emit_plugin_surface_events_runtime(
     }
 }
 
+fn refine_terminal_reason_for_context_window(
+    response: &mut LlmResponse,
+    max_context_tokens: Option<usize>,
+) {
+    if response.terminal_reason != crate::LlmTerminalReason::OutputLimit {
+        return;
+    }
+    if response.usage.output_tokens != 0 {
+        return;
+    }
+    let Some(max_context_tokens) = max_context_tokens.filter(|value| *value > 0) else {
+        return;
+    };
+    let prompt_tokens = response
+        .usage
+        .input_tokens
+        .saturating_add(response.usage.cached_input_tokens)
+        .max(0) as usize;
+    if prompt_tokens >= max_context_tokens.saturating_mul(95) / 100 {
+        response.terminal_reason = crate::LlmTerminalReason::ContextOverflow;
+        response.terminal_diagnostic = Some(
+            "Model produced no output because the prompt reached the configured context window."
+                .to_string(),
+        );
+    }
+}
+
 impl RuntimeTurnDriver {
     async fn transform_assistant_stream_chunk(
         &mut self,
@@ -50,6 +77,7 @@ impl RuntimeTurnDriver {
                 retryable: false,
                 raw: None,
                 code: Some("plugin_assistant_stream".to_string()),
+                terminal_reason: crate::LlmTerminalReason::ProviderError,
                 request_body: None,
             })?;
         let mut current = String::new();
@@ -92,6 +120,7 @@ impl RuntimeTurnDriver {
                 retryable: false,
                 raw: None,
                 code: Some("plugin_assistant_response".to_string()),
+                terminal_reason: crate::LlmTerminalReason::ProviderError,
                 request_body: None,
             })?;
         let mut current: Option<LlmResponse> = None;
@@ -123,6 +152,7 @@ impl RuntimeTurnDriver {
                         retryable: false,
                         raw: None,
                         code: Some("attachment_resolution_failed".to_string()),
+                        terminal_reason: crate::LlmTerminalReason::ProviderError,
                         request_body: None,
                     }),
                     false,
@@ -184,6 +214,7 @@ impl RuntimeTurnDriver {
                         retryable: false,
                         raw: None,
                         code: Some("cancelled".to_string()),
+                        terminal_reason: crate::LlmTerminalReason::Cancelled,
                         request_body: None,
                     });
                 }
@@ -221,6 +252,8 @@ impl RuntimeTurnDriver {
                             full_text: stream_accumulator.full_text(),
                             parts: Vec::new(),
                             usage: streamed_usage.clone(),
+                            terminal_reason: crate::LlmTerminalReason::Stop,
+                            terminal_diagnostic: None,
                             provider_usage: None,
                             request_body: None,
                             http_summary: None,
@@ -242,6 +275,7 @@ impl RuntimeTurnDriver {
                             retryable: false,
                             raw: None,
                             code: Some("task_join_failed".to_string()),
+                            terminal_reason: crate::LlmTerminalReason::ProviderError,
                             request_body: None,
                         }),
                     };
@@ -269,12 +303,21 @@ impl RuntimeTurnDriver {
                             retryable: e.retryable,
                             raw: e.raw,
                             code: e.code,
+                            terminal_reason: e.terminal_reason,
                             request_body: e.request_body,
                         }),
                     }
                 }
             }
         };
+
+        let result = result.map(|mut response| {
+            refine_terminal_reason_for_context_window(
+                &mut response,
+                self.policy.max_context_tokens,
+            );
+            response
+        });
 
         if let Err(err) = &result {
             tracing::error!(
@@ -300,6 +343,7 @@ impl RuntimeTurnDriver {
                             response: crate::trace::trace_llm_response(
                                 response.full_text.clone(),
                                 debug.elapsed_ms(),
+                                Some(response.terminal_reason),
                                 crate::trace::trace_output_parts(&response.parts),
                             ),
                             usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
@@ -317,6 +361,7 @@ impl RuntimeTurnDriver {
                             error: TraceError {
                                 message: error.message.clone(),
                                 retryable: error.retryable,
+                                terminal_reason: Some(error.terminal_reason.code().to_string()),
                                 code: error.code.clone(),
                                 raw: error.raw.clone(),
                             },
@@ -362,6 +407,7 @@ impl RuntimeTurnDriver {
                         response: crate::trace::trace_llm_response(
                             response_text,
                             0,
+                            None,
                             response_parts,
                         ),
                         usage: Some(crate::trace::trace_usage_from_session(&usage)),
@@ -377,6 +423,7 @@ impl RuntimeTurnDriver {
                 retryable,
                 raw,
                 code,
+                terminal_reason,
                 ..
             } => {
                 let stream_summary = self.llm_stream_summaries.remove(&mode_iteration);
@@ -393,6 +440,7 @@ impl RuntimeTurnDriver {
                         error: TraceError {
                             message,
                             retryable,
+                            terminal_reason: Some(terminal_reason.code().to_string()),
                             code,
                             raw,
                         },

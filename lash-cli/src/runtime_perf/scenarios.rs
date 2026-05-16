@@ -13,10 +13,11 @@ pub(crate) enum RuntimePerfScenario {
     OpenAiCompatStream,
     EmbedStandard,
     EmbedRlm,
+    TurnCheckpoint,
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 9] = [
+    pub(crate) const DEFAULTS: [Self; 10] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
@@ -26,8 +27,9 @@ impl RuntimePerfScenario {
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
         Self::EmbedRlm,
+        Self::TurnCheckpoint,
     ];
-    pub(crate) const KNOWN: [Self; 9] = [
+    pub(crate) const KNOWN: [Self; 10] = [
         Self::Standard,
         Self::Rlm,
         Self::RlmToolCalls,
@@ -37,6 +39,7 @@ impl RuntimePerfScenario {
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
         Self::EmbedRlm,
+        Self::TurnCheckpoint,
     ];
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -50,6 +53,7 @@ impl RuntimePerfScenario {
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             "embed_standard" => Some(Self::EmbedStandard),
             "embed_rlm" => Some(Self::EmbedRlm),
+            "turn_checkpoint" => Some(Self::TurnCheckpoint),
             _ => None,
         }
     }
@@ -65,6 +69,7 @@ impl RuntimePerfScenario {
             Self::OpenAiCompatStream => "openai_compat_stream",
             Self::EmbedStandard => "embed_standard",
             Self::EmbedRlm => "embed_rlm",
+            Self::TurnCheckpoint => "turn_checkpoint",
         }
     }
 
@@ -73,7 +78,8 @@ impl RuntimePerfScenario {
             Self::Standard
             | Self::ObservationalMemory
             | Self::OpenAiCompatStream
-            | Self::EmbedStandard => ExecutionMode::standard(),
+            | Self::EmbedStandard
+            | Self::TurnCheckpoint => ExecutionMode::standard(),
             Self::Rlm
             | Self::RlmToolCalls
             | Self::RlmGlobals

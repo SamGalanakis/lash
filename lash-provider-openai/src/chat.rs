@@ -489,6 +489,16 @@ impl OpenAiCompatibleProvider {
                     state.update_tool_call_delta(tool_call);
                 }
             }
+            if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                state.terminal_reason = match finish_reason {
+                    "stop" => LlmTerminalReason::Stop,
+                    "tool_calls" | "function_call" => LlmTerminalReason::ToolUse,
+                    "length" | "max_tokens" => LlmTerminalReason::OutputLimit,
+                    "content_filter" | "safety" => LlmTerminalReason::ContentFilter,
+                    "" => state.terminal_reason,
+                    _ => LlmTerminalReason::ProviderError,
+                };
+            }
             if let Some(details) = delta.get("reasoning_details") {
                 state.apply_reasoning_details(details);
             }
@@ -544,6 +554,7 @@ pub(crate) struct ChatStreamState {
     pub(crate) provider_usage: Option<Value>,
     pub(crate) tool_calls: HashMap<usize, ChatStreamingToolCall>,
     pub(crate) final_response_raw: Option<String>,
+    pub(crate) terminal_reason: LlmTerminalReason,
 }
 
 impl ChatStreamState {

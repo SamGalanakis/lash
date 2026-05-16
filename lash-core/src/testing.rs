@@ -885,10 +885,13 @@ mod test_mode_fakes {
         }
 
         fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
+            let tool_names = input.tool_surface.tool_names();
+            let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
             ModePreamble {
                 config: ModeConfig::chat(Arc::new(TestDriver), false),
                 tool_specs: input.tool_surface.model_tool_specs(),
-                tool_names: input.tool_surface.tool_names(),
+                tool_names,
+                tool_names_fingerprint,
                 omitted_tool_count: 0,
                 execution_prompt: Arc::from(""),
                 prompt_contributions: input.extra_prompt_contributions,
@@ -916,7 +919,7 @@ mod test_mode_fakes {
         fn handle_llm_success(
             &self,
             ctx: DriverContextView<'_>,
-            _waiting: WaitingLlmState,
+            _waiting: WaitingLlmState<crate::HostModeProtocol>,
             llm_response: LlmResponse,
             text_streamed: bool,
         ) -> Vec<DriverAction> {
@@ -1184,7 +1187,7 @@ mod test_mode_fakes {
         fn handle_exec_result(
             &self,
             _ctx: DriverContextView<'_>,
-            _waiting: WaitingExecState,
+            _waiting: WaitingExecState<crate::HostModeProtocol>,
             _result: Result<ExecResponse, String>,
         ) -> Vec<DriverAction> {
             Vec::new()

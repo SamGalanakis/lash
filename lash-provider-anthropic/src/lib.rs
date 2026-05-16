@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice, LlmUsage,
+    LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage,
     ProviderReasoningReplay,
 };
 use lash_core::provider::{
@@ -804,9 +804,10 @@ impl AnthropicProvider {
         Ok(())
     }
 
-    fn finalize(state: StreamState) -> (Vec<LlmOutputPart>, String, LlmUsage) {
+    fn finalize(state: StreamState) -> (Vec<LlmOutputPart>, String, LlmUsage, LlmTerminalReason) {
         let mut parts: Vec<LlmOutputPart> = Vec::new();
         let mut full_text = String::new();
+        let stop_reason = state.stop_reason.clone();
         for block in state.blocks {
             match block.kind {
                 BlockKind::Text => {
@@ -860,7 +861,25 @@ impl AnthropicProvider {
                 BlockKind::Unknown => {}
             }
         }
-        (parts, full_text, state.usage)
+        let terminal_reason = match stop_reason.as_deref() {
+            Some("end_turn" | "stop_sequence") => LlmTerminalReason::Stop,
+            Some("tool_use") => LlmTerminalReason::ToolUse,
+            Some("max_tokens") => LlmTerminalReason::OutputLimit,
+            Some("pause_turn") => LlmTerminalReason::Stop,
+            Some("refusal" | "safety" | "sensitive") => LlmTerminalReason::ContentFilter,
+            Some(_) => LlmTerminalReason::ProviderError,
+            None => {
+                if parts
+                    .iter()
+                    .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+                {
+                    LlmTerminalReason::ToolUse
+                } else {
+                    LlmTerminalReason::Stop
+                }
+            }
+        };
+        (parts, full_text, state.usage, terminal_reason)
     }
 }
 
@@ -1115,7 +1134,7 @@ impl ProviderTransport for AnthropicProvider {
         )
         .await?;
 
-        let (parts, full_text, usage) = Self::finalize(state);
+        let (parts, full_text, usage, terminal_reason) = Self::finalize(state);
         let deltas = if stream_events.is_none() {
             vec![full_text.clone()]
         } else {
@@ -1126,6 +1145,8 @@ impl ProviderTransport for AnthropicProvider {
             full_text,
             parts,
             usage,
+            terminal_reason,
+            terminal_diagnostic: None,
             provider_usage: None,
             request_body,
             http_summary: Some(format!("HTTP POST {} (stream)", url)),
@@ -1258,6 +1279,26 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn pause_turn_maps_to_stop() {
+        let mut state = StreamState::default();
+        state.stop_reason = Some("pause_turn".to_string());
+
+        let (_, _, _, terminal_reason) = AnthropicProvider::finalize(state);
+
+        assert_eq!(terminal_reason, LlmTerminalReason::Stop);
+    }
+
+    #[test]
+    fn unknown_stop_reason_maps_to_provider_error() {
+        let mut state = StreamState::default();
+        state.stop_reason = Some("new_provider_reason".to_string());
+
+        let (_, _, _, terminal_reason) = AnthropicProvider::finalize(state);
+
+        assert_eq!(terminal_reason, LlmTerminalReason::ProviderError);
     }
 
     #[test]

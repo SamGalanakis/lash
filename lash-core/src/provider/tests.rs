@@ -82,6 +82,8 @@ impl ProviderTransport for MutatingProvider {
             full_text: "ok".to_string(),
             parts: Vec::new(),
             usage: LlmUsage::default(),
+            terminal_reason: crate::LlmTerminalReason::Stop,
+            terminal_diagnostic: None,
             provider_usage: None,
             request_body: None,
             http_summary: None,
@@ -112,6 +114,8 @@ impl ProviderTransport for FailingProvider {
             full_text: "ok".to_string(),
             parts: Vec::new(),
             usage: LlmUsage::default(),
+            terminal_reason: crate::LlmTerminalReason::Stop,
+            terminal_diagnostic: None,
             provider_usage: None,
             request_body: None,
             http_summary: None,
@@ -359,4 +363,73 @@ async fn provider_handle_set_options_affects_retry_behavior() {
         .expect("retry after set_options");
 
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn default_failure_classifier_marks_context_overflow() {
+    let classifier = DefaultProviderFailureClassifier;
+    for message in [
+        "Anthropic request failed: prompt is too long",
+        "context_length_exceeded",
+        "This model's maximum context length is 128000 tokens",
+        "Google says input is too long",
+        "OpenRouter error: too many tokens",
+        "Together: request too large",
+        "Copilot: exceeds the maximum number of tokens",
+        "local model: context window exceeded",
+        "Anthropic: request_too_large",
+        "OpenAI: Your input exceeds the context window of this model",
+        "Google: The input token count (1196265) exceeds the maximum number of tokens allowed",
+        "xAI: This model's maximum prompt length is 131072 but the request contains more",
+        "Groq: Please reduce the length of the messages",
+        "OpenRouter: This endpoint's maximum context length is 128000 tokens",
+        "Together: The input (150000 tokens) is longer than the model's context length (128000 tokens).",
+        "llama.cpp: the request exceeds the available context size",
+        "LM Studio: tokens to keep from the initial prompt is greater than the context length",
+        "MiniMax: invalid params, context window exceeds limit",
+        "Kimi: Your request exceeded model token limit: 131072 (requested: 150000)",
+        "Mistral: Prompt contains too many tokens; too large for model with 128000 maximum context length",
+        "z.ai: model_context_window_exceeded",
+    ] {
+        let failure = classifier.classify(ProviderFailure::new(message).with_status(400));
+        assert_eq!(
+            failure.terminal_reason,
+            crate::LlmTerminalReason::ContextOverflow
+        );
+        assert!(!failure.retryable);
+    }
+}
+
+#[test]
+fn default_failure_classifier_marks_content_filter() {
+    let classifier = DefaultProviderFailureClassifier;
+    for message in [
+        "Provider finish_reason: content_filter",
+        "blocked by prohibited_content",
+        "safety filter tripped",
+        "sensitive content refused",
+    ] {
+        let failure = classifier.classify(ProviderFailure::new(message).with_status(400));
+        assert_eq!(
+            failure.terminal_reason,
+            crate::LlmTerminalReason::ContentFilter
+        );
+    }
+}
+
+#[test]
+fn default_failure_classifier_does_not_treat_rate_limits_as_context_overflow() {
+    let classifier = DefaultProviderFailureClassifier;
+    for message in [
+        "rate limit: too many tokens per minute",
+        "Too many requests",
+        "throttling because token rate exceeded",
+        "insufficient_quota",
+    ] {
+        let failure = classifier.classify(ProviderFailure::new(message).with_status(429));
+        assert_ne!(
+            failure.terminal_reason,
+            crate::LlmTerminalReason::ContextOverflow
+        );
+    }
 }

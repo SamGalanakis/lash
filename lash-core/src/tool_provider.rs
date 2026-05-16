@@ -11,7 +11,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct SandboxMessage {
     pub text: String,
-    /// "final", "tool_output", or other host-rendered progress events.
+    /// "tool_output" or another host-rendered progress event kind.
     pub kind: String,
 }
 

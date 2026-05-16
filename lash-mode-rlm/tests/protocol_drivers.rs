@@ -117,6 +117,13 @@ fn find_done(effects: &[Effect]) -> Option<(&lash_sansio::MessageSequence, usize
     })
 }
 
+fn roundtrip_turn_checkpoint(
+    checkpoint: lash_sansio::TurnCheckpoint<lash_core::HostModeProtocol>,
+) -> lash_sansio::TurnCheckpoint<lash_core::HostModeProtocol> {
+    let encoded = serde_json::to_string(&checkpoint).expect("serialize checkpoint");
+    serde_json::from_str(&encoded).expect("deserialize checkpoint")
+}
+
 fn machine_trajectory(machine: &TurnMachine) -> Vec<RlmTrajectoryEntry> {
     machine
         .events()
@@ -241,6 +248,129 @@ fn standard_tool_calls_produce_effects_and_loop() {
 
     let effects = drain_effects(&mut machine);
     assert!(find_llm_call(&effects).is_some());
+}
+
+#[test]
+fn standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls() {
+    let config = test_config(ExecutionMode::standard());
+    let msgs = vec![user_message("read and search")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            parts: vec![
+                LlmOutputPart::ToolCall {
+                    call_id: "tc-read".to_string(),
+                    tool_name: "read_file".to_string(),
+                    input_json: r#"{"path":"foo.txt"}"#.to_string(),
+                    replay: None,
+                },
+                LlmOutputPart::ToolCall {
+                    call_id: "tc-grep".to_string(),
+                    tool_name: "grep".to_string(),
+                    input_json: r#"{"pattern":"needle"}"#.to_string(),
+                    replay: None,
+                },
+            ],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (tool_id, calls) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ToolCalls { id, calls } => Some((*id, calls.clone())),
+            _ => None,
+        })
+        .expect("tool batch");
+    assert_eq!(calls.len(), 2);
+
+    let checkpoint = roundtrip_turn_checkpoint(machine.checkpoint());
+    let mut restored =
+        TurnMachine::restore_from_checkpoint(test_config(ExecutionMode::standard()), checkpoint);
+    let effects = drain_effects(&mut restored);
+    let (restored_tool_id, restored_calls) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ToolCalls { id, calls } => Some((*id, calls)),
+            _ => None,
+        })
+        .expect("restored tool batch");
+    assert_eq!(restored_tool_id, tool_id);
+    assert_eq!(restored_calls.len(), 2);
+    assert_eq!(restored_calls[0].call_id, "tc-read");
+    assert_eq!(restored_calls[1].tool_name, "grep");
+}
+
+#[test]
+fn standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome() {
+    let config = test_config(ExecutionMode::standard());
+    let msgs = vec![user_message("finish through a tool")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            parts: vec![LlmOutputPart::ToolCall {
+                call_id: "tc-finish".to_string(),
+                tool_name: "submit_result".to_string(),
+                input_json: "{}".to_string(),
+                replay: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let tool_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ToolCalls { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("tool call");
+    machine.handle_response(Response::ToolResults {
+        id: tool_id,
+        results: vec![sansio::CompletedToolCall {
+            call_id: "tc-finish".to_string(),
+            tool_name: "submit_result".to_string(),
+            args: serde_json::json!({}),
+            output: lash_sansio::ToolCallOutput::success(serde_json::json!({"ok": true}))
+                .with_control(lash_core::ToolControl::Finish {
+                    value: serde_json::json!({"ok": true}).into(),
+                }),
+            model_return: lash_sansio::ModelToolReturn {
+                call_id: "tc-finish".to_string(),
+                tool_name: "submit_result".to_string(),
+                parts: vec![lash_sansio::ModelToolReturnPart::Text("done".to_string())],
+            },
+            duration_ms: 1,
+            replay: None,
+        }],
+    });
+
+    let checkpoint = roundtrip_turn_checkpoint(machine.checkpoint());
+    let mut restored =
+        TurnMachine::restore_from_checkpoint(test_config(ExecutionMode::standard()), checkpoint);
+    let effects = drain_effects(&mut restored);
+    assert!(find_llm_call(&effects).is_none());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::TurnOutcome {
+            outcome: lash_sansio::TurnOutcome::Finished(
+                lash_sansio::TurnFinish::ToolValue { tool_name, value }
+            )
+        }) if tool_name == "submit_result" && *value == serde_json::json!({"ok": true})
+    )));
+    assert!(find_done(&effects).is_some());
 }
 
 #[test]
@@ -482,13 +612,24 @@ fn prose_or_submit_response_finishes_with_assistant_message() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|effect| {
+    assert!(!effects.iter().any(|effect| {
         matches!(
             effect,
-            Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
-                if text == "Hello there!" && kind == "final"
+            Effect::Emit(lash_sansio::SessionEvent::Message { kind, .. }) if kind == "final"
         )
     }));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Progress { events, .. }
+                if events.iter().any(|event| matches!(
+                    event,
+                    lash_sansio::SessionEventRecord::Conversation(record)
+                        if record.to_message().role == MessageRole::Assistant
+                ))
+        )),
+        "RLM prose finalization must not write a mode-owned assistant message"
+    );
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
@@ -583,7 +724,173 @@ fn rlm_fenced_lashlang_block_runs_exec_and_continues() {
 }
 
 #[test]
-fn rlm_exec_tool_call_events_keep_call_id() {
+fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
+    let config = test_config(ExecutionMode::new("rlm"));
+    let msgs = vec![user_message("run some code")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "Reason first.\n```lashlang\nprint \"hi\"\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Reason first.\n```lashlang\nprint \"hi\"\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let (exec_id, code) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, code } => Some((*id, code.clone())),
+            _ => None,
+        })
+        .expect("exec effect");
+    assert_eq!(code, "print \"hi\"");
+
+    let checkpoint = roundtrip_turn_checkpoint(machine.checkpoint());
+    let mut restored =
+        TurnMachine::restore_from_checkpoint(test_config(ExecutionMode::new("rlm")), checkpoint);
+    let effects = drain_effects(&mut restored);
+    let (restored_exec_id, restored_code) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, code } => Some((*id, code.clone())),
+            _ => None,
+        })
+        .expect("restored exec effect");
+    assert_eq!(restored_exec_id, exec_id);
+    assert_eq!(restored_code, "print \"hi\"");
+
+    restored.handle_response(Response::ExecResult {
+        id: restored_exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: "hi\n".to_string(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 1,
+            terminal_finish: None,
+        }),
+    });
+
+    let effects = drain_effects(&mut restored);
+    let trajectory = machine_trajectory(&restored);
+    let entry = trajectory.last().expect("rlm trajectory entry");
+    assert_eq!(entry.code, "print \"hi\"");
+    assert!(entry.reasoning.contains("Reason first."));
+    assert_eq!(entry.output, vec!["hi\n".to_string()]);
+    let (_, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+}
+
+#[test]
+fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes() {
+    let config = test_config(ExecutionMode::new("rlm"));
+    let msgs = vec![user_message("run parallel tools")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nresults = parallel { a: call ok {}, b: call fail {}, c: call stop {} }\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nresults = parallel { a: call ok {}, b: call fail {}, c: call stop {} }\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: vec!["parallel done".to_string()],
+            observation_truncation: Vec::new(),
+            tool_calls: vec![
+                lash_core::ToolCallRecord {
+                    call_id: Some("parallel-ok".to_string()),
+                    tool: "ok".to_string(),
+                    args: serde_json::json!({}),
+                    output: lash_core::ToolCallOutput::success(serde_json::json!("ok")),
+                    duration_ms: 1,
+                },
+                lash_core::ToolCallRecord {
+                    call_id: Some("parallel-fail".to_string()),
+                    tool: "fail".to_string(),
+                    args: serde_json::json!({}),
+                    output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
+                        lash_core::ToolFailureClass::Execution,
+                        "tool_failed",
+                        "failed but captured",
+                    )),
+                    duration_ms: 2,
+                },
+                lash_core::ToolCallRecord {
+                    call_id: Some("parallel-cancel".to_string()),
+                    tool: "stop".to_string(),
+                    args: serde_json::json!({}),
+                    output: lash_core::ToolCallOutput::cancelled(
+                        lash_core::ToolCancellation::runtime("cancelled sibling"),
+                    ),
+                    duration_ms: 3,
+                },
+            ],
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: None,
+            duration_ms: 3,
+            terminal_finish: None,
+        }),
+    });
+
+    let checkpoint = roundtrip_turn_checkpoint(machine.checkpoint());
+    let mut restored =
+        TurnMachine::restore_from_checkpoint(test_config(ExecutionMode::new("rlm")), checkpoint);
+    let effects = drain_effects(&mut restored);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+    );
+    let trajectory = machine_trajectory(&restored);
+    let entry = trajectory.last().expect("rlm trajectory entry");
+    assert_eq!(
+        entry.tool_call_ids,
+        vec![
+            "parallel-ok".to_string(),
+            "parallel-fail".to_string(),
+            "parallel-cancel".to_string()
+        ]
+    );
+    assert_eq!(entry.output, vec!["parallel done".to_string()]);
+    let (_, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
+    assert_eq!(checkpoint, CheckpointKind::AfterWork);
+}
+
+#[test]
+fn rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events() {
     let config = test_config(ExecutionMode::new("rlm"));
     let msgs = vec![user_message("run a tool")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
@@ -633,11 +940,14 @@ fn rlm_exec_tool_call_events_keep_call_id() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::Emit(SessionEvent::ToolCall { call_id: Some(call_id), name, .. })
-            if call_id == "rlm-call-1" && name == "read_file"
-    )));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+    );
+    let trajectory = machine_trajectory(&machine);
+    let entry = trajectory.last().expect("rlm trajectory entry");
+    assert_eq!(entry.tool_call_ids, vec!["rlm-call-1".to_string()]);
 }
 
 #[test]
@@ -694,11 +1004,11 @@ fn rlm_exec_any_tool_control_handoff_is_terminal() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::Emit(SessionEvent::ToolCall { name, output, .. })
-            if name == "custom_handoff" && output.is_success()
-    )));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+    );
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
@@ -775,11 +1085,11 @@ fn rlm_exec_any_tool_control_fail_is_terminal_error() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::Emit(SessionEvent::ToolCall { name, output, .. })
-            if name == "custom_fail" && output.is_success()
-    )));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Emit(SessionEvent::ToolCall { .. })))
+    );
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
@@ -849,11 +1159,13 @@ fn typed_rlm_finish_emits_turn_outcome_and_done() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|e| matches!(
-        e,
-        Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
-            if text.contains("\"ok\": true") && kind == "final"
-    )));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Emit(lash_sansio::SessionEvent::Message { kind, .. }) if kind == "final"
+        )),
+        "RLM submit should surface through SubmittedValue, not a duplicate final message"
+    );
     let (checkpoint_id, checkpoint) = find_checkpoint(&effects).expect("checkpoint");
     assert_eq!(checkpoint, CheckpointKind::BeforeCompletion);
     machine.handle_response(Response::Checkpoint {
@@ -996,13 +1308,18 @@ fn rlm_reasoning_part_is_preserved_in_trajectory() {
     });
 
     let effects = drain_effects(&mut machine);
-    assert!(effects.iter().any(|effect| {
-        matches!(
+    assert!(
+        effects
+            .iter()
+            .any(|effect| { matches!(effect, Effect::Checkpoint { .. }) })
+    );
+    assert!(
+        !effects.iter().any(|effect| matches!(
             effect,
-            Effect::Emit(lash_sansio::SessionEvent::Message { text, kind })
-                if text == "Hi." && kind == "final"
-        )
-    }));
+            Effect::Emit(lash_sansio::SessionEvent::Message { kind, .. }) if kind == "final"
+        )),
+        "RLM submit should surface through SubmittedValue, not a duplicate final message"
+    );
     let trajectory = machine_trajectory(&machine);
     let entry = trajectory.last().expect("trajectory entry");
     assert!(entry.reasoning.contains("I'll answer directly."));
