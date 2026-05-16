@@ -234,7 +234,7 @@ bottom-aligned.
   <small>Pure protocol</small>
   <h3>lash-sansio</h3>
   <p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>.</p>
-  <code class="path">lash-sansio/src/sansio.rs</code>
+  <code class="path">crates/lash-sansio/src/sansio.rs</code>
 </article>
 ```
 
@@ -266,7 +266,7 @@ Wrap in `.table` for horizontal-scroll on narrow viewports.
   <table>
     <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
     <tbody>
-      <tr><td><code>lash-core/src/runtime/mod.rs</code></td><td>…</td></tr>
+      <tr><td><code>crates/lash-core/src/runtime/mod.rs</code></td><td>…</td></tr>
     </tbody>
   </table>
 </div>

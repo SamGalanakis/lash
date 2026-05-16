@@ -10,17 +10,17 @@ name = "bench-frontier-cs"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../../../lash-core", default-features = false, features = ["full"] }
-lash = { path = "../../../lash" }
-lash-cli = { path = "../../../lash-cli" }
-lash-export = { path = "../../../lash-export" }
-lash-sqlite-store = { path = "../../../lash-sqlite-store" }
-lash-llm-tools = { path = "../../../lash-llm-tools" }
-lash-mode-rlm = { path = "../../../lash-mode-rlm" }
-lash-rlm-types = { path = "../../../lash-rlm-types" }
-lash-provider-openai = { path = "../../../lash-provider-openai" }
-lash-providers-builtin = { path = "../../../lash-providers-builtin" }
-lash-subagents = { path = "../../../lash-subagents" }
+lash-core = { path = "../../../crates/lash-core", default-features = false, features = ["full"] }
+lash = { path = "../../../crates/lash" }
+lash-cli = { path = "../../../crates/lash-cli" }
+lash-export = { path = "../../../crates/lash-export" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools" }
+lash-mode-rlm = { path = "../../../crates/lash-mode-rlm" }
+lash-rlm-types = { path = "../../../crates/lash-rlm-types" }
+lash-provider-openai = { path = "../../../crates/lash-provider-openai" }
+lash-providers-builtin = { path = "../../../crates/lash-providers-builtin" }
+lash-subagents = { path = "../../../crates/lash-subagents" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive", "env"] }

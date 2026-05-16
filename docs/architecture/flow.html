@@ -49,7 +49,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: per-turn, apply them via <code>TurnInput::rlm_project(bindings)</code> from <code>lash_mode_rlm::RlmTurnInputExt</code>; per-session, install <code>rlm_session_projection_extension(bindings)</code> as a session-level mode extension (see <code>lash-mode-rlm/src/projected_bindings.rs</code>).</p>
+            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: per-turn, apply them via <code>TurnInput::rlm_project(bindings)</code> from <code>lash_mode_rlm::RlmTurnInputExt</code>; per-session, install <code>rlm_session_projection_extension(bindings)</code> as a session-level mode extension (see <code>crates/lash-mode-rlm/src/projected_bindings.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
@@ -134,7 +134,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Graph To UI Projection</h2>
-            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML (<code>lash-export/src/tree.rs</code>, <code>html.rs</code>).</p>
+            <p>Chronological rendering is a projection policy, not a storage policy. The graph remains durable and branchable; UI and exports choose readable order. <code>lash-export</code> walks an entire session tree: <code>load_tree_from_paths</code> assembles a <code>LoadedSessionTree</code> from the SQLite store and trace JSONL, and <code>render_tree</code> emits a multi-view HTML (<code>crates/lash-export/src/tree.rs</code>, <code>html.rs</code>).</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Read projection path</div>
@@ -233,7 +233,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Flow anchors: <code>lash-core/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>lash-core/src/session_graph.rs</code>, <code>lash-cli/src/app/projection.rs</code>.</footer>
+      <footer class="footer">Flow anchors: <code>crates/lash-core/src/runtime/turn_loop.rs</code>, <code>turn_driver.rs</code>, <code>turn_commit_pipeline.rs</code>, <code>crates/lash-core/src/session_graph.rs</code>, <code>crates/lash-cli/src/app/projection.rs</code>.</footer>
     </main>
   </div>
 </body>

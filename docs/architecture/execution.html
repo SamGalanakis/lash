@@ -155,7 +155,7 @@ flowchart LR
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. <code>BuiltinMonitorToolPluginFactory</code> and <code>BuiltinTaskControlsPluginFactory</code> live in <code>lash_core::runtime_controls</code> (re-exported by the <code>lash</code> facade as <code>lash::plugins::*</code>). A child can fail terminally with <code>call submit_error { reason }</code> (defined in <code>lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. <code>BuiltinMonitorToolPluginFactory</code> and <code>BuiltinTaskControlsPluginFactory</code> live in <code>lash_core::runtime_controls</code> (re-exported by the <code>lash</code> facade as <code>lash::plugins::*</code>). A child can fail terminally with <code>call submit_error { reason }</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">
@@ -175,7 +175,7 @@ flowchart LR
         </div>
       </section>
 
-      <footer class="footer">Execution anchors: <code>lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>lash-mode-standard/src/lib.rs</code>, <code>lash-mode-rlm/src/*</code>, <code>lash-subagents/src/*</code>, <code>lash-llm-tools/src/lib.rs</code>.</footer>
+      <footer class="footer">Execution anchors: <code>crates/lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>crates/lash-mode-standard/src/lib.rs</code>, <code>crates/lash-mode-rlm/src/*</code>, <code>crates/lash-subagents/src/*</code>, <code>crates/lash-llm-tools/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

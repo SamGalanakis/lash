@@ -65,7 +65,7 @@ flowchart TD
   Config --> Tavily["Tavily search / extract"]
   Config --> Models["models.dev catalog<br/>file cache + bundled fallback"]
   CLI --> FileIndex["lash-file-index<br/>ignore + notify + nucleo"]
-  Runtime["LashRuntime"] --> StoreContract["RuntimePersistence<br/>lash-core/src/store.rs"]
+  Runtime["LashRuntime"] --> StoreContract["RuntimePersistence<br/>crates/lash-core/src/store.rs"]
   StoreContract --> Store["lash-sqlite-store<br/>session graph + blobs + usage"]
   Runtime --> Trace["lash-trace schema v2<br/>standard + extended JSONL"]
   Runtime --> Export["lash-export<br/>DB + provider trace"]
@@ -96,7 +96,7 @@ flowchart TD
             <article class="panel"><h3>models.dev</h3><p><code>CachedModelCatalog</code> reads a file cache, can fetch <code>https://models.dev/api.json</code>, and has a bundled snapshot fallback.</p></article>
             <article class="panel"><h3>Tracing</h3><p><code>lash-trace</code> defines schema version 2 JSONL records. Standard records cover turns, LLM starts/completions, tools, and summaries; extended records preserve provider/stream details. The optional <code>otel</code> cargo feature pulls in <code>opentelemetry 0.31</code> and maps those events to spans. <code>lash-trace-viewer</code> is a standalone binary crate that consumes <code>lash-trace</code> JSONL directly, independent of <code>lash-export</code>.</p></article>
             <article class="panel"><h3>File index</h3><p><code>lash-file-index</code> combines <code>ignore</code> walking, <code>notify</code> watching, and <code>nucleo</code> matching for async <code>@</code> completion.</p></article>
-            <article class="panel"><h3>Store</h3><p><code>lash-core/src/store.rs</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
+            <article class="panel"><h3>Store</h3><p><code>crates/lash-core/src/store.rs</code> defines the runtime persistence contract. <code>lash-sqlite-store</code> is the local implementation for session heads, graph nodes, checkpoint blobs, usage deltas, tombstones, and garbage-collection metadata.</p></article>
             <article class="panel"><h3>Export</h3><p><code>lash-export</code> renders the SQLite session plus provider trace JSONL when present, so transcript views can include prompt snapshots, context percentage, cached-token percentage, and exact token counts.</p></article>
           </div>
         </div>
@@ -107,7 +107,7 @@ flowchart TD
         </div>
       </section>
 
-      <footer class="footer">Dependency anchors: <code>lash-core/src/provider/mod.rs</code>, <code>lash-plugin-mcp/src/plugin.rs</code>, <code>lash-core/src/model_info.rs</code>, <code>lash-core/src/store.rs</code>, <code>lash-sqlite-store/src/lib.rs</code>, <code>lash-file-index/src/lib.rs</code>.</footer>
+      <footer class="footer">Dependency anchors: <code>crates/lash-core/src/provider/mod.rs</code>, <code>crates/lash-plugin-mcp/src/plugin.rs</code>, <code>crates/lash-core/src/model_info.rs</code>, <code>crates/lash-core/src/store.rs</code>, <code>crates/lash-sqlite-store/src/lib.rs</code>, <code>crates/lash-file-index/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

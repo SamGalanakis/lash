@@ -236,12 +236,12 @@ while !machine.is_done() {
             <table>
               <thead><tr><th>Test</th><th>Asserts</th></tr></thead>
               <tbody>
-                <tr><td><code>checkpoint_before_llm_completion_reissues_same_logical_llm_call</code><br><code>lash-sansio/src/sansio/tests.rs:502</code></td><td>Restore from a checkpoint taken mid-LLM yields a fresh <code>LlmCall</code> effect with the same <code>EffectId</code> and identical request payload.</td></tr>
+                <tr><td><code>checkpoint_before_llm_completion_reissues_same_logical_llm_call</code><br><code>crates/lash-sansio/src/sansio/tests.rs:502</code></td><td>Restore from a checkpoint taken mid-LLM yields a fresh <code>LlmCall</code> effect with the same <code>EffectId</code> and identical request payload.</td></tr>
                 <tr><td><code>checkpoint_after_llm_result_replays_checkpoint_without_second_llm</code><br><code>:521</code></td><td>Restore after the LLM completed but before the checkpoint plugin ran yields the pending <code>Checkpoint</code> effect — no duplicate model call.</td></tr>
                 <tr><td><code>checkpoint_preserves_parallel_tool_batch_before_any_result</code><br><code>:706</code></td><td>Round-tripping a <code>WaitingTools</code> state preserves every <code>PendingToolCall</code> with its id and arguments intact.</td></tr>
                 <tr><td><code>checkpoint_after_mixed_tool_batch_results_replays_model_feedback_once</code><br><code>:757</code></td><td>Mixed success / failure / cancellation tool outcomes round-trip without re-emitting per-tool events to the stream.</td></tr>
                 <tr><td><code>checkpoint_round_trips_waiting_exec_driver_state</code><br><code>:871</code></td><td>RLM exec waits round-trip with their driver state intact; the same code block and trajectory cursor resume after restore.</td></tr>
-                <tr><td><code>standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls</code><br><code>lash-mode-rlm/tests/protocol_drivers.rs:254</code></td><td>End-to-end through a protocol driver: standard-mode parallel tool batches resume identically after restore.</td></tr>
+                <tr><td><code>standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls</code><br><code>crates/lash-mode-rlm/tests/protocol_drivers.rs:254</code></td><td>End-to-end through a protocol driver: standard-mode parallel tool batches resume identically after restore.</td></tr>
                 <tr><td><code>standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome</code><br><code>:311</code></td><td>A tool that authored a terminal value via tool-control finishes the same way on replay.</td></tr>
                 <tr><td><code>rlm_checkpoint_redrives_pending_exec_code_with_driver_state</code><br><code>:716</code></td><td>RLM pending <code>ExecCode</code> re-runs with the same driver state, projected bindings intact.</td></tr>
                 <tr><td><code>rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes</code><br><code>:786</code></td><td>RLM exec results carrying parallel tool outcomes preserve success / failure / cancellation structure across restore.</td></tr>
@@ -257,7 +257,7 @@ while !machine.is_done() {
         </div>
       </section>
 
-      <footer class="footer">Durability anchors: <code>lash-sansio/src/sansio/mod.rs</code>, <code>lash-sansio/src/sansio/tests.rs</code>, <code>lash-mode-rlm/tests/protocol_drivers.rs</code>, <code>lash-core/src/runtime/turn_loop.rs</code>.</footer>
+      <footer class="footer">Durability anchors: <code>crates/lash-sansio/src/sansio/mod.rs</code>, <code>crates/lash-sansio/src/sansio/tests.rs</code>, <code>crates/lash-mode-rlm/tests/protocol_drivers.rs</code>, <code>crates/lash-core/src/runtime/turn_loop.rs</code>.</footer>
     </main>
   </div>
 </body>

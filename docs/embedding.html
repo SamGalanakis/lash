@@ -48,6 +48,7 @@
             <li><a href="#token-usage">Token Usage</a></li>
             <li><a href="#context-window">Context Window And History</a></li>
             <li><a href="#rlm-and-submit">RLM And Submit</a></li>
+            <li><a href="#projected-bindings">Projected Bindings</a></li>
             <li><a href="#prompt-templates">Prompt Templates</a></li>
             <li><a href="#typed-plugin-input">Typed Plugin Input</a></li>
             <li><a href="#app-storage">App Storage</a></li>
@@ -485,6 +486,63 @@ let prose_or_submit = session
           </div>
         </div>
 
+        <div class="section" id="projected-bindings">
+          <div class="section-header">
+            <h2>Projected Bindings</h2>
+            <p>RLM programs see host data in three ways. Tool args carry data the model decides to fetch; the prompt carries text the model reads as instructions; <em>projected bindings</em> sit between the two — named, typed, read-only values that appear directly in lashlang scope so a program can write <code>history[-1]</code> or <code>board.cells[2]</code> instead of calling a tool first. Project anything the model should treat as part of the environment: the user's current request, a board state, a tenant id, a task spec, a parent-session digest.</p>
+          </div>
+          <p>The mechanism is RLM-only. Two scopes:</p>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Per turn</h3>
+              <p>Attach bindings to the input of one turn via <code>TurnInput::rlm_project(...)</code>. Right for values that change every turn — the user's current message, fresh board state, a request payload.</p>
+            </article>
+            <article class="panel">
+              <h3>Per session</h3>
+              <p>Apply a mode extension at session open so the same bindings appear in every turn of the session. Right for values that persist across turns — tenant id, an immutable task spec, a long-lived parent reference.</p>
+            </article>
+          </div>
+          <pre><code>use lash::TurnInput;
+use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
+
+// Session-wide: applies to every turn the session runs.
+session
+    .control()
+    .mode()
+    .apply_session_extension(rlm_session_projection_extension(
+        RlmProjectedBindings::new()
+            .bind_json("tenant_id", serde_json::json!("acme"))?
+            .bind_json("task", serde_json::to_value(&amp;task)?)?,
+    ))
+    .await?;
+
+// Per-turn: layered on top of the session bindings for this turn only.
+let input = TurnInput::text("Play one move.")
+    .rlm_project(
+        RlmProjectedBindings::new()
+            .bind_json("board", serde_json::to_value(&amp;board)?)?,
+    )?;
+
+let result = session.turn(input).run().await?;</code></pre>
+          <p>The model sees these names directly in fenced lashlang code:</p>
+          <pre><code>```lashlang
+let move_idx = best_move(board.cells, board.turn)
+submit({ "move": move_idx, "tenant": tenant_id })
+```</code></pre>
+          <p>Three ways to bind a value, in order of growing power:</p>
+          <ul class="bullets">
+            <li><code>.bind_json(name, value)</code> — the common case. Pass any <code>serde_json::Value</code>; lashlang re-types it on the way in.</li>
+            <li><code>.bind_value(name, FlowValue)</code> — pass a native <code>lashlang::Value</code> directly, skipping the JSON round-trip. Use this when you already hold a lashlang value (e.g. from <code>history</code>).</li>
+            <li><code>.bind_lazy(name, Arc&lt;dyn ProjectedHostValue&gt;)</code> — for large host structures you don't want to clone. Implement <code>get_field</code> / <code>get_index</code> / <code>len</code> / <code>render</code> / <code>materialize</code> and the executor calls them on demand as the program reads fields.</li>
+          </ul>
+          <h3>Reserved names and the read-only guard</h3>
+          <p>Projected names are reserved. Attempting <code>tenant_id = "other"</code> inside lashlang raises <code>`tenant_id` is a read-only projected binding</code>. The runtime also reserves <code>history</code> — every RLM turn already projects the conversation history through that name. A host that wants to override <code>history</code> should narrow it through its own projected handle rather than bind a new value over it.</p>
+          <p>Duplicate names between session-scope and turn-scope are rejected at <code>session.turn(...).run()</code> time with a protocol error — no silent override. Pick one scope per name; merge at the source if both layers want to contribute.</p>
+          <h3>Seeds for handoffs and subagents</h3>
+          <p>The RLM control tools <code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries are re-projected in the successor or child session. Pass <code>input.prompt</code>, a projected handle, or any other root-projected value as a seed entry and it stays projected on the other side. See <a href="#subagents">Subagents</a> and the <a href="./architecture/lashlang.html#projected-host-bindings">Projected Host Bindings</a> chapter for the wire format and the seed-classifier rules.</p>
+          <p>The deep reference — <code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, the read-only assignment rule, and the RLM serialization marker — lives in <a href="./architecture/lashlang.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
+        </div>
+
         <div class="section" id="prompt-templates">
           <div class="section-header">
             <h2>Prompt Templates And Slots</h2>
@@ -817,7 +875,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         </div>
       </section>
 
-      <footer class="footer">Lash API anchors: <code>lash/src/lib.rs</code>, <code>lash/src/core.rs</code>, <code>lash/src/session.rs</code>, <code>lash-plugin-mcp/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>lash-core/src/runtime/*</code>.</footer>
+      <footer class="footer">Lash API anchors: <code>crates/lash/src/lib.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-plugin-mcp/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>crates/lash-core/src/runtime/*</code>.</footer>
     </div>
   </main>
 </body>

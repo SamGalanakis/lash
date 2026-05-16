@@ -153,7 +153,7 @@
             <article class="panel"><h3>Model policy</h3><p>Maps user-facing model + variant names to provider-native ids, declares structured-output / tool-call / thinking capabilities per model.</p></article>
             <article class="panel"><h3>Factory</h3><p>Registers with the global provider registry at process start; <code>ProviderHandle::new(components)</code> assembles the five pieces into a handle the runtime can use.</p></article>
           </div>
-          <p>See <code>lash-provider-openai/src/lib.rs</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
+          <p>See <code>crates/lash-provider-openai/src/lib.rs</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
         </div>
 
         <div class="section-nav">
@@ -162,7 +162,7 @@
         </div>
       </section>
 
-      <footer class="footer">Provider anchors: <code>lash-core/src/provider/mod.rs</code>, <code>lash-provider-openai/src</code>, <code>lash-provider-anthropic/src</code>, <code>lash-provider-codex/src</code>, <code>lash-provider-google/src</code>, <code>lash-providers-builtin/src/lib.rs</code>.</footer>
+      <footer class="footer">Provider anchors: <code>crates/lash-core/src/provider/mod.rs</code>, <code>crates/lash-provider-openai/src</code>, <code>crates/lash-provider-anthropic/src</code>, <code>crates/lash-provider-codex/src</code>, <code>crates/lash-provider-google/src</code>, <code>crates/lash-providers-builtin/src/lib.rs</code>.</footer>
     </main>
   </div>
 </body>

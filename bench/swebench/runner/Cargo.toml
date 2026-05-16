@@ -11,18 +11,18 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = "6"
-lash-core = { path = "../../../lash-core", default-features = false, features = ["full"] }
-lash = { path = "../../../lash" }
-lash-cli = { path = "../../../lash-cli" }
-lash-standard-plugins = { path = "../../../lash-standard-plugins" }
-lash-sqlite-store = { path = "../../../lash-sqlite-store" }
-lash-llm-tools = { path = "../../../lash-llm-tools" }
-lash-mode-rlm = { path = "../../../lash-mode-rlm" }
-lash-mode-standard = { path = "../../../lash-mode-standard" }
-lash-plugin-observational-memory = { path = "../../../lash-plugin-observational-memory" }
-lash-plugin-rolling-history = { path = "../../../lash-plugin-rolling-history" }
-lash-providers-builtin = { path = "../../../lash-providers-builtin" }
-lash-subagents = { path = "../../../lash-subagents" }
+lash-core = { path = "../../../crates/lash-core", default-features = false, features = ["full"] }
+lash = { path = "../../../crates/lash" }
+lash-cli = { path = "../../../crates/lash-cli" }
+lash-standard-plugins = { path = "../../../crates/lash-standard-plugins" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools" }
+lash-mode-rlm = { path = "../../../crates/lash-mode-rlm" }
+lash-mode-standard = { path = "../../../crates/lash-mode-standard" }
+lash-plugin-observational-memory = { path = "../../../crates/lash-plugin-observational-memory" }
+lash-plugin-rolling-history = { path = "../../../crates/lash-plugin-rolling-history" }
+lash-providers-builtin = { path = "../../../crates/lash-providers-builtin" }
+lash-subagents = { path = "../../../crates/lash-subagents" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive", "env"] }

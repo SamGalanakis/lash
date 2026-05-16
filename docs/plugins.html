@@ -148,7 +148,7 @@ let core = LashCore::builder()
         <div class="section" id="worked-example">
           <div class="section-header">
             <h2>A Worked Example</h2>
-            <p>The plan-mode plugin (<code>lash-plugin-plan-mode/src/update_plan.rs</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
+            <p>The plan-mode plugin (<code>crates/lash-plugin-plan-mode/src/update_plan.rs</code>) is a good single-file model. It exposes one tool (<code>update_plan</code>), keeps a session-local state shared between the tool and an after-tool hook, gates itself off in non-root sessions, and emits a TUI surface event when the plan changes. The skeleton:</p>
           </div>
           <pre><code>use std::sync::{Arc, Mutex};
 use lash::plugins::{
@@ -213,7 +213,7 @@ impl ToolProvider for UpdatePlanTool {
         ToolResult::ok(serde_json::json!({ "generation": 1 }))
     }
 }</code></pre>
-          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>lash-plugin-plan-mode/src/update_plan.rs:280-330</code> for the full version.</p>
+          <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>crates/lash-plugin-plan-mode/src/update_plan.rs:280-330</code> for the full version.</p>
         </div>
 
         <div class="section" id="what-you-can-register">
@@ -402,10 +402,10 @@ let plugins = PluginStack::runtime().configure(|plugins| {
             <p>If you want a plugin to model your work on, these are good starting points:</p>
           </div>
           <div class="def-list-grid">
-            <article class="panel"><h3>Minimal hook only</h3><p><code>lash-plugin-ui-activity/src/lib.rs</code> — ~50 lines, one after-turn hook, emits a desktop-notification surface event. No tools, no state. Good template for "I just want to react to turn lifecycle."</p></article>
-            <article class="panel"><h3>Tool + state + UI event</h3><p><code>lash-plugin-plan-mode/src/update_plan.rs</code> — single tool with session-local state, surface-event emission on tool success, root-session-only gating. Good template for "I want to expose one tool that the user can see in the TUI."</p></article>
-            <article class="panel"><h3>Prompt contribution + factory state</h3><p><code>lash-plugin-prompt-context/src/lib.rs</code> — captures an instruction source on the factory, projects it into prompts via <code>reg.prompt().contribute(...)</code>. Good template for "I want to inject something into the system prompt."</p></article>
-            <article class="panel"><h3>Per-core connection pool</h3><p><code>lash-plugin-mcp/src/plugin.rs</code> — factory owns an <code>Arc&lt;McpConnectionPool&gt;</code> shared across every session, plus runtime <code>attach_server</code> / <code>detach_server</code> methods. Good template for "I'm wrapping an external service with one persistent connection."</p></article>
+            <article class="panel"><h3>Minimal hook only</h3><p><code>crates/lash-plugin-ui-activity/src/lib.rs</code> — ~50 lines, one after-turn hook, emits a desktop-notification surface event. No tools, no state. Good template for "I just want to react to turn lifecycle."</p></article>
+            <article class="panel"><h3>Tool + state + UI event</h3><p><code>crates/lash-plugin-plan-mode/src/update_plan.rs</code> — single tool with session-local state, surface-event emission on tool success, root-session-only gating. Good template for "I want to expose one tool that the user can see in the TUI."</p></article>
+            <article class="panel"><h3>Prompt contribution + factory state</h3><p><code>crates/lash-plugin-prompt-context/src/lib.rs</code> — captures an instruction source on the factory, projects it into prompts via <code>reg.prompt().contribute(...)</code>. Good template for "I want to inject something into the system prompt."</p></article>
+            <article class="panel"><h3>Per-core connection pool</h3><p><code>crates/lash-plugin-mcp/src/plugin.rs</code> — factory owns an <code>Arc&lt;McpConnectionPool&gt;</code> shared across every session, plus runtime <code>attach_server</code> / <code>detach_server</code> methods. Good template for "I'm wrapping an external service with one persistent connection."</p></article>
           </div>
         </div>
 
@@ -415,7 +415,7 @@ let plugins = PluginStack::runtime().configure(|plugins| {
         </div>
       </section>
 
-      <footer class="footer">Source anchors: <code>lash-core/src/plugin/registry.rs</code>, <code>lash-core/src/plugin/registrar.rs</code>, <code>lash-core/src/tool_provider.rs</code>, <code>lash-plugin-plan-mode/src/update_plan.rs</code>, <code>lash-plugin-ui-activity/src/lib.rs</code>, <code>lash/src/lib.rs</code>.</footer>
+      <footer class="footer">Source anchors: <code>crates/lash-core/src/plugin/registry.rs</code>, <code>crates/lash-core/src/plugin/registrar.rs</code>, <code>crates/lash-core/src/tool_provider.rs</code>, <code>crates/lash-plugin-plan-mode/src/update_plan.rs</code>, <code>crates/lash-plugin-ui-activity/src/lib.rs</code>, <code>crates/lash/src/lib.rs</code>.</footer>
     </div>
   </main>
 </body>
