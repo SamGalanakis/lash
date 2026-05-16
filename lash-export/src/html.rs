@@ -100,7 +100,7 @@ mod tests {
             reasoning: "thinking".to_string(),
             code: "x = 1".to_string(),
             output: vec!["1".to_string()],
-            tool_calls: Vec::new(),
+            tool_call_ids: Vec::new(),
             images: Vec::new(),
             error: None,
             final_output: None,
@@ -254,25 +254,30 @@ mod tests {
 
     #[test]
     fn rlm_step_renders_inline_expandable_tool_calls() {
+        let record = ToolCallRecord {
+            call_id: Some("call_1".to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "x"}),
+            output: lash_core::ToolCallOutput::success(serde_json::json!({"answer": "y"})),
+            duration_ms: 4,
+        };
         let session = LoadedSession {
             meta: None,
-            chronological: vec![ChronologicalEntry {
-                index: 0,
-                payload: rlm_payload(RlmTrajectoryEntry {
-                    code: "data = (call lookup { q: \"x\" })?".to_string(),
-                    output: Vec::new(),
-                    tool_calls: vec![ToolCallRecord {
-                        call_id: Some("call_1".to_string()),
-                        tool: "lookup".to_string(),
-                        args: serde_json::json!({"q": "x"}),
-                        output: lash_core::ToolCallOutput::success(
-                            serde_json::json!({"answer": "y"}),
-                        ),
-                        duration_ms: 4,
-                    }],
-                    ..rlm_step(0, "rlm_step_0")
-                }),
-            }],
+            chronological: vec![
+                ChronologicalEntry {
+                    index: 0,
+                    payload: ChronologicalPayload::ToolCall(record),
+                },
+                ChronologicalEntry {
+                    index: 1,
+                    payload: rlm_payload(RlmTrajectoryEntry {
+                        code: "data = (call lookup { q: \"x\" })?".to_string(),
+                        output: Vec::new(),
+                        tool_call_ids: vec!["call_1".to_string()],
+                        ..rlm_step(0, "rlm_step_0")
+                    }),
+                },
+            ],
             trace_path: PathBuf::from("session.trace.jsonl"),
             context_window_tokens: None,
             llm_prompts: Vec::new(),

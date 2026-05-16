@@ -1,4 +1,5 @@
 use super::support::*;
+use crate::LlmTerminalReason;
 
 pub trait ProviderState: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
@@ -84,13 +85,10 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
             failure.raw.as_deref().unwrap_or_default()
         )
         .to_ascii_lowercase();
-        if haystack.contains("context_length")
-            || haystack.contains("context length")
-            || haystack.contains("maximum context")
-            || haystack.contains("invalid_request_error")
-        {
+        if is_context_overflow_text(&haystack) {
             failure.kind = ProviderFailureKind::Validation;
             failure.retryable = false;
+            failure.terminal_reason = LlmTerminalReason::ContextOverflow;
         }
         if haystack.contains("insufficient_quota")
             || haystack.contains("usage_limit_reached")
@@ -99,6 +97,13 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
         {
             failure.kind = ProviderFailureKind::Quota;
             failure.retryable = false;
+        }
+        if haystack.contains("content_filter")
+            || haystack.contains("prohibited_content")
+            || haystack.contains("safety")
+            || haystack.contains("sensitive")
+        {
+            failure.terminal_reason = LlmTerminalReason::ContentFilter;
         }
         if haystack.contains("model_not_found")
             || haystack.contains("unsupported model")
@@ -109,4 +114,51 @@ impl ProviderFailureClassifier for DefaultProviderFailureClassifier {
         }
         failure
     }
+}
+
+pub fn is_context_overflow_text(haystack: &str) -> bool {
+    let lower = haystack.to_ascii_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("ratelimit")
+        || lower.contains("throttle")
+        || lower.contains("throttling")
+        || lower.contains("too many requests")
+        || lower.contains("tokens per minute")
+        || lower.contains("tpm")
+        || lower.contains("quota")
+    {
+        return false;
+    }
+
+    lower.contains("context_length_exceeded")
+        || lower.contains("context_length")
+        || lower.contains("context length")
+        || lower.contains("maximum context")
+        || lower.contains("max context")
+        || lower.contains("context window")
+        || lower.contains("context window exceeds limit")
+        || lower.contains("exceeds the context window")
+        || lower.contains("prompt is too long")
+        || lower.contains("prompt too long")
+        || lower.contains("request_too_large")
+        || lower.contains("input token count") && lower.contains("exceeds the maximum")
+        || lower.contains("maximum prompt length is")
+        || lower.contains("reduce the length of the messages")
+        || lower.contains("maximum context length is")
+        || lower.contains("model's context length")
+        || lower.contains("models context length")
+        || lower.contains("exceeds the available context size")
+        || lower.contains("greater than the context length")
+        || lower.contains("exceeded model token limit")
+        || lower.contains("too large for model with")
+        || lower.contains("model_context_window_exceeded")
+        || lower.contains("too many tokens")
+        || lower.contains("exceeds the maximum number of tokens")
+        || lower.contains("exceeds maximum number of tokens")
+        || lower.contains("request too large")
+        || lower.contains("input is too long")
+        || lower.contains("token limit exceeded")
+        || lower.contains("reduce the length of the messages")
+        || lower.contains("reduce the length of your prompt")
 }

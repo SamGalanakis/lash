@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use crate::PromptFingerprint;
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoningReplay};
 use crate::sansio::{
     ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
@@ -41,6 +42,7 @@ pub struct ModePreamble<M: ModeProtocol = UnitModeProtocol> {
     pub config: ModeConfig<M>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
     pub tool_names: Arc<Vec<String>>,
+    pub tool_names_fingerprint: PromptFingerprint,
     pub omitted_tool_count: usize,
     pub execution_prompt: Arc<str>,
     pub prompt_contributions: Vec<PromptContribution>,

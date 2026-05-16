@@ -4,7 +4,6 @@
 //! lives behind `ProtocolDriverHandle`, which returns declarative
 //! `DriverAction`s that the machine applies.
 
-use std::any::Any;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -15,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::llm::types::{
-    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmToolChoice, LlmToolSpec,
-    ProviderReplayMeta,
+    LlmAttachment, LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason, LlmToolChoice,
+    LlmToolSpec, ProviderReplayMeta,
 };
 use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
@@ -33,21 +32,23 @@ use crate::{
 pub trait ModeProtocol: Send + Sync + 'static {
     type Event: Clone + Serialize + DeserializeOwned + Debug + Send + Sync + 'static;
     type Termination: Clone + Default + Debug + Send + Sync + 'static;
+    type DriverState: Clone + Default + Serialize + DeserializeOwned + Debug + Send + Sync + 'static;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct UnitModeProtocol;
 
 impl ModeProtocol for UnitModeProtocol {
     type Event = ();
     type Termination = ();
+    type DriverState = serde_json::Value;
 }
 
 /// Opaque identifier linking an effect to its response.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
 pub struct EffectId(pub u64);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct PendingToolCall {
     pub call_id: String,
     pub tool_name: String,
@@ -56,7 +57,7 @@ pub struct PendingToolCall {
     pub replay: Option<ProviderReplayMeta>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct CompletedToolCall {
     pub call_id: String,
     pub tool_name: String,
@@ -68,7 +69,7 @@ pub struct CompletedToolCall {
     pub replay: Option<ProviderReplayMeta>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub enum LogEvent {
     LlmDebug {
         session_id: String,
@@ -87,6 +88,7 @@ pub enum LogEvent {
         retryable: bool,
         raw: Option<String>,
         code: Option<String>,
+        terminal_reason: LlmTerminalReason,
     },
 }
 
@@ -148,13 +150,75 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     },
 }
 
+impl<M: ModeProtocol> Effect<M> {
+    fn id(&self) -> Option<EffectId> {
+        match self {
+            Self::SyncExecutionSurface { id, .. }
+            | Self::LlmCall { id, .. }
+            | Self::CancelLlm { id }
+            | Self::ToolCalls { id, .. }
+            | Self::ExecCode { id, .. }
+            | Self::Checkpoint { id, .. }
+            | Self::Sleep { id, .. } => Some(*id),
+            Self::Log { .. } | Self::Emit(_) | Self::Progress { .. } | Self::Done { .. } => None,
+        }
+    }
+}
+
 /// Error details from a failed LLM call.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum CheckpointEffect<M: ModeProtocol = UnitModeProtocol> {
+    SyncExecutionSurface {
+        id: EffectId,
+        update_machine_config: bool,
+    },
+    LlmCall {
+        id: EffectId,
+        request: Arc<LlmRequest>,
+    },
+    CancelLlm {
+        id: EffectId,
+    },
+    ToolCalls {
+        id: EffectId,
+        calls: Vec<PendingToolCall>,
+    },
+    ExecCode {
+        id: EffectId,
+        code: String,
+    },
+    Checkpoint {
+        id: EffectId,
+        checkpoint: CheckpointKind,
+    },
+    Sleep {
+        id: EffectId,
+        duration: Duration,
+    },
+    Log {
+        event: LogEvent,
+    },
+    Emit(SessionEvent),
+    Progress {
+        messages: Vec<Message>,
+        events: Vec<SessionEventRecord<M::Event>>,
+        mode_iteration: usize,
+    },
+    Done {
+        messages: Vec<Message>,
+        events: Vec<SessionEventRecord<M::Event>>,
+        mode_iteration: usize,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct LlmCallError {
     pub message: String,
     pub retryable: bool,
     pub raw: Option<String>,
     pub code: Option<String>,
+    pub terminal_reason: LlmTerminalReason,
     pub request_body: Option<String>,
 }
 
@@ -193,52 +257,52 @@ pub enum Response {
     Timeout { id: EffectId },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct ExecutionSurfaceSync {
     pub system_prompt: Arc<str>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,
 }
 
-pub type DriverState = Box<dyn Any + Send + Sync>;
-
-pub fn driver_state<T>(state: T) -> DriverState
+pub fn driver_state<T>(state: T) -> serde_json::Value
 where
-    T: Any + Send + Sync,
+    T: Serialize,
 {
-    Box::new(state)
+    serde_json::to_value(state).expect("driver state must serialize")
 }
 
-pub struct WaitingLlmState {
+pub struct WaitingLlmState<M: ModeProtocol = UnitModeProtocol> {
     pub request: Arc<LlmRequest>,
-    driver_state: Option<DriverState>,
+    driver_state: Option<M::DriverState>,
 }
 
-impl WaitingLlmState {
+impl<M: ModeProtocol> WaitingLlmState<M> {
     pub fn take_driver_state<T>(&mut self) -> Option<T>
     where
-        T: Any + Send + Sync,
+        T: DeserializeOwned,
     {
         self.driver_state
             .take()
-            .and_then(|state| state.downcast::<T>().ok())
-            .map(|state| *state)
+            .and_then(|state| serde_json::to_value(state).ok())
+            .and_then(|state| serde_json::from_value(state).ok())
     }
 }
 
-pub struct WaitingExecState {
-    driver_state: DriverState,
+pub struct WaitingExecState<M: ModeProtocol = UnitModeProtocol> {
+    driver_state: M::DriverState,
 }
 
-impl WaitingExecState {
+impl<M: ModeProtocol> WaitingExecState<M> {
     pub fn into_driver_state<T>(self) -> Option<T>
     where
-        T: Any + Send + Sync,
+        T: DeserializeOwned,
     {
-        self.driver_state.downcast::<T>().ok().map(|state| *state)
+        serde_json::to_value(self.driver_state)
+            .ok()
+            .and_then(|state| serde_json::from_value(state).ok())
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub enum CheckpointResumeAction {
     PrepareIteration,
     Finish(TurnOutcome),
@@ -250,14 +314,14 @@ pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
     AppendEvents(Vec<SessionEventRecord<M::Event>>),
     StartLlm {
         request: Arc<LlmRequest>,
-        driver_state: Option<DriverState>,
+        driver_state: Option<M::DriverState>,
     },
     StartTools {
         calls: Vec<PendingToolCall>,
     },
     StartExec {
         code: String,
-        driver_state: DriverState,
+        driver_state: M::DriverState,
     },
     StartCheckpoint {
         checkpoint: CheckpointKind,
@@ -379,7 +443,7 @@ pub trait ProtocolDriverHandle<M: ModeProtocol = UnitModeProtocol>: Send + Sync 
     fn handle_llm_success(
         &self,
         ctx: DriverContextView<'_, M>,
-        waiting: WaitingLlmState,
+        waiting: WaitingLlmState<M>,
         llm_response: LlmResponse,
         text_streamed: bool,
     ) -> Vec<DriverAction<M>>;
@@ -391,7 +455,7 @@ pub trait ProtocolDriverHandle<M: ModeProtocol = UnitModeProtocol>: Send + Sync 
     fn handle_exec_result(
         &self,
         ctx: DriverContextView<'_, M>,
-        waiting: WaitingExecState,
+        waiting: WaitingExecState<M>,
         result: Result<crate::ExecResponse, String>,
     ) -> Vec<DriverAction<M>>;
 }
@@ -415,23 +479,27 @@ pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
 
 // ─── Internal state ───
 
-enum MachineState {
+#[derive(Debug, Serialize, serde::Deserialize)]
+enum MachineState<M: ModeProtocol = UnitModeProtocol> {
     PreparingMode,
     WaitingExecutionSurface {
         effect_id: EffectId,
+        update_machine_config: bool,
     },
     PrepareIteration,
     WaitingLlm {
         effect_id: EffectId,
         request: Arc<LlmRequest>,
-        driver_state: Option<DriverState>,
+        driver_state: Option<M::DriverState>,
     },
     WaitingTools {
         effect_id: EffectId,
+        calls: Vec<PendingToolCall>,
     },
     WaitingExec {
         effect_id: EffectId,
-        driver_state: DriverState,
+        code: String,
+        driver_state: M::DriverState,
     },
     WaitingCheckpoint {
         effect_id: EffectId,
@@ -441,11 +509,219 @@ enum MachineState {
     Finished,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct TurnCheckpoint<M: ModeProtocol = UnitModeProtocol> {
+    state: MachineState<M>,
+    pending_effects: Vec<CheckpointEffect<M>>,
+    next_effect_id: u64,
+    messages: Vec<Message>,
+    events: Vec<SessionEventRecord<M::Event>>,
+    mode_iteration: usize,
+    mode_run_offset: usize,
+    cumulative_usage: TokenUsage,
+    termination: TurnTerminationPolicyState,
+    synced_mode_iteration: Option<usize>,
+}
+
+impl<M: ModeProtocol> Clone for MachineState<M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::PreparingMode => Self::PreparingMode,
+            Self::WaitingExecutionSurface {
+                effect_id,
+                update_machine_config,
+            } => Self::WaitingExecutionSurface {
+                effect_id: *effect_id,
+                update_machine_config: *update_machine_config,
+            },
+            Self::PrepareIteration => Self::PrepareIteration,
+            Self::WaitingLlm {
+                effect_id,
+                request,
+                driver_state,
+            } => Self::WaitingLlm {
+                effect_id: *effect_id,
+                request: Arc::clone(request),
+                driver_state: driver_state.clone(),
+            },
+            Self::WaitingTools { effect_id, calls } => Self::WaitingTools {
+                effect_id: *effect_id,
+                calls: calls.clone(),
+            },
+            Self::WaitingExec {
+                effect_id,
+                code,
+                driver_state,
+            } => Self::WaitingExec {
+                effect_id: *effect_id,
+                code: code.clone(),
+                driver_state: driver_state.clone(),
+            },
+            Self::WaitingCheckpoint {
+                effect_id,
+                checkpoint,
+                on_empty,
+            } => Self::WaitingCheckpoint {
+                effect_id: *effect_id,
+                checkpoint: *checkpoint,
+                on_empty: on_empty.clone(),
+            },
+            Self::Finished => Self::Finished,
+        }
+    }
+}
+
+impl<M: ModeProtocol> CheckpointEffect<M> {
+    fn from_effect(effect: &Effect<M>) -> Self {
+        match effect {
+            Effect::SyncExecutionSurface {
+                id,
+                update_machine_config,
+            } => Self::SyncExecutionSurface {
+                id: *id,
+                update_machine_config: *update_machine_config,
+            },
+            Effect::LlmCall { id, request } => Self::LlmCall {
+                id: *id,
+                request: Arc::clone(request),
+            },
+            Effect::CancelLlm { id } => Self::CancelLlm { id: *id },
+            Effect::ToolCalls { id, calls } => Self::ToolCalls {
+                id: *id,
+                calls: calls.clone(),
+            },
+            Effect::ExecCode { id, code } => Self::ExecCode {
+                id: *id,
+                code: code.clone(),
+            },
+            Effect::Checkpoint { id, checkpoint } => Self::Checkpoint {
+                id: *id,
+                checkpoint: *checkpoint,
+            },
+            Effect::Sleep { id, duration } => Self::Sleep {
+                id: *id,
+                duration: *duration,
+            },
+            Effect::Log { event } => Self::Log {
+                event: event.clone(),
+            },
+            Effect::Emit(event) => Self::Emit(event.clone()),
+            Effect::Progress {
+                messages,
+                events,
+                mode_iteration,
+            } => Self::Progress {
+                messages: messages.iter().cloned().collect(),
+                events: events.as_ref().clone(),
+                mode_iteration: *mode_iteration,
+            },
+            Effect::Done {
+                messages,
+                events,
+                mode_iteration,
+            } => Self::Done {
+                messages: messages.iter().cloned().collect(),
+                events: events.as_ref().clone(),
+                mode_iteration: *mode_iteration,
+            },
+        }
+    }
+
+    fn into_effect(self) -> Effect<M> {
+        match self {
+            Self::SyncExecutionSurface {
+                id,
+                update_machine_config,
+            } => Effect::SyncExecutionSurface {
+                id,
+                update_machine_config,
+            },
+            Self::LlmCall { id, request } => Effect::LlmCall { id, request },
+            Self::CancelLlm { id } => Effect::CancelLlm { id },
+            Self::ToolCalls { id, calls } => Effect::ToolCalls { id, calls },
+            Self::ExecCode { id, code } => Effect::ExecCode { id, code },
+            Self::Checkpoint { id, checkpoint } => Effect::Checkpoint { id, checkpoint },
+            Self::Sleep { id, duration } => Effect::Sleep { id, duration },
+            Self::Log { event } => Effect::Log { event },
+            Self::Emit(event) => Effect::Emit(event),
+            Self::Progress {
+                messages,
+                events,
+                mode_iteration,
+            } => Effect::Progress {
+                messages: MessageSequence::from_owned(messages),
+                events: Arc::new(events),
+                mode_iteration,
+            },
+            Self::Done {
+                messages,
+                events,
+                mode_iteration,
+            } => Effect::Done {
+                messages: MessageSequence::from_owned(messages),
+                events: Arc::new(events),
+                mode_iteration,
+            },
+        }
+    }
+}
+
+impl<M: ModeProtocol> MachineState<M> {
+    fn outstanding_effect_id(&self) -> Option<EffectId> {
+        match self {
+            Self::WaitingExecutionSurface { effect_id, .. }
+            | Self::WaitingLlm { effect_id, .. }
+            | Self::WaitingTools { effect_id, .. }
+            | Self::WaitingExec { effect_id, .. }
+            | Self::WaitingCheckpoint { effect_id, .. } => Some(*effect_id),
+            Self::PreparingMode | Self::PrepareIteration | Self::Finished => None,
+        }
+    }
+
+    fn outstanding_effect(&self) -> Option<Effect<M>> {
+        match self {
+            Self::WaitingExecutionSurface {
+                effect_id,
+                update_machine_config,
+            } => Some(Effect::SyncExecutionSurface {
+                id: *effect_id,
+                update_machine_config: *update_machine_config,
+            }),
+            Self::WaitingLlm {
+                effect_id, request, ..
+            } => Some(Effect::LlmCall {
+                id: *effect_id,
+                request: Arc::clone(request),
+            }),
+            Self::WaitingTools { effect_id, calls } => Some(Effect::ToolCalls {
+                id: *effect_id,
+                calls: calls.clone(),
+            }),
+            Self::WaitingExec {
+                effect_id, code, ..
+            } => Some(Effect::ExecCode {
+                id: *effect_id,
+                code: code.clone(),
+            }),
+            Self::WaitingCheckpoint {
+                effect_id,
+                checkpoint,
+                ..
+            } => Some(Effect::Checkpoint {
+                id: *effect_id,
+                checkpoint: *checkpoint,
+            }),
+            Self::PreparingMode | Self::PrepareIteration | Self::Finished => None,
+        }
+    }
+}
+
 /// Sans-IO state machine for a single session run (multi-turn).
 pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
     config: TurnMachineConfig<M>,
-    state: MachineState,
+    state: MachineState<M>,
     pending_effects: VecDeque<Effect<M>>,
+    active_effect_redelivery: bool,
     next_effect_id: u64,
     messages: MessageSequence,
     events: Arc<Vec<SessionEventRecord<M::Event>>>,
@@ -482,6 +758,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
             config,
             state: MachineState::PreparingMode,
             pending_effects: VecDeque::new(),
+            active_effect_redelivery: false,
             next_effect_id: 1,
             messages,
             events,
@@ -512,6 +789,58 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     pub fn mode_iteration(&self) -> usize {
         self.mode_iteration
+    }
+
+    pub fn checkpoint(&self) -> TurnCheckpoint<M> {
+        let active_effect_id = self.state.outstanding_effect_id();
+        let pending_effects = self
+            .pending_effects
+            .iter()
+            .filter(|effect| active_effect_id.is_none_or(|id| effect.id() != Some(id)))
+            .map(CheckpointEffect::from_effect)
+            .collect::<Vec<_>>();
+        TurnCheckpoint {
+            state: self.state.clone(),
+            pending_effects,
+            next_effect_id: self.next_effect_id,
+            messages: self.messages.iter().cloned().collect(),
+            events: self.events.as_ref().clone(),
+            mode_iteration: self.mode_iteration,
+            mode_run_offset: self.mode_run_offset,
+            cumulative_usage: self.cumulative_usage.clone(),
+            termination: self.termination.clone(),
+            synced_mode_iteration: self.synced_mode_iteration,
+        }
+    }
+
+    pub fn restore_from_checkpoint(
+        config: TurnMachineConfig<M>,
+        checkpoint: TurnCheckpoint<M>,
+    ) -> Self {
+        let active_effect_id = checkpoint.state.outstanding_effect_id();
+        let pending_effects = checkpoint
+            .pending_effects
+            .into_iter()
+            .map(CheckpointEffect::into_effect)
+            .collect::<VecDeque<_>>();
+        let active_effect_redelivery = active_effect_id.is_some()
+            && !pending_effects
+                .iter()
+                .any(|effect| effect.id() == active_effect_id);
+        Self {
+            config,
+            state: checkpoint.state,
+            pending_effects,
+            active_effect_redelivery,
+            next_effect_id: checkpoint.next_effect_id,
+            messages: MessageSequence::from_owned(checkpoint.messages),
+            events: Arc::new(checkpoint.events),
+            mode_iteration: checkpoint.mode_iteration,
+            mode_run_offset: checkpoint.mode_run_offset,
+            cumulative_usage: checkpoint.cumulative_usage,
+            termination: checkpoint.termination,
+            synced_mode_iteration: checkpoint.synced_mode_iteration,
+        }
     }
 
     fn driver_context(&self) -> DriverContextView<'_, M> {
@@ -572,6 +901,12 @@ impl<M: ModeProtocol> TurnMachine<M> {
         if let Some(effect) = self.pending_effects.pop_front() {
             return Some(effect);
         }
+        if self.active_effect_redelivery {
+            self.active_effect_redelivery = false;
+            if let Some(effect) = self.state.outstanding_effect() {
+                return Some(effect);
+            }
+        }
 
         match &self.state {
             MachineState::PreparingMode => {
@@ -591,7 +926,10 @@ impl<M: ModeProtocol> TurnMachine<M> {
     fn prepare_mode(&mut self) {
         if self.config.sync_execution_surface {
             let id = self.next_id();
-            self.state = MachineState::WaitingExecutionSurface { effect_id: id };
+            self.state = MachineState::WaitingExecutionSurface {
+                effect_id: id,
+                update_machine_config: false,
+            };
             self.pending_effects
                 .push_back(Effect::SyncExecutionSurface {
                     id,
@@ -608,7 +946,10 @@ impl<M: ModeProtocol> TurnMachine<M> {
             && self.synced_mode_iteration != Some(self.mode_iteration)
         {
             let id = self.next_id();
-            self.state = MachineState::WaitingExecutionSurface { effect_id: id };
+            self.state = MachineState::WaitingExecutionSurface {
+                effect_id: id,
+                update_machine_config: true,
+            };
             self.pending_effects
                 .push_back(Effect::SyncExecutionSurface {
                     id,
@@ -624,7 +965,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.apply_actions(actions);
     }
 
-    fn start_llm_request(&mut self, request: Arc<LlmRequest>, driver_state: Option<DriverState>) {
+    fn start_llm_request(
+        &mut self,
+        request: Arc<LlmRequest>,
+        driver_state: Option<M::DriverState>,
+    ) {
         let tool_list = self
             .config
             .tool_specs
@@ -650,17 +995,21 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     fn start_tool_calls(&mut self, calls: Vec<PendingToolCall>) {
         let effect_id = self.next_id();
-        self.state = MachineState::WaitingTools { effect_id };
+        self.state = MachineState::WaitingTools {
+            effect_id,
+            calls: calls.clone(),
+        };
         self.pending_effects.push_back(Effect::ToolCalls {
             id: effect_id,
             calls,
         });
     }
 
-    fn start_exec(&mut self, code: String, driver_state: DriverState) {
+    fn start_exec(&mut self, code: String, driver_state: M::DriverState) {
         let effect_id = self.next_id();
         self.state = MachineState::WaitingExec {
             effect_id,
+            code: code.clone(),
             driver_state,
         };
         self.pending_effects.push_back(Effect::ExecCode {
@@ -746,6 +1095,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     /// Feed a response to a previously emitted effect.
     pub fn handle_response(&mut self, response: Response) {
+        self.active_effect_redelivery = false;
         match response {
             Response::ExecutionSurfaceSynced { id, result } => {
                 self.handle_execution_surface_synced(id, result)
@@ -782,16 +1132,21 @@ impl<M: ModeProtocol> TurnMachine<M> {
         id: EffectId,
         result: Result<Option<ExecutionSurfaceSync>, String>,
     ) {
-        let waiting_id = match std::mem::replace(&mut self.state, MachineState::Finished) {
-            MachineState::WaitingExecutionSurface { effect_id } => effect_id,
-            other => {
-                self.state = other;
-                return;
-            }
-        };
+        let (waiting_id, waiting_update_machine_config) =
+            match std::mem::replace(&mut self.state, MachineState::Finished) {
+                MachineState::WaitingExecutionSurface {
+                    effect_id,
+                    update_machine_config,
+                } => (effect_id, update_machine_config),
+                other => {
+                    self.state = other;
+                    return;
+                }
+            };
         if waiting_id != id {
             self.state = MachineState::WaitingExecutionSurface {
                 effect_id: waiting_id,
+                update_machine_config: waiting_update_machine_config,
             };
             return;
         }
@@ -912,7 +1267,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
         }
     }
 
-    fn take_waiting_llm_state(&mut self, id: EffectId) -> Option<WaitingLlmState> {
+    fn take_waiting_llm_state(&mut self, id: EffectId) -> Option<WaitingLlmState<M>> {
         match std::mem::replace(&mut self.state, MachineState::Finished) {
             MachineState::WaitingLlm {
                 effect_id,
@@ -944,6 +1299,9 @@ impl<M: ModeProtocol> TurnMachine<M> {
             }
             Ok(llm_response) => {
                 self.record_llm_usage(&llm_response, self.llm_response_text(&llm_response));
+                if self.handle_terminal_llm_response(&llm_response, text_streamed) {
+                    return;
+                }
                 let actions = {
                     let driver = Arc::clone(&self.config.protocol_driver);
                     let ctx = self.driver_context();
@@ -952,6 +1310,51 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 self.apply_actions(actions);
             }
         }
+    }
+
+    fn handle_terminal_llm_response(
+        &mut self,
+        llm_response: &LlmResponse,
+        text_streamed: bool,
+    ) -> bool {
+        let outcome = match llm_response.terminal_reason {
+            LlmTerminalReason::OutputLimit => TurnOutcome::Stopped(TurnStop::Incomplete),
+            LlmTerminalReason::ContextOverflow => TurnOutcome::Stopped(TurnStop::ProviderError),
+            LlmTerminalReason::ContentFilter => TurnOutcome::Stopped(TurnStop::ProviderError),
+            LlmTerminalReason::ProviderError => TurnOutcome::Stopped(TurnStop::ProviderError),
+            LlmTerminalReason::Cancelled => TurnOutcome::Stopped(TurnStop::Cancelled),
+            LlmTerminalReason::Stop | LlmTerminalReason::ToolUse | LlmTerminalReason::Unknown => {
+                return false;
+            }
+        };
+
+        if !text_streamed && !llm_response.full_text.is_empty() {
+            self.emit(SessionEvent::TextDelta {
+                content: llm_response.full_text.clone(),
+            });
+        }
+        self.emit(SessionEvent::LlmResponse {
+            mode_iteration: self.mode_iteration,
+            content: llm_response.full_text.clone(),
+            duration_ms: 0,
+        });
+        let reason = llm_response.terminal_reason;
+        let diagnostic = llm_response
+            .terminal_diagnostic
+            .clone()
+            .unwrap_or_else(|| format!("Model call ended with terminal reason {reason:?}."));
+        self.emit(SessionEvent::Error {
+            message: diagnostic.clone(),
+            envelope: Some(crate::session_model::make_error_envelope(
+                "llm_provider",
+                Some(reason.code()),
+                Some(reason),
+                diagnostic,
+                None,
+            )),
+        });
+        self.finish(outcome);
+        true
     }
 
     fn llm_response_text<'a>(&self, llm_response: &'a LlmResponse) -> &'a str {
@@ -1032,6 +1435,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     retryable: error.retryable,
                     raw: error.raw.clone(),
                     code: error.code.clone(),
+                    terminal_reason: error.terminal_reason,
                 },
             });
         }
@@ -1039,27 +1443,33 @@ impl<M: ModeProtocol> TurnMachine<M> {
 
     fn emit_llm_error(&mut self, error: LlmCallError) {
         self.record_llm_error(&error);
-        self.emit(make_error_event(
-            "llm_provider",
-            error.code.as_deref(),
-            format!("LLM error: {}", error.message),
-            error.raw,
-        ));
+        self.emit(SessionEvent::Error {
+            message: format!("LLM error: {}", error.message),
+            envelope: Some(crate::session_model::make_error_envelope(
+                "llm_provider",
+                error.code.as_deref(),
+                Some(error.terminal_reason),
+                format!("LLM error: {}", error.message),
+                error.raw,
+            )),
+        });
         self.finish(TurnOutcome::Stopped(TurnStop::ProviderError));
     }
 
     fn handle_tool_results(&mut self, id: EffectId, completed: Vec<CompletedToolCall>) {
-        let waiting_effect_id = match std::mem::replace(&mut self.state, MachineState::Finished) {
-            MachineState::WaitingTools { effect_id } => effect_id,
-            other => {
-                self.state = other;
-                return;
-            }
-        };
+        let (waiting_effect_id, waiting_calls) =
+            match std::mem::replace(&mut self.state, MachineState::Finished) {
+                MachineState::WaitingTools { effect_id, calls } => (effect_id, calls),
+                other => {
+                    self.state = other;
+                    return;
+                }
+            };
 
         if waiting_effect_id != id {
             self.state = MachineState::WaitingTools {
                 effect_id: waiting_effect_id,
+                calls: waiting_calls,
             };
             return;
         }
@@ -1082,10 +1492,11 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.apply_actions(actions);
     }
 
-    fn take_waiting_exec_state(&mut self, id: EffectId) -> Option<WaitingExecState> {
+    fn take_waiting_exec_state(&mut self, id: EffectId) -> Option<WaitingExecState<M>> {
         match std::mem::replace(&mut self.state, MachineState::Finished) {
             MachineState::WaitingExec {
                 effect_id,
+                code: _,
                 driver_state,
             } if effect_id == id => Some(WaitingExecState { driver_state }),
             other => {

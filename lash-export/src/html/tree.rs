@@ -450,6 +450,26 @@ fn render_node_entries(
             ChronologicalPayload::ToolCall(_) => {}
         }
     }
+    let tool_call_map = session
+        .chronological
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ChronologicalPayload::ToolCall(record) => record
+                .call_id
+                .as_ref()
+                .map(|call_id| (call_id.clone(), record)),
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ModeEvent(_) => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let rlm_owned_tool_call_ids = session
+        .chronological
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            ChronologicalPayload::ModeEvent(event) => chronological_rlm_step(event),
+            ChronologicalPayload::Message(_) | ChronologicalPayload::ToolCall(_) => None,
+        })
+        .flat_map(|step| step.tool_call_ids)
+        .collect::<HashSet<_>>();
 
     for (i, entry) in session.chronological.iter().enumerate() {
         for &prompt_idx in &insertions.before_index[i] {
@@ -472,6 +492,10 @@ fn render_node_entries(
                 render_message(out, spine, ctx, message);
             }
             ChronologicalPayload::ToolCall(record) => match record.tool.as_str() {
+                _ if record
+                    .call_id
+                    .as_ref()
+                    .is_some_and(|call_id| rlm_owned_tool_call_ids.contains(call_id)) => {}
                 "continue_as" => {
                     // Suppressed — the seam is rendered by `write_view` between
                     // chain elements as a handoff divider.
@@ -496,7 +520,7 @@ fn render_node_entries(
                 let Some(step) = chronological_rlm_step(event) else {
                     continue;
                 };
-                render_rlm_step(out, spine, ctx, &step);
+                render_rlm_step(out, spine, ctx, &step, &tool_call_map);
             }
         }
     }

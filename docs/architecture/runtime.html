@@ -5,8 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Runtime - lash Architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css">
-<script src="./mermaid.js" defer></script>
+<link rel="stylesheet" href="../styles.css?v=4">
+<script src="../theme.js"></script>
+<script src="../nav.js?v=7" defer></script>
+<script src="../search.js?v=7" defer></script>
+<script src="../codecopy.js" defer></script>
+<script src="../syntax.js" defer></script>
+<script src="../mermaid.js" defer></script>
+<script src="../toc.js?v=4" defer></script>
 </head>
 <body>
   <div class="page">
@@ -29,6 +35,7 @@
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
             <li><a href="./providers.html">Providers</a></li>
+            <li><a href="./durability.html">Durability</a></li>
           </ol>
         </details>
       </aside>
@@ -106,7 +113,7 @@ flowchart TD
             <table>
               <thead><tr><th>Outcome</th><th>Shape</th><th>Meaning</th></tr></thead>
               <tbody>
-                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code>, <code>TurnFinish::SubmittedValue { value }</code>, or <code>TurnFinish::ToolValue { tool_name, value }</code></td><td>The turn produced a final answer, either as plain assistant text or as a typed terminal value authored by RLM <code>submit</code> or a terminal tool control.</td></tr>
+                <tr><td><code>TurnOutcome::Finished</code></td><td><code>TurnFinish::AssistantMessage { text }</code>, <code>TurnFinish::SubmittedValue { value }</code>, or <code>TurnFinish::ToolValue { tool_name, value }</code></td><td>The turn produced a final answer. <code>AssistantMessage</code> is the sole terminal prose result; live prose is only <code>AssistantProseDelta</code>, and the runtime commit materializes the settled transcript message once. <code>SubmittedValue</code> and <code>ToolValue</code> are typed terminal values authored by RLM <code>submit</code> or terminal tool controls.</td></tr>
                 <tr><td><code>TurnOutcome::Handoff</code></td><td><code>{ session_id }</code></td><td>RLM <code>continue_as</code> opened a successor session with a fresh window. The runtime queues the packed <code>{ task, seed }</code> as that session's first turn input.</td></tr>
                 <tr><td><code>TurnOutcome::Stopped</code></td><td><code>TurnStop::{Cancelled, InvalidInput, MaxTurns, ToolFailure, ProviderError, PluginAbort, RuntimeError, SubmittedError{...}, ToolError{...}}</code></td><td>The turn ended without a clean answer. <code>SubmittedError</code> and <code>ToolError</code> carry terminal errors authored by failing control paths, such as <code>submit_error</code>, so hosts can surface them.</td></tr>
               </tbody>
@@ -137,7 +144,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Persistence And Usage</h2>
-            <p>Persistence is turn-scoped. Commits update the session graph, checkpoint blobs, session heads, and usage ledger together so read views and benchmark cost reports agree.</p>
+            <p>Persistence is turn-scoped. Commits update the session graph, checkpoint blobs, session heads, usage ledger, and settled assistant prose together so read views and benchmark cost reports agree. Modes describe outcomes; the shared runtime commit path owns final transcript materialization.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Commit and accounting path</div>

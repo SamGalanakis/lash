@@ -190,6 +190,7 @@ fn non_manual_error_sets_transient_status() {
         envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("http_500".into()),
+            terminal_reason: None,
             user_message: "LLM error: Claude request failed with 500".into(),
             raw: None,
         }),

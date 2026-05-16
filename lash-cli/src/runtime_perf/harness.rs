@@ -353,5 +353,9 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
             "Turn {} in OpenAI-compatible streaming benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
+        RuntimePerfScenario::TurnCheckpoint => format!(
+            "Turn {} in turn durability checkpoint benchmark mode. Checkpoint and restore pending effects, then reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
     }
 }

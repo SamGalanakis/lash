@@ -1308,6 +1308,8 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
                     response_meta: None,
                 }],
                 usage: lash_core::llm::types::LlmUsage::default(),
+                terminal_reason: lash_core::LlmTerminalReason::Stop,
+                terminal_diagnostic: None,
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,

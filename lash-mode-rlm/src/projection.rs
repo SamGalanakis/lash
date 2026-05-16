@@ -52,11 +52,9 @@ impl RlmHistoryProjection {
                     }
                 }
                 ChronologicalPayload::ModeEvent(event) => {
-                    if let Some(RlmModeEvent::RlmTrajectoryEntry(mut step)) =
+                    if let Some(RlmModeEvent::RlmTrajectoryEntry(step)) =
                         decode_rlm_mode_event(event)
                     {
-                        step.tool_calls
-                            .retain(|record| seen_tool_calls.insert(tool_call_record_key(record)));
                         history.push(history_item_from_rlm_step(&step));
                     }
                 }
@@ -120,7 +118,7 @@ fn history_item_from_rlm_step(entry: &RlmTrajectoryEntry) -> RlmHistoryItem {
         reasoning: entry.reasoning.clone(),
         code: entry.code.clone(),
         output: entry.output.clone(),
-        tool_calls: entry.tool_calls.clone(),
+        tool_call_ids: entry.tool_call_ids.clone(),
         images: entry.images.iter().map(image_ref).collect(),
         error: entry.error.clone(),
         final_output: entry.final_output.clone(),

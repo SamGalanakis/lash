@@ -478,7 +478,6 @@ fn append_stream_piece(full: &mut String, piece: &str) {
 }
 
 pub(super) struct TurnAssembler {
-    pub(super) final_message: Option<String>,
     pub(super) current_assistant_prose_id: Option<TurnActivityId>,
     pub(super) current_assistant_prose: Option<String>,
     pub(super) text_deltas: String,
@@ -507,7 +506,6 @@ impl Default for TurnAssembler {
 impl TurnAssembler {
     pub(super) fn new(capture_text_deltas: bool) -> Self {
         Self {
-            final_message: None,
             current_assistant_prose_id: None,
             current_assistant_prose: None,
             text_deltas: String::new(),
@@ -560,9 +558,6 @@ impl TurnAssembler {
                     self.saw_tool_failure = true;
                 }
             }
-            SessionEvent::Message { text, kind } if kind == "final" => {
-                self.final_message = Some(text.clone());
-            }
             SessionEvent::TokenUsage {
                 usage, cumulative, ..
             } => {
@@ -582,18 +577,20 @@ impl TurnAssembler {
                 );
             }
             SessionEvent::Error { message, envelope } => {
-                let (kind, code, raw) = if let Some(envelope) = envelope {
+                let (kind, code, terminal_reason, raw) = if let Some(envelope) = envelope {
                     (
                         envelope.kind.clone(),
                         envelope.code.clone(),
+                        envelope.terminal_reason,
                         envelope.raw.clone(),
                     )
                 } else {
-                    ("runtime".to_string(), None, None)
+                    ("runtime".to_string(), None, None, None)
                 };
                 self.issues.push(TurnIssue {
                     kind,
                     code,
+                    terminal_reason,
                     message: message.clone(),
                     raw,
                 });
@@ -628,8 +625,10 @@ impl TurnAssembler {
                     .any(|part| part.content.contains("Turn limit reached ("))
         });
 
-        let raw_output = if let Some(final_message) = self.final_message {
-            final_message
+        let raw_output = if let Some(TurnOutcome::Finished(TurnFinish::SubmittedValue { value })) =
+            self.outcome.as_ref()
+        {
+            render_submitted_value_for_output(value)
         } else if let Some(assistant_prose) = self.current_assistant_prose {
             assistant_prose
         } else {
@@ -722,6 +721,14 @@ fn aggregate_child_cumulatives(
             usage,
         })
         .collect()
+}
+
+fn render_submitted_value_for_output(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
 }
 
 pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {

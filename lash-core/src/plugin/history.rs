@@ -16,9 +16,6 @@ use super::PluginError;
 pub enum RewriteTrigger {
     /// User invoked `/compact` (or an equivalent plugin command).
     Manual { instructions: Option<String> },
-    /// The previous turn overflowed the context window; retry with
-    /// compacted history.
-    OverflowRecovery,
     /// Session config changed to a smaller context window.
     WindowShrink {
         old_max: Option<usize>,

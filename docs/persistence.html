@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Persistence - lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -26,14 +32,13 @@
             <li><a href="./plugins.html">Plugins</a></li>
             <li><a class="active" href="./persistence.html">Persistence</a></li>
             <li><a href="./tracing.html">Tracing</a></li>
-            <li><a href="./architecture/">Architecture</a></li>
-            <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
           <div class="sidebar__label">On this page</div>
           <ol>
             <li><a href="#contract">The Contract</a></li>
+            <li><a href="#cas-conflicts">Concurrent Writes And CAS</a></li>
             <li><a href="#wiring">Wiring It Up</a></li>
             <li><a href="#whats-persisted">What Gets Persisted</a></li>
             <li><a href="#garbage-collection">Garbage Collection</a></li>
@@ -77,6 +82,28 @@ pub trait RuntimePersistence: Send + Sync {
 }</code></pre>
         </div>
 
+        <div class="section" id="cas-conflicts">
+          <div class="section-header">
+            <h2>Concurrent Writes And CAS</h2>
+            <p>Every <code>RuntimeCommit</code> carries an <code>expected_head_revision: Option&lt;u64&gt;</code> read from the session state when the turn started. The store checks that field against the row's current revision under the same SQL transaction that applies the delta; mismatch means another writer has advanced the head since this turn read it, and the transaction is rolled back. The runtime does <strong>not</strong> retry — partial state never lands.</p>
+          </div>
+          <p>What that means for hosts: at most one turn per session can commit at a time. If you open the same session id from two processes (or two tasks in one process) and start turns concurrently, exactly one commits and the loser surfaces an error.</p>
+          <pre><code>match session.turn(input).run().await {
+    Ok(turn) =&gt; persist(turn),
+    Err(err) if err.code == "store_commit_failed" =&gt; {
+        // Another writer raced us. Re-open the session to read the new
+        // head, then decide whether to retry, surface to the user, or
+        // merge intent.
+        let session = core.session(chat_id).open().await?;
+        retry_or_surface(err, session);
+    }
+    Err(other) =&gt; bail!(other),
+}</code></pre>
+          <p>The conflict surfaces as a turn-level <code>Err</code> carrying <code>RuntimeError { code: "store_commit_failed", .. }</code>, not as a <code>TurnStop</code> variant. No partial commit and no half-finished turn in the graph; the next read of the session is identical to the read before the failed call. Hosts that expect concurrent access (multi-tab UIs, agent fleets writing to the same chat id) should either serialize turns at their own layer or treat the conflict as a recoverable signal and re-open the session against the refreshed head.</p>
+          <p>In-memory sessions (no <code>store_factory</code> set) enforce the same CAS check against an in-process revision counter, so the contract is identical regardless of backing store.</p>
+          <p>Embedders driving sessions from an external workflow runtime (Temporal, Restate, similar) bypass this whole-turn commit boundary in favour of per-effect durability — see <a href="./architecture/durability.html">Architecture → Durability</a> for the <code>lash-sansio</code> checkpoint / restore seam.</p>
+        </div>
+
         <div class="section" id="wiring">
           <div class="section-header">
             <h2>Wiring It Up</h2>
@@ -113,7 +140,7 @@ let core = LashCore::builder()
           <div class="def-list-grid">
             <article class="panel">
               <h3>Graph nodes</h3>
-              <p>Every conversation event — user inputs, assistant responses, tool calls, mode events, prompt snapshots — lives in <code>graph_nodes</code> with a <code>tombstoned</code> flag for soft deletion. The runtime walks active paths from the session head.</p>
+              <p>Every conversation event — user inputs, runtime-materialized assistant responses, tool calls, mode events, prompt snapshots — lives in <code>graph_nodes</code> with a <code>tombstoned</code> flag for soft deletion. Standard and RLM modes return terminal outcomes; the shared runtime commit writes the settled assistant transcript exactly once.</p>
             </article>
             <article class="panel">
               <h3>Session head</h3>

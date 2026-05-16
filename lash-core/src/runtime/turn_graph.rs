@@ -75,11 +75,26 @@ impl TurnGraphOverlay {
     where
         I: IntoIterator<Item = ToolCallRecord>,
     {
-        self.append_events(records.into_iter().map(|record| {
-            SessionEventRecord::Tool(crate::session_model::ToolEvent::Invocation {
-                stable_key: tool_call_record_active_read_key(&record),
-                record,
-            })
+        let mut seen_tool_call_keys = self
+            .graph_tool_calls
+            .iter()
+            .map(tool_call_record_active_read_key)
+            .collect::<HashSet<_>>();
+        self.append_events(records.into_iter().filter_map(|record| {
+            let stable_key = tool_call_record_active_read_key(&record);
+            if seen_tool_call_keys.insert(stable_key.clone()) {
+                Some(SessionEventRecord::Tool(
+                    crate::session_model::ToolEvent::Invocation { stable_key, record },
+                ))
+            } else {
+                tracing::debug!(
+                    stable_key,
+                    call_id = record.call_id.as_deref(),
+                    tool = record.tool.as_str(),
+                    "skipping duplicate tool call record"
+                );
+                None
+            }
         }));
     }
 
@@ -245,22 +260,6 @@ impl TurnGraphOverlay {
         }
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn mark_graph_commit_persisted(&mut self, graph: &GraphCommitDelta) {
-        match graph {
-            GraphCommitDelta::Unchanged { .. } => {}
-            GraphCommitDelta::Append { nodes, .. } => {
-                self.mark_node_ids_persisted(nodes.iter().map(|node| node.node_id.clone()));
-            }
-            GraphCommitDelta::ReplaceFull(graph) => {
-                self.replace_persisted_node_ids(
-                    graph.nodes.iter().map(|node| node.node_id.clone()),
-                );
-            }
-        }
-    }
-
     pub(super) fn mark_node_ids_persisted<I>(&mut self, node_ids: I)
     where
         I: IntoIterator<Item = String>,
@@ -337,5 +336,45 @@ impl TurnGraphOverlay {
                 .insert(node.node_id.clone(), self.appended_nodes.len());
             self.appended_nodes.push(node);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ToolCallOutput, session_model::ToolEvent};
+
+    fn tool_record(call_id: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            call_id: Some(call_id.to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "x"}),
+            output: ToolCallOutput::success(serde_json::json!({"answer": "y"})),
+            duration_ms: 3,
+        }
+    }
+
+    #[test]
+    fn record_tool_calls_skips_duplicate_stable_keys() {
+        let base_graph = Arc::new(SessionGraph::default());
+        let base_read_model = base_graph.read_model();
+        let mut overlay = TurnGraphOverlay::new(base_graph, base_read_model);
+        let record = tool_record("call-1");
+
+        overlay.record_tool_calls([record.clone(), record]);
+
+        let read_model = overlay.read_model();
+        assert_eq!(read_model.tool_calls.len(), 1);
+        let graph = overlay.into_session_graph();
+        let graph_tool_records = graph
+            .active_path_nodes()
+            .into_iter()
+            .filter_map(|node| match node.event()? {
+                SessionEventRecord::Tool(ToolEvent::Invocation { record, .. }) => Some(record),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(graph_tool_records.len(), 1);
+        assert_eq!(graph_tool_records[0].call_id.as_deref(), Some("call-1"));
     }
 }

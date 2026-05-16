@@ -10,8 +10,8 @@ use lash_core::SchemaProjectionOverride;
 use lash_core::llm::transport::{LlmTransportError, ProviderFailure, ProviderFailureKind};
 use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse, LlmRole,
-    LlmStreamEvent, LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta,
-    ResponseTextMeta, ResponseTextPhase,
+    LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
+    ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
@@ -510,6 +510,37 @@ impl CodexStreamState {
                 LlmOutputPart::ToolCall { .. } | LlmOutputPart::Reasoning { .. } => None,
             })
             .collect::<String>()
+    }
+
+    fn terminal_reason(&self, parts: &[LlmOutputPart]) -> LlmTerminalReason {
+        if let Some(final_response) = &self.final_response {
+            let incomplete_details = final_response.get("incomplete_details");
+            if incomplete_details
+                .and_then(|details| details.get("reason").and_then(Value::as_str))
+                .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
+            {
+                return LlmTerminalReason::ContentFilter;
+            }
+            if final_response.get("status").and_then(Value::as_str) == Some("incomplete")
+                || incomplete_details.is_some_and(|details| !details.is_null())
+            {
+                return LlmTerminalReason::OutputLimit;
+            }
+            if final_response.get("status").and_then(Value::as_str) == Some("cancelled") {
+                return LlmTerminalReason::Cancelled;
+            }
+            if final_response.get("status").and_then(Value::as_str) == Some("failed") {
+                return LlmTerminalReason::ProviderError;
+            }
+        }
+        if parts
+            .iter()
+            .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+        {
+            LlmTerminalReason::ToolUse
+        } else {
+            LlmTerminalReason::Stop
+        }
     }
 }
 
@@ -1310,11 +1341,14 @@ impl CodexProvider {
     ) -> LlmResponse {
         let parts = state.response_parts();
         let full_text = state.response_full_text(&parts);
+        let terminal_reason = state.terminal_reason(&parts);
         LlmResponse {
             deltas: state.deltas,
             full_text,
             parts,
             usage: state.usage,
+            terminal_reason,
+            terminal_diagnostic: None,
             provider_usage: None,
             request_body,
             http_summary: Some(http_summary),
@@ -1609,6 +1643,38 @@ impl CodexProvider {
         }
         parts
     }
+
+    fn terminal_reason_from_response_value(
+        value: &Value,
+        parts: &[LlmOutputPart],
+    ) -> LlmTerminalReason {
+        let incomplete_details = value.get("incomplete_details");
+        if incomplete_details
+            .and_then(|details| details.get("reason").and_then(Value::as_str))
+            .is_some_and(|reason| matches!(reason, "content_filter" | "safety"))
+        {
+            return LlmTerminalReason::ContentFilter;
+        }
+        if value.get("status").and_then(Value::as_str) == Some("incomplete")
+            || incomplete_details.is_some_and(|details| !details.is_null())
+        {
+            return LlmTerminalReason::OutputLimit;
+        }
+        if value.get("status").and_then(Value::as_str) == Some("cancelled") {
+            return LlmTerminalReason::Cancelled;
+        }
+        if value.get("status").and_then(Value::as_str) == Some("failed") {
+            return LlmTerminalReason::ProviderError;
+        }
+        if parts
+            .iter()
+            .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+        {
+            LlmTerminalReason::ToolUse
+        } else {
+            LlmTerminalReason::Stop
+        }
+    }
 }
 
 impl CodexProvider {
@@ -1658,6 +1724,18 @@ impl ProviderFailureClassifier for CodexFailureClassifier {
         if text.contains("usage_limit_reached") || text.contains("usage_not_included") {
             failure.kind = ProviderFailureKind::Quota;
             failure.retryable = false;
+        }
+        if text.contains("content_filter")
+            || text.contains("prohibited_content")
+            || text.contains("safety")
+            || text.contains("sensitive")
+        {
+            failure.terminal_reason = LlmTerminalReason::ContentFilter;
+        }
+        if lash_core::provider::is_context_overflow_text(&text) {
+            failure.kind = ProviderFailureKind::Validation;
+            failure.retryable = false;
+            failure.terminal_reason = LlmTerminalReason::ContextOverflow;
         }
         failure
     }
@@ -1944,11 +2022,14 @@ impl ProviderTransport for CodexProvider {
                     tx.send(LlmStreamEvent::Delta(content.clone()));
                 }
             }
+            let terminal_reason = Self::terminal_reason_from_response_value(&value, &parts);
             return Ok(LlmResponse {
                 deltas: vec![content.clone()],
                 full_text: content,
                 parts,
                 usage,
+                terminal_reason,
+                terminal_diagnostic: None,
                 provider_usage: None,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", Self::CODEX_RESPONSES_URL)),
@@ -2130,6 +2211,29 @@ mod tests {
                 .request_variant_config("gpt-5.5", "minimal")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn codex_null_incomplete_details_does_not_map_to_output_limit() {
+        let terminal_reason = CodexProvider::terminal_reason_from_response_value(
+            &json!({"status":"completed","incomplete_details":null}),
+            &[LlmOutputPart::Text {
+                text: "Hi".to_string(),
+                response_meta: None,
+            }],
+        );
+
+        assert_eq!(terminal_reason, LlmTerminalReason::Stop);
+    }
+
+    #[test]
+    fn codex_content_filter_incomplete_maps_to_content_filter() {
+        let terminal_reason = CodexProvider::terminal_reason_from_response_value(
+            &json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
+            &[],
+        );
+
+        assert_eq!(terminal_reason, LlmTerminalReason::ContentFilter);
     }
 
     #[test]

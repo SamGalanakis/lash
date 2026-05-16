@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use crate::session_model::SessionEventRecord;
+use crate::session_model::{SessionEventRecord, fresh_message_id};
 use crate::store::{GraphCommitDelta, RuntimeCommit, RuntimePersistence, StoreError};
 use crate::{
-    AssembledTurn, MessageSequence, PluginSession, Session, SessionPolicy, SessionReadView,
-    ToolCallRecord,
+    AssembledTurn, Message, MessageRole, MessageSequence, Part, PartKind, PluginSession,
+    PruneState, Session, SessionPolicy, SessionReadView, ToolCallRecord, TurnFinish, TurnOutcome,
+    shared_parts,
 };
 
 use super::{PersistedSessionState, RuntimeError, TurnProgress, merge_ledger_entry};
@@ -255,6 +256,7 @@ impl TurnCommitPipeline {
             execution_state_snapshot,
             store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
+            &returned_turn.outcome,
         )
         .await
         .map_err(|err| RuntimeError {
@@ -320,18 +322,10 @@ impl TurnCommitPipeline {
         execution_state_snapshot: Option<Option<Vec<u8>>>,
         store: Option<&(dyn RuntimePersistence + '_)>,
         usage_deltas: &[crate::TokenLedgerEntry],
+        outcome: &TurnOutcome,
     ) -> Result<(), StoreError> {
-        let progress_graph = self
-            .progress
-            .as_ref()
-            .map(|progress| progress.graph_commit(progress.state().graph_replace_required))
-            .or_else(|| self.final_graph_commit.clone());
         let state = self.final_state_mut();
-        let materialized_graph = state.session_graph.clone();
         state.apply_exported_state(returned_state);
-        if state.session_graph.nodes.is_empty() && !materialized_graph.nodes.is_empty() {
-            state.session_graph = materialized_graph;
-        }
         for entry in usage_deltas.iter().cloned() {
             merge_ledger_entry(&mut state.token_ledger, entry);
         }
@@ -341,6 +335,13 @@ impl TurnCommitPipeline {
         if let Some(execution_state_snapshot) = execution_state_snapshot {
             state.set_execution_state_snapshot(execution_state_snapshot);
         }
+        materialize_terminal_output(state, outcome);
+        let progress_graph = self
+            .progress
+            .as_ref()
+            .map(|progress| progress.graph_commit(progress.state().graph_replace_required))
+            .or_else(|| self.final_graph_commit.clone());
+        let state = self.final_state_mut();
 
         if let Some(store) = store {
             let graph = if state.graph_replace_required {
@@ -417,6 +418,58 @@ impl TurnCommitPipeline {
             }
         }
     }
+}
+
+fn materialize_terminal_output(state: &mut PersistedSessionState, outcome: &TurnOutcome) {
+    let TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) = outcome else {
+        return;
+    };
+    if state
+        .read_model()
+        .messages
+        .iter()
+        .rfind(|message| !message.is_transient())
+        .is_some_and(|message| {
+            message.role == MessageRole::Assistant && message_rendered_text(message) == *text
+        })
+    {
+        return;
+    }
+
+    let id = fresh_message_id();
+    state.append_active_conversation_messages(&[Message {
+        id: id.clone(),
+        role: MessageRole::Assistant,
+        parts: shared_parts(vec![Part {
+            id: format!("{id}.p0"),
+            kind: PartKind::Prose,
+            content: text.clone(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
+    }]);
+    state.graph_replace_required = true;
+}
+
+fn message_rendered_text(message: &Message) -> String {
+    message
+        .parts
+        .iter()
+        .filter(|part| {
+            matches!(
+                part.kind,
+                PartKind::Prose | PartKind::Text | PartKind::Image | PartKind::ToolResult
+            )
+        })
+        .map(|part| part.content.as_str())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[cfg(test)]
@@ -804,6 +857,7 @@ mod tests {
                 Some(Some(b"runtime".to_vec())),
                 Some(&store),
                 &usage,
+                &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
             )
             .await
             .expect("commit");
@@ -833,7 +887,14 @@ mod tests {
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
-            .final_commit_with_snapshots(&returned_state, None, None, None, &[])
+            .final_commit_with_snapshots(
+                &returned_state,
+                None,
+                None,
+                None,
+                &[],
+                &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+            )
             .await
             .expect("no-store commit");
 

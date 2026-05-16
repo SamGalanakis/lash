@@ -1016,6 +1016,14 @@ impl AppDb {
             );
             CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
                 ON messages(chat_id, id);
+            CREATE TABLE IF NOT EXISTS code_block_tool_calls (
+                code_block_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                tool_call_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+                call_id TEXT NOT NULL,
+                PRIMARY KEY (code_block_message_id, call_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_block_tool_calls_tool_message
+                ON code_block_tool_calls(tool_call_message_id);
             ",
         )?;
         add_column_if_missing(&conn, "chats", "model_variant", "TEXT")?;
@@ -1261,27 +1269,35 @@ impl AppDb {
         event: TurnEvent,
         code: Option<String>,
     ) -> AppResult<ChatMessage> {
-        let payload = match event {
-            TurnEvent::CodeBlockStarted { language, code } => json!({
-                "phase": "started",
-                "language": language,
-                "code": code,
-            }),
+        let (payload, tool_call_ids) = match event {
+            TurnEvent::CodeBlockStarted { language, code } => (
+                json!({
+                    "phase": "started",
+                    "language": language,
+                    "code": code,
+                }),
+                Vec::new(),
+            ),
             TurnEvent::CodeBlockCompleted {
                 language,
                 output,
                 error,
                 success,
                 duration_ms,
-            } => json!({
-                "phase": "completed",
-                "language": language,
-                "output": output,
-                "error": error,
-                "success": success,
-                "duration_ms": duration_ms,
-                "code": code,
-            }),
+                tool_call_ids,
+            } => (
+                json!({
+                    "phase": "completed",
+                    "language": language,
+                    "output": output,
+                    "error": error,
+                    "success": success,
+                    "duration_ms": duration_ms,
+                    "tool_call_ids": tool_call_ids,
+                    "code": code,
+                }),
+                tool_call_ids,
+            ),
             _ => return Err(AppError::internal("expected code-block event")),
         };
         let created_at = now();
@@ -1296,6 +1312,7 @@ impl AppDb {
             params![now(), chat_id],
         )?;
         let id = self.conn.last_insert_rowid();
+        self.replace_code_block_tool_links(chat_id, id, &tool_call_ids)?;
         Ok(ChatMessage {
             id,
             chat_id: chat_id.to_string(),
@@ -1313,22 +1330,27 @@ impl AppDb {
         event: TurnEvent,
         code: Option<String>,
     ) -> AppResult<ChatMessage> {
-        let payload = match event {
+        let (payload, tool_call_ids) = match event {
             TurnEvent::CodeBlockCompleted {
                 language,
                 output,
                 error,
                 success,
                 duration_ms,
-            } => json!({
-                "phase": "completed",
-                "language": language,
-                "output": output,
-                "error": error,
-                "success": success,
-                "duration_ms": duration_ms,
-                "code": code,
-            }),
+                tool_call_ids,
+            } => (
+                json!({
+                    "phase": "completed",
+                    "language": language,
+                    "output": output,
+                    "error": error,
+                    "success": success,
+                    "duration_ms": duration_ms,
+                    "tool_call_ids": tool_call_ids,
+                    "code": code,
+                }),
+                tool_call_ids,
+            ),
             _ => return Err(AppError::internal("expected code-block event")),
         };
         let language = payload["language"].as_str().unwrap_or("code").to_string();
@@ -1337,6 +1359,16 @@ impl AppDb {
              WHERE id = ?3 AND kind = 'code_block'",
             params![language, payload.to_string(), id],
         )?;
+        let chat_id = self
+            .conn
+            .query_row(
+                "SELECT chat_id FROM messages WHERE id = ?1 AND kind = 'code_block'",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::internal("code block message not found"))?;
+        self.replace_code_block_tool_links(&chat_id, id, &tool_call_ids)?;
         self.message_by_id(id)
     }
 
@@ -1346,8 +1378,12 @@ impl AppDb {
              FROM messages WHERE chat_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![chat_id], chat_message_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(AppError::from)
+        let mut messages = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)?;
+        drop(stmt);
+        self.hydrate_code_block_tool_links(&mut messages)?;
+        Ok(messages)
     }
 
     fn message_by_id(&mut self, id: i64) -> AppResult<ChatMessage> {
@@ -1359,6 +1395,83 @@ impl AppDb {
                 chat_message_from_row,
             )
             .map_err(AppError::from)
+    }
+
+    fn replace_code_block_tool_links(
+        &mut self,
+        chat_id: &str,
+        code_block_message_id: i64,
+        tool_call_ids: &[String],
+    ) -> AppResult<()> {
+        self.conn.execute(
+            "DELETE FROM code_block_tool_calls WHERE code_block_message_id = ?1",
+            params![code_block_message_id],
+        )?;
+        for call_id in tool_call_ids {
+            let tool_message_id = self
+                .find_tool_call_message_id(chat_id, call_id)
+                .map_err(AppError::from)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO code_block_tool_calls
+                 (code_block_message_id, tool_call_message_id, call_id)
+                 VALUES (?1, ?2, ?3)",
+                params![code_block_message_id, tool_message_id, call_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn find_tool_call_message_id(
+        &mut self,
+        chat_id: &str,
+        call_id: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, payload FROM messages
+             WHERE chat_id = ?1 AND kind = 'tool_call'
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![chat_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, payload) = row?;
+            let Some(payload) = payload else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            if payload.get("call_id").and_then(|value| value.as_str()) == Some(call_id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    fn hydrate_code_block_tool_links(&mut self, messages: &mut [ChatMessage]) -> AppResult<()> {
+        for message in messages.iter_mut() {
+            if message.kind != "code_block" {
+                continue;
+            }
+            let Some(payload) = message.payload.as_mut() else {
+                continue;
+            };
+            let mut stmt = self.conn.prepare(
+                "SELECT call_id FROM code_block_tool_calls
+                 WHERE code_block_message_id = ?1
+                 ORDER BY rowid ASC",
+            )?;
+            let call_ids = stmt
+                .query_map(params![message.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !call_ids.is_empty()
+                && let Some(object) = payload.as_object_mut()
+            {
+                object.insert("tool_call_ids".to_string(), json!(call_ids));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1930,23 +2043,37 @@ const INDEX_HTML: &str = r#"<!doctype html>
       messagesEl.innerHTML = '';
       // Replay persisted board snapshots in message order. User messages carry
       // the human move; tool rows carry accepted agent moves.
-      for (const message of messages) appendMessage(message);
+      const toolsByCallId = new Map();
+      const codeLinkedToolIds = new Set();
+      for (const message of messages) {
+        if (message.kind === 'tool_call' && message.payload?.phase === 'completed' && message.payload.call_id) {
+          toolsByCallId.set(message.payload.call_id, message.payload);
+        }
+        if (message.kind === 'code_block' && message.payload?.phase === 'completed') {
+          for (const callId of message.payload.tool_call_ids || []) codeLinkedToolIds.add(callId);
+        }
+      }
+      for (const message of messages) appendMessage(message, { toolsByCallId, codeLinkedToolIds });
       renderBoard();
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
-    function appendMessage(message) {
+    function appendMessage(message, replay = {}) {
       if (message.kind === 'reasoning') {
         appendReasoningMessage(message.text);
         return;
       }
       if (message.kind === 'tool_call' && message.payload) {
         if (message.payload.phase !== 'completed') return;
+        if (message.payload.call_id && replay.codeLinkedToolIds?.has(message.payload.call_id)) return;
         appendTool(message.payload);
         return;
       }
       if (message.kind === 'code_block' && message.payload) {
         if (message.payload.phase !== 'completed') return;
-        appendCodeBlock(message.payload);
+        const linkedTools = (message.payload.tool_call_ids || [])
+          .map((callId) => replay.toolsByCallId?.get(callId))
+          .filter(Boolean);
+        appendCodeBlock(message.payload, linkedTools);
         return;
       }
       if (message.payload?.board?.cells) setBoard(message.payload.board);
@@ -1957,7 +2084,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       el.lastElementChild.textContent = message.text;
       messagesEl.appendChild(el);
     }
-    function appendTool(event) {
+    function appendTool(event, parent = messagesEl) {
       if (event.phase !== 'completed') return;
       applyToolBoard(event);
       const ok = toolSucceeded(event);
@@ -1984,19 +2111,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
         null,
         2
       );
-      messagesEl.appendChild(el);
+      parent.appendChild(el);
     }
-    function appendCodeBlock(event) {
+    function appendCodeBlock(event, linkedTools = []) {
       if (event.phase !== 'completed') return;
       const el = document.createElement('details');
       el.className = 'code-block' + (event.success === false ? ' fail' : '');
       el.open = false;
       el.innerHTML = '<summary></summary><pre></pre>';
-      const label = `${event.language || 'code'} ${event.success ? 'completed' : 'failed'} in ${event.duration_ms || 0}ms`;
+      const toolCount = linkedTools.length || (event.tool_call_ids || []).length;
+      const toolLabel = toolCount ? ` · ${toolCount} tool${toolCount === 1 ? '' : 's'}` : '';
+      const label = `${event.language || 'code'} ${event.success ? 'completed' : 'failed'} in ${event.duration_ms || 0}ms${toolLabel}`;
       el.querySelector('summary').textContent = label;
       const code = event.code || el.querySelector('pre').textContent || '';
       el.querySelector('pre').textContent = code;
+      for (const tool of linkedTools) appendTool(tool, el);
       messagesEl.appendChild(el);
+      return el;
     }
     function appendCompletedTool(event) {
       if (pendingCodeBlock) {
@@ -2006,9 +2137,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
     }
     function completeCodeBlock(event) {
-      appendCodeBlock({ ...event, phase:'completed', code: event.code || pendingCodeBlock?.code || '' });
+      const linkedIds = new Set(event.tool_call_ids || []);
+      const linkedTools = pendingTools.filter((tool) => tool.call_id && linkedIds.has(tool.call_id));
+      const unlinkedTools = pendingTools.filter((tool) => !tool.call_id || !linkedIds.has(tool.call_id));
+      appendCodeBlock(
+        { ...event, phase:'completed', code: event.code || pendingCodeBlock?.code || '' },
+        linkedTools,
+      );
       pendingCodeBlock = null;
-      for (const tool of pendingTools) appendTool(tool);
+      for (const tool of unlinkedTools) appendTool(tool);
       pendingTools = [];
     }
     function thinkingPanel(label) {

@@ -152,11 +152,10 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
         .entries()
         .iter()
         .filter_map(|entry| match &entry.payload {
-            lash_core::ChronologicalPayload::ToolCall(record) => {
-                record.call_id.as_deref().and_then(|call_id| {
-                    (!rlm_owned_tool_call_ids.contains(call_id)).then(|| (call_id, record.clone()))
-                })
-            }
+            lash_core::ChronologicalPayload::ToolCall(record) => record
+                .call_id
+                .as_deref()
+                .map(|call_id| (call_id, record.clone())),
             lash_core::ChronologicalPayload::Message(_)
             | lash_core::ChronologicalPayload::ModeEvent(_) => None,
         })
@@ -186,7 +185,12 @@ fn timeline_from_chronological(projection: &lash_core::ChronologicalProjection) 
                 if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
                     lash_mode_rlm::decode_rlm_mode_event(event)
                 {
-                    append_rlm_trajectory_items(&mut timeline, &entry, &mut activity_state);
+                    append_rlm_trajectory_items(
+                        &mut timeline,
+                        &entry,
+                        &tool_call_map,
+                        &mut activity_state,
+                    );
                 }
             }
         }
@@ -207,11 +211,7 @@ fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> H
             | lash_core::ChronologicalPayload::ToolCall(_) => None,
         })
         .flat_map(|event| match event {
-            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry
-                .tool_calls
-                .into_iter()
-                .filter_map(|record| record.call_id)
-                .collect::<Vec<_>>(),
+            lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
             lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_)
             | lash_rlm_types::RlmModeEvent::RlmDiagnostic(_) => Vec::new(),
         })
@@ -221,14 +221,17 @@ fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> H
 fn append_rlm_trajectory_items(
     timeline: &mut UiTimeline,
     entry: &lash_rlm_types::RlmTrajectoryEntry,
+    tool_calls: &HashMap<&str, ToolCallRecord>,
     activity_state: &mut ActivityState,
 ) {
     if let Some(reasoning) = rlm_reasoning_display_text(&entry.reasoning) {
         let _ = push_assistant_reasoning_item(timeline, &reasoning);
     }
     timeline.push(UiTimelineItem::LashlangCode(entry.code.clone()));
-    for record in &entry.tool_calls {
-        append_tool_call_record_items(timeline, record, activity_state);
+    for call_id in &entry.tool_call_ids {
+        if let Some(record) = tool_calls.get(call_id.as_str()) {
+            append_tool_call_record_items(timeline, record, activity_state);
+        }
     }
     if let Some(final_output) = &entry.final_output {
         let _ = push_assistant_text_item(timeline, &render_submitted_value(final_output));

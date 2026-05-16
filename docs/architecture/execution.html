@@ -5,8 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Execution - lash Architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css">
-<script src="./mermaid.js" defer></script>
+<link rel="stylesheet" href="../styles.css?v=4">
+<script src="../theme.js"></script>
+<script src="../nav.js?v=7" defer></script>
+<script src="../search.js?v=7" defer></script>
+<script src="../codecopy.js" defer></script>
+<script src="../syntax.js" defer></script>
+<script src="../mermaid.js" defer></script>
+<script src="../toc.js?v=4" defer></script>
 </head>
 <body>
   <div class="page">
@@ -29,6 +35,7 @@
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
             <li><a href="./providers.html">Providers</a></li>
+            <li><a href="./durability.html">Durability</a></li>
           </ol>
         </details>
       </aside>
@@ -154,10 +161,10 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Host Rendering</h2>
-            <p>The terminal receives both live stream events and completed authoritative read views.</p>
+            <p>The terminal receives live stream events for previews and completed authoritative read views for settled output.</p>
           </div>
           <div class="two-col">
-            <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>; live markdown lanes and activity state bridge partial output until the final projection arrives.</p></article>
+            <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>: live markdown lanes are cleared, then the current turn is replaced from <code>SessionReadView</code>. The CLI does not consume a final assistant-message stream event.</p></article>
             <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state plus the full provider trace JSONL when available, then renders chronological projections, prompt snapshots, context percentages, cached-token percentages, and usage bars. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
           </div>
         </div>

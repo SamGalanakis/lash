@@ -20,6 +20,88 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
 }
 
 #[test]
+fn chat_finish_reasons_map_to_terminal_reasons() {
+    let parts = vec![LlmOutputPart::Text {
+        text: "partial".to_string(),
+        response_meta: None,
+    }];
+    assert_eq!(
+        terminal_reason_from_chat_value(&json!({"choices":[{"finish_reason":"length"}]}), &parts),
+        LlmTerminalReason::OutputLimit
+    );
+    assert_eq!(
+        terminal_reason_from_chat_value(
+            &json!({"choices":[{"finish_reason":"content_filter"}]}),
+            &parts
+        ),
+        LlmTerminalReason::ContentFilter
+    );
+    assert_eq!(
+        terminal_reason_from_chat_value(
+            &json!({"choices":[{"finish_reason":"tool_calls"}]}),
+            &parts
+        ),
+        LlmTerminalReason::ToolUse
+    );
+}
+
+#[test]
+fn responses_incomplete_maps_to_output_limit() {
+    assert_eq!(
+        terminal_reason_from_responses_value(
+            &json!({"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}),
+            &[]
+        ),
+        LlmTerminalReason::OutputLimit
+    );
+}
+
+#[test]
+fn responses_null_incomplete_details_does_not_map_to_output_limit() {
+    let parts = vec![LlmOutputPart::Text {
+        text: "Hi".to_string(),
+        response_meta: None,
+    }];
+    assert_eq!(
+        terminal_reason_from_responses_value(
+            &json!({"status":"completed","incomplete_details":null}),
+            &parts
+        ),
+        LlmTerminalReason::Stop
+    );
+}
+
+#[test]
+fn responses_content_filter_incomplete_maps_to_content_filter() {
+    let parts = vec![LlmOutputPart::Text {
+        text: "partial".into(),
+        response_meta: None,
+    }];
+    assert_eq!(
+        terminal_reason_from_responses_value(
+            &json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
+            &parts
+        ),
+        LlmTerminalReason::ContentFilter
+    );
+}
+
+#[test]
+fn chat_unknown_finish_reason_maps_to_provider_error() {
+    let parts = vec![LlmOutputPart::Text {
+        text: "partial".into(),
+        response_meta: None,
+    }];
+    assert_eq!(
+        terminal_reason_from_chat_value(
+            &json!({"choices":[{"finish_reason":"network_error"}]}),
+            &parts
+        ),
+        LlmTerminalReason::ProviderError
+    );
+}
+
+#[test]
 fn builds_responses_body_with_instructions_and_input() {
     let provider = OpenAiProvider::new("key");
     let req = request(vec![

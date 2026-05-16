@@ -17,6 +17,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use attachment::{
     AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef, ImageMediaType, MediaType,
 };
+pub use llm::types::LlmTerminalReason;
 pub use mode::{
     ModeBuildInput, ModeConfig, ModePreamble, append_assistant_text_part,
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
@@ -32,8 +33,8 @@ pub use prompt::{
 pub use sansio::{
     ChatContextProjector, CheckpointResumeAction, CompletedToolCall, ContextProjector,
     DriverAction, DriverContextView, Effect, EffectId, LlmCallError, ModeProtocol, PendingToolCall,
-    ProjectorContext, ProtocolDriverHandle, Response, TurnMachine, TurnMachineConfig,
-    UnitModeProtocol, WaitingExecState, WaitingLlmState, driver_state,
+    ProjectorContext, ProtocolDriverHandle, Response, TurnCheckpoint, TurnMachine,
+    TurnMachineConfig, UnitModeProtocol, WaitingExecState, WaitingLlmState, driver_state,
 };
 pub use session::{
     CompletedTurn, ExecResponse, PromptUsage, SansIoSessionState, TextProjectionMetadata,

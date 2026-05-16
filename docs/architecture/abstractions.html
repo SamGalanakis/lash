@@ -5,8 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Abstractions - lash Architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css">
-<script src="./mermaid.js" defer></script>
+<link rel="stylesheet" href="../styles.css?v=4">
+<script src="../theme.js"></script>
+<script src="../nav.js?v=7" defer></script>
+<script src="../search.js?v=7" defer></script>
+<script src="../codecopy.js" defer></script>
+<script src="../syntax.js" defer></script>
+<script src="../mermaid.js" defer></script>
+<script src="../toc.js?v=4" defer></script>
 </head>
 <body>
   <div class="page">
@@ -29,6 +35,7 @@
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
             <li><a href="./providers.html">Providers</a></li>
+            <li><a href="./durability.html">Durability</a></li>
           </ol>
         </details>
       </aside>
@@ -48,7 +55,7 @@
             <table>
               <thead><tr><th>Abstraction</th><th>Owner</th><th>Role</th></tr></thead>
               <tbody>
-                <tr><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code></td><td><code>lash-sansio</code></td><td>Pure turn state machine and host-effect protocol.</td></tr>
+                <tr><td><code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>, <code>EffectId</code>, <code>TurnCheckpoint</code></td><td><code>lash-sansio</code></td><td>Pure turn state machine and host-effect protocol. The same checkpoint round-trips across crashes with deterministic <code>EffectId</code> — see <a href="./durability.html">Durability</a> for the workflow-integration contract.</td></tr>
                 <tr><td><code>TurnOutcome</code>, <code>TurnFinish</code>, <code>TurnStop</code></td><td><code>lash-sansio</code></td><td>Three-class turn result: <code>Finished{AssistantMessage|SubmittedValue|ToolValue}</code>, <code>Handoff{session_id}</code>, <code>Stopped{Cancelled|InvalidInput|MaxTurns|ToolFailure|ProviderError|PluginAbort|RuntimeError|SubmittedError{...}|ToolError{...}}</code>.</td></tr>
                 <tr><td><code>ModePreamble</code>, <code>ContextProjector</code>, <code>ProtocolDriverHandle</code></td><td><code>lash-sansio</code> + mode crates</td><td>Mode-specific prompt, request projection, and model-output interpretation.</td></tr>
                 <tr><td><code>LashCore</code>, <code>LashSession</code>, <code>TurnBuilder</code></td><td><code>lash</code></td><td>App-facing facade for shared core configuration, per-conversation sessions, and semantic turn streaming.</td></tr>
@@ -64,7 +71,7 @@
                 <tr><td><code>Store</code></td><td><code>lash-sqlite-store</code></td><td>Concrete SQLite implementation for graph nodes, session heads, blobs, checkpoints, usage, tombstones, and vacuum metadata.</td></tr>
                 <tr><td><code>ProviderHandle</code>, <code>ProviderComponents</code></td><td><code>lash-core/src/provider/mod.rs</code></td><td>Persisted provider handle split by state, auth, readiness, transport, and model policy.</td></tr>
                 <tr><td><code>ToolDefinition</code>, <code>ToolSurface</code>, <code>ToolOutputContract</code></td><td><code>lash-sansio</code></td><td>Tool visibility, model schema, examples, compact docs, and dynamic return contracts.</td></tr>
-                <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash-core/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and plugin actions.</td></tr>
+                <tr><td><code>PluginFactory</code>, <code>SessionPlugin</code>, <code>PluginRegistrar</code></td><td><code>lash-core/src/plugin</code></td><td>Plugin lifecycle and hook registration for tools, prompts, modes, runtime events, and host-callable RPCs.</td></tr>
                 <tr><td><code>LlmToolsPluginFactory</code>, <code>DirectCompletionHost</code></td><td><code>lash-llm-tools</code> + <code>lash-core</code></td><td><code>llm_query</code> tool registration, output-schema handling, direct completion, and usage relay.</td></tr>
                 <tr><td><code>RlmControlToolsProvider</code></td><td><code>lash-mode-rlm/src/control_tools.rs</code></td><td>Mode-owned RLM control tools such as <code>continue_as</code>, which produces a <code>TurnOutcome::Handoff</code>.</td></tr>
                 <tr><td><code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, <code>ProjectedReadRequest</code>, <code>ProjectedReadResponse</code></td><td><code>lashlang/src/runtime/value.rs</code></td><td>Read-only bindings injected from the host into Lashlang scope. RLM uses this to expose <code>history</code> and other projected globals without copying them into VM <code>State</code>; assignment over a projected name is rejected at runtime.</td></tr>
@@ -79,7 +86,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Plugin Registration</h2>
-            <p>Plugins are assembled per session. Each plugin can contribute mode drivers, native tools, tool-surface entries, prompt text, lifecycle hooks, plugin actions, and UI activity.</p>
+            <p>Plugins are assembled per session. Each plugin can contribute mode drivers, native tools, tool-surface entries, prompt text, lifecycle hooks, host-callable RPCs, and UI activity.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Plugin contract shape</div>

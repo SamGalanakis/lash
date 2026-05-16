@@ -9,6 +9,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use compact_str::CompactString;
+
 use super::instruction::{CompiledFormatPart, CompiledFormatTemplate};
 use super::*;
 
@@ -418,17 +420,17 @@ pub(crate) fn execute_compiled_format_direct(
     Ok(output)
 }
 
-pub(crate) fn execute_compiled_format_one_number_direct(
+pub(crate) fn execute_compiled_format_one_number_compact_direct(
     template: &CompiledFormatTemplate,
     value: f64,
-) -> Result<String, RuntimeError> {
+) -> Result<CompactString, RuntimeError> {
     if let Some(message) = &template.error {
         return Err(RuntimeError::ValueError {
             message: message.clone(),
         });
     }
 
-    let mut output = String::with_capacity(template.min_capacity);
+    let mut output = CompactString::with_capacity(template.min_capacity);
     for part in template.parts.iter() {
         match part {
             CompiledFormatPart::Literal(literal) => output.push_str(literal),

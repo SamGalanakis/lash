@@ -121,10 +121,13 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
     }
 
     fn build_preamble(&self, input: ModeBuildInput) -> ModePreamble {
+        let tool_names = input.tool_surface.tool_names();
+        let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
         ModePreamble {
             config: ModeConfig::chat(Arc::new(StandardDriver), true),
             tool_specs: input.tool_surface.model_tool_specs(),
-            tool_names: input.tool_surface.tool_names(),
+            tool_names,
+            tool_names_fingerprint,
             omitted_tool_count: 0,
             execution_prompt: Arc::from(STANDARD_EXECUTION_SECTION),
             prompt_contributions: input.extra_prompt_contributions,
@@ -337,7 +340,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
     fn handle_llm_success(
         &self,
         ctx: DriverContextView<'_>,
-        _waiting: WaitingLlmState,
+        _waiting: WaitingLlmState<lash_core::HostModeProtocol>,
         llm_response: LlmResponse,
         text_streamed: bool,
     ) -> Vec<DriverAction> {
@@ -466,14 +469,6 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
                 )));
                 return actions;
             }
-            actions.push(DriverAction::AppendEvents(vec![conversation_event(
-                Message {
-                    id: asst_id,
-                    role: MessageRole::Assistant,
-                    parts: shared_parts(parts_out),
-                    origin: None,
-                },
-            )]));
             actions.push(DriverAction::StartCheckpoint {
                 checkpoint: CheckpointKind::BeforeCompletion,
                 on_empty: CheckpointResumeAction::Finish(TurnOutcome::Finished(
@@ -640,7 +635,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
     fn handle_exec_result(
         &self,
         _ctx: DriverContextView<'_>,
-        _waiting: WaitingExecState,
+        _waiting: WaitingExecState<lash_core::HostModeProtocol>,
         _result: Result<lash_core::ExecResponse, String>,
     ) -> Vec<DriverAction> {
         Vec::new()

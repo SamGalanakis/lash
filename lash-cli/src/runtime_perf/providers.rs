@@ -42,6 +42,8 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
                     response_meta: None,
                 }],
                 usage,
+                terminal_reason: lash_core::LlmTerminalReason::Stop,
+                terminal_diagnostic: None,
                 provider_usage: None,
                 request_body: None,
                 http_summary: None,

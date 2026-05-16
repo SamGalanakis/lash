@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Durability - lash Architecture</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../styles.css?v=4">
+<script src="../theme.js"></script>
+<script src="../nav.js?v=7" defer></script>
+<script src="../search.js?v=7" defer></script>
+<script src="../codecopy.js" defer></script>
+<script src="../syntax.js" defer></script>
+<script src="../toc.js?v=4" defer></script>
+</head>
+<body>
+  <div class="page">
+    <main class="frame">
+      <aside class="sidebar" aria-label="Architecture navigation">
+        <a class="sidebar__exit" href="../index.html">← Docs</a>
+        <details class="sidebar__disclosure" open>
+          <summary>
+            <span class="sidebar__label">Architecture</span>
+            <span class="sidebar__current">Durability</span>
+          </summary>
+          <ol class="sidebar__chapters">
+            <li><a href="./overview.html">Overview</a></li>
+            <li><a href="./modules.html">Modules</a></li>
+            <li><a href="./flow.html">Data Flow</a></li>
+            <li><a href="./execution.html">Execution</a></li>
+            <li><a href="./runtime.html">Runtime</a></li>
+            <li><a href="./abstractions.html">Abstractions</a></li>
+            <li><a href="./deps.html">Dependencies</a></li>
+            <li><a href="./lashlang.html">Lashlang</a></li>
+            <li><a href="./html-exporter.html">HTML Exporter</a></li>
+            <li><a href="./providers.html">Providers</a></li>
+            <li><a class="active" href="./durability.html">Durability</a></li>
+          </ol>
+        </details>
+      </aside>
+      <header class="hero">
+        <div class="eyebrow">Architecture chapter 11</div>
+        <h1>durability<span class="slash">/</span>workflows</h1>
+        <p>Agent turns cross process boundaries. Tool calls may run for minutes, exec blocks may hand off to other workers, and the orchestrator on top might be a durable workflow runtime that expects deterministic replay. <code>lash-sansio</code> is the pure state machine that makes this seam explicit — every side effect is a yielded value, every result is a fed-back response, and a serialised checkpoint can be replayed by a different process to land in the same place.</p>
+      </header>
+
+      <section class="content">
+        <div class="section">
+          <div class="section-header">
+            <h2>The Sansio Seam</h2>
+            <p><code>lash-sansio::TurnMachine</code> is a sans-IO state machine. It does not call providers, run tools, or execute code on its own. Instead, it <em>yields</em> effects — <code>LlmCall</code>, <code>ToolCalls</code>, <code>ExecCode</code>, <code>Checkpoint</code> — and waits for the host to feed results back. The whole machine is <code>Serialize</code> / <code>Deserialize</code>; the host can snapshot it at any point, store the bytes anywhere, and resume on a different worker.</p>
+          </div>
+          <p>That shape is exactly what durable workflow runtimes (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) want from a library they're embedding. The workflow's own ledger records that effect <em>E</em> was started, persists the result, and replays the workflow code with <em>E</em>'s output already in hand. A lash turn driven from inside such a workflow gets the same property: the turn's state-machine progress survives crashes, redeployments, and worker migrations because the workflow runtime owns the persistence and lash owns nothing the workflow can't replay.</p>
+          <p>The standard <code>LashRuntime</code> wraps the sansio machine with its own async I/O loop — it calls providers, schedules tools, runs RLM exec. Embedders who only need in-process durability through <a href="../persistence.html">session persistence</a> never see sansio. Embedders integrating with an external orchestrator drive sansio directly.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Effects And Responses</h2>
+            <p>The <code>Effect</code> enum is the full surface of side effects a turn can request. The host fulfils each effect and replies with a matching <code>Response</code> indexed by <code>EffectId</code>.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Effect</th><th>Payload</th><th>Response</th></tr></thead>
+              <tbody>
+                <tr><td><code>SyncExecutionSurface</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionSurfaceSynced</code> with refreshed prompt + tool specs</td></tr>
+                <tr><td><code>LlmCall</code></td><td><code>request: Arc&lt;LlmRequest&gt;</code></td><td><code>LlmComplete</code> with <code>Result&lt;LlmResponse, LlmCallError&gt;</code></td></tr>
+                <tr><td><code>ToolCalls</code></td><td><code>calls: Vec&lt;PendingToolCall&gt;</code></td><td><code>ToolResults</code> with <code>Vec&lt;CompletedToolCall&gt;</code></td></tr>
+                <tr><td><code>ExecCode</code></td><td><code>code: String</code></td><td><code>ExecResult</code> with <code>Result&lt;ExecResponse, String&gt;</code></td></tr>
+                <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
+                <tr><td><code>Sleep</code></td><td><code>duration: Duration</code></td><td><code>Timeout</code></td></tr>
+                <tr><td><code>CancelLlm</code></td><td><code>id</code> of the call to cancel</td><td>none — fire-and-forget</td></tr>
+                <tr><td><code>Log</code> / <code>Emit</code></td><td>structured event</td><td>none — fire-and-forget</td></tr>
+                <tr><td><code>Progress</code></td><td>committed messages + events at this iteration</td><td>none — durable persistence signal</td></tr>
+                <tr><td><code>Done</code></td><td>final protocol messages + events</td><td>none — turn terminal; the high-level runtime still materializes prose <code>AssistantMessage</code> output during its shared final commit</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p><code>Progress</code> is the host's hook for durable persistence: every time the machine commits new messages or mode-step events, it emits a <code>Progress</code> effect before continuing. Workflow runtimes treat each <code>Progress</code> as an activity boundary; in-process embedders fold it into their own persistence loop. Prose finalization is an outcome, not a low-level <code>SessionEvent::Message { kind: "final" }</code> side channel.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Waiting States</h2>
+            <p>When the machine yields an effect that needs a response, it parks in a <code>MachineState</code> variant that retains exactly the data needed to re-emit the same effect identically after restore. Five variants matter for durability:</p>
+          </div>
+          <div class="def-list-grid">
+            <article class="panel">
+              <h3><code>WaitingLlm</code></h3>
+              <p><code>effect_id</code>, the original <code>Arc&lt;LlmRequest&gt;</code>, and optional mode <code>driver_state</code>. Restore re-issues the same request — same model, same messages, same tool spec — under the same <code>EffectId</code>.</p>
+            </article>
+            <article class="panel">
+              <h3><code>WaitingTools</code></h3>
+              <p><code>effect_id</code> plus the full <code>Vec&lt;PendingToolCall&gt;</code> batch the model emitted. On restore, the host sees the same list with the same call ids; tools that already completed in a partial batch are <em>not</em> rerun (see Replay Safety below).</p>
+            </article>
+            <article class="panel">
+              <h3><code>WaitingExec</code></h3>
+              <p><code>effect_id</code>, the original code block, and the mode's <code>driver_state</code>. RLM, for example, persists its trajectory cursor and projected bindings here so the same exec re-runs in the same context.</p>
+            </article>
+            <article class="panel">
+              <h3><code>WaitingCheckpoint</code></h3>
+              <p><code>effect_id</code>, the <code>CheckpointKind</code> being run, and an <code>on_empty</code> resume action — whether to prepare another mode iteration or finish the turn if the checkpoint plugin contributes no messages.</p>
+            </article>
+            <article class="panel">
+              <h3><code>WaitingExecutionSurface</code></h3>
+              <p><code>effect_id</code> plus <code>update_machine_config</code> flag. The least state-bearing of the waiting variants — restore simply re-asks the host for the live tool surface.</p>
+            </article>
+            <article class="panel">
+              <h3>Non-waiting</h3>
+              <p><code>PreparingMode</code>, <code>PrepareIteration</code>, and <code>Finished</code> hold no outstanding effect. Restoring into these is a no-op for re-emission; the machine just resumes from the persisted message and event log.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>EffectId Stability</h2>
+            <p><code>EffectId(u64)</code> is a monotonic counter held in the machine. The next id is allocated on each yielded effect; the counter is part of <code>TurnCheckpoint</code> and is restored on resume. The first effect of a fresh turn is always <code>EffectId(1)</code>; the n-th effect is always <code>EffectId(n)</code> regardless of how many times the workflow crashed and replayed in between.</p>
+          </div>
+          <p>Use the id as your workflow's idempotency key. A Temporal activity keyed by <code>(session_id, turn_id, effect_id)</code> never runs twice for the same logical effect: the first attempt persists its result, replay reads from history. The same property holds for Restate's invocation keys and any other workflow runtime that supports keyed deduplication.</p>
+          <p><code>EffectId</code> is local to one turn. Across turns, the counter resets to 1; pair it with the enclosing turn id to construct globally unique keys.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Checkpoint And Restore</h2>
+            <p>Two methods bracket every durable boundary:</p>
+          </div>
+          <pre><code>impl&lt;M: ModeProtocol&gt; TurnMachine&lt;M&gt; {
+    pub fn checkpoint(&amp;self) -&gt; TurnCheckpoint&lt;M&gt;;
+
+    pub fn restore_from_checkpoint(
+        config: TurnMachineConfig&lt;M&gt;,
+        checkpoint: TurnCheckpoint&lt;M&gt;,
+    ) -&gt; Self;
+}</code></pre>
+          <p><code>TurnCheckpoint&lt;M&gt;</code> is fully serde-compatible. Fields:</p>
+          <ul class="bullets">
+            <li><code>state: MachineState&lt;M&gt;</code> — the waiting variant, with the data each retains.</li>
+            <li><code>pending_effects: Vec&lt;CheckpointEffect&lt;M&gt;&gt;</code> — fire-and-forget effects queued but not yet drained (<code>Emit</code>, <code>Log</code>, <code>Progress</code>).</li>
+            <li><code>next_effect_id: u64</code> — counter, preserves id determinism.</li>
+            <li><code>messages: Vec&lt;Message&gt;</code> — prompt history committed so far.</li>
+            <li><code>events: Vec&lt;SessionEventRecord&lt;M::Event&gt;&gt;</code> — semantic event log committed so far.</li>
+            <li><code>mode_iteration</code>, <code>mode_run_offset</code> — turn position.</li>
+            <li><code>cumulative_usage: TokenUsage</code> — running token totals for this turn.</li>
+            <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
+            <li><code>synced_mode_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
+          </ul>
+          <p>The <code>TurnMachineConfig</code> passed to <code>restore_from_checkpoint</code> is <em>not</em> serialised — it carries the protocol driver, projector, tool registry, system prompt builder, and other host-owned plugins. The host reconstructs it the same way it built it for <code>new()</code>, then hands it back alongside the deserialised checkpoint. This is intentional: the config is what makes the abstract machine concrete, and it lives at the same layer as the workflow runtime that's driving the machine.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Replay Safety</h2>
+            <p>Restore reissues the <em>outstanding</em> effect, not the whole effect history. The event log persisted in <code>TurnCheckpoint.events</code> is reloaded as-is — past <code>ToolCallStarted</code>, <code>ToolCallCompleted</code>, <code>AssistantProseDelta</code> records do not re-emit. The same is true of past mode-step events. From the workflow's perspective, only the unresolved effect needs activity coverage; everything before it is fact.</p>
+          </div>
+          <ul class="bullets">
+            <li><strong>Mid-LLM crash</strong> → restore yields a new <code>LlmCall</code> with the same <code>EffectId</code> and identical request. The workflow's activity for that id is the same lookup and produces the same response.</li>
+            <li><strong>Post-LLM crash, pre-checkpoint</strong> → restore yields the pending <code>Checkpoint</code> effect, not another <code>LlmCall</code>. The model is not re-invoked.</li>
+            <li><strong>Mid-tool-batch crash</strong> → restore yields a <code>ToolCalls</code> effect carrying every original call. Tools that completed in the partial batch are surfaced to the host via the response shape (each <code>CompletedToolCall</code> includes its outcome). Hosts can short-circuit completed calls by id and only re-invoke the pending ones.</li>
+            <li><strong>RLM exec crash</strong> → restore yields an <code>ExecCode</code> effect with the original code block and the driver's trajectory state. The exec result contains the parallel tool outputs in their structured form (success / failure / cancellation); no replayed <code>ToolCallStarted</code> events leak from the previous attempt.</li>
+            <li><strong>Plugin checkpoint crash</strong> → restore yields the <code>Checkpoint</code> effect again. The <code>on_empty</code> resume action is preserved, so a checkpoint that contributed no messages still finishes the turn the same way.</li>
+          </ul>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Driving The Machine From A Workflow</h2>
+            <p>The basic loop a workflow runtime wraps around the sansio machine:</p>
+          </div>
+          <pre><code>// `workflow.run_activity(...)` is whatever the runtime exposes for
+// durable side effects — keyed by effect_id for idempotency.
+
+let mut machine = TurnMachine::new(config, messages, events, mode_run_offset);
+
+while !machine.is_done() {
+    while let Some(effect) = machine.poll_effect() {
+        match effect {
+            Effect::LlmCall { id, request } =&gt; {
+                let response = workflow
+                    .run_activity(("llm", turn_id, id), || invoke_llm(request))
+                    .await;
+                machine.handle_response(Response::LlmComplete {
+                    id,
+                    result: response,
+                    text_streamed: false,
+                });
+            }
+            Effect::ToolCalls { id, calls } =&gt; {
+                let results = workflow
+                    .run_activity(("tools", turn_id, id), || run_tool_batch(calls))
+                    .await;
+                machine.handle_response(Response::ToolResults { id, results });
+            }
+            Effect::Progress { messages, events, .. } =&gt; {
+                workflow.persist(turn_id, messages, events).await;
+            }
+            Effect::Done { messages, events, .. } =&gt; {
+                workflow.finalize(turn_id, messages, events).await;
+            }
+            // … the remaining variants follow the same pattern.
+            _ =&gt; {}
+        }
+    }
+    // Snapshot the machine at every iteration so a worker crash
+    // resumes against the latest waiting state, not the turn start.
+    workflow.persist_checkpoint(turn_id, machine.checkpoint()).await;
+}</code></pre>
+          <p>The shape matches Temporal's <em>workflow + activity</em> split and Restate's <em>handler + side-effect</em> split with no glue layer: each effect becomes one durable activity, the machine snapshot becomes one workflow-state write, and the <code>EffectId</code> is the key that joins them.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>What's Covered, What Isn't</h2>
+            <p>The durability seam covers the in-turn effects the machine yields. Some workloads sit outside it:</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Inside the seam</h3>
+              <p>LLM calls, native tool batches, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps. Each gets an <code>EffectId</code>, each round-trips through the host, each survives crashes deterministically.</p>
+            </article>
+            <article class="panel">
+              <h3>Outside the seam</h3>
+              <p>Fire-and-forget <code>Emit</code> and <code>Log</code> effects, plugin background tasks spawned through <code>ToolContext::tasks()</code>, anything a tool implementation does that's not its <code>execute()</code> return value. Workflows that need these durable should fold them into their own activities.</p>
+            </article>
+          </div>
+          <p>Sessions opened through the regular <code>LashCore</code> / <code>LashSession</code> path also get durability through the <a href="../persistence.html">session store</a>, but at a coarser grain: a turn either commits to the store atomically or fails as a whole. Use sansio directly when you need crash recovery <em>inside</em> a turn — when a single LLM call is expensive enough to replay, or when a tool batch can run for minutes and you can't afford to lose its partial progress.</p>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Test Coverage</h2>
+            <p>The durability properties above are pinned by integration tests in two places:</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Test</th><th>Asserts</th></tr></thead>
+              <tbody>
+                <tr><td><code>checkpoint_before_llm_completion_reissues_same_logical_llm_call</code><br><code>lash-sansio/src/sansio/tests.rs:502</code></td><td>Restore from a checkpoint taken mid-LLM yields a fresh <code>LlmCall</code> effect with the same <code>EffectId</code> and identical request payload.</td></tr>
+                <tr><td><code>checkpoint_after_llm_result_replays_checkpoint_without_second_llm</code><br><code>:521</code></td><td>Restore after the LLM completed but before the checkpoint plugin ran yields the pending <code>Checkpoint</code> effect — no duplicate model call.</td></tr>
+                <tr><td><code>checkpoint_preserves_parallel_tool_batch_before_any_result</code><br><code>:706</code></td><td>Round-tripping a <code>WaitingTools</code> state preserves every <code>PendingToolCall</code> with its id and arguments intact.</td></tr>
+                <tr><td><code>checkpoint_after_mixed_tool_batch_results_replays_model_feedback_once</code><br><code>:757</code></td><td>Mixed success / failure / cancellation tool outcomes round-trip without re-emitting per-tool events to the stream.</td></tr>
+                <tr><td><code>checkpoint_round_trips_waiting_exec_driver_state</code><br><code>:871</code></td><td>RLM exec waits round-trip with their driver state intact; the same code block and trajectory cursor resume after restore.</td></tr>
+                <tr><td><code>standard_checkpoint_redrives_parallel_tool_batch_without_losing_calls</code><br><code>lash-mode-rlm/tests/protocol_drivers.rs:254</code></td><td>End-to-end through a protocol driver: standard-mode parallel tool batches resume identically after restore.</td></tr>
+                <tr><td><code>standard_checkpoint_after_tool_control_finish_preserves_terminal_outcome</code><br><code>:311</code></td><td>A tool that authored a terminal value via tool-control finishes the same way on replay.</td></tr>
+                <tr><td><code>rlm_checkpoint_redrives_pending_exec_code_with_driver_state</code><br><code>:716</code></td><td>RLM pending <code>ExecCode</code> re-runs with the same driver state, projected bindings intact.</td></tr>
+                <tr><td><code>rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes</code><br><code>:786</code></td><td>RLM exec results carrying parallel tool outcomes preserve success / failure / cancellation structure across restore.</td></tr>
+                <tr><td><code>rlm_exec_result_stores_tool_call_ids_without_replayed_tool_events</code><br><code>:882</code></td><td>RLM exec outcomes carry tool call ids without leaking replayed <code>ToolCallStarted</code> events to the activity log.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section-nav">
+          <a href="./providers.html"><span>Previous</span><strong>Providers</strong></a>
+          <a href="../embedding.html"><span>Next</span><strong>Lash API</strong></a>
+        </div>
+      </section>
+
+      <footer class="footer">Durability anchors: <code>lash-sansio/src/sansio/mod.rs</code>, <code>lash-sansio/src/sansio/tests.rs</code>, <code>lash-mode-rlm/tests/protocol_drivers.rs</code>, <code>lash-core/src/runtime/turn_loop.rs</code>.</footer>
+    </main>
+  </div>
+</body>
+</html>

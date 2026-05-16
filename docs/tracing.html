@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tracing - lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -26,8 +32,6 @@
             <li><a href="./plugins.html">Plugins</a></li>
             <li><a href="./persistence.html">Persistence</a></li>
             <li><a class="active" href="./tracing.html">Tracing</a></li>
-            <li><a href="./architecture/">Architecture</a></li>
-            <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
@@ -107,7 +111,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Prompt</h3>
-              <p><code>PromptBuilt</code> — component hashes, source, length. Lets you detect prompt drift / cache invalidation across turns.</p>
+              <p><code>PromptBuilt</code> — <code>prompt_hash</code> (combined fingerprint), <code>prompt_chars</code>, and per-component fingerprints in <code>components</code>. The runtime caches the rendered system prompt by these fingerprints; identical inputs across consecutive turns reuse the cached prompt. A <code>prompt_hash</code> that changes between turns where you expected it stable is a fast signal that some plugin contribution, tool list, or template entry is drifting — useful for cache-bust debugging without diffing the full rendered prompt.</p>
             </article>
             <article class="panel">
               <h3>LLM interaction</h3>

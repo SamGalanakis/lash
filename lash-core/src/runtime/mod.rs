@@ -401,6 +401,8 @@ pub struct TurnIssue {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<crate::LlmTerminalReason>,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
@@ -578,6 +580,7 @@ pub enum TurnEvent {
         error: Option<String>,
         success: bool,
         duration_ms: u64,
+        tool_call_ids: Vec<String>,
     },
     ToolCallStarted {
         call_id: Option<String>,
@@ -693,7 +696,6 @@ pub struct LashRuntime {
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
     pub(in crate::runtime) managed_turns: Arc<Mutex<HashMap<String, ManagedSessionTurn>>>,
-    pub(in crate::runtime) overflow_recovery_attempted: bool,
     /// Mode-owned turn options for this session.
     pub(in crate::runtime) mode_turn_options: crate::ModeTurnOptions,
     /// Session-scoped token cost ledger. Shared by ALL

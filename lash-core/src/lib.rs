@@ -42,7 +42,7 @@ pub use direct::{
     DirectJsonSchema, DirectLlmClient, DirectLlmError, DirectMessage, DirectOutputSpec, DirectPart,
     DirectRequest, DirectRole,
 };
-pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse};
+pub use lash_sansio::llm::types::{LlmOutputPart, LlmRequest, LlmResponse, LlmTerminalReason};
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
     BaseRenderCache, CheckpointKind, CompactToolContract, EffectId, ErrorEnvelope, ExecResponse,
@@ -115,12 +115,13 @@ impl ModeTurnOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HostModeProtocol;
 
 impl lash_sansio::ModeProtocol for HostModeProtocol {
     type Event = crate::session_model::ModeEvent;
     type Termination = ModeTurnOptions;
+    type DriverState = serde_json::Value;
 }
 
 pub type Effect = lash_sansio::Effect<HostModeProtocol>;

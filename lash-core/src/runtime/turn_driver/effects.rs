@@ -123,10 +123,7 @@ impl RuntimeTurnDriver {
                             sandbox_closed = true;
                             continue;
                         };
-                        if sandbox_msg.kind != "final"
-                            && sandbox_msg.kind != "lashlang_code"
-                            && !relay_tx.is_closed()
-                        {
+                        if sandbox_msg.kind != "lashlang_code" && !relay_tx.is_closed() {
                             let _ = relay_tx
                                 .send(RuntimeStreamEvent::Session(SessionEvent::Message {
                                     text: sandbox_msg.text,

@@ -5,8 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Modules - lash Architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css">
-<script src="./mermaid.js" defer></script>
+<link rel="stylesheet" href="../styles.css?v=4">
+<script src="../theme.js"></script>
+<script src="../nav.js?v=7" defer></script>
+<script src="../search.js?v=7" defer></script>
+<script src="../codecopy.js" defer></script>
+<script src="../syntax.js" defer></script>
+<script src="../mermaid.js" defer></script>
+<script src="../toc.js?v=4" defer></script>
 </head>
 <body>
   <div class="page">
@@ -29,6 +35,7 @@
             <li><a href="./lashlang.html">Lashlang</a></li>
             <li><a href="./html-exporter.html">HTML Exporter</a></li>
             <li><a href="./providers.html">Providers</a></li>
+            <li><a href="./durability.html">Durability</a></li>
           </ol>
         </details>
       </aside>
@@ -49,7 +56,7 @@
             <article class="panel"><small>Async runtime</small><h3>lash-core</h3><p>Owns <code>LashRuntime</code>, <code>Session</code>, <code>SessionGraph</code>, and the <code>RuntimePersistence</code> contract, plus tool dispatch, provider registry, OAuth, attachments, tracing, runtime controls, the built-in tool-output budgeting plugin, and handoff-following turn execution. No knowledge of MCP, user config files, or any host concerns — those live in higher layers.</p><code class="path">lash-core/src/runtime/*, lash-core/src/session.rs, lash-core/src/store.rs, lash-core/src/plugin/*</code></article>
             <article class="panel"><small>Facade</small><h3>lash</h3><p>App-facing API on top of <code>lash-core</code>. Provides <code>LashCore</code>, <code>LashCoreBuilder</code>, <code>LashSession</code>, <code>SessionBuilder</code>, <code>TurnBuilder</code>, mode presets, and typed-plugin binding helpers. Host applications use this crate (not <code>lash-core</code> directly) for runtime construction, chat/task sessions, persistence wiring, and semantic turn streaming.</p><code class="path">lash/src/lib.rs, lash/src/core.rs, lash/src/session.rs, examples/*</code></article>
             <article class="panel"><small>CLI runtime + config</small><h3>lash-cli</h3><p>Hosts the <code>lash</code> binary plus a <code>[lib]</code> half that owns <code>LashConfig</code>, provider spec parsing, and credential bootstrap. Bench runners and <code>lash-harness-opt</code> consume the lib half to share the same config loader. The bin handles resume/fork, <code>--print</code>, interactive TUI flows, and assembles the plugin factory chain (providers, MCP, mode presets) before constructing <code>LashCore</code>.</p><code class="path">lash-cli/src/config.rs, lash-cli/src/bootstrap.rs, lash-cli/src/main.rs, lash-cli/src/interactive</code></article>
-            <article class="panel"><small>Mode plugins</small><h3>standard + rlm</h3><p>Standard drives native provider tool calls. RLM extracts <code>lashlang</code> code fences, runs persistent REPL state with read-only host bindings projected into scope (<code>history</code> and any host-supplied globals), masks fence streaming, owns the <code>continue_as</code> handoff control tool, and records the RLM trajectory.</p><code class="path">lash-mode-standard, lash-mode-rlm, lashlang, lash-rlm-types</code></article>
+            <article class="panel"><small>Mode plugins</small><h3>standard + rlm</h3><p>Standard drives native provider tool calls. RLM extracts <code>lashlang</code> code fences, runs persistent REPL state with read-only host bindings projected into scope (<code>history</code> and any host-supplied globals), masks fence streaming, owns the <code>continue_as</code> handoff control tool, and records the RLM trajectory. Both modes return terminal outcomes; shared runtime code owns final prose transcript writes.</p><code class="path">lash-mode-standard, lash-mode-rlm, lashlang, lash-rlm-types</code></article>
             <article class="panel"><small>Provider plugins</small><h3>OpenAI, Codex, Anthropic, Google</h3><p>Each provider implements state, auth, readiness, transport, and model policy components behind <code>ProviderHandle</code>.</p><code class="path">lash-provider-*, lash-providers-builtin</code></article>
             <article class="panel"><small>Tool plugins</small><h3>default tools + subagents + LLM helpers + MCP + tool-output budgeting</h3><p>Default tools, subagents, <code>llm_query</code>, monitors, plan mode, prompt context, observational memory, rolling-history compaction, UI activity, tool discovery, MCP servers (via <code>lash-plugin-mcp</code>, rmcp-based, Stdio + Streamable HTTP + SSE), and the built-in tool-output budgeter all register through plugin factories. Discovery remains split across catalog projection, provider execution, lexical/BM25 ranking, LLM rerank, and schema indexing.</p><code class="path">lash-standard-plugins, lash-subagents, lash-llm-tools, lash-plugin-*, lash-core/src/plugin/tool_result_projection_builtin.rs</code></article>
             <article class="panel"><small>Persistence</small><h3>lash-sqlite-store</h3><p>The concrete SQLite implementation persists session heads, graph nodes, blobs, checkpoints, usage ledgers, tombstones, and vacuum metadata behind the runtime store contract.</p><code class="path">lash-sqlite-store/src/lib.rs</code></article>

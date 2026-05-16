@@ -93,30 +93,6 @@ fn text_delta_stays_in_live_assistant_until_committed() {
 }
 
 #[test]
-fn final_message_never_replaces_visible_streamed_text_with_shorter_text() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.start_turn();
-    app.handle_session_event(SessionEvent::TextDelta {
-        content: "Visible streamed text".into(),
-    });
-
-    app.handle_session_event(SessionEvent::Message {
-        text: "Visible".into(),
-        kind: "final".into(),
-    });
-
-    assert_eq!(
-        app.live_assistant.normalized_text().as_deref(),
-        Some("Visible streamed text")
-    );
-    assert!(
-        !app.timeline
-            .iter()
-            .any(|block| matches!(block, UiTimelineItem::AssistantText(_)))
-    );
-}
-
-#[test]
 fn text_delta_updates_live_token_estimate() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.handle_session_event(SessionEvent::LlmRequest {
@@ -132,25 +108,6 @@ fn text_delta_updates_live_token_estimate() {
         content: "efgh".into(),
     });
     assert_eq!(app.live_output_tokens_estimate, 2);
-}
-
-#[test]
-fn final_message_event_renders_in_live_assistant_lane() {
-    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.start_turn();
-    app.handle_session_event(SessionEvent::Message {
-        text: "final output".into(),
-        kind: "final".into(),
-    });
-    assert_eq!(
-        app.live_assistant.normalized_text().as_deref(),
-        Some("final output")
-    );
-    assert!(
-        !app.timeline
-            .iter()
-            .any(|block| matches!(block, UiTimelineItem::AssistantText(_)))
-    );
 }
 
 #[test]
@@ -531,6 +488,7 @@ fn cancelled_error_renders_as_system_message() {
         envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
+            terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
         }),
@@ -553,6 +511,7 @@ fn cancelled_error_without_manual_request_still_stops_immediately() {
         envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
+            terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
         }),
@@ -575,6 +534,7 @@ fn repeated_cancelled_errors_do_not_duplicate_system_message() {
         envelope: Some(lash_core::session_model::ErrorEnvelope {
             kind: "llm_provider".into(),
             code: Some("cancelled".into()),
+            terminal_reason: None,
             user_message: "LLM error: cancelled".into(),
             raw: None,
         }),

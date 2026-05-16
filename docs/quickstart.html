@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Quickstart - lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -26,8 +32,6 @@
             <li><a href="./plugins.html">Plugins</a></li>
             <li><a href="./persistence.html">Persistence</a></li>
             <li><a href="./tracing.html">Tracing</a></li>
-            <li><a href="./architecture/">Architecture</a></li>
-            <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
@@ -89,9 +93,9 @@ tokio  = { version = "1", features = ["full"] }</code></pre>
         <div class="section" id="hello-turn">
           <div class="section-header">
             <h2>Hello, Turn</h2>
-            <p>The smallest meaningful program: build a core, open a session, run one turn, print the assistant's prose.</p>
+            <p>The smallest meaningful program: build a core, open a session, run one turn, print the settled assistant prose.</p>
           </div>
-          <pre><code>use lash::{provider::ProviderHandle, LashCore, TurnEvent, TurnInput};
+          <pre><code>use lash::{provider::ProviderHandle, LashCore, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -112,16 +116,13 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     // One session per chat / task.
     let session = core.session("hello-1").open().await?;
 
-    // Run one turn; collect prose from the activity stream.
+    // Run one turn; read settled prose from the terminal result.
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
         .run()
         .await?;
 
-    let prose: String = result.activities.iter().filter_map(|a| match &amp;a.event {
-        TurnEvent::AssistantProseDelta { text } =&gt; Some(text.as_str()),
-        _ =&gt; None,
-    }).collect();
+    let prose = result.assistant_message().unwrap_or_default();
 
     println!("{prose}");
     Ok(())

@@ -81,6 +81,7 @@ where
                     errors: vec![TurnIssue {
                         kind: "runtime".to_string(),
                         code: Some(err.to_string()),
+                        terminal_reason: None,
                         message: err.to_string(),
                         raw: None,
                     }],

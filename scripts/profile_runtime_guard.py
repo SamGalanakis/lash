@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_SCENARIOS = ["rlm_large_tool_surface"]
+DEFAULT_SCENARIOS = ["rlm_large_tool_surface", "turn_checkpoint"]
 DEFAULT_STACKS = ["64k", "128k", "256k", "320k", "512k", "1m", "8m"]
 
 
@@ -39,7 +39,10 @@ def parse_args() -> argparse.Namespace:
         "--scenario",
         action="append",
         default=[],
-        help="Scenario to track. Defaults to rlm_large_tool_surface. May be repeated.",
+        help=(
+            "Scenario to track. Defaults to rlm_large_tool_surface and "
+            "turn_checkpoint. May be repeated."
+        ),
     )
     parser.add_argument(
         "--stack-bytes",

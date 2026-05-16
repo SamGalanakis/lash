@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use lash_core::llm::transport::LlmTransportError;
 use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
-    LlmRequest, LlmResponse, LlmRole, LlmToolChoice, LlmUsage, ProviderReasoningReplay,
-    ProviderReplayMeta,
+    LlmRequest, LlmResponse, LlmRole, LlmTerminalReason, LlmToolChoice, LlmUsage,
+    ProviderReasoningReplay, ProviderReplayMeta,
 };
 use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
@@ -563,6 +563,54 @@ impl GoogleOAuthProvider {
         parts
     }
 
+    fn terminal_reason_from_value(value: &Value, parts: &[LlmOutputPart]) -> LlmTerminalReason {
+        let finish = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .or_else(|| {
+                value
+                    .get("response")
+                    .and_then(|response| response.get("candidates"))
+                    .and_then(Value::as_array)
+                    .and_then(|candidates| candidates.first())
+                    .and_then(|candidate| candidate.get("finishReason"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match finish {
+            "STOP" => LlmTerminalReason::Stop,
+            "MAX_TOKENS" => LlmTerminalReason::OutputLimit,
+            "SAFETY"
+            | "RECITATION"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "IMAGE_RECITATION"
+            | "IMAGE_OTHER"
+            | "LANGUAGE" => LlmTerminalReason::ContentFilter,
+            "MALFORMED_FUNCTION_CALL"
+            | "UNEXPECTED_TOOL_CALL"
+            | "FINISH_REASON_UNSPECIFIED"
+            | "OTHER"
+            | "NO_IMAGE" => LlmTerminalReason::ProviderError,
+            "" => {
+                if parts
+                    .iter()
+                    .any(|part| matches!(part, LlmOutputPart::ToolCall { .. }))
+                {
+                    LlmTerminalReason::ToolUse
+                } else {
+                    LlmTerminalReason::Stop
+                }
+            }
+            _ => LlmTerminalReason::ProviderError,
+        }
+    }
+
     fn upload_cache_key(
         project_id: Option<&str>,
         att: &LlmAttachment,
@@ -990,11 +1038,14 @@ impl GoogleOAuthProvider {
                     }))
                 })
                 .unwrap_or_default();
+            let terminal_reason = Self::terminal_reason_from_value(&value, &parts);
             return Ok(LlmResponse {
                 full_text,
                 deltas: Vec::new(),
                 parts,
                 usage,
+                terminal_reason,
+                terminal_diagnostic: None,
                 provider_usage: None,
                 request_body,
                 http_summary: Some(format!("HTTP POST {}", url)),
@@ -1046,6 +1097,8 @@ impl GoogleOAuthProvider {
             deltas,
             parts,
             usage,
+            terminal_reason: LlmTerminalReason::Stop,
+            terminal_diagnostic: None,
             provider_usage: None,
             request_body,
             http_summary: Some(format!("HTTP POST {}?alt=sse", url)),
@@ -1355,6 +1408,26 @@ mod tests {
             stream_events: None::<LlmEventSender>,
             provider_trace: None,
         }
+    }
+
+    #[test]
+    fn google_unknown_finish_reason_maps_to_provider_error() {
+        let terminal_reason = GoogleOAuthProvider::terminal_reason_from_value(
+            &json!({"candidates":[{"finishReason":"NEW_REASON"}]}),
+            &[],
+        );
+
+        assert_eq!(terminal_reason, LlmTerminalReason::ProviderError);
+    }
+
+    #[test]
+    fn google_image_safety_finish_reason_maps_to_content_filter() {
+        let terminal_reason = GoogleOAuthProvider::terminal_reason_from_value(
+            &json!({"candidates":[{"finishReason":"IMAGE_SAFETY"}]}),
+            &[],
+        );
+
+        assert_eq!(terminal_reason, LlmTerminalReason::ContentFilter);
     }
 
     #[test]

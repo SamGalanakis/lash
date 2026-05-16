@@ -43,6 +43,8 @@ impl Default for RlmProjectorConfig {
 pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> ModePreamble {
     let tool_surface = input.tool_surface.as_ref();
     let omitted_tool_count = tool_surface.omitted_tool_count();
+    let tool_names = tool_surface.tool_names();
+    let tool_names_fingerprint = tool_surface.tool_names_fingerprint();
     let mut prompt_contributions = Vec::new();
 
     let tool_docs = tool_surface.prompt_tool_docs();
@@ -62,7 +64,8 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
             sync_execution_surface: true,
         },
         tool_specs: Arc::new(Vec::new()),
-        tool_names: tool_surface.tool_names(),
+        tool_names,
+        tool_names_fingerprint,
         omitted_tool_count,
         execution_prompt: Arc::from(crate::protocol::rlm_execution_section_with_features(
             config.prompt_features,
@@ -523,7 +526,7 @@ fn render_history_item(index: usize, item: &RlmHistoryItem, max_output_chars: us
             reasoning,
             code,
             output,
-            tool_calls: _,
+            tool_call_ids: _,
             images,
             error,
             final_output,
@@ -1067,7 +1070,7 @@ mod tests {
                 } else {
                     vec![output.to_string()]
                 },
-                tool_calls: Vec::new(),
+                tool_call_ids: Vec::new(),
                 images: Vec::new(),
                 error: None,
                 final_output: None,
@@ -1193,7 +1196,7 @@ mod tests {
                 reasoning: String::new(),
                 code: "print img".to_string(),
                 output: vec![r#"{"type":"image","id":"img"}"#.to_string()],
-                tool_calls: Vec::new(),
+                tool_call_ids: Vec::new(),
                 images: vec![lash_core::AttachmentRef {
                     id: lash_core::AttachmentId::new("img-ref"),
                     media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),

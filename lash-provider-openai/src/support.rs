@@ -8,8 +8,8 @@ pub(crate) use lash_core::SchemaProjectionOverride;
 pub(crate) use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
-    LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmToolChoice,
-    LlmUsage, ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
+    LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,
+    LlmToolChoice, LlmUsage, ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 pub(crate) use lash_core::provider::{
     AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,

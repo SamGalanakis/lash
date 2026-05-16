@@ -767,6 +767,7 @@ mod tests {
                 error: crate::TraceError {
                     message: "boom".to_string(),
                     retryable: false,
+                    terminal_reason: None,
                     code: Some("test".to_string()),
                     raw: None,
                 },

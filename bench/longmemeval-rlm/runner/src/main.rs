@@ -1402,6 +1402,7 @@ fn done_reason_label(outcome: &TurnOutcome) -> &'static str {
         TurnOutcome::Finished(TurnFinish::ToolValue { .. }) => "tool_value",
         TurnOutcome::Handoff { .. } => "handoff",
         TurnOutcome::Stopped(TurnStop::Cancelled) => "cancelled",
+        TurnOutcome::Stopped(TurnStop::Incomplete) => "incomplete",
         TurnOutcome::Stopped(TurnStop::InvalidInput) => "invalid_input",
         TurnOutcome::Stopped(TurnStop::MaxTurns) => "max_turns",
         TurnOutcome::Stopped(TurnStop::ToolFailure) => "tool_failure",

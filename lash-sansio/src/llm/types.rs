@@ -2,6 +2,35 @@ use std::sync::Arc;
 
 use crate::{AttachmentRef, SchemaProjectionOverride};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmTerminalReason {
+    Stop,
+    ToolUse,
+    OutputLimit,
+    ContextOverflow,
+    ContentFilter,
+    ProviderError,
+    Cancelled,
+    #[default]
+    Unknown,
+}
+
+impl LlmTerminalReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::ToolUse => "tool_use",
+            Self::OutputLimit => "output_limit",
+            Self::ContextOverflow => "context_overflow",
+            Self::ContentFilter => "content_filter",
+            Self::ProviderError => "provider_error",
+            Self::Cancelled => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseTextPhase {
@@ -19,7 +48,7 @@ pub struct ResponseTextMeta {
     pub phase: Option<ResponseTextPhase>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmToolSpec {
     pub name: String,
     pub description: String,
@@ -29,7 +58,7 @@ pub struct LlmToolSpec {
     pub output_schema_projections: Vec<SchemaProjectionOverride>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LlmToolChoice {
     #[default]
     Auto,
@@ -75,7 +104,7 @@ impl ProviderReasoningReplay {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LlmOutputPart {
     Text {
         text: String,
@@ -101,7 +130,7 @@ pub enum LlmOutputPart {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LlmRole {
     User,
     Assistant,
@@ -111,7 +140,7 @@ pub enum LlmRole {
 /// A structured content block inside an `LlmMessage`. Mirrors pi-mono's
 /// per-provider block types and maps cleanly onto each wire format so the
 /// adapters can emit the right shape without re-coalescing flat messages.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LlmContentBlock {
     Text {
         text: Arc<str>,
@@ -151,7 +180,7 @@ pub enum LlmContentBlock {
 /// content that maps 1:1 onto provider wire types. The old flat
 /// `content: String` + `kind` discriminator has been retired in favor of
 /// this block model.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmMessage {
     pub role: LlmRole,
     pub blocks: Arc<Vec<LlmContentBlock>>,
@@ -186,7 +215,7 @@ impl LlmMessage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmAttachment {
     pub mime: String,
     pub data: Vec<u8>,
@@ -215,20 +244,20 @@ impl LlmAttachment {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmJsonSchema {
     pub name: String,
     pub schema: serde_json::Value,
     pub strict: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LlmOutputSpec {
     JsonObject,
     JsonSchema(LlmJsonSchema),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<LlmMessage>,
@@ -238,11 +267,13 @@ pub struct LlmRequest {
     pub model_variant: Option<String>,
     pub session_id: Option<String>,
     pub output_spec: Option<LlmOutputSpec>,
+    #[serde(default, skip)]
     pub stream_events: Option<LlmEventSender>,
+    #[serde(default, skip)]
     pub provider_trace: Option<LlmProviderTraceSender>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LlmUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -319,12 +350,14 @@ impl std::fmt::Debug for LlmEventSender {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LlmResponse {
     pub full_text: String,
     pub deltas: Vec<String>,
     pub parts: Vec<LlmOutputPart>,
     pub usage: LlmUsage,
+    pub terminal_reason: LlmTerminalReason,
+    pub terminal_diagnostic: Option<String>,
     pub provider_usage: Option<serde_json::Value>,
     pub request_body: Option<String>,
     pub http_summary: Option<String>,

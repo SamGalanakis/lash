@@ -117,9 +117,6 @@ pub(crate) fn compute_stats(session: &LoadedSession) -> SessionStats {
                 }
                 s.total_chars = s.total_chars.saturating_add(step.output_chars());
                 s.total_chars = s.total_chars.saturating_add(step.code.chars().count());
-                for record in &step.tool_calls {
-                    record_tool_call(&mut s, &mut tool_counts, record);
-                }
             }
         }
     }

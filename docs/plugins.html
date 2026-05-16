@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Plugins - lash Docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./architecture/styles.css">
+<link rel="stylesheet" href="./styles.css?v=4">
+<script src="./theme.js"></script>
+<script src="./nav.js?v=7" defer></script>
+<script src="./search.js?v=7" defer></script>
+<script src="./codecopy.js" defer></script>
+<script src="./syntax.js" defer></script>
+<script src="./toc.js?v=4" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
@@ -26,8 +32,6 @@
             <li><a class="active" href="./plugins.html">Plugins</a></li>
             <li><a href="./persistence.html">Persistence</a></li>
             <li><a href="./tracing.html">Tracing</a></li>
-            <li><a href="./architecture/">Architecture</a></li>
-            <li><a href="./design-language.html">Design Language</a></li>
           </ol>
         </details>
         <nav class="sidebar__toc" aria-label="On this page">
@@ -38,8 +42,11 @@
             <li><a href="#worked-example">A Worked Example</a></li>
             <li><a href="#what-you-can-register">What You Can Register</a></li>
             <li><a href="#cheap-build">The Cheap-Build Contract</a></li>
+            <li><a href="#snapshots">Snapshots And Durability</a></li>
             <li><a href="#toolcall-shape">The ToolCall Shape</a></li>
             <li><a href="#tool-capabilities">Tool Capabilities</a></li>
+            <li><a href="#tool-execution-modes">Tool Execution Modes</a></li>
+            <li><a href="#tool-output-budget">Tool-Output Budgeting</a></li>
             <li><a href="#wiring">Wiring It In</a></li>
             <li><a href="#reference-examples">Reference Examples</a></li>
           </ol>
@@ -49,7 +56,7 @@
       <header class="hero">
         <div class="eyebrow">lash guide</div>
         <h1>writing<span class="slash">/</span>plugins</h1>
-        <p>A plugin is the unit of extension in lash. Plugins register tools, contribute to prompts, observe turn lifecycle hooks, apply tool-output budgets, register monitors, mutate history, or expose typed actions. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
+        <p>A plugin is the unit of extension in lash. Plugins register tools, contribute to prompts, observe turn lifecycle hooks, apply tool-output budgets, register monitors, mutate history, or expose typed RPCs the host can invoke directly. This page walks through the three traits you actually implement (<code>PluginFactory</code>, <code>SessionPlugin</code>, <code>ToolProvider</code>), a minimal worked example, and the contracts you need to know to avoid surprising the runtime.</p>
       </header>
 
       <section class="content" id="content">
@@ -227,7 +234,7 @@ impl ToolProvider for UpdatePlanTool {
                 <tr><td><code>reg.output()</code></td><td>Hooks on assistant streaming output and final responses.</td></tr>
                 <tr><td><code>reg.tool_results()</code></td><td>Tool-output budgeting and projection. <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
                 <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
-                <tr><td><code>reg.actions()</code></td><td>Plugin actions — typed or raw RPC-shaped APIs the host can invoke without going through tool calls.</td></tr>
+                <tr><td><code>reg.actions()</code></td><td>Typed or raw RPC-shaped entry points the host can invoke directly, without going through tool calls.</td></tr>
                 <tr><td><code>reg.monitors()</code></td><td>Monitor specs (long-running watches that the plugin maintains across turns).</td></tr>
                 <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
                 <tr><td><code>reg.mode()</code></td><td>Mode-plugin capabilities. Most users don't touch this; modes are built into <code>lash-mode-standard</code> and <code>lash-mode-rlm</code>.</td></tr>
@@ -249,6 +256,18 @@ impl ToolProvider for UpdatePlanTool {
             <li>Block on long mutexes or run anything resembling work.</li>
           </ul>
           <p>Put expensive state on the <em>factory</em> struct (wrap it in <code>Arc</code>), clone the <code>Arc</code> into the <code>SessionPlugin</code> at build time, and clone again into hook closures. The factory lives once per core; sessions are cheap shells.</p>
+        </div>
+
+        <div class="section" id="snapshots">
+          <div class="section-header">
+            <h2>Snapshots And Durability</h2>
+            <p>A session that uses a <code>SessionStoreFactory</code> (see <a href="./persistence.html">Persistence</a>) survives process restarts: the runtime parks its in-memory state into the store on shutdown and rehydrates it on the next open. Plugins participate by implementing two optional <code>SessionPlugin</code> methods:</p>
+          </div>
+          <pre><code>fn snapshot(&amp;self) -&gt; Result&lt;Option&lt;Vec&lt;u8&gt;&gt;, PluginError&gt; { Ok(None) }
+fn restore(&amp;self, _bytes: &amp;[u8]) -&gt; Result&lt;(), PluginError&gt; { Ok(()) }</code></pre>
+          <p><code>snapshot()</code> serialises whatever session-local state the plugin holds — counters, accumulated context, pending state machines — and the bytes go into the same SQLite checkpoint blob the runtime uses for its own state. <code>restore()</code> is called on a fresh session plugin after <code>register()</code> when the runtime opens an existing session id. Treat the byte format as private to your plugin; version it inline if you anticipate schema drift.</p>
+          <p>Plugins that hold no per-session state at all (most prompt contributors, observers, pure tool providers) can skip both methods — the defaults are correct. Plugins that hold mutable per-session state (counters, plan documents, ongoing observations) <strong>must</strong> implement snapshot/restore to remain consistent across restart; without them, the session resumes with the runtime graph intact but the plugin's view reset to factory defaults.</p>
+          <p>Snapshot bytes live in the session store, so they share its durability story: every commit is one SQLite transaction with optimistic CAS. There is no separate flush of plugin state — your snapshot lands in the same atomic write as the turn that produced it.</p>
         </div>
 
         <div class="section" id="toolcall-shape">
@@ -311,6 +330,56 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
     }
 }</code></pre>
           <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime bridge traits such as <code>ToolHookHost</code> remain internal <code>lash-core</code> wiring, not plugin-facing API. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
+        </div>
+
+        <div class="section" id="tool-execution-modes">
+          <div class="section-header">
+            <h2>Tool Execution Modes</h2>
+            <p>When the model emits multiple tool calls in one assistant turn, the runtime can dispatch them concurrently or one-at-a-time. The choice is declared per tool via <code>ToolDefinition::execution_mode</code>; the runtime groups the batch and runs each group accordingly.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>ToolExecutionMode::Parallel</code> (default)</h3>
+              <p>The tool's <code>execute()</code> may run concurrently with other parallel tools from the same batch. The dispatcher schedules them through <code>FuturesUnordered</code> and collects results as each completes. Right for pure reads, network fetches, file scans — anything safe to interleave.</p>
+            </article>
+            <article class="panel">
+              <h3><code>ToolExecutionMode::Serial</code></h3>
+              <p>The tool blocks the batch: the runtime runs serial tools one at a time in the order the model emitted them, and only after all parallel tools in the batch have finished. Right for tools that mutate shared state (write to a file, update a database, advance a state machine) where overlapping calls would corrupt outcomes.</p>
+            </article>
+          </div>
+          <pre><code>use lash::tools::{ToolDefinition, ToolExecutionMode};
+
+ToolDefinition::raw("write_file", "Replace a file's contents.", schema, examples)
+    .execution_mode(ToolExecutionMode::Serial)</code></pre>
+          <p>Mixing parallel and serial tools in one batch is supported and common: a read-heavy plan emitting five <code>read_file</code> calls plus one <code>write_file</code> gets the reads concurrently and the write afterward. There is no model-visible distinction — the model sees the same JSON tool list regardless of dispatch mode.</p>
+        </div>
+
+        <div class="section" id="tool-output-budget">
+          <div class="section-header">
+            <h2>Tool-Output Budgeting</h2>
+            <p>Large tool outputs blow up provider context, model context windows, and persistent history all at once. <code>ToolOutputBudgetPluginFactory</code> sits in <code>PluginStack::runtime()</code> by default and projects oversized outputs into shorter forms at three different sites — so the dispatch result, the model's next request, and the session graph each see an appropriately budgeted view.</p>
+          </div>
+          <pre><code>use lash::plugins::{
+    ToolOutputBudgetConfig, ToolOutputBudgetPluginFactory,
+};
+
+let config = ToolOutputBudgetConfig {
+    max_bytes: 32 * 1024, // default: 16 * 1024
+    max_lines: 800,        // default: 400
+    ..ToolOutputBudgetConfig::default()
+};
+
+let plugins = PluginStack::runtime().configure(|plugins| {
+    plugins.replace(Arc::new(ToolOutputBudgetPluginFactory::new(config)));
+});</code></pre>
+          <p>Defaults are <strong>16 KiB and 400 lines per tool output</strong>. Outputs under both caps pass through untouched; outputs over either cap are truncated with a "<code>… N more bytes / lines elided …</code>" trailer.</p>
+          <p>The plugin registers a tool-result projector that applies at three points:</p>
+          <ul class="bullets">
+            <li><strong>Dispatch projection</strong> — what the runtime returns to the calling code as the tool's immediate result.</li>
+            <li><strong>Model projection</strong> — what gets serialised into the next provider request's tool-result message.</li>
+            <li><strong>History projection</strong> — what's written to the session graph for replay and audit.</li>
+          </ul>
+          <p>RLM mode <code>print</code> observations go through the same projector — a Lashlang program that prints a 200 KiB blob sees the same trimmed view its next observation would carry. Replace the factory rather than appending; <code>reg.tool_results()</code> is exclusive (one projector per session). Plugins that need different projection logic should build on <code>ToolOutputBudgetConfig</code> rather than fight it.</p>
         </div>
 
         <div class="section" id="wiring">

@@ -265,6 +265,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
                 error: None,
                 success: true,
                 duration_ms: 4,
+                tool_call_ids: vec!["call-1".to_string()],
             },
         ))
         .await;
@@ -463,7 +464,10 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallCompleted { .. }
     )));
 
-    let TurnEvent::ToolCallCompleted { output, .. } = &events[tool_completed].event else {
+    let TurnEvent::ToolCallCompleted {
+        call_id, output, ..
+    } = &events[tool_completed].event
+    else {
         unreachable!();
     };
     assert_eq!(
@@ -474,6 +478,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         language,
         success,
         error,
+        tool_call_ids,
         ..
     } = &events[code_completed].event
     else {
@@ -482,6 +487,31 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     assert_eq!(language, "lashlang");
     assert!(*success);
     assert!(error.is_none());
+    assert_eq!(call_id.as_ref(), tool_call_ids.first());
+    assert_eq!(tool_call_ids.len(), 1);
+    let read_view = result.state.read_view();
+    let active_matches = read_view
+        .tool_calls()
+        .iter()
+        .filter(|record| record.call_id.as_ref() == tool_call_ids.first())
+        .count();
+    assert_eq!(active_matches, 1);
+    let graph_matches = read_view
+        .materialized_session_graph()
+        .active_path_nodes()
+        .into_iter()
+        .filter_map(|node| node.event())
+        .filter(|event| {
+            matches!(
+                event,
+                lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
+                    record,
+                    ..
+                }) if record.call_id.as_ref() == tool_call_ids.first()
+            )
+        })
+        .count();
+    assert_eq!(graph_matches, 1);
     let TurnEvent::SubmittedValue { value } = &events[terminal_output].event else {
         unreachable!();
     };
@@ -515,6 +545,14 @@ async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()>
         TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
     )));
     assert_eq!(assistant_prose(&events), "done in prose");
+    let read_view = result.state.read_view();
+    let assistant_messages = read_view
+        .messages()
+        .iter()
+        .filter(|message| message.role == lash_core::MessageRole::Assistant)
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].parts[0].content, "done in prose");
     Ok(())
 }
 

@@ -69,7 +69,6 @@ impl LashRuntime {
             managed_sessions: Arc::new(Mutex::new(HashMap::new())),
             active_handoff_continuations: Arc::new(Mutex::new(HashMap::new())),
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
-            overflow_recovery_attempted: false,
             mode_turn_options,
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_sync_needed: Arc::new(AtomicBool::new(false)),
