@@ -21,11 +21,20 @@
     return "lash";
   }
 
-  // Build a path back to docs root from the current page. `depth` is the
-  // number of directory levels we are below the docs root; we emit one ".."
-  // for each. Path "/index.html" → depth 0 → "./"; "/architecture/flow.html"
-  // → depth 1 → "../".
+  // Absolute path to the docs root. `nav.js` sits at the docs root, so we
+  // read this script tag's own `src` to learn that root. Works when the docs
+  // are served at the host root ("/index.html") AND when they're served under
+  // a project subpath like "/lash/embedding.html" — depth-only math would get
+  // the subpath case wrong and emit topbar links that escape the project.
+  // `defer` scripts can't use `document.currentScript`, so we look up the
+  // tag by filename instead.
   function rootPrefix() {
+    const tag = document.querySelector('script[src*="nav.js"]');
+    if (tag) {
+      const url = new URL(tag.getAttribute("src"), location.href);
+      return url.pathname.replace(/nav\.js(\?.*)?$/, "");
+    }
+    // Fallback: legacy depth math, fine when docs are at the host root.
     const slashes = (location.pathname.match(/\//g) || []).length;
     const depth = Math.max(0, slashes - 1);
     return depth === 0 ? "./" : "../".repeat(depth);
