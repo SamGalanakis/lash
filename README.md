@@ -6,6 +6,8 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 **Docs**: <https://samgalanakis.github.io/lash/> — quickstart, embedding guide, plugins, persistence, durable workflow integration, architecture chapters.
 
+> **Alpha:** works today, API still moving fast — pin to a commit when you embed.
+
 ## What's inside
 
 ### Durable per-turn commits
@@ -132,6 +134,10 @@ That default matrix covers standard mode, RLM, RLM tool batches, large tool surf
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
 ```
+
+## Contributing
+
+Feature requests and bug reports welcome — open an [issue](https://github.com/SamGalanakis/lash/issues). At this stage detailed write-ups (what you tried, what you expected, what happened) help more than drive-by PRs; the internals are still moving and code may land in the wrong direction.
 
 ## License
 
