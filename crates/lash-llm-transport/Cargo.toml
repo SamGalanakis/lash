@@ -1,12 +1,21 @@
 [package]
 name = "lash-llm-transport"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "HTTP transport layer used by lash provider crates."
+keywords = ["lash", "agent", "llm", "transport", "http"]
+categories = ["asynchronous", "network-programming"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false }
-lash-sansio = { path = "../lash-sansio" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
 tokio = { workspace = true, features = ["time"] }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }

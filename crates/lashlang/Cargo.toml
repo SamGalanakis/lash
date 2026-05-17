@@ -1,9 +1,17 @@
 [package]
 name = "lashlang"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
-publish = false
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Lashlang: compact CodeAct language for model-authored REPL blocks in the lash agent runtime."
+keywords = ["lash", "lashlang", "agent", "codeact", "llm"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 compact_str = { version = "0.9.0", features = ["serde"] }

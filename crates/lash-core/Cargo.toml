@@ -1,8 +1,17 @@
 [package]
 name = "lash-core"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Sans-IO turn machine and runtime kernel for the lash agent runtime."
+keywords = ["lash", "agent", "runtime", "async", "ai"]
+categories = ["asynchronous", "api-bindings"]
 
 [features]
 # Keep core portable by default.
@@ -15,8 +24,8 @@ testing = []
 full = []
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio" }
-lash-trace = { path = "../lash-trace" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.1" }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }

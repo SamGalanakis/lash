@@ -1,16 +1,25 @@
 [package]
 name = "lash-llm-tools"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "LLM-backed tool implementations (llm_query and friends) for the lash agent runtime."
+keywords = ["lash", "agent", "tools", "llm", "subagent"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["full"] }
-lashlang = { path = "../lashlang" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["full"] }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 jsonschema = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["full", "testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["full", "testing"] }
 tokio = { workspace = true, features = ["full"] }

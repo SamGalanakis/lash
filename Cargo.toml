@@ -87,8 +87,15 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.131"
+version = "0.1.0-alpha.1"
 license = "MIT"
+edition = "2024"
+authors = ["Samuel Galanakis"]
+repository = "https://github.com/SamGalanakis/lash"
+homepage = "https://samgalanakis.github.io/lash/"
+documentation = "https://samgalanakis.github.io/lash/"
+readme = "README.md"
+rust-version = "1.85"
 
 # Centralized external versions. Members opt in with
 # `dep = { workspace = true, features = [...] }`.

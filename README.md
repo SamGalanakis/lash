@@ -50,15 +50,21 @@ JSONL by default with a self-contained HTML viewer; optional OpenTelemetry expor
 
 ## Embed it
 
-The shortest path to a working turn. Pull the crates straight from the monorepo:
+The shortest path to a working turn. `lash` is shipped on crates.io as
+`lash-runtime` (the bare name is owned by another project). During the
+alpha series the versions carry an `-alpha.N` suffix, so the dep needs
+the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash                 = { git = "https://github.com/SamGalanakis/lash.git" }
-lash-provider-openai = { git = "https://github.com/SamGalanakis/lash.git" }
-anyhow = "1"
-tokio  = { version = "1", features = ["full"] }
+lash-runtime         = "=0.1.0-alpha.1"
+lash-provider-openai = "=0.1.0-alpha.1"
+anyhow               = "1"
+tokio                = { version = "1", features = ["full"] }
 ```
+
+The library is still imported as `lash` — only the crate name on
+crates.io changes:
 
 ```rust
 use lash::{provider::ProviderHandle, LashCore, TurnInput};

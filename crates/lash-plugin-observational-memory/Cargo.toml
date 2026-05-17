@@ -1,11 +1,20 @@
 [package]
 name = "lash-plugin-observational-memory"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Observational-memory plugin for the lash agent runtime."
+keywords = ["lash", "agent", "memory", "plugin", "llm"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
@@ -14,5 +23,5 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", features = ["testing"] }
 serde_json = { workspace = true }

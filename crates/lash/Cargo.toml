@@ -1,16 +1,31 @@
 [package]
-name = "lash"
+# Crate name on crates.io. The library is still imported as `lash`
+# (see lib section below) so `use lash::...` keeps working everywhere.
+name = "lash-runtime"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Durable agent runtime for Rust: sessions, turns, tools, plugins. Embeddable facade over lash-core."
+keywords = ["lash", "agent", "llm", "runtime", "ai"]
+categories = ["asynchronous", "api-bindings"]
+
+[lib]
+name = "lash"
+path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core" }
-lash-mode-rlm = { path = "../lash-mode-rlm" }
-lash-mode-standard = { path = "../lash-mode-standard" }
-lash-rlm-types = { path = "../lash-rlm-types" }
-lash-trace = { path = "../lash-trace" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
+lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.1" }
+lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.1" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.1" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -18,6 +33,6 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 trybuild = "1"

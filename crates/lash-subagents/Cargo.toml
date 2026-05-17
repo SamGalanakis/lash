@@ -1,14 +1,23 @@
 [package]
 name = "lash-subagents"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Subagent / spawn_agent harness for the lash agent runtime."
+keywords = ["lash", "agent", "subagent", "spawn", "llm"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false }
-lash-llm-tools = { path = "../lash-llm-tools" }
-lash-mode-rlm = { path = "../lash-mode-rlm" }
-lash-rlm-types = { path = "../lash-rlm-types" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
+lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.1" }
+lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.1" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -16,5 +25,5 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["testing"] }
 tokio-util = { workspace = true, features = ["rt"] }
