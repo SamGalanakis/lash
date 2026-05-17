@@ -3,252 +3,76 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash Docs</title>
+<title>lash · docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
-<style>
-  /* docs landing · stand-alone layout (no sidebar) */
-  main.page > .frame {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      "hero"
-      "content"
-      "footer";
-    column-gap: 0;
-  }
-  .home-hero {
-    padding: var(--space-4xl) 0 var(--space-2xl);
-    border-bottom: 1px solid var(--rule);
-    margin-bottom: var(--space-2xl);
-  }
-  .home-hero h1 {
-    font-family: var(--font-display);
-    font-weight: 800;
-    font-size: clamp(2.8rem, 5.4vw, 4.6rem);
-    line-height: 0.96;
-    letter-spacing: -0.02em;
-    text-transform: uppercase;
-    margin-bottom: var(--space-lg);
-  }
-  .home-hero p {
-    font-size: 1.22rem;
-    line-height: 1.55;
-    color: var(--ink-mid);
-    max-width: 42rem;
-    margin: 0 0 var(--space-lg);
-  }
-  .status-alpha {
-    display: inline-block;
-    padding: 1px 6px;
-    background: color-mix(in oklch, var(--accent) 14%, transparent);
-    color: var(--accent-strong);
-    border: 1px solid color-mix(in oklch, var(--accent) 36%, transparent);
-    border-radius: 3px;
-    font-weight: 700;
-    letter-spacing: 0.16em;
-    font-size: 0.62rem;
-    vertical-align: 1px;
-  }
-  .home-hero p.status-note {
-    font-size: 0.94rem;
-    color: var(--ink-mid);
-    background: var(--bg-elev);
-    border-left: 2px solid var(--accent);
-    padding: var(--space-sm) var(--space-md);
-    max-width: 38rem;
-    margin: calc(var(--space-md) * -1) 0 var(--space-lg);
-  }
-  .home-hero p.status-note strong {
-    color: var(--ink);
-    font-weight: 700;
-  }
-  .home-cta {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-xs);
-    padding: var(--space-sm) var(--space-lg);
-    background: var(--ink);
-    color: var(--bg);
-    font-size: 0.94rem;
-    font-weight: 500;
-    text-decoration: none;
-    border-radius: 4px;
-    transition: background 120ms ease;
-  }
-  .home-cta:hover {
-    background: var(--accent-strong);
-    color: var(--bg);
-    text-decoration: none;
-  }
-  .home-cta:focus-visible {
-    outline: none;
-    background: var(--accent-strong);
-    box-shadow: var(--focus-ring);
-  }
-  .home-cta .arrow {
-    font-family: var(--font-mono);
-    transition: transform 200ms ease;
-  }
-  .home-cta:hover .arrow { transform: translateX(3px); }
-
-  .entry-rail {
-    grid-area: content;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-    gap: var(--space-md);
-    padding: 0 0 var(--space-4xl);
-  }
-  .entry {
-    position: relative;
-    display: grid;
-    grid-template-rows: auto auto 1fr auto;
-    gap: var(--space-sm);
-    padding: var(--space-lg) var(--space-xl);
-    border: 1px solid var(--rule);
-    background: var(--bg-elev);
-    color: var(--ink);
-    border-radius: 6px;
-    transition: border-color 160ms ease, background 160ms ease;
-  }
-  .entry:hover {
-    border-color: var(--rule-strong);
-    background: var(--bg-faint);
-  }
-  .entry:focus-within {
-    border-color: var(--accent);
-    box-shadow: var(--focus-ring);
-  }
-  .entry .micro-label {
-    margin-bottom: 0;
-  }
-  .entry h2 {
-    margin: 0;
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: 1.875rem;
-    line-height: 1;
-    letter-spacing: -0.02em;
-    text-transform: uppercase;
-    color: var(--ink);
-  }
-  .entry-link {
-    color: inherit;
-    text-decoration: none;
-  }
-  .entry-link::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 6px;
-  }
-  .entry-link:focus-visible { outline: none; }
-  .entry .accent { color: var(--accent); }
-  .entry p {
-    margin: 0;
-    color: var(--ink-mid);
-    font-size: 0.94rem;
-    line-height: 1.55;
-    max-width: none;
-  }
-  .entry p a {
-    position: relative;
-    z-index: 1;
-    color: var(--accent-strong);
-  }
-  .entry-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: var(--space-sm);
-    color: var(--ink-dim);
-    font-size: 0.74rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-  .entry-arrow {
-    color: var(--ink-dim);
-    font-family: var(--font-mono);
-    font-size: 1.1rem;
-    font-weight: 400;
-    transition: transform 200ms ease, color 200ms ease;
-  }
-  .entry:hover .entry-arrow,
-  .entry:focus-within .entry-arrow {
-    color: var(--accent-strong);
-    transform: translateX(3px);
-  }
-</style>
+<script>
+  // landing scene sits in the lower portion of the viewport in flow.
+  // The SVG's sky-rect is transparent so the cover blends seamlessly
+  // with the page background — no visible rectangle boundary.
+  // suppressOutputStrand: keeps the brazier as just a flame, no
+  // strands fanning into the sky — the period of "lash." carries
+  // the sodium-ember visual rhyme to the candle below.
+  window.__LASH_SCENE = {
+    aspect: 4 / 16,
+    scaleMin: 1.15,
+    scaleMax: 1.4,
+    suppressOutputStrand: true,
+  };
+</script>
+<script src="./scene.js" defer></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
-  <a class="skip-link" href="#content">Skip to content</a>
-  <main class="page">
-    <div class="frame">
-      <header class="hero home-hero">
-        <div>
-          <div class="eyebrow">lash · documentation · <span class="status-alpha">alpha</span></div>
-          <h1>system<span class="slash">/</span>manual</h1>
-          <p>Three views of the same agent runtime — the app-facing <code>lash</code> API, the lower-level runtime architecture, and the design language for long working sessions in the TUI.</p>
-          <p class="status-note"><strong>Status: alpha.</strong> Everything documented works today, but the public API is still in flux — expect breaking changes between releases. Pin to a specific commit when you embed.</p>
-          <a class="home-cta" href="./quickstart.html">Start with Quickstart <span class="arrow">→</span></a>
-        </div>
-      </header>
+<body id="top" class="landing">
+  <a class="skip-link" href="#content">skip to content</a>
 
-      <section class="entry-rail" id="content" aria-label="Documentation sections">
-        <div class="entry">
-          <div class="micro-label">Build an app</div>
-          <div>
-            <h2><a class="entry-link" href="./embedding.html">Lash API<span class="accent">.</span></a></h2>
-            <p>How to configure <code>LashCore</code>, open sessions, stream semantic turn events, collect visible output, pass typed plugin context, and wire app tools. Start with <a href="./quickstart.html">Quickstart</a>, then read the <a href="./example-agent-service.html">Agent Service</a> walkthrough.</p>
-          </div>
-          <div class="entry-foot">
-            <span>Guide</span>
-            <span class="entry-arrow">→</span>
-          </div>
-        </div>
-        <div class="entry">
-          <div class="micro-label">Drive the binary</div>
-          <div>
-            <h2><a class="entry-link" href="./cli.html">CLI<span class="accent">.</span></a></h2>
-            <p>The <code>lash</code> terminal binary. Slash commands, keyboard shortcuts, every CLI flag, config file schema, environment variables, setup wizard, and resume/fork flows.</p>
-          </div>
-          <div class="entry-foot">
-            <span>Reference</span>
-            <span class="entry-arrow">→</span>
-          </div>
-        </div>
-        <div class="entry">
-          <div class="micro-label">Read the system</div>
-          <div>
-            <h2><a class="entry-link" href="./architecture/">Architecture<span class="accent">.</span></a></h2>
-            <p>Crates, execution paths, runtime residency, graph storage, providers, plugin contracts, Lashlang, UI projection, benchmarks, and high-signal files.</p>
-          </div>
-          <div class="entry-foot">
-            <span>Reference</span>
-            <span class="entry-arrow">→</span>
-          </div>
-        </div>
-        <div class="entry">
-          <div class="micro-label">Shape the interface</div>
-          <div>
-            <h2><a class="entry-link" href="./design-language.html">Design Language<span class="accent">.</span></a></h2>
-            <p>The terminal product vocabulary. Sodium intent, ash structure, chalk text, plan dock, activity rendering, type, color, texture.</p>
-          </div>
-          <div class="entry-foot">
-            <span>Reference</span>
-            <span class="entry-arrow">→</span>
-          </div>
-        </div>
-      </section>
+  <header class="band">
+    <div class="band__right">
+      <button class="band__btn band__btn--search" type="button" data-cmdk-open aria-label="search docs (ctrl/cmd + k)" title="search docs (ctrl/cmd + k)"><span class="cmdk-label">search</span><span class="cmdk-kbd" aria-hidden="true">⌘K</span></button>
+      <a class="band__btn band__btn--icon" href="https://github.com/SamGalanakis/lash" target="_blank" rel="noopener" aria-label="lash on GitHub" title="lash on GitHub"><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2 .37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+      <button class="band__btn" id="theme-toggle" type="button" aria-label="toggle theme" title="toggle light / dark">
+        <span class="glyph" id="theme-glyph" aria-hidden="true">◐</span>
+        <span id="theme-label">light</span>
+      </button>
+    </div>
+  </header>
 
-      <footer class="footer">Docs root · <code>docs/index.html</code></footer>
+  <main class="landing__hero" id="content">
+    <h1 class="landing__title">lash<span class="slash">.</span></h1>
+    <p class="landing__tagline">agent runtime</p>
+    <div class="landing__cta-row">
+      <a class="cta" href="./quickstart.html">read the docs <span aria-hidden="true">→</span></a>
     </div>
   </main>
+
+  <section class="cover" aria-label="landing footer · twilight landscape">
+    <svg
+      id="range"
+      class="cover__svg"
+      preserveAspectRatio="xMidYMid slice"
+      xmlns="http://www.w3.org/2000/svg"
+      role="img"
+      aria-label="A warm-iron twilight landscape. A brazier on a left-side peak with strands fanning out, and a dark-robed figure on a right peak raising a dish toward sodium suns overhead."
+    >
+      <defs>
+        <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"  stop-color="#141412"/>
+          <stop offset="65%" stop-color="#1a1814"/>
+          <stop offset="100%" stop-color="#221d16"/>
+        </linearGradient>
+      </defs>
+      <rect id="sky-rect" width="100%" height="100%" fill="transparent"/>
+      <g id="g-back"></g>
+      <g id="g-mid"></g>
+      <g id="g-lash-behind"></g>
+      <g id="g-near"></g>
+      <g id="g-lash-front"></g>
+      <g id="g-ground"></g>
+    </svg>
+  </section>
 </body>
 </html>

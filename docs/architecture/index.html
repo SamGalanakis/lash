@@ -3,56 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>lash Architecture</title>
+<title>lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">All chapters</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div>
-          <div class="eyebrow">Current workspace architecture</div>
-          <h1>lash<span class="slash">/</span>system</h1>
-          <p><strong>lash</strong> is a Rust workspace for coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by <code>lash-core</code>, with mode plugins, provider adapters, dynamic tools, durable session graph storage, benchmark runners, a CLI/TUI host, and an app-facing <code>lash</code> facade on top.</p>
-        </div>
-        <div class="hero-meta">
-          <article class="card"><div class="micro-label">Workspace</div><strong>48 Cargo members</strong><span>Runtime core and facade, CLI/TUI, providers, mode and tool plugins (including MCP), export and trace utilities, lashlang, examples, and benchmark runners.</span></article>
-          <article class="card"><div class="micro-label">Primary language</div><strong>Rust, ~191k LOC</strong><span>Measured by line count over <code>*.rs</code>, excluding <code>target</code> and <code>.git</code>.</span></article>
-          <article class="card"><div class="micro-label">Architecture root</div><strong><code>docs/architecture/</code></strong><span>Chaptered documentation matching the current runtime, projection seams, and handoff continuations.</span></article>
-        </div>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lash<span class="slash">/</span>system</h1>
+    <p class="opener__lede"><strong>lash</strong> is a Rust workspace for coding agents. The core is a layered agent runtime — a sans-IO turn machine wrapped by <code>lash-core</code>, with mode plugins, provider adapters, dynamic tools, durable session graph storage, benchmark runners, a CLI/TUI host, and an app-facing <code>lash</code> facade on top.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>Reading Paths</h2>
             <p>Three curated entry routes. The full chapter index lives in the sidebar; these are the orderings worth following depending on why you're here.</p>
@@ -96,10 +63,6 @@
             </li>
           </ol>
         </div>
-      </section>
-
-      <footer class="footer">Architecture index for the current Lash workspace.</footer>
-    </main>
-  </div>
+  </main>
 </body>
 </html>

@@ -3,61 +3,26 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tracing - lash Docs</title>
+<title>tracing · lash docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
-  <a class="skip-link" href="#content">Skip to content</a>
-  <main class="page">
-    <div class="frame">
-      <aside class="sidebar" aria-label="Documentation navigation">
-        <a class="sidebar__exit" href="./index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Guide</span>
-            <span class="sidebar__current">Tracing</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./quickstart.html">Quickstart</a></li>
-            <li><a href="./embedding.html">Lash API</a></li>
-            <li><a href="./example-agent-service.html">Agent Service</a></li>
-            <li><a href="./cli.html">CLI</a></li>
-            <li><a href="./plugins.html">Plugins</a></li>
-            <li><a href="./persistence.html">Persistence</a></li>
-            <li><a class="active" href="./tracing.html">Tracing</a></li>
-          </ol>
-        </details>
-        <nav class="sidebar__toc" aria-label="On this page">
-          <div class="sidebar__label">On this page</div>
-          <ol>
-            <li><a href="#enabling-tracing">Enabling Tracing</a></li>
-            <li><a href="#sink-trait">The Sink Trait</a></li>
-            <li><a href="#what-is-emitted">What Is Emitted</a></li>
-            <li><a href="#jsonl-schema">The JSONL Schema</a></li>
-            <li><a href="#viewing">Viewing A Trace</a></li>
-            <li><a href="#opentelemetry">OpenTelemetry Export</a></li>
-          </ol>
-        </nav>
-      </aside>
+<body class="docs-page" data-cover-source="<code>crates/lash-trace/src/lib.rs</code>, <code>crates/lash-trace/src/otel.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash-trace-viewer/src/main.rs</code>, <code>examples/agent-service/src/main.rs</code>.">
+<section class="opener">
+    <h1 class="opener__title">tracing<span class="slash">/</span>observability</h1>
+    <p class="opener__lede">Structured trace records emit through <code>TraceSink</code>. The bundled <code>JsonlTraceSink</code> writes one record per line; fan-out, OTel, and custom sinks are wrappers. <code>lash-trace-viewer</code> renders JSONL to a self-contained HTML page.</p>
+  </section>
 
-      <header class="hero">
-        <div class="eyebrow">lash guide</div>
-        <h1>tracing<span class="slash">/</span>observability</h1>
-        <p>Lash emits a structured trace of every session, turn, LLM call, tool call, and streaming event. Traces are written through a <code>TraceSink</code> trait — the bundled <code>JsonlTraceSink</code> writes one record per line to a file; you can fan out to stderr, a database, or OpenTelemetry. The <code>lash-trace-viewer</code> binary renders a JSONL trace into a self-contained HTML page for human inspection.</p>
-      </header>
-
-      <section class="content" id="content">
-        <div class="section" id="enabling-tracing">
+  <main class="body" id="content">
+<div class="section" id="enabling-tracing">
           <div class="section-header">
             <h2>Enabling Tracing</h2>
-            <p>Attach a sink at <code>LashCoreBuilder</code> time. The sink, level, and an optional <code>TraceContext</code> propagate to every session built from that core.</p>
+            <p>Attach a sink at builder time. It propagates to every session from that core.</p>
           </div>
           <pre><code>use std::sync::Arc;
 use lash::{
@@ -74,18 +39,18 @@ let core = LashCore::builder()
     .trace_sink(Some(trace_sink))
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
-          <p><code>TraceLevel::Standard</code> (the default) keeps turns, tool calls, LLM start/complete, and token usage. <code>TraceLevel::Extended</code> additionally records provider-side stream chunks, prompt-component hashes, and runtime stream deltas — useful for debugging provider behavior, expensive in volume.</p>
+          <p><code>TraceLevel::Standard</code> (default): turns, tool calls, LLM start/complete, token usage. <code>TraceLevel::Extended</code> adds provider stream chunks, prompt-component hashes, and runtime stream deltas. Extended is verbose; use for provider debugging.</p>
         </div>
 
         <div class="section" id="sink-trait">
           <div class="section-header">
             <h2>The Sink Trait</h2>
-            <p><code>TraceSink</code> is intentionally narrow: one synchronous <code>append</code>. Sinks are called from runtime context but must not block for long; <code>JsonlTraceSink</code> serializes one line and appends with a short-held mutex.</p>
+            <p>One synchronous <code>append</code>. Called on the runtime thread; must not block. <code>JsonlTraceSink</code> serializes and appends under a short-held mutex.</p>
           </div>
           <pre><code>pub trait TraceSink: Send + Sync {
     fn append(&amp;self, record: &amp;TraceRecord) -&gt; Result&lt;(), TraceSinkError&gt;;
 }</code></pre>
-          <p>Real-world sinks usually wrap multiple destinations. A common pattern is a fan-out sink that writes to both stderr (for live inspection) and a JSONL file (for replay):</p>
+          <p>Fan out to multiple destinations by wrapping sinks:</p>
           <pre><code>struct FanoutTraceSink { sinks: Vec&lt;Arc&lt;dyn TraceSink&gt;&gt; }
 
 impl TraceSink for FanoutTraceSink {
@@ -102,7 +67,7 @@ impl TraceSink for FanoutTraceSink {
         <div class="section" id="what-is-emitted">
           <div class="section-header">
             <h2>What Is Emitted</h2>
-            <p>Records are tagged enums on <code>TraceEvent</code>. The shape stays consistent across schema versions; new variants are added rather than fields renamed. The main categories:</p>
+            <p>Tagged enums on <code>TraceEvent</code>. New variants are additive; existing fields are not renamed across schema versions.</p>
           </div>
           <div class="def-list-grid">
             <article class="panel">
@@ -111,11 +76,11 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Prompt</h3>
-              <p><code>PromptBuilt</code> — <code>prompt_hash</code> (combined fingerprint), <code>prompt_chars</code>, and per-component fingerprints in <code>components</code>. The runtime caches the rendered system prompt by these fingerprints; identical inputs across consecutive turns reuse the cached prompt. A <code>prompt_hash</code> that changes between turns where you expected it stable is a fast signal that some plugin contribution, tool list, or template entry is drifting — useful for cache-bust debugging without diffing the full rendered prompt.</p>
+              <p><code>PromptBuilt</code> — combined <code>prompt_hash</code>, <code>prompt_chars</code>, per-component fingerprints. The runtime caches rendered prompts by fingerprint; an unexpected hash change flags a drifting plugin contribution, tool list, or template entry.</p>
             </article>
             <article class="panel">
               <h3>LLM interaction</h3>
-              <p><code>LlmCallStarted</code>, <code>LlmCallCompleted</code>, <code>LlmCallFailed</code>. Carries provider, model, variant, timeouts, and request shape.</p>
+              <p><code>LlmCallStarted</code>, <code>LlmCallCompleted</code>, <code>LlmCallFailed</code>. Provider, model, variant, timeouts, request shape.</p>
             </article>
             <article class="panel">
               <h3>Streaming (extended only)</h3>
@@ -123,11 +88,11 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Tool calls</h3>
-              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Includes args, result success flag, duration.</p>
+              <p><code>ToolCallStarted</code>, <code>ToolCallCompleted</code>. Args, success flag, duration.</p>
             </article>
             <article class="panel">
               <h3>Usage</h3>
-              <p><code>TokenUsage</code> — per-turn input/output/cached/reasoning token deltas, mirroring what's persisted to the session usage ledger.</p>
+              <p><code>TokenUsage</code> — per-turn input/output/cached/reasoning deltas. Mirrors the session usage ledger.</p>
             </article>
             <article class="panel">
               <h3>Mode steps</h3>
@@ -135,7 +100,7 @@ impl TraceSink for FanoutTraceSink {
             </article>
             <article class="panel">
               <h3>Custom</h3>
-              <p><code>Custom { name, payload }</code> — escape hatch for host-specific events that don't fit the built-in taxonomy.</p>
+              <p><code>Custom { name, payload }</code> — escape hatch for host-specific events.</p>
             </article>
           </div>
         </div>
@@ -143,7 +108,7 @@ impl TraceSink for FanoutTraceSink {
         <div class="section" id="jsonl-schema">
           <div class="section-header">
             <h2>The JSONL Schema</h2>
-            <p>Every record is one line of UTF-8 JSON. Schema version is pinned at <code>TRACE_SCHEMA_VERSION = 2</code>; consumers should reject (or warn on) records with a higher version they don't recognize.</p>
+            <p>One line of UTF-8 JSON per record. <code>TRACE_SCHEMA_VERSION = 2</code>. Reject or warn on higher unrecognized versions.</p>
           </div>
           <pre><code>{
   "schema_version": 2,
@@ -167,13 +132,13 @@ impl TraceSink for FanoutTraceSink {
     "...": "..."
   }
 }</code></pre>
-          <p>The full record type is <code>lash_trace::TraceRecord</code>; the event variants are <code>lash_trace::TraceEvent</code>. Both are <code>Deserialize</code> — your consumer can parse the JSONL with <code>serde_json::from_str::&lt;TraceRecord&gt;()</code> directly.</p>
+          <p>Record type: <code>lash_trace::TraceRecord</code>. Event variants: <code>lash_trace::TraceEvent</code>. Both <code>Deserialize</code>; parse directly with <code>serde_json::from_str::&lt;TraceRecord&gt;()</code>.</p>
         </div>
 
         <div class="section" id="viewing">
           <div class="section-header">
             <h2>Viewing A Trace</h2>
-            <p><code>lash-trace-viewer</code> is a small standalone binary that takes a JSONL trace and renders a self-contained HTML page — every record laid out as a timeline with nested LLM calls, tool calls, and streaming chunks visible inline. Unparseable lines are preserved as raw text so old or forward-compatible records don't get dropped.</p>
+            <p>Renders JSONL to a self-contained HTML timeline with nested LLM calls, tool calls, and streaming chunks inline. Unparseable lines are preserved as raw text.</p>
           </div>
           <pre><code>$ cargo run -p lash-trace-viewer -- ./.lash-data/trace.jsonl
 # Writes ./.lash-data/trace.html next to the input
@@ -182,19 +147,19 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
       --out report.html \
       --title "Session 2026-05-11"
 # Custom output path and title.</code></pre>
-          <p>The viewer is workspace-only — run it via <code>cargo run -p lash-trace-viewer</code> from the workspace root. No separate install or release ships.</p>
+          <p>Workspace-only; no separate release. Run with <code>cargo run -p lash-trace-viewer</code> from the workspace root.</p>
         </div>
 
         <div class="section" id="opentelemetry">
           <div class="section-header">
             <h2>OpenTelemetry Export</h2>
-            <p>An optional cargo feature converts Lash trace events into OpenTelemetry spans for export to Jaeger, Honeycomb, Datadog, or any OTLP-compatible backend. The feature is off by default to keep the runtime lean; the OTel sink lives in <code>lash-trace</code> and is re-exported by <code>lash-core</code> when the <code>otel-trace</code> feature is on.</p>
+            <p>Optional <code>otel-trace</code> cargo feature converts events to OTel spans for export to Jaeger, Honeycomb, Datadog, or any OTLP backend. Off by default. The sink lives in <code>lash-trace</code> and is re-exported by <code>lash-core</code> under the feature.</p>
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace feature
 # alongside the lash facade.
 lash      = { git = "https://github.com/SamGalanakis/lash.git" }
 lash-core = { git = "https://github.com/SamGalanakis/lash.git", features = ["otel-trace"] }</code></pre>
-          <p>With the feature enabled, <code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every Lash event to a span with the event payload attached as attributes. Use it in place of (or alongside) <code>JsonlTraceSink</code>:</p>
+          <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;
 
@@ -204,15 +169,14 @@ let core = LashCore::builder()
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>
         </div>
-
-        <div class="section-nav">
-          <a href="./persistence.html"><span>Previous</span><strong>Persistence</strong></a>
-          <a href="./architecture/"><span>Next</span><strong>Architecture</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Source anchors: <code>crates/lash-trace/src/lib.rs</code>, <code>crates/lash-trace/src/otel.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash-trace-viewer/src/main.rs</code>, <code>examples/agent-service/src/main.rs</code>.</footer>
-    </div>
   </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./persistence.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>persistence</strong></a>
+    <a class="pager__next" href="./architecture/"><span>next</span><strong>architecture</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
 </body>
 </html>

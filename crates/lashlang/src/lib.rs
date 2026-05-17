@@ -62,12 +62,84 @@ pub async fn execute_with_projected_bindings<H: ToolHost>(
         .map_err(ExecuteError::Runtime)
 }
 
+pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
+    format_source_diagnostic(
+        source,
+        error.offset(),
+        &error.to_string(),
+        parse_hint(error),
+    )
+}
+
 pub fn format_runtime_diagnostic(source: &str, error: &RuntimeError, span: Option<Span>) -> String {
     let Some(span) = span else {
-        return error.to_string();
+        return format_message_with_hint(&error.to_string(), runtime_hint(error));
     };
-    let (line, column, snippet) = line_column_snippet(source, span.start);
-    format!("{error}\n--> line {line}, column {column}\n{snippet}")
+    format_source_diagnostic(source, span.start, &error.to_string(), runtime_hint(error))
+}
+
+fn format_source_diagnostic(
+    source: &str,
+    offset: usize,
+    message: &str,
+    hint: Option<&'static str>,
+) -> String {
+    let (line, column, source_line) = line_column_snippet(source, offset);
+    let caret_pad = " ".repeat(column.saturating_sub(1));
+    let mut diagnostic =
+        format!("{message}\n--> line {line}, column {column}\n{source_line}\n{caret_pad}^");
+    if let Some(hint) = hint {
+        diagnostic.push_str("\nhint: ");
+        diagnostic.push_str(hint);
+    }
+    diagnostic
+}
+
+fn format_message_with_hint(message: &str, hint: Option<&'static str>) -> String {
+    let mut diagnostic = message.to_string();
+    if let Some(hint) = hint {
+        diagnostic.push_str("\nhint: ");
+        diagnostic.push_str(hint);
+    }
+    diagnostic
+}
+
+fn parse_hint(error: &ParseError) -> Option<&'static str> {
+    match error {
+        ParseError::Unexpected { found, .. } if found == "`if`" => {
+            Some("use `cond ? yes : no` for inline conditionals")
+        }
+        ParseError::Unexpected { found, .. } if found == "`for`" => Some(
+            "`for` is a statement. Put it on its own line, not inside an expression or record literal.",
+        ),
+        ParseError::UnsupportedLoop {
+            keyword: "while", ..
+        } => Some("use bounded `for` loops over ranges or lists"),
+        ParseError::Expected { expected, .. } if expected.contains("type literals must start") => {
+            Some("write nested object types as `Type { field: type }`")
+        }
+        _ => None,
+    }
+}
+
+fn runtime_hint(error: &RuntimeError) -> Option<&'static str> {
+    match error {
+        RuntimeError::TypeError { message } | RuntimeError::ValueError { message } => {
+            if message.starts_with("`?` unwrapped failed tool result:") {
+                return Some(
+                    "remove `?` and inspect `.ok` or `.error` when you need to handle failures",
+                );
+            }
+            if message.contains("read-only projected binding") {
+                return Some("copy the projected value into a new variable before changing it");
+            }
+            if message == "`validate` requires a Type literal as the second argument" {
+                return Some("pass `Type { ... }` or a variable that holds a Type literal");
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, String) {
@@ -91,7 +163,9 @@ fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, String) {
     (
         line,
         column,
-        source[line_start..line_end].trim_end().to_string(),
+        source[line_start..line_end]
+            .trim_end_matches('\r')
+            .to_string(),
     )
 }
 
@@ -143,6 +217,7 @@ mod tests {
         assert!(message.contains("unknown name `missing`"), "{message}");
         assert!(message.contains("--> line 2, column 1"), "{message}");
         assert!(message.contains("submit missing"), "{message}");
+        assert!(message.contains("^"), "{message}");
     }
 
     #[tokio::test(flavor = "current_thread")]

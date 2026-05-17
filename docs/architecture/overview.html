@@ -3,50 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Overview - lash Architecture</title>
+<title>overview - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../mermaid.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Overview</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a class="active" href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 01</div>
-        <h1>overview<span class="slash">/</span>map</h1>
-        <p>Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, mode plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
-      </header>
+<body class="docs-page" data-cover-source="<code>Cargo.toml</code>, <code>crates/lash-core/src/runtime</code>, <code>crates/lash/src/lib.rs</code>, <code>crates/lash-sansio/src</code>.">
+<section class="opener">
+    <h1 class="opener__title">overview<span class="slash">/</span>map</h1>
+    <p class="opener__lede">Lash is organized as a narrow protocol kernel plus an async host runtime. The app-facing <code>lash</code> facade and the CLI compose replaceable edges — providers, mode plugins, tools, dynamic tool plugins (including MCP via <code>lash-plugin-mcp</code>), UI extensions, persistence, tracing, and the TUI — around that core.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>System Shape</h2>
             <p>Dependency direction runs from host surfaces inward to the runtime, then into the sans-IO protocol model. Providers, modes, tools, and plugins are replaceable edges around the runtime core.</p>
@@ -166,15 +140,14 @@ flowchart TD
             </li>
           </ol>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <span></span>
-          <a href="./modules.html"><span>Next</span><strong>Modules</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Source anchors: <code>Cargo.toml</code>, <code>crates/lash-core/src/runtime</code>, <code>crates/lash/src/lib.rs</code>, <code>crates/lash-sansio/src</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <span></span>
+    <a class="pager__next" href="./modules.html"><span>next</span><strong>modules</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

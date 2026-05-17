@@ -5,3 +5,4 @@ expression: diagnostic_message(err)
 `len` requires a string, list, record, or null; use `.size` for images
 --> line 2, column 1
 submit len(true)
+^

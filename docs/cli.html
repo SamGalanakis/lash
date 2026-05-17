@@ -3,60 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Using the CLI - lash Docs</title>
+<title>using the cli · lash docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
-  <a class="skip-link" href="#content">Skip to content</a>
-  <main class="page">
-    <div class="frame">
-      <aside class="sidebar" aria-label="Documentation navigation">
-        <a class="sidebar__exit" href="./index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Guide</span>
-            <span class="sidebar__current">Using the CLI</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./quickstart.html">Quickstart</a></li>
-            <li><a href="./embedding.html">Lash API</a></li>
-            <li><a href="./example-agent-service.html">Agent Service</a></li>
-            <li><a class="active" href="./cli.html">CLI</a></li>
-            <li><a href="./plugins.html">Plugins</a></li>
-            <li><a href="./persistence.html">Persistence</a></li>
-            <li><a href="./tracing.html">Tracing</a></li>
-          </ol>
-        </details>
-        <nav class="sidebar__toc" aria-label="On this page">
-          <div class="sidebar__label">On this page</div>
-          <ol>
-            <li><a href="#first-run">First Run</a></li>
-            <li><a href="#slash-commands">Slash Commands</a></li>
-            <li><a href="#keyboard-shortcuts">Keyboard Shortcuts</a></li>
-            <li><a href="#cli-flags">CLI Flags</a></li>
-            <li><a href="#print-mode">Print Mode</a></li>
-            <li><a href="#config-file">Config File</a></li>
-            <li><a href="#environment-variables">Environment Variables</a></li>
-            <li><a href="#resume-fork">Resume &amp; Fork</a></li>
-          </ol>
-        </nav>
-      </aside>
+<body class="docs-page" data-cover-source="<code>crates/lash-cli/src/main.rs</code>, <code>crates/lash-cli/src/command.rs</code>, <code>crates/lash-cli/src/config.rs</code>, <code>crates/lash-cli/src/setup.rs</code>, <code>crates/lash-cli/src/paths.rs</code>, <code>crates/lash-cli/src/interactive/input_handling.rs</code>.">
+<section class="opener">
+    <h1 class="opener__title">using<span class="slash">/</span>cli</h1>
+    <p class="opener__lede">The <code>lash</code> binary is shipped by the <code>lash-cli</code> crate. It runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and a handful of administrative flows like <code>--export</code> and <code>--reset</code>. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
+  </section>
 
-      <header class="hero">
-        <div class="eyebrow">lash guide</div>
-        <h1>using<span class="slash">/</span>cli</h1>
-        <p>The <code>lash</code> binary is shipped by the <code>lash-cli</code> crate. It runs an interactive terminal UI by default, an autonomous single-shot mode under <code>--print</code>, and a handful of administrative flows like <code>--export</code> and <code>--reset</code>. This page enumerates the user-visible surface: flags, slash commands, key bindings, the setup wizard, the config file, and the environment variables it reads.</p>
-      </header>
-
-      <section class="content" id="content">
-        <div class="section" id="first-run">
+  <main class="body" id="content">
+<div class="section" id="first-run">
           <div class="section-header">
             <h2>First Run</h2>
             <p>If <code>~/.lash/config.json</code> does not exist, <code>lash</code> launches the setup wizard. The wizard provisions an active provider, collects credentials, and writes the config file before dropping you into the TUI.</p>
@@ -296,15 +259,14 @@ $ lash --print "Investigate the latest test failure." \
           </div>
           <p><code>/fork</code> branches the current session at the current message and opens the fork in a new terminal window. Lash resolves the launcher using the running binary's <code>$PATH</code> entry and falls back to the executable directory if needed. The launched fork runs <code>lash --resume &lt;new-session-id&gt;</code> in the new terminal.</p>
         </div>
-
-        <div class="section-nav">
-          <a href="./example-agent-service.html"><span>Previous</span><strong>Agent Service</strong></a>
-          <a href="./plugins.html"><span>Next</span><strong>Plugins</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Source anchors: <code>crates/lash-cli/src/main.rs</code>, <code>crates/lash-cli/src/command.rs</code>, <code>crates/lash-cli/src/config.rs</code>, <code>crates/lash-cli/src/setup.rs</code>, <code>crates/lash-cli/src/paths.rs</code>, <code>crates/lash-cli/src/interactive/input_handling.rs</code>.</footer>
-    </div>
   </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./example-agent-service.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>agent service</strong></a>
+    <a class="pager__next" href="./plugins.html"><span>next</span><strong>plugins</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
 </body>
 </html>

@@ -78,7 +78,7 @@ pub enum RuntimeError {
     UndefinedVariable { name: String },
     #[error("`for` expects a list")]
     NonListIteration,
-    #[error("`finish` can't be used inside `parallel`")]
+    #[error("`submit` can't be used inside `parallel`")]
     FinishInsideParallel,
     #[error("`parallel` assigns `{name}` more than once")]
     ParallelConflict { name: String },

@@ -3,49 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Durability - lash Architecture</title>
+<title>durability - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Durability</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a class="active" href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 11</div>
-        <h1>durability<span class="slash">/</span>workflows</h1>
-        <p>Agent turns cross process boundaries. Tool calls may run for minutes, exec blocks may hand off to other workers, and the orchestrator on top might be a durable workflow runtime that expects deterministic replay. <code>lash-sansio</code> is the pure state machine that makes this seam explicit — every side effect is a yielded value, every result is a fed-back response, and a serialised checkpoint can be replayed by a different process to land in the same place.</p>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">durability<span class="slash">/</span>workflows</h1>
+    <p class="opener__lede">Agent turns cross process boundaries. Tool calls may run for minutes, exec blocks may hand off to other workers, and the orchestrator on top might be a durable workflow runtime that expects deterministic replay. <code>lash-sansio</code> is the pure state machine that makes this seam explicit — every side effect is a yielded value, every result is a fed-back response, and a serialised checkpoint can be replayed by a different process to land in the same place.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>The Sansio Seam</h2>
             <p><code>lash-sansio::TurnMachine</code> is a sans-IO state machine. It does not call providers, run tools, or execute code on its own. Instead, it <em>yields</em> effects — <code>LlmCall</code>, <code>ToolCalls</code>, <code>ExecCode</code>, <code>Checkpoint</code> — and waits for the host to feed results back. The whole machine is <code>Serialize</code> / <code>Deserialize</code>; the host can snapshot it at any point, store the bytes anywhere, and resume on a different worker.</p>
@@ -250,15 +224,14 @@ while !machine.is_done() {
             </table>
           </div>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <a href="./providers.html"><span>Previous</span><strong>Providers</strong></a>
-          <a href="../embedding.html"><span>Next</span><strong>Lash API</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Durability anchors: <code>crates/lash-sansio/src/sansio/mod.rs</code>, <code>crates/lash-sansio/src/sansio/tests.rs</code>, <code>crates/lash-mode-rlm/tests/protocol_drivers.rs</code>, <code>crates/lash-core/src/runtime/turn_loop.rs</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./providers.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>providers</strong></a>
+    <a class="pager__next" href="../embedding.html"><span>next</span><strong>lash api</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

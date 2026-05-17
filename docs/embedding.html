@@ -3,77 +3,26 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lash API - lash Docs</title>
+<title>lash api · basics · lash docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
-  <a class="skip-link" href="#content">Skip to content</a>
-  <main class="page">
-    <div class="frame">
-      <aside class="sidebar" aria-label="Documentation navigation">
-        <a class="sidebar__exit" href="./index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Guide</span>
-            <span class="sidebar__current">Lash API</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./quickstart.html">Quickstart</a></li>
-            <li><a class="active" href="./embedding.html">Lash API</a></li>
-            <li><a href="./example-agent-service.html">Agent Service</a></li>
-            <li><a href="./cli.html">CLI</a></li>
-            <li><a href="./plugins.html">Plugins</a></li>
-            <li><a href="./persistence.html">Persistence</a></li>
-            <li><a href="./tracing.html">Tracing</a></li>
-          </ol>
-        </details>
-        <nav class="sidebar__toc" aria-label="On this page">
-          <div class="sidebar__label">On this page</div>
-          <ol>
-            <li><a href="#runtime-alongside-model">Runtime Alongside The Model</a></li>
-            <li><a href="#core-shape">Core Shape</a></li>
-            <li><a href="#session-specs-and-plugins">Session Specs And Plugins</a></li>
-            <li><a href="#run-a-turn">Run A Turn</a></li>
-            <li><a href="#turn-outcomes">Turn Outcomes</a></li>
-            <li><a href="#input-boundary">Input Boundary</a></li>
-            <li><a href="#semantic-events">Semantic Events</a></li>
-            <li><a href="#sink-semantics">Sink Semantics</a></li>
-            <li><a href="#token-usage">Token Usage</a></li>
-            <li><a href="#context-window">Context Window And History</a></li>
-            <li><a href="#rlm-and-submit">RLM And Submit</a></li>
-            <li><a href="#projected-bindings">Projected Bindings</a></li>
-            <li><a href="#prompt-templates">Prompt Templates</a></li>
-            <li><a href="#typed-plugin-input">Typed Plugin Input</a></li>
-            <li><a href="#app-storage">App Storage</a></li>
-            <li><a href="#session-lifecycle">Session Lifecycle</a></li>
-            <li><a href="#durable-workflows">Durable Workflows</a></li>
-            <li><a href="#subagents">Subagents</a></li>
-            <li><a href="#mcp-servers">MCP Servers</a></li>
-            <li><a href="#advanced-runtime">Advanced Runtime</a></li>
-            <li><a href="#complete-example">Complete Example</a></li>
-            <li><a href="#related-guides">Related Guides</a></li>
-          </ol>
-        </nav>
-      </aside>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lash<span class="slash">/</span>api</h1>
+    <p class="opener__lede">Core shape of the runtime: <code>LashCore</code>, <code>LashSession</code>, plugin stack, and the call that runs one turn. Companion pages cover turn semantics, prompts and bindings, and lifecycle and integration.</p>
+  </section>
 
-      <header class="hero">
-        <div class="eyebrow">lash guide</div>
-        <h1>lash<span class="slash">/</span>api</h1>
-        <p>Most agent stacks treat the LLM as the runtime and stitch state around it — a database for memory, a queue for retries, a sandbox for code. <code>lash</code> inverts that. The runtime is the durable end of the pair; the LLM is the variable call. Your app owns the outer boundaries — storage, auth, transport, product state. <code>lash</code> owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.</p>
-      </header>
-
-      <section class="content" id="content">
-        <div class="section" id="runtime-alongside-model">
+  <main class="body" id="content">
+<div class="section" id="runtime-alongside-model">
           <div class="section-header">
             <h2>Runtime Alongside The Model</h2>
-            <p>The unit of work is a turn. A turn is a <code>RuntimeCommit</code> against a durable <code>SessionGraph</code> — either the whole turn lands or none of it does. Model output is one event class flowing through that commit, not the thing holding state between events. Two execution modes — <code>standard</code> for native tool calls and <code>rlm</code> for Lashlang programs in a no-syscall VM — share the same containment, trace shape, and commit unit.</p>
+            <p>A turn is a <code>RuntimeCommit</code> against a durable <code>SessionGraph</code>: whole-turn atomic. Two execution modes — <code>standard</code> (native tool calls) and <code>rlm</code> (Lashlang in a no-syscall VM) — share the same commit and trace shape.</p>
           </div>
           <dl class="def-list">
             <dt>Durable session graph</dt>
@@ -93,13 +42,13 @@
             <dt>Snapshot and restore seams</dt>
             <dd>Plugins, tool state, and the Lashlang VM each persist through versioned snapshot writers so a parked session resumes intact across process restarts.</dd>
           </dl>
-          <p>What sits outside this crate, on purpose: tenancy boundaries, retention and lifecycle for long-lived artifacts, discovery of agent-authored procedures, a shared coherent image across many sessions. <code>lash</code> is the kernel and runtime; the platform-shaped pieces belong to whatever embeds it.</p>
+          <p>Out of scope: tenancy, artifact lifecycle, procedure discovery, cross-session shared state. Those belong to the embedder.</p>
         </div>
 
         <div class="section" id="core-shape">
           <div class="section-header">
             <h2>Core Shape</h2>
-            <p>Build one shared <code>LashCore</code> for app-wide configuration, then open one <code>LashSession</code> per app conversation or task.</p>
+            <p>One <code>LashCore</code> per app. One <code>LashSession</code> per conversation or task.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">lash vs lash-core boundary</div>
@@ -131,24 +80,24 @@ println!("{assistant_text}");</code></pre>
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared configuration: provider, model, installed modes, tool providers, plugin factories, store factory, attachment store, and tracing. Runtime internals such as residency and termination policy live behind <code>.advanced()</code>.</dd>
+            <dd>Cloneable shared config: provider, model, modes, tool providers, plugin factories, store factory, attachment store, tracing. Residency and termination policy live behind <code>.advanced()</code>.</dd>
             <dt><code>ModePreset</code></dt>
-            <dd>Installs execution modes. Use <code>ModePreset::standard()</code> for native provider tool calls, <code>ModePreset::rlm()</code> for Lashlang-driven RLM turns, or install both and choose the default with <code>default_mode</code>.</dd>
+            <dd>Installs execution modes. <code>ModePreset::standard()</code> for native provider tool calls; <code>ModePreset::rlm()</code> for Lashlang turns; <code>ModePreset::rlm_with_config(...)</code> to customize. Install multiple and pick a default with <code>default_mode</code>.</dd>
             <dt><code>SessionSpec</code></dt>
-            <dd>Reusable public configuration overlay for provider, model/variant, execution mode, max context tokens, max turns, and prompt layer. Root cores use <code>SessionSpec::new()</code>; child sessions and subagents usually use <code>SessionSpec::inherit()</code>.</dd>
+            <dd>Provider, model/variant, mode, max context tokens, max turns, prompt layer. Root cores: <code>SessionSpec::new()</code>. Children and subagents: <code>SessionSpec::inherit()</code>.</dd>
             <dt><code>PluginStack</code></dt>
-            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> include <code>PluginStack::runtime()</code>; a raw <code>LashCore::builder()</code> stays explicit and needs modes and plugins installed by the host.</dd>
+            <dd>Ordered plugin factory list. <code>LashCore::standard()</code> / <code>::rlm()</code> ship with <code>PluginStack::runtime()</code>; raw <code>::builder()</code> starts empty.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>One app conversation or task. Sessions wrap a parked/resumable runtime, can use a per-session store, and expose <code>turn(TurnInput)</code>, <code>run(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>.</dd>
+            <dd>One conversation/task. Parked/resumable runtime, optional per-session store, exposes <code>turn(TurnInput)</code>, <code>run(...)</code>, <code>read_view()</code>, and <code>control()</code>.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn configuration: cancellation, mode options, typed plugin input, and RLM-projected bindings. Call <code>.stream(&amp;sink)</code> for live events or <code>.run()</code> for a collected ordered activity log.</dd>
+            <dd>Per-turn config: cancellation, mode options, typed plugin input, RLM projected bindings. <code>.stream(&amp;sink)</code> for live events; <code>.run()</code> for a collected activity log.</dd>
           </dl>
         </div>
 
         <div class="section" id="session-specs-and-plugins">
           <div class="section-header">
             <h2>Session Specs And Plugins</h2>
-            <p>The root builder methods are ergonomic wrappers over one <code>SessionSpec</code>. Use <code>.session_spec(...)</code> when a host already has a complete spec object, and use the same type for parent-relative child session configuration.</p>
+            <p>Root builder methods wrap one <code>SessionSpec</code>. Pass a complete spec via <code>.session_spec(...)</code>; the same type configures child sessions.</p>
           </div>
           <div class="two-col">
             <article class="panel">
@@ -182,13 +131,13 @@ let core = LashCore::builder()
     .build()?;</code></pre>
             </article>
           </div>
-          <p><code>.plugin(...)</code> appends one factory to the current stack, <code>.plugins(...)</code> replaces the full stack, and <code>.configure_plugins(...)</code> mutates the current stack in place. That gives hosts a default runtime set while still allowing precise removal, replacement, or insertion.</p>
+          <p><code>.plugin(...)</code> appends; <code>.plugins(...)</code> replaces; <code>.configure_plugins(...)</code> mutates in place.</p>
         </div>
 
         <div class="section" id="run-a-turn">
           <div class="section-header">
             <h2>Run A Turn</h2>
-            <p><code>TurnBuilder::run()</code> is the smallest path. It returns a <code>TurnOutput</code> with the terminal <code>TurnResult</code> and the ordered <code>Vec&lt;TurnActivity&gt;</code> emitted during the turn.</p>
+            <p><code>TurnBuilder::run()</code> returns a <code>TurnOutput</code>: terminal <code>TurnResult</code> plus ordered <code>Vec&lt;TurnActivity&gt;</code>.</p>
           </div>
           <div class="two-col">
             <article class="panel">
@@ -220,663 +169,16 @@ let turn = session
 persist(turn.assistant_message().unwrap_or_default(), turn.total_usage())?;</code></pre>
             </article>
           </div>
-          <p>Apps own their live projection policy. Fold <code>TurnActivity</code> directly for partial UI state, terminal-value previews, tool summaries, or timelines. At turn completion, replace the current-turn display from the returned <code>TurnResult.state.read_view()</code> or the latest <code>SessionReadView</code>; do not append a separate final assistant event after streamed prose. Treat <code>TurnActivity.correlation_id</code> as the stable identity for multi-phase UI rows: start events insert rows, completion events update those same rows.</p>
+          <p>Fold <code>TurnActivity</code> directly for live UI state. At turn completion, replace the current-turn display from <code>TurnResult.state.read_view()</code> — do not append a separate final assistant event. Use <code>TurnActivity.correlation_id</code> as the stable identity for multi-phase rows: start events insert, completion events update.</p>
         </div>
-
-        <div class="section" id="turn-outcomes">
-          <div class="section-header">
-            <h2>Turn Outcomes</h2>
-            <p>Every successful <code>TurnBuilder::run()</code> / <code>stream()</code> call resolves with a <code>TurnResult</code> whose <code>outcome</code> field is one of three categories: the turn finished cleanly, the turn handed off to a successor session, or the turn was stopped mid-flight for a specific reason. Host code should branch on outcome, not on individual variants, unless it actually cares about a stop reason.</p>
-          </div>
-          <div class="diagram">
-            <div class="diagram-title">TurnOutcome shape</div>
-            <pre><code>pub enum TurnOutcome {
-    Finished(TurnFinish),
-    Handoff { session_id: String },
-    Stopped(TurnStop),
-}
-
-pub enum TurnFinish {
-    AssistantMessage { text: String },
-    SubmittedValue { value: serde_json::Value },
-    ToolValue { tool_name: String, value: serde_json::Value },
-}</code></pre>
-          </div>
-          <p><code>Finished</code> means the turn completed cleanly with a terminal value. <code>AssistantMessage</code> is the default — a free-form prose answer — and is the only terminal semantic result for prose in standard and RLM modes. Live prose may already have streamed as <code>AssistantProseDelta</code>, but there is no second "final message" stream event; the shared runtime commit materializes the assistant transcript message exactly once. <code>SubmittedValue</code> and <code>ToolValue</code> come from RLM control flow when the program ends with <code>submit</code> or a tool-authored terminal value; the same JSON value already arrived as a <code>TurnEvent::SubmittedValue</code> / <code>TurnEvent::ToolValue</code> in the stream.</p>
-          <p><code>Handoff</code> means a mode plugin or tool returned control to a fresh session — usually a context-compaction successor or a continue-as redirect. The new session is persisted before this returns; resume against <code>session_id</code> to continue.</p>
-          <p><code>Stopped</code> means the turn was aborted before producing a terminal value. <code>TurnStop</code> has ten variants:</p>
-          <div class="table">
-            <table>
-              <thead><tr><th>Variant</th><th>Class</th><th>Cause</th></tr></thead>
-              <tbody>
-                <tr><td><code>Cancelled</code></td><td>Host-driven</td><td>The cancellation token passed to <code>TurnBuilder::cancellation(...)</code> fired.</td></tr>
-                <tr><td><code>InvalidInput</code></td><td>Host-driven</td><td>Input normalization rejected the <code>TurnInput</code> (e.g. missing attachment, malformed image ref).</td></tr>
-                <tr><td><code>Incomplete</code></td><td>Provider</td><td>The LLM hit its output limit mid-message without finishing.</td></tr>
-                <tr><td><code>ProviderError</code></td><td>Provider</td><td>The provider returned an error, a content-filter refusal, or a context-overflow terminal reason.</td></tr>
-                <tr><td><code>MaxTurns</code></td><td>Runtime</td><td>The mode loop hit <code>session_spec.max_turns</code> and the final forced-reply turn finished without a terminal.</td></tr>
-                <tr><td><code>ToolFailure</code></td><td>Runtime</td><td>A tool returned <code>ToolResult::err(...)</code> and turn assembly flagged the turn as failed.</td></tr>
-                <tr><td><code>PluginAbort</code></td><td>Runtime</td><td>A plugin's turn-preparation or checkpoint hook returned an abort directive.</td></tr>
-                <tr><td><code>RuntimeError</code></td><td>Fatal</td><td>Internal runtime failure or a strict-termination policy with no <code>Done</code> event. Treat as a bug or environmental fault.</td></tr>
-                <tr><td><code>SubmittedError { value }</code></td><td>RLM</td><td>An RLM program ended with <code>submit_error(...)</code>; <code>value</code> is the model-authored payload.</td></tr>
-                <tr><td><code>ToolError { tool_name, value }</code></td><td>RLM</td><td>A mode plugin signalled a tool-authored error terminal; <code>value</code> is the payload.</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p>Host-driven stops are recoverable on the next request. Provider stops usually warrant a retry with a different model or a shorter context. Runtime stops mean a configuration / authoring problem the user needs to know about. <code>RuntimeError</code> is the only category where re-running with identical input is unlikely to help.</p>
-          <p>Optimistic-concurrency commit conflicts on the session graph are <em>not</em> represented as a <code>Stopped</code> variant — they surface as <code>Err</code> from the <code>run()</code>/<code>stream()</code> call itself, with no partial commit. See <a href="./persistence.html#contract">Persistence → The Contract</a> for the retry shape.</p>
-          <pre><code>match result.outcome {
-    lash::TurnOutcome::Finished(finish) =&gt; persist_terminal(finish)?,
-    lash::TurnOutcome::Handoff { session_id } =&gt; reopen(session_id).await?,
-    lash::TurnOutcome::Stopped(stop) =&gt; match stop {
-        lash::TurnStop::Cancelled
-        | lash::TurnStop::InvalidInput =&gt; report_user_visible(stop),
-        lash::TurnStop::ProviderError
-        | lash::TurnStop::Incomplete =&gt; offer_retry(stop),
-        lash::TurnStop::MaxTurns =&gt; suggest_higher_max_turns(),
-        other =&gt; record_for_diagnosis(other),
-    },
-}</code></pre>
-        </div>
-
-        <div class="section" id="input-boundary">
-          <div class="section-header">
-            <h2>Input Boundary</h2>
-            <p><code>TurnInput</code> is semantic core input: text plus image references backed by the attachment store. Filesystem syntax is a host concern.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel"><h3>Text</h3><p>Pass ordinary user text with <code>TurnInput::text(...)</code> or explicit <code>InputItem::Text</code> values. If your host supports <code>@path</code>, resolve and validate it in the host, then include whatever marker text you want the model to see.</p></article>
-            <article class="panel"><h3>Images</h3><p>Use <code>InputItem::ImageRef</code> with a matching entry in <code>TurnInput::image_blobs</code>. Lash stores the bytes as typed attachments and resolves them when building provider requests.</p></article>
-          </div>
-        </div>
-
-        <div class="section" id="semantic-events">
-          <div class="section-header">
-            <h2>Semantic Events</h2>
-            <p>The app stream is semantic and identity-bearing. Assistant prose arrives as deltas, reasoning arrives as deltas, multi-phase tool/code activity carries a correlation id, and terminal values authored by <code>submit</code> or tool controls arrive as <code>SubmittedValue</code> or <code>ToolValue</code>. Normal prose completion does not emit a terminal stream item.</p>
-          </div>
-          <div class="callout">
-            <strong>Three event types — only one is for your app.</strong>
-            <p>Apps consume <code>TurnActivity</code>: an identity-bearing wrapper that carries a fresh <code>id</code>, a stable <code>correlation_id</code>, and a <code>TurnEvent</code> payload. The payload-shape enum is <code>TurnEvent</code> — what kind of event happened. <code>SessionEvent</code> sits one layer deeper as a runtime/debug enum used inside the session graph; hosts should not subscribe to it, and there is no app-facing <code>SessionEvent::Message { kind: "final" }</code> contract. If you're writing a <code>TurnActivitySink</code>, you only ever match on <code>TurnEvent</code> variants — that's the app surface.</p>
-          </div>
-          <div class="diagram">
-            <div class="diagram-title">TurnActivity sink</div>
-            <pre><code>use async_trait::async_trait;
-use lash::{TurnActivity, TurnActivitySink, TurnEvent};
-
-struct AppEvents {
-    tx: AppUiTx,
-    turn_state: std::sync::Mutex&lt;TurnUiState&gt;,
-}
-
-#[derive(Default)]
-struct TurnUiState {
-    reasoning: Option&lt;UiRowId&gt;,
-    tools: std::collections::HashMap&lt;String, UiRowId&gt;,
-    code: Option&lt;UiRowId&gt;,
-}
-
-#[async_trait]
-impl TurnActivitySink for AppEvents {
-    async fn emit(&amp;self, activity: TurnActivity) {
-        let correlation_id = activity.correlation_id.0.clone();
-        match activity.event {
-            TurnEvent::AssistantProseDelta { text } =&gt; {
-                append_live_text(text).await;
-            }
-            TurnEvent::ReasoningDelta { text } =&gt; {
-                let row = self.turn_state.lock().unwrap().reasoning.clone();
-                let row = upsert_reasoning_row(row, text).await;
-                self.turn_state.lock().unwrap().reasoning = Some(row);
-            }
-            TurnEvent::ToolCallStarted { name, args, .. } =&gt; {
-                let row = insert_tool_row(name, args).await;
-                self.turn_state
-                    .lock()
-                    .unwrap()
-                    .tools
-                    .insert(correlation_id, row);
-            }
-            TurnEvent::ToolCallCompleted { name, output, .. } =&gt; {
-                let row = self.turn_state.lock().unwrap().tools.remove(&amp;correlation_id);
-                update_or_insert_tool_row(row, name, output).await;
-            }
-            TurnEvent::CodeBlockStarted { language, code } =&gt; {
-                let row = insert_code_row(language, code).await;
-                self.turn_state.lock().unwrap().code = Some(row);
-            }
-            TurnEvent::CodeBlockCompleted { language, output, error, success, .. } =&gt; {
-                let row = self.turn_state.lock().unwrap().code.take();
-                update_or_insert_code_row(row, language, output, error, success).await;
-            }
-            TurnEvent::SubmittedValue { value } =&gt; {
-                append_live_text(render_terminal_value(&amp;value)).await;
-            }
-            TurnEvent::ToolValue { tool_name, value } =&gt; {
-                append_live_text(render_terminal_value(&amp;value)).await;
-                record_terminal_tool(tool_name).await;
-            }
-            TurnEvent::Usage { usage, cumulative, .. } =&gt; {
-                update_usage(usage, cumulative).await;
-            }
-            TurnEvent::ChildUsage { source, usage, cumulative, .. } =&gt; {
-                update_child_usage(source, usage, cumulative).await;
-            }
-            TurnEvent::Error { .. }
-            | _ =&gt; {}
-        }
-    }
-}
-
-fn render_terminal_value(value: &amp;serde_json::Value) -&gt; String {
-    match value {
-        serde_json::Value::Null =&gt; String::new(),
-        serde_json::Value::String(text) =&gt; text.clone(),
-        other =&gt; serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-    }
-}</code></pre>
-          </div>
-          <div class="callout">
-            <strong>Use event identity, not duplicate detection.</strong>
-            <p><code>ToolCallStarted</code> and <code>ToolCallCompleted</code> describe the same logical row when their <code>correlation_id</code> matches; code-block events work the same way. <code>TurnEvent::SubmittedValue</code> and <code>TurnEvent::ToolValue</code> mean “a new terminal value was authored by a control path.” They are not emitted for a normal assistant prose finish because that prose already streamed as <code>AssistantProseDelta</code> and the settled message is reconstructed from the read view.</p>
-          </div>
-        </div>
-
-        <div class="section" id="sink-semantics">
-          <div class="section-header">
-            <h2>Sink Semantics</h2>
-            <p><code>TurnActivitySink::emit()</code> is an async method <strong>and the runtime awaits it</strong>. A slow sink slows the turn — every <code>.await</code> inside <code>emit()</code> is on the hot path for the next event. There's no buffering layer between the runtime and the sink, and no spawn-and-drop. Sink authors own their own concurrency.</p>
-          </div>
-          <p>The conventional pattern is a thin sink that pushes onto an async <code>mpsc</code> channel and returns immediately, with a separate consumer task draining the channel into UI state. <code>tokio::sync::mpsc::Sender::send</code> only awaits when the channel is full, so the channel bound becomes your backpressure dial:</p>
-          <pre><code>use tokio::sync::mpsc;
-
-struct ChannelSink { tx: mpsc::Sender&lt;TurnActivity&gt; }
-
-#[async_trait::async_trait]
-impl TurnActivitySink for ChannelSink {
-    async fn emit(&amp;self, activity: TurnActivity) {
-        // send().await yields when the channel is full — the turn
-        // will pause here if your UI consumer falls behind.
-        let _ = self.tx.send(activity).await;
-    }
-}</code></pre>
-          <p>If a sink panics or returns an <code>Err</code>-shaped activity, the runtime keeps going — emit failures are observed but do not abort the turn. Persistence and the turn's own activity log are independent of the sink: a dropped sink does not lose the activity, because <code>TurnResult.activities</code> still holds the canonical ordered log when the turn completes.</p>
-        </div>
-
-        <div class="section" id="token-usage">
-          <div class="section-header">
-            <h2>Token Usage</h2>
-            <p>Four channels surface token usage, finest granularity to coarsest. Pick the one that matches what you want to display or persist.</p>
-          </div>
-          <dl class="def-list">
-            <dt><code>TraceSink</code></dt>
-            <dd>Every provider call across every session in the runtime. Right for billing, audit, off-line analysis. Heavier than necessary for plain totals.</dd>
-            <dt><code>TurnEvent::Usage</code> / <code>TurnEvent::ChildUsage</code></dt>
-            <dd>Live during a turn, one event per LLM iteration. <code>Usage</code> is the parent's own model call; <code>ChildUsage</code> carries <code>session_id</code> and <code>source</code> so a UI can group child traffic (subagent, compaction, observer). Right for live counters.</dd>
-            <dt><code>TurnResult.usage</code> / <code>TurnResult.children_usage</code></dt>
-            <dd>Per-turn snapshot at completion. <code>usage</code> is parent-only; <code>children_usage</code> is a per-<code>(source, model)</code> breakdown for any child sessions that ran during the turn. <code>TurnResult::total_usage()</code> sums both.</dd>
-            <dt><code>session.usage_report()</code> → <code>SessionUsageReport</code></dt>
-            <dd>Aggregate across the whole session, broken down by <code>source × model</code>. Right for dashboards and "session so far."</dd>
-          </dl>
-          <p>The full re-export and well-known <code>source</code> label constants live in <code>lash::usage</code>.</p>
-        </div>
-
-        <div class="section" id="context-window">
-          <div class="section-header">
-            <h2>Context Window And History</h2>
-            <p>The <code>max_context_tokens</code> setting on <code>LashCoreBuilder</code> / <code>SessionSpec</code> caps every provider request for the session. When a request would exceed the cap, or the provider itself reports a context-overflow terminal, the turn finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> retry with a truncated prompt. Hosts should treat context overflow as a signal to compact, switch to a longer-context model, or hand off to a successor session.</p>
-          </div>
-          <p>Two strategies manage what's actually passed to the model across many turns. Pick one per session (or per core) via the standard mode's context-approach setting:</p>
-          <div class="two-col">
-            <article class="panel">
-              <h3><code>RollingHistory</code> (default)</h3>
-              <p>Every turn includes the full ordered conversation history, trimmed only as needed to satisfy <code>max_context_tokens</code>. Best for short-to-medium sessions where the model genuinely benefits from seeing prior turns verbatim.</p>
-            </article>
-            <article class="panel">
-              <h3><code>ObservationalMemory</code></h3>
-              <p>Older turns are replaced with rolling <em>observations</em> — short summaries authored by the runtime as the session grows. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), and reflection thresholds. Best for long-running agents that should remember themes without quoting old messages.</p>
-            </article>
-          </div>
-          <pre><code>use lash_core::{ObservationalMemoryConfig, StandardContextApproach};
-
-let session = core
-    .session("long-running-thread")
-    .standard_context_approach(StandardContextApproach::ObservationalMemory(
-        ObservationalMemoryConfig::default(),
-    ))
-    .open()
-    .await?;</code></pre>
-          <p>RLM mode has its own context-approach knob with the same shape; both modes share the same enum so a core that installs both modes can default to one and override per session.</p>
-        </div>
-
-        <div class="section" id="rlm-and-submit">
-          <div class="section-header">
-            <h2>RLM And Submit</h2>
-            <p>RLM turns can require <code>submit</code> or allow direct prose. With <code>SubmitRequired</code>, a <code>submit</code> statement validates against the configured schema when present, finishes the turn as <code>TurnFinish::SubmittedValue</code>, and emits a <code>SubmittedValue</code> semantic event. With <code>ProseOrSubmit</code>, a no-code prose answer finishes as <code>TurnFinish::AssistantMessage</code>, emits no terminal-value event, and relies on the shared runtime commit to persist the final assistant transcript message.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel">
-              <h3>Per-turn RLM options</h3>
-              <pre><code>let submitted = session
-    .turn(TurnInput::text("Move on the board."))
-    .require_submit()?
-    .stream(&amp;sink)
-    .await?;
-
-let prose_or_submit = session
-    .turn(TurnInput::text("Answer directly if no code is needed."))
-    .allow_prose_or_submit()?
-    .run()
-    .await?;</code></pre>
-            </article>
-            <article class="panel">
-              <h3>Outcome shape</h3>
-              <pre><code>match result.outcome {
-    lash::TurnOutcome::Finished(
-        lash::TurnFinish::SubmittedValue { value }
-    ) =&gt; {
-        // Same value already arrived as TurnEvent::SubmittedValue.
-        persist_typed_value(value)?;
-    }
-    lash::TurnOutcome::Finished(
-        lash::TurnFinish::AssistantMessage { text }
-    ) =&gt; persist_text(text)?,
-    other =&gt; handle_other_outcome(other)?,
-}</code></pre>
-            </article>
-          </div>
-        </div>
-
-        <div class="section" id="projected-bindings">
-          <div class="section-header">
-            <h2>Projected Bindings</h2>
-            <p>RLM programs see host data in three ways. Tool args carry data the model decides to fetch; the prompt carries text the model reads as instructions; <em>projected bindings</em> sit between the two — named, typed, read-only values that appear directly in lashlang scope so a program can write <code>history[-1]</code> or <code>board.cells[2]</code> instead of calling a tool first. Project anything the model should treat as part of the environment: the user's current request, a board state, a tenant id, a task spec, a parent-session digest.</p>
-          </div>
-          <p>The mechanism is RLM-only. Two scopes:</p>
-          <div class="two-col">
-            <article class="panel">
-              <h3>Per turn</h3>
-              <p>Attach bindings to the input of one turn via <code>TurnInput::rlm_project(...)</code>. Right for values that change every turn — the user's current message, fresh board state, a request payload.</p>
-            </article>
-            <article class="panel">
-              <h3>Per session</h3>
-              <p>Apply a mode extension at session open so the same bindings appear in every turn of the session. Right for values that persist across turns — tenant id, an immutable task spec, a long-lived parent reference.</p>
-            </article>
-          </div>
-          <pre><code>use lash::TurnInput;
-use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
-
-// Session-wide: applies to every turn the session runs.
-session
-    .control()
-    .mode()
-    .apply_session_extension(rlm_session_projection_extension(
-        RlmProjectedBindings::new()
-            .bind_json("tenant_id", serde_json::json!("acme"))?
-            .bind_json("task", serde_json::to_value(&amp;task)?)?,
-    ))
-    .await?;
-
-// Per-turn: layered on top of the session bindings for this turn only.
-let input = TurnInput::text("Play one move.")
-    .rlm_project(
-        RlmProjectedBindings::new()
-            .bind_json("board", serde_json::to_value(&amp;board)?)?,
-    )?;
-
-let result = session.turn(input).run().await?;</code></pre>
-          <p>The model sees these names directly in fenced lashlang code:</p>
-          <pre><code>```lashlang
-let move_idx = best_move(board.cells, board.turn)
-submit({ "move": move_idx, "tenant": tenant_id })
-```</code></pre>
-          <p>Three ways to bind a value, in order of growing power:</p>
-          <ul class="bullets">
-            <li><code>.bind_json(name, value)</code> — the common case. Pass any <code>serde_json::Value</code>; lashlang re-types it on the way in.</li>
-            <li><code>.bind_value(name, FlowValue)</code> — pass a native <code>lashlang::Value</code> directly, skipping the JSON round-trip. Use this when you already hold a lashlang value (e.g. from <code>history</code>).</li>
-            <li><code>.bind_lazy(name, Arc&lt;dyn ProjectedHostValue&gt;)</code> — for large host structures you don't want to clone. Implement <code>get_field</code> / <code>get_index</code> / <code>len</code> / <code>render</code> / <code>materialize</code> and the executor calls them on demand as the program reads fields.</li>
-          </ul>
-          <h3>Reserved names and the read-only guard</h3>
-          <p>Projected names are reserved. Attempting <code>tenant_id = "other"</code> inside lashlang raises <code>`tenant_id` is a read-only projected binding</code>. The runtime also reserves <code>history</code> — every RLM turn already projects the conversation history through that name. A host that wants to override <code>history</code> should narrow it through its own projected handle rather than bind a new value over it.</p>
-          <p>Duplicate names between session-scope and turn-scope are rejected at <code>session.turn(...).run()</code> time with a protocol error — no silent override. Pick one scope per name; merge at the source if both layers want to contribute.</p>
-          <h3>Seeds for handoffs and subagents</h3>
-          <p>The RLM control tools <code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries are re-projected in the successor or child session. Pass <code>input.prompt</code>, a projected handle, or any other root-projected value as a seed entry and it stays projected on the other side. See <a href="#subagents">Subagents</a> and the <a href="./architecture/lashlang.html#projected-host-bindings">Projected Host Bindings</a> chapter for the wire format and the seed-classifier rules.</p>
-          <p>The deep reference — <code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, the read-only assignment rule, and the RLM serialization marker — lives in <a href="./architecture/lashlang.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
-        </div>
-
-        <div class="section" id="prompt-templates">
-          <div class="section-header">
-            <h2>Prompt Templates And Slots</h2>
-            <p><code>lash</code> exposes the same prompt model as the runtime: one effective template chooses the layout, while slot contributions supply app, session, and turn-specific content. Core, session, and turn layers inherit by default; a lower layer can replace or clear one slot without rebuilding the whole template.</p>
-          </div>
-          <div class="diagram">
-            <div class="diagram-title">Template layout is separate from slot content</div>
-            <pre><code>use lash::{
-    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
-    PromptTemplateEntry, PromptTemplateSection,
-};
-
-let template = PromptTemplate::new(vec![
-    PromptTemplateSection::untitled(vec![
-        PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
-        PromptTemplateEntry::slot(PromptSlot::Intro),
-    ]),
-    PromptTemplateSection::titled(
-        "Guidance",
-        vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
-    ),
-]);
-
-let core = lash::LashCore::standard()
-    .provider(provider)
-    .model("gpt-5.4", None)
-    .max_context_tokens(200_000)
-    .prompt_template(template)
-    .prompt_contribution(PromptContribution::guidance(
-        "App",
-        "Answer as the host application assistant.",
-    ))
-    .build()?;
-
-let session = core
-    .session("customer-42")
-    .replace_prompt_slot(
-        PromptSlot::Guidance,
-        [PromptContribution::guidance(
-            "Tenant",
-            "Use the tenant's support policy.",
-        )],
-    )
-    .open()
-    .await?;
-
-let result = session
-    .turn(TurnInput::text("Draft the response."))
-    .prompt_contribution(PromptContribution::guidance(
-        "Turn",
-        "Keep this reply under 120 words.",
-    ))
-    .run()
-    .await?;</code></pre>
-          </div>
-        </div>
-
-        <div class="section" id="typed-plugin-input">
-          <div class="section-header">
-            <h2>Typed Plugin Input</h2>
-            <p>Plugin bindings let an app provide strongly typed session configuration and per-turn input. The binding activates an ordinary core plugin factory for that session; the resulting session plugin registers prompt contributions, tools, and other capabilities through <code>PluginRegistrar</code>.</p>
-          </div>
-          <div class="diagram">
-            <div class="diagram-title">Plugin and tool pattern</div>
-            <pre><code>#[derive(Clone, Debug)]
-struct BoardPlugin;
-
-#[derive(Clone, Debug)]
-struct BoardConfig;
-
-#[derive(Clone, Debug)]
-struct BoardTurnInput {
-    board: BoardState,
-}
-
-impl lash::PluginBinding for BoardPlugin {
-    const ID: &amp;'static str = "board";
-    type SessionConfig = BoardConfig;
-    type Input = BoardTurnInput;
-
-    fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::plugins::PluginFactory&gt; {
-        Arc::new(BoardPluginFactory)
-    }
-
-    fn requires_turn_input(_: &amp;Self::SessionConfig) -&gt; bool {
-        true
-    }
-}
-
-impl lash::plugins::SessionPlugin for BoardSessionPlugin {
-    fn id(&amp;self) -&gt; &amp;'static str { BoardPlugin::ID }
-
-    fn register(&amp;self, reg: &amp;mut lash::plugins::PluginRegistrar) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
-        reg.prompt().contribute(Arc::new(|ctx| {
-            Box::pin(async move {
-                let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
-                    return Ok(Vec::new());
-                };
-                Ok(vec![lash::PromptContribution::environment(
-                    "Board",
-                    format_board(&amp;input.board),
-                )])
-            })
-        }));
-        reg.tools().provider(Arc::new(BoardTools))
-    }
-}
-
-#[async_trait::async_trait]
-impl lash::tools::ToolProvider for BoardTools {
-    fn definitions(&amp;self) -&gt; Vec&lt;lash::tools::ToolDefinition&gt; {
-        vec![/* read_board, play_move, app tools */]
-    }
-
-    async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
-        let Some(input) = call.context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
-            return lash::tools::ToolResult::err_fmt("missing board input");
-        };
-        run_board_tool(call.name, call.args, &amp;input.board)
-    }
-}</code></pre>
-          </div>
-          <p>Human input follows the same rule: expose it as a host-owned tool that waits inside its tool implementation and returns a normal tool result. App streams then see ordinary tool start/completion events; there is no separate runtime prompt event to handle.</p>
-          <p>Plugin crates should export a domain extension trait that wraps the generic input primitive:</p>
-          <pre><code>trait BoardTurnExt {
-    fn with_board(self, board: BoardState) -&gt; Self;
-}
-
-impl BoardTurnExt for lash::TurnBuilder {
-    fn with_board(self, board: BoardState) -&gt; Self {
-        self.with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
-    }
-}</code></pre>
-          <p>Install typed plugins on the session and use the extension method before each run:</p>
-          <pre><code>let core = LashCore::rlm()
-    .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
-    .build()?;
-
-let session = core
-    .session(chat_id)
-    .rlm()
-    .plugin::&lt;BoardPlugin&gt;(BoardConfig)
-    .open()
-    .await?;
-
-let result = session
-    .turn(TurnInput::text("Play one move."))
-    .with_board(board)
-    .require_submit()?
-    .collect_with(&amp;sink)
-    .await?;</code></pre>
-        </div>
-
-        <div class="section" id="app-storage">
-          <div class="section-header">
-            <h2>App Storage</h2>
-            <p>Keep product storage separate from runtime storage. Your app database can store chats, users, messages, and UI state; Lash session persistence stores the runtime graph and checkpoints through a <code>SessionStoreFactory</code>.</p>
-          </div>
-          <div class="two-col">
-            <article class="panel"><h3>App state</h3><p>Own chat tables, account ids, frontend board state, request auth, and transport formats. The example app stores chat messages in SQLite and streams newline-delimited JSON to the browser.</p></article>
-            <article class="panel"><h3>Runtime state</h3><p>Pass an explicit store factory such as <code>lash_sqlite_store::SqliteSessionStoreFactory::new(...)</code> to <code>LashCoreBuilder::store_factory</code>, or pass a concrete store to <code>SessionBuilder::store</code>, when sessions need durable runtime state across process restarts.</p></article>
-          </div>
-        </div>
-
-        <div class="section" id="session-lifecycle">
-          <div class="section-header">
-            <h2>Session Lifecycle</h2>
-            <p>A <code>LashSession</code> lives in one of two states: <strong>active</strong> (resident in memory, ready to run a turn immediately) or <strong>parked</strong> (in-memory state has been flushed to the store, only the session id and store reference are retained). Opening a session against an existing id rehydrates it from the store; the cost is one read of the graph head plus any plugin / mode snapshots referenced from it.</p>
-          </div>
-          <p>The runtime parks sessions automatically when the <code>LashSession</code> handle is dropped: in-flight state is flushed to the store, and the runtime keeps only the session id plus the store reference around. Long-running servers can hold thousands of session ids cheaply this way — work happens only while a handle exists. Residency policy controls how aggressively in-memory state is trimmed while a session is still active:</p>
-          <div class="two-col">
-            <article class="panel">
-              <h3><code>Residency::KeepAll</code> (default)</h3>
-              <p>Every node in the session graph stays resident. Fastest re-reads, highest memory. Right for interactive sessions that the user is actively driving.</p>
-            </article>
-            <article class="panel">
-              <h3><code>Residency::ActivePathOnly</code></h3>
-              <p>Only nodes on the active path are kept in memory; orphaned branches stay on disk. Lower memory at the cost of an occasional store read when crossing a forked branch. Right for long server processes managing many sessions.</p>
-            </article>
-          </div>
-          <pre><code>use lash::Residency;
-
-let core = LashCore::rlm()
-    .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
-    .store_factory(store_factory)
-    .advanced()
-    .residency(Residency::ActivePathOnly)
-    .build()?;</code></pre>
-          <p>Some plugin work is genuinely background — spawned tasks that the plugin tracks through <code>ToolContext::tasks()</code>, observation summaries that compute after the turn returns, MCP server warm-ups. By default a turn returns as soon as the model's terminal value is committed; background work continues until the plugin finishes it or the runtime is dropped. To force the runtime to drain pending background work before returning (handy for one-shot processes that need every observation persisted before exit), call:</p>
-          <pre><code>session.control().state().await_background_work().await?;</code></pre>
-          <p>The CLI exposes this as the <code>--await-background-work</code> flag on <code>lash --print</code>; embedders typically don't need it unless they're running short-lived processes that exit immediately after a turn.</p>
-        </div>
-
-        <div class="section" id="durable-workflows">
-          <div class="section-header">
-            <h2>Durable Workflows</h2>
-            <p>The standard <code>LashCore</code> path owns its own I/O loop and persists at the turn boundary. Some workloads need finer-grained durability — an LLM call expensive enough to replay, a tool batch that runs for minutes and can't afford to lose partial progress, a deployment story that crashes and migrates workers mid-turn. For those, <code>lash-sansio</code> exposes the underlying state machine directly as an effect / response protocol that an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) can drive.</p>
-          </div>
-          <p>The shape: <code>TurnMachine::poll_effect()</code> yields the next side effect (<code>LlmCall</code>, <code>ToolCalls</code>, <code>ExecCode</code>, <code>Checkpoint</code>, …), the workflow runtime invokes it as a durable activity keyed by the effect's <code>EffectId</code>, and <code>TurnMachine::handle_response(...)</code> feeds the result back. The whole machine round-trips through <code>TurnMachine::checkpoint()</code> / <code>restore_from_checkpoint(...)</code>, and the <code>EffectId</code> counter is deterministic across replays — the n-th effect of a fresh turn is always <code>EffectId(n)</code> regardless of how many crashes and restarts happened in between, so workflow activities deduplicate naturally.</p>
-          <p>See <a href="./architecture/durability.html">Architecture → Durability</a> for the full contract: which effects exist, what each waiting state retains across restore, replay-safety guarantees, the per-test coverage matrix, and a worked example of the workflow loop. Embedders who don't need workflow-level orchestration can ignore this seam — the regular <a href="./persistence.html">session-store path</a> already handles in-process durability.</p>
-        </div>
-
-        <div class="section" id="subagents">
-          <div class="section-header">
-            <h2>Subagents</h2>
-            <p>Subagents are configured with the same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry and host; child policy resolution always starts from the live parent snapshot.</p>
-          </div>
-          <pre><code>use std::sync::Arc;
-use lash::{plugins::PluginFactory, SessionSpec};
-use lash_subagents::{default_registry, SubagentsPluginFactory};
-
-let registry = Arc::new(default_registry(&amp;tier_models));
-let host = Arc::new(AppSubagentHost::new(child_store_factory));
-
-let subagents = SubagentsPluginFactory::new(registry, host)
-    .with_session_spec(SessionSpec::inherit().max_turns(8));
-
-let core = LashCore::rlm()
-    .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
-    .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
-    .build()?;</code></pre>
-          <p>Capability implementations return <code>SessionSpec</code> overlays. <code>StaticCapability</code> is for exact child authority, while <code>TierCapability</code> implements the built-in <code>explore</code> and <code>peer</code> model/mode selection. Tool authors should not construct <code>SessionPolicy</code> for child configuration; it remains the resolved runtime artifact.</p>
-          <h3>Built-in tiers</h3>
-          <p>The default registry ships two tiers, each a thin <code>TierCapability</code>:</p>
-          <div class="two-col">
-            <article class="panel">
-              <h3><code>explore</code></h3>
-              <p>Read-only investigator. Runs in RLM mode by default and cannot recurse — explore subagents may not spawn further subagents. Use it for "scan / summarise / verify" tasks where the agent should never mutate state.</p>
-            </article>
-            <article class="panel">
-              <h3><code>peer</code></h3>
-              <p>Parallel self. Inherits the parent's execution mode and full tool authority, including the ability to spawn its own subagents. Use it for "go do a parallel branch of the same work in a fresh window."</p>
-            </article>
-          </div>
-          <p>Both tiers consult the host's <code>tier_models</code> map for an explicit model override; if absent, they fall back to the provider's <code>default_agent_model(tier)</code> selection, and finally the parent session's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
-          <h3>Capability resolution</h3>
-          <p><code>Capability::resolve(ctx)</code> sees the live <code>SessionPolicy</code> of the parent and returns a <code>SessionSpec</code>. The runtime composes that spec against the parent's policy to produce the child's effective configuration; the spec layer is what's persisted, so a resumed subagent re-derives the same authority from the parent state.</p>
-          <p>Regardless of which capability resolves a spawn, three interactive-only tools are always stripped from the subagent's tool surface: <code>ask</code>, <code>showcase</code>, and <code>plan_exit</code>. Those tools assume a human at the keyboard; a subagent that called them would block indefinitely. Subagents see every other tool the parent has access to, modulo whatever the capability's spec narrowed.</p>
-          <h3>Usage attribution</h3>
-          <p>Child sessions emit their own <code>TurnEvent::ChildUsage</code> entries on the parent's stream, tagged with <code>source</code> (e.g. <code>"subagent"</code>, <code>"compaction"</code>, <code>"observer"</code>) and the child <code>session_id</code>. <code>TurnResult.children_usage</code> rolls these up per <code>(source, model)</code> at turn end; <code>TurnResult::total_usage()</code> sums parent and children. Dashboards that want a finer split should fold <code>ChildUsage</code> directly off the stream rather than computing from totals.</p>
-        </div>
-
-        <div class="section" id="mcp-servers">
-          <div class="section-header">
-            <h2>MCP Servers</h2>
-            <p>MCP (Model Context Protocol) servers attach via the <code>lash-plugin-mcp</code> crate, which wraps the official <code>rmcp</code> SDK and supports the three standard transports — <code>stdio</code> (child process), <code>streamable_http</code>, and <code>sse</code>. The plugin owns a shared connection pool: every session built from the same <code>LashCore</code> reuses the same client per server, so stdio servers spawn once per process instead of per session.</p>
-          </div>
-          <pre><code>use std::collections::BTreeMap;
-use lash_plugin_mcp::{McpPluginFactory, McpServerConfig};
-
-let mut servers = BTreeMap::new();
-servers.insert(
-    "docs".to_string(),
-    McpServerConfig::stdio("uvx", vec!["mcp-server-docs".into()]),
-);
-servers.insert(
-    "web".to_string(),
-    McpServerConfig::streamable_http("https://mcp.example.com/rpc"),
-);
-
-let mcp = McpPluginFactory::new(servers).await?;
-
-let core = LashCore::rlm()
-    .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
-    .plugin(std::sync::Arc::new(mcp))
-    .build()?;</code></pre>
-          <p>Tools are surfaced under <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> names with their original input and output schemas preserved. The factory's <code>attach_server</code> / <code>detach_server</code> methods let hosts add or remove servers at runtime without rebuilding the core.</p>
-          <h3>Lifecycle and failure isolation</h3>
-          <p>Each configured server connects once when <code>McpPluginFactory::new(...)</code> resolves. The factory holds the <code>Arc&lt;McpConnectionPool&gt;</code>; every <code>SessionPlugin</code> the factory builds clones that <code>Arc</code>, so stdio servers spawn once per process regardless of how many sessions are live. The CLI and a multi-tenant embedder both pay one server startup cost, not one per chat.</p>
-          <p>Runtime mutation is async and operates on the live pool. After a successful <code>attach_server</code>, new tools become visible to sessions created from the same core; existing sessions pick them up on their next tool-surface refresh (typically the start of the next turn). <code>detach_server</code> shuts the server down and removes its tools — in-flight tool calls against that server fail rather than hang.</p>
-          <pre><code>// Hot-swap a server at runtime.
-mcp.attach_server(
-    "new-tool".to_string(),
-    McpServerConfig::stdio("uvx", vec!["mcp-server-new".into()]),
-).await?;
-
-mcp.detach_server("old-tool").await?;</code></pre>
-          <p>One bad server does not cascade. A <code>stdio</code> child that exits, an HTTP endpoint that 500s, or an SSE stream that drops surfaces as a per-call failure: the affected tool returns <code>ToolResult::err(...)</code> with the MCP error message; other servers and other tools on the same server keep working. If a server is unreachable at <code>McpPluginFactory::new</code> time, that single call fails — use <code>McpPluginFactory::empty()</code> plus runtime <code>attach_server</code> when initial connectivity is unreliable.</p>
-        </div>
-
-        <div class="section" id="advanced-runtime">
-          <div class="section-header">
-            <h2>Advanced Runtime</h2>
-            <p>The normal builder exposes app-facing setup. Use <code>.advanced()</code> only for runtime-host concerns such as custom plugin hosts, shared background task hosts, residency policy, imported <code>RuntimeCoreConfig</code>, and termination policy.</p>
-          </div>
-          <pre><code>let core = LashCore::rlm()
-    .provider(provider)
-    .model("anthropic/claude-sonnet-4.6", None)
-    .max_context_tokens(200_000)
-    .store_factory(store_factory)
-    .advanced()
-    .residency(Residency::ActivePathOnly)
-    .build()?;</code></pre>
-          <p>Turn streaming is semantic by default: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> items and resolves with a rich <code>TurnResult</code>. Raw runtime telemetry belongs in tracing and lower-level runtime debugging, not the normal <code>lash</code> API surface.</p>
-        </div>
-
-        <div class="section" id="complete-example">
-          <div class="section-header">
-            <h2>Complete Example</h2>
-            <p>The runnable browser example shows the full pattern: app-owned chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events for live UI, terminal output rendering from <code>TurnOutput</code>, and app-owned product persistence.</p>
-          </div>
-          <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
-# then open http://127.0.0.1:3000</code></pre>
-          <p>Source: <code>examples/agent-service</code>. The dedicated walkthrough is <a href="./example-agent-service.html">Agent Service</a>.</p>
-        </div>
-
-        <div class="section" id="related-guides">
-          <div class="section-header">
-            <h2>Related Guides</h2>
-            <p>Focused walkthroughs for the topics above.</p>
-          </div>
-          <div class="module-grid">
-            <article class="panel"><h3><a href="./quickstart.html">Quickstart</a></h3><p>The one-screen hello-world: minimal builder, one turn, prose extraction. Skip the boilerplate, start here.</p></article>
-            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>The complete browser example: OpenRouter, RLM submit, typed plugin input, app tools, semantic streaming, per-chat model selection, and SQLite persistence.</p></article>
-            <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p>Writing a plugin: <code>PluginFactory</code>, <code>SessionPlugin</code>, registering tools and hooks, the cheap-build contract, four reference plugins in the workspace.</p></article>
-            <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p>Wiring up <code>lash-sqlite-store</code>, what gets persisted, in-memory mode, GC and vacuum operations.</p></article>
-            <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p>Enabling traces, the <code>TraceSink</code> trait, JSONL schema v2, fan-out sinks, the <code>lash-trace-viewer</code> binary, and OTel export.</p></article>
-            <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>If you're building on top of the shipping <code>lash</code> binary: slash commands, keyboard shortcuts, config schema, env vars, resume/fork flow.</p></article>
-            <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, runtime residency, session graph, plugin host traits, providers, Lashlang internals — everything one layer deeper than the app-facing <code>lash</code> API.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p>The <code>lash-sansio</code> seam: pure state machine, deterministic <code>EffectId</code>, checkpoint / restore round-trip. Integrate lash with Temporal, Restate, or any durable workflow runtime.</p></article>
-          </div>
-        </div>
-      </section>
-
-      <footer class="footer">Lash API anchors: <code>crates/lash/src/lib.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-plugin-mcp/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>crates/lash-core/src/runtime/*</code>.</footer>
-    </div>
   </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./quickstart.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>quickstart</strong></a>
+    <a class="pager__next" href="./embedding-turns.html"><span>next</span><strong>lash api · turns</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
 </body>
 </html>

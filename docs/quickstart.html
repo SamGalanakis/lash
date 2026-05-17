@@ -3,156 +3,186 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Quickstart - lash Docs</title>
+<title>quickstart · lash docs</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
-  <a class="skip-link" href="#content">Skip to content</a>
-  <main class="page">
-    <div class="frame">
-      <aside class="sidebar" aria-label="Documentation navigation">
-        <a class="sidebar__exit" href="./index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Guide</span>
-            <span class="sidebar__current">Quickstart</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a class="active" href="./quickstart.html">Quickstart</a></li>
-            <li><a href="./embedding.html">Lash API</a></li>
-            <li><a href="./example-agent-service.html">Agent Service</a></li>
-            <li><a href="./cli.html">CLI</a></li>
-            <li><a href="./plugins.html">Plugins</a></li>
-            <li><a href="./persistence.html">Persistence</a></li>
-            <li><a href="./tracing.html">Tracing</a></li>
-          </ol>
-        </details>
-        <nav class="sidebar__toc" aria-label="On this page">
-          <div class="sidebar__label">On this page</div>
-          <ol>
-            <li><a href="#add-the-crates">Add The Crates</a></li>
-            <li><a href="#core-concepts">Core Concepts</a></li>
-            <li><a href="#hello-turn">Hello, Turn</a></li>
-            <li><a href="#whats-next">What's Not Here Yet</a></li>
-          </ol>
-        </nav>
-      </aside>
+<body class="docs-page" data-cover-source="<code>crates/lash/src/core.rs</code> &middot; <code>crates/lash/src/session.rs</code> &middot; <code>crates/lash-providers-builtin/src/lib.rs</code>">
 
-      <header class="hero">
-        <div class="eyebrow">lash guide</div>
-        <h1>quick<span class="slash">/</span>start</h1>
-        <p>The shortest path to a working Lash turn. Add the crate, pick a provider, open a session, run one turn. Once this works you can layer on tools, modes, plugins, persistence, and tracing as you need them.</p>
-      </header>
+<section class="opener">
+  <h1 class="opener__title">quick<span class="slash">/</span>start</h1>
+  <p class="opener__lede">The shortest path to a working <em>Lash</em> turn. Add the crate, pick a provider, open a session, run one turn. Tools, modes, plugins, persistence, and tracing all layer on after that.</p>
+</section>
 
-      <section class="content" id="content">
-        <div class="section" id="add-the-crates">
-          <div class="section-header">
-            <h2>Add The Crates</h2>
-            <p>The <code>lash</code> crate is the user-facing facade. Pull in the provider crate you use directly. Add <code>lash-providers-builtin</code> only when your host wants registry-driven provider lookup.</p>
-          </div>
-          <p>Lash is not on crates.io yet. Pull the crates straight from the monorepo by git URL:</p>
-          <pre><code>[dependencies]
+<main class="body" id="content">
+
+  <section class="stanza">
+    <div class="stanza__rail">
+      <div class="knot">
+        <span class="knot__bead" aria-hidden="true"></span>
+        <p class="knot__id">§ 01</p>
+        <p class="knot__name">depend on it</p>
+      </div>
+    </div>
+    <div class="stanza__body">
+      <h2 class="stanza__title" data-id="§ 01 · depend on it">add the crates</h2>
+      <p class="stanza__lede">The <code>lash</code> crate is the user-facing facade. Pull in whatever provider crate you actually use. Add <code>lash-providers-builtin</code> only when your host wants registry-driven provider lookup.</p>
+      <p>Lash is not on crates.io yet. Pull the crates straight from the monorepo by git URL.</p>
+<pre data-lang="cargo.toml"><code>[dependencies]
 lash                 = { git = "https://github.com/SamGalanakis/lash.git" }
 lash-provider-openai = { git = "https://github.com/SamGalanakis/lash.git" }
 anyhow = "1"
 tokio  = { version = "1", features = ["full"] }</code></pre>
-          <p>Cargo resolves each <code>name</code> against packages inside that repo. Pin to a commit with <code>rev = "..."</code> or a tag with <code>tag = "..."</code> for reproducible builds.</p>
-          <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing such as custom <code>PluginHost</code> instances or shared <code>LocalBackgroundTaskHost</code> values.</p>
-        </div>
+      <p>Cargo resolves each <code>name</code> against packages inside that repo. Pin to a commit with <code>rev = "..."</code> or a tag with <code>tag = "..."</code> for reproducible builds.</p>
+      <p>For ordinary projects the bundled facade and provider crates cover the common ground. Drop down to <code>lash-core</code> only when you need runtime-host plumbing — custom <code>PluginHost</code> instances or shared <code>LocalBackgroundTaskHost</code> values.</p>
+    </div>
+  </section>
 
-        <div class="section" id="core-concepts">
-          <div class="section-header">
-            <h2>Core Concepts</h2>
-            <p>The minimal example below names <code>LashCore</code>, <code>LashSession</code>, <code>TurnInput</code>, <code>TurnBuilder</code>, and <code>ProviderHandle</code>. <code>SessionSpec</code> and <code>PluginStack</code> are the next two types you'll meet in the <a href="./embedding.html">Lash API guide</a>. Skim all of them before reading the code — the rest follows from how they compose.</p>
-          </div>
-          <dl class="def-list">
-            <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins. One per app, cloned freely.</dd>
-            <dt><code>SessionSpec</code></dt>
-            <dd>Reusable session configuration overlay for provider, model, mode, prompt layer, max context tokens, and max turns. The ergonomic builder methods update the same spec.</dd>
-            <dt><code>PluginStack</code></dt>
-            <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with the runtime defaults; <code>LashCore::builder()</code> is explicit and starts empty.</dd>
-            <dt><code>LashSession</code></dt>
-            <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
-            <dt><code>TurnInput</code></dt>
-            <dd>Semantic input to a turn — text plus image references. Use <code>TurnInput::text(...)</code> for the common case.</dd>
-            <dt><code>TurnBuilder</code></dt>
-            <dd>Per-turn configuration returned by <code>session.turn(input)</code>. Call <code>.run()</code> for a collected result, <code>.stream(&amp;sink)</code> for live events.</dd>
-            <dt><code>ProviderHandle</code></dt>
-            <dd>A typed adapter around a provider crate. <code>lash_providers_builtin::register_all()</code> wires the OpenAI / Anthropic / Codex / Google factories into the global registry once at process start.</dd>
-          </dl>
-        </div>
+  <section class="stanza">
+    <div class="stanza__rail">
+      <div class="knot">
+        <span class="knot__bead" aria-hidden="true"></span>
+        <p class="knot__id">§ 02</p>
+        <p class="knot__name">read the shape</p>
+      </div>
+    </div>
+    <div class="stanza__body">
+      <h2 class="stanza__title" data-id="§ 02 · read the shape">core concepts</h2>
+      <p class="stanza__lede">The minimal example below names <code>LashCore</code>, <code>LashSession</code>, <code>TurnInput</code>, <code>TurnBuilder</code>, and <code>ProviderHandle</code>. <code>SessionSpec</code> and <code>PluginStack</code> are the next two types you'll meet in the <a href="./embedding.html">Lash API guide</a>. Skim them before reading the code — the rest follows from how they compose.</p>
+      <dl class="defs">
+        <dt>LashCore</dt>
+        <dd>Cloneable shared configuration: provider, model, installed modes, tools, plugins. One per app, cloned freely.</dd>
+        <dt>SessionSpec</dt>
+        <dd>Reusable session configuration overlay for provider, model, mode, prompt layer, max context tokens, and max turns. The ergonomic builder methods update the same spec.</dd>
+        <dt>PluginStack</dt>
+        <dd>Mutable list of plugin factories. <code>LashCore::standard()</code> and <code>LashCore::rlm()</code> start with the runtime defaults; <code>LashCore::builder()</code> is explicit and starts empty.</dd>
+        <dt>LashSession</dt>
+        <dd>One logical conversation or task, opened from a <code>LashCore</code> by a stable session id.</dd>
+        <dt>TurnInput</dt>
+        <dd>Semantic input to a turn — text plus image references. Use <code>TurnInput::text(...)</code> for the common case.</dd>
+        <dt>TurnBuilder</dt>
+        <dd>Per-turn configuration returned by <code>session.turn(input)</code>. Call <code>.run()</code> for a collected result, <code>.stream(&amp;sink)</code> for live events.</dd>
+        <dt>ProviderHandle</dt>
+        <dd>A typed adapter around a provider crate. <code>lash_providers_builtin::register_all()</code> wires the OpenAI / Anthropic / Codex / Google factories into the global registry once at process start.</dd>
+      </dl>
+    </div>
+  </section>
 
-        <div class="section" id="hello-turn">
-          <div class="section-header">
-            <h2>Hello, Turn</h2>
-            <p>The smallest meaningful program: build a core, open a session, run one turn, print the settled assistant prose.</p>
-          </div>
-          <pre><code>use lash::{provider::ProviderHandle, LashCore, TurnInput};
+  <section class="stanza">
+    <div class="stanza__rail">
+      <div class="knot">
+        <span class="knot__bead" aria-hidden="true"></span>
+        <p class="knot__id">§ 03</p>
+        <p class="knot__name">run one turn</p>
+      </div>
+    </div>
+    <div class="stanza__body">
+      <h2 class="stanza__title" data-id="§ 03 · run one turn">hello, turn</h2>
+      <p class="stanza__lede">The smallest meaningful program: build a core, open a session, run one turn, print the settled assistant prose.</p>
+<pre data-lang="rust"><code>use lash::{provider::ProviderHandle, LashCore, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
 async fn main() -&gt; anyhow::Result&lt;()&gt; {
-    // Build a provider handle. Substitute your own creds + base URL.
+    // build a provider handle. substitute your own creds + base URL.
     let api_key = std::env::var("OPENROUTER_API_KEY")?;
     let provider = ProviderHandle::new(
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
     );
 
-    // One LashCore per app, cloned freely.
+    // one LashCore per app, cloned freely.
     let core = LashCore::standard()
         .provider(provider)
         .model("anthropic/claude-sonnet-4.6", None)
         .max_context_tokens(200_000)
         .build()?;
 
-    // One session per chat / task.
+    // one session per chat / task.
     let session = core.session("hello-1").open().await?;
 
-    // Run one turn; read settled prose from the terminal result.
+    // run one turn; read settled prose from the terminal result.
     let result = session
         .turn(TurnInput::text("Say hi in one short sentence."))
         .run()
         .await?;
 
     let prose = result.assistant_message().unwrap_or_default();
-
     println!("{prose}");
     Ok(())
 }</code></pre>
-          <p>That's the whole flow: <code>LashCore</code> for shared configuration, <code>LashSession</code> for one logical conversation, <code>TurnBuilder::run()</code> for a single collected turn. Nothing more is required.</p>
-        </div>
-
-        <div class="section" id="whats-next">
-          <div class="section-header">
-            <h2>What's Not Here Yet</h2>
-            <p>The example above has no persistence (the session lives in memory and goes away when the process exits), no host tools, only the default runtime plugin stack, no tracing, and no live streaming. Each is a small additional step.</p>
-          </div>
-          <div class="module-grid">
-            <article class="panel"><h3>Live streaming</h3><p>Use <code>TurnBuilder::stream(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding.html#semantic-events">Lash API guide</a> covers the full event taxonomy.</p></article>
-            <article class="panel"><h3>Host tools</h3><p>Implement <code>ToolProvider</code>, hand it to <code>.tools(Arc::new(MyTools))</code> on the builder. See the <a href="./plugins.html">Plugins guide</a>.</p></article>
-            <article class="panel"><h3>Persistence</h3><p>Pass a <code>SessionStoreFactory</code> to <code>.store_factory(...)</code> so sessions survive process restarts. See the <a href="./persistence.html">Persistence guide</a>.</p></article>
-            <article class="panel"><h3>Tracing</h3><p>Attach a <code>TraceSink</code> via <code>.trace_sink(Some(Arc::new(sink)))</code> for JSONL traces of every turn. See the <a href="./tracing.html">Tracing guide</a>.</p></article>
-            <article class="panel"><h3>RLM mode</h3><p>Install <code>ModePreset::rlm()</code> for Lashlang-driven agentic turns with structured submit/handoff semantics. See <a href="./embedding.html#rlm-and-submit">RLM And Submit</a>.</p></article>
-            <article class="panel"><h3>MCP servers</h3><p>Wire up MCP via <code>McpPluginFactory::new(servers).await?</code> and pass it to <code>.plugin(...)</code>. See the <a href="./embedding.html#mcp-servers">MCP Servers</a> section in the Lash API guide.</p></article>
-          </div>
-        </div>
-
-        <div class="section-nav">
-          <span></span>
-          <a href="./embedding.html"><span>Next</span><strong>Lash API</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Source anchors: <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-providers-builtin/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>.</footer>
+      <p>That's the whole flow: <code>LashCore</code> for shared configuration, <code>LashSession</code> for one logical conversation, <code>TurnBuilder::run()</code> for a single collected turn. Nothing more is required.</p>
     </div>
-  </main>
+  </section>
+
+  <section class="stanza">
+    <div class="stanza__rail">
+      <div class="knot">
+        <span class="knot__bead" aria-hidden="true"></span>
+        <p class="knot__id">§ 04</p>
+        <p class="knot__name">what comes next</p>
+      </div>
+    </div>
+    <div class="stanza__body">
+      <h2 class="stanza__title" data-id="§ 04 · what comes next">what's not here yet</h2>
+      <p class="stanza__lede">The example above has no persistence, no host tools, only the default runtime plugin stack, no tracing, and no live streaming. Each is a small additional step — pick what you need and read on.</p>
+      <div class="listing">
+        <div class="listing__row">
+          <div class="listing__label">live streaming</div>
+          <div class="listing__body">
+            <p>Use <code>TurnBuilder::stream(&amp;sink)</code> instead of <code>run()</code> to emit <code>TurnActivity</code> items as the model produces them. The <a href="./embedding-turns.html#semantic-events">Lash API · turns guide</a> covers the full event taxonomy.</p>
+          </div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">host tools</div>
+          <div class="listing__body">
+            <p>Implement <code>ToolProvider</code>, hand it to <code>.tools(Arc::new(MyTools))</code> on the builder. See the <a href="./plugins.html">Plugins guide</a>.</p>
+          </div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">persistence</div>
+          <div class="listing__body">
+            <p>Pass a <code>SessionStoreFactory</code> to <code>.store_factory(...)</code> so sessions survive process restarts. See the <a href="./persistence.html">Persistence guide</a>.</p>
+          </div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">tracing</div>
+          <div class="listing__body">
+            <p>Attach a <code>TraceSink</code> via <code>.trace_sink(Some(Arc::new(sink)))</code> for JSONL traces of every turn. See the <a href="./tracing.html">Tracing guide</a>.</p>
+          </div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">rlm mode</div>
+          <div class="listing__body">
+            <p>Install <code>ModePreset::rlm()</code> for Lashlang-driven agentic turns with structured submit / handoff semantics. See <a href="./embedding-turns.html#rlm-and-submit">RLM and Submit</a>.</p>
+          </div>
+        </div>
+        <div class="listing__row">
+          <div class="listing__label">mcp servers</div>
+          <div class="listing__body">
+            <p>Wire up MCP via <code>McpPluginFactory::new(servers).await?</code> and pass it to <code>.plugin(...)</code>. See <a href="./embedding-advanced.html#mcp-servers">MCP Servers</a> in the Lash API guide.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<section class="pager" aria-label="next chapter">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <span></span>
+    <a class="pager__next" href="./embedding.html">
+      <span>next &middot; § 02</span>
+      <strong>lash api</strong>
+      <span class="arrow" aria-hidden="true">→</span>
+    </a>
+  </div>
+</section>
+
 </body>
 </html>

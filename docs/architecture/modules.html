@@ -3,50 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Modules - lash Architecture</title>
+<title>modules - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../mermaid.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Modules</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a class="active" href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 02</div>
-        <h1>modules<span class="slash">/</span>crates</h1>
-        <p>The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">modules<span class="slash">/</span>crates</h1>
+    <p class="opener__lede">The workspace is split by responsibility: pure protocol, async runtime, mode drivers, provider transports, plugin/tool surfaces, host UI, trace/export utilities, and benchmark runners.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>Crate Families</h2>
             <p>The high-value ownership groups to inspect before changing behavior.</p>
@@ -112,15 +86,14 @@ flowchart TD
             </div>
           </div>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <a href="./overview.html"><span>Previous</span><strong>Overview</strong></a>
-          <a href="./flow.html"><span>Next</span><strong>Data Flow</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Module map based on current workspace members in <code>Cargo.toml</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./overview.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>overview</strong></a>
+    <a class="pager__next" href="./flow.html"><span>next</span><strong>data flow</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

@@ -3,53 +3,27 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Execution - lash Architecture</title>
+<title>execution - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../mermaid.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Execution</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a class="active" href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 04</div>
-        <h1>execution<span class="slash">/</span>runtime</h1>
-        <p>Execution starts in the CLI bootstrap path, then branches into interactive TUI or autonomous <code>--print</code>. Inside a turn, the active mode decides whether model output becomes native tool calls or Lashlang code execution.</p>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">execution<span class="slash">/</span>runtime</h1>
+    <p class="opener__lede">Execution starts in the CLI bootstrap path, then branches into interactive TUI or autonomous <code>--print</code>. Inside a turn, the active mode decides whether model output becomes native tool calls or Lashlang code execution.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>CLI Startup</h2>
-            <p>The CLI resolves durable session state and runtime composition before entering the terminal UI or single-shot autonomous runner. App hosts use the app-facing <code>lash</code> facade (<code>LashCore</code>, <code>LashSession</code>, <code>TurnBuilder</code>) and never go through <code>bootstrap::run</code>.</p>
+            <p>The CLI resolves durable session state and runtime composition before entering the TUI or <code>--print</code> runner. App hosts use the <code>lash</code> facade and never enter <code>bootstrap::run</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Command execution path</div>
@@ -74,20 +48,19 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Mode Execution</h2>
-            <p>Modes contribute protocol drivers and preambles. The runtime loop does not need provider-specific branches to understand Standard versus RLM behavior.</p>
+            <p>Two <code>ModePreset</code>s: <code>standard()</code> and <code>rlm()</code>. Each contributes a protocol driver and preamble. Background work and handoffs are cross-cutting outcomes either mode can coordinate.</p>
           </div>
-          <div class="mode-grid">
-            <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p><code>StandardDriver::handle_llm_success</code> interprets provider output. Tool calls become <code>StartTools</code>, then <code>RuntimeTurnDriver::run_tool_calls</code> dispatches native mode tools first and then registered <code>ToolProvider</code>s.</p></article>
-            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p><code>RlmDriver</code> extracts a closed <code>lashlang</code> fence, starts <code>ExecCode</code>, and the RLM executor runs the program through <code>RlmExecutionState</code> against a <code>HostBridge</code>. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope via <code>ProjectedBindings</code>. <code>continue_as</code> is a mode-owned control tool; <code>llm_query</code> is supplied by <code>lash-llm-tools</code>; the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution is complete.</p></article>
-            <article class="panel"><small>background</small><h3>Subagents and monitors</h3><p>Subagents, monitor tasks, and async tool calls share handle-shaped background work. RLM discovers live handles with <code>list_async_handles</code> and resolves them with <code>await</code>.</p></article>
-            <article class="panel"><small>handoff</small><h3>continue_as successors</h3><p>An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::Handoff { session_id }</code>; <code>continue_as</code> and <code>spawn_agent</code> decode their payload into <code>RlmCreateExtras</code> (in <code>lash-rlm-types</code>), and the successor session is created with <code>SessionRelation::Handoff</code> so the runtime can carry parent ids, turn index, and trace continuity. App hosts normally call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows handoffs and returns the final <code>TurnResult</code>.</p></article>
+          <div class="two-col">
+            <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>Standard mode interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches mode-native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>RLM mode extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope via <code>ProjectedBindings</code> — they read like ordinary names but cannot be reassigned. <code>continue_as</code> is a mode-owned control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::Handoff { session_id }</code> and the successor session is created with <code>SessionRelation::Handoff</code> so the runtime can carry parent ids, turn index, and trace continuity. App hosts call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows handoffs and returns the final <code>TurnResult</code>.</p></article>
           </div>
+          <p>Background work — subagents, monitor tasks, and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either mode can spawn handles; RLM additionally discovers live handles via <code>list_async_handles</code> and resolves them with <code>await</code>.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Lash API</h2>
-            <p><code>lash</code> is the higher-level app-facing API used by the examples. It hides CLI bootstrap details and <code>lash-core</code> runtime plumbing while leaving providers, app persistence, HTTP protocols, auth, and frontend streaming under the host application's ownership.</p>
+            <p>The app-facing facade. Hides CLI bootstrap and runtime plumbing; leaves persistence, HTTP, auth, and frontend streaming to the host.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">App-facing lash facade</div>
@@ -106,17 +79,17 @@ flowchart LR
           </div>
           <dl class="def-list">
             <dt><code>LashCore</code></dt>
-            <dd>Cloneable shared core that owns the runtime environment, default session policy, installed mode presets, optional store factory, tool providers, plugin factories, attachment store, and trace sink. Residency and termination policy are advanced runtime-host settings.</dd>
+            <dd>Cloneable shared core: runtime env, default session policy, mode presets, store factory, tool providers, plugin factories, attachment store, trace sink. Residency and termination policy live in <code>.advanced()</code>.</dd>
             <dt><code>ModePreset</code></dt>
-            <dd>Installs semantic modes such as <code>ModePreset::standard()</code> and <code>ModePreset::rlm()</code>. Hosts can install both and choose a default with <code>default_mode</code>, then override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
+            <dd><code>standard()</code>, <code>rlm()</code>, <code>rlm_with_config(...)</code>. Install multiple and pick a default with <code>default_mode</code>; override per session with <code>.standard()</code>, <code>.rlm()</code>, or <code>.mode(...)</code>.</dd>
             <dt><code>LashSession</code></dt>
-            <dd>Represents one app conversation. It wraps the parked/resumable runtime handle, exposes <code>run(TurnInput)</code>, <code>turn(TurnInput)</code>, <code>read_view()</code>, and lower-level control groups through <code>control()</code>, and can carry a parent session id for app-level parent/child relationships.</dd>
+            <dd>One conversation. Parked/resumable handle exposing <code>run(...)</code>, <code>turn(...)</code>, <code>read_view()</code>, and <code>control()</code>. Carries an optional parent session id.</dd>
             <dt><code>TurnBuilder</code></dt>
-            <dd>Lets apps attach a cancellation token, per-turn mode options, plugin turn input, and RLM-projected bindings before running. <code>.stream(&amp;sink)</code> drives the turn against a <code>TurnActivitySink</code> and returns a rich <code>TurnResult</code> with state, outcome, assistant output, usage, tool calls, execution summary, and errors; <code>.run()</code> returns a <code>TurnOutput</code> with the terminal result and ordered turn activities.</dd>
+            <dd>Per-turn config: cancellation token, mode options, plugin input, RLM bindings. <code>.stream(&amp;sink)</code> drives against a <code>TurnActivitySink</code>; <code>.run()</code> returns a <code>TurnOutput</code> with terminal result and ordered activities.</dd>
             <dt><code>TurnInput</code></dt>
-            <dd>Core input is text plus image references. Hosts resolve UI syntax such as <code>@path</code> before constructing the turn, either as text markers or as future host-owned attachments.</dd>
+            <dd>Text plus image refs. Hosts resolve UI syntax like <code>@path</code> before constructing the turn.</dd>
             <dt><code>TurnActivity</code></dt>
-            <dd>Normal app streams are semantic activity records with stable ids and correlation ids. Session-level raw event streams are runtime internals and tracing inputs, not <code>lash</code> API UI contracts.</dd>
+            <dd>Semantic activity records with stable ids and correlation ids. Raw session events are runtime/tracing internals.</dd>
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
@@ -131,15 +104,15 @@ let result = session
     .stream(&events)
     .await?;</code></pre>
           <div class="two-col">
-            <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code> opens a <code>LashSession</code> from the chat id and store for each request, records projected <code>TurnEvent</code>s through a <code>TurnActivitySink</code>, and wires an app database, a <code>SessionStoreFactory</code>, Axum routes, and browser streaming. The app-facing walkthrough lives in <a href="../embedding.html">Lash API</a>.</p></article>
-            <article class="panel"><h3>Boundary rule</h3><p>The <code>lash</code> API is intentionally above raw runtime internals but below an app framework. The facade should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP and frontend protocols.</p></article>
+            <article class="panel"><h3>Example shape</h3><p><code>examples/agent-service</code>: opens a session per chat id, records <code>TurnEvent</code>s through a sink, wires app DB + <code>SessionStoreFactory</code> + Axum + browser streaming. Walkthrough: <a href="../embedding.html">Lash API</a>.</p></article>
+            <article class="panel"><h3>Boundary rule</h3><p>Above runtime internals, below an app framework. The facade should not import CLI/TUI vocabulary, own product chat storage, or dictate HTTP/frontend protocols.</p></article>
           </div>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Background Work</h2>
-            <p>Subagents are sessions, not special messages. Monitors are background tasks that wake future turns from stdout lines. Generic async tool calls are tracked inside the session.</p>
+            <p>Subagents are sessions. Monitors are background tasks that wake future turns from stdout lines. Async tool calls are tracked inside the session.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Subagent and monitor path</div>
@@ -161,22 +134,21 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Host Rendering</h2>
-            <p>The terminal receives live stream events for previews and completed authoritative read views for settled output.</p>
+            <p>Live events drive previews; settled output comes from the authoritative read view.</p>
           </div>
           <div class="two-col">
             <article class="panel"><h3>Interactive TUI</h3><p><code>run_app</code> drives event handling. Completed turns reconcile with <code>finish_turn_from_read_view</code>: live markdown lanes are cleared, then the current turn is replaced from <code>SessionReadView</code>. The CLI does not consume a final assistant-message stream event.</p></article>
             <article class="panel"><h3>Export and trace</h3><p><code>lash-export</code> reads store state plus the full provider trace JSONL when available, then renders chronological projections, prompt snapshots, context percentages, cached-token percentages, and usage bars. <code>lash-trace-viewer</code> reads JSONL traces and displays timeline, LLM calls, stream events, and raw records.</p></article>
           </div>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <a href="./flow.html"><span>Previous</span><strong>Data Flow</strong></a>
-          <a href="./runtime.html"><span>Next</span><strong>Runtime</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Execution anchors: <code>crates/lash-cli/src/main.rs</code>, <code>bootstrap.rs</code>, <code>crates/lash-mode-standard/src/lib.rs</code>, <code>crates/lash-mode-rlm/src/*</code>, <code>crates/lash-subagents/src/*</code>, <code>crates/lash-llm-tools/src/lib.rs</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./flow.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>data flow</strong></a>
+    <a class="pager__next" href="./runtime.html"><span>next</span><strong>runtime</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

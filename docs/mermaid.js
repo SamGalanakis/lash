@@ -1,85 +1,132 @@
 // Conditional Mermaid loader — only fetches the library when the page
 // actually has .mermaid blocks. Saves ~2 MB on diagram-free pages.
-// Also wires up click-to-fullscreen with pan/zoom on every .diagram once
-// mermaid renders.
+// Theme variables are sampled from live CSS custom properties so a
+// runtime theme toggle (data-theme on <html>) re-renders the diagrams
+// against the active palette. Click-to-fullscreen with pan/zoom is
+// wired up on every .diagram after the first render.
 (function () {
+  let _mermaid = null;
+  // first-time-load promise; init() awaits it before each render
+  let _loadPromise = null;
+
+  function themeVarsFromCSS() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (k) => cs.getPropertyValue(k).trim();
+    const bg     = v("--bg")        || "#1b1a17";
+    const elev   = v("--bg-elev")   || "#1b1a17";
+    const faint  = v("--bg-faint")  || "#201d18";
+    const tint   = v("--bg-tint")   || "#2b2722";
+    const ink    = v("--ink")       || "#e8e4d0";
+    const inkMid = v("--ink-mid")   || "#c0bca8";
+    const inkDim = v("--ink-dim")   || "#a09e91";
+    const rule   = v("--rule")      || "#2b2925";
+    const ruleS  = v("--rule-strong") || "#5a5a50";
+    const sodium = v("--sodium")    || "#e8a33c";
+    return {
+      background:           bg,
+      primaryColor:         elev,
+      primaryTextColor:     ink,
+      primaryBorderColor:   sodium,
+      secondaryColor:       faint,
+      tertiaryColor:        tint,
+      lineColor:            inkDim,
+      textColor:            ink,
+      mainBkg:              elev,
+      nodeBorder:           sodium,
+      clusterBkg:           tint,
+      clusterBorder:        ruleS,
+      edgeLabelBackground:  bg,
+      titleColor:           ink,
+      // Chivo Mono is the docs' label face — use it inside diagrams
+      // so they read as the same family of artefacts. NEVER Inter.
+      fontFamily:           '"Chivo Mono", ui-monospace, monospace',
+      // sequence-diagram extras
+      actorBorder:          sodium,
+      actorBkg:             elev,
+      actorTextColor:       ink,
+      signalColor:          inkMid,
+      signalTextColor:      ink,
+      labelBoxBkgColor:     elev,
+      labelBoxBorderColor:  ruleS,
+      labelTextColor:       ink,
+      noteBkgColor:         tint,
+      noteBorderColor:      ruleS,
+      noteTextColor:        ink,
+    };
+  }
+
+  // Snapshot a diagram's source the first time we see it; we use this
+  // when re-rendering after a theme change.
+  function snapshotSources() {
+    document.querySelectorAll(".mermaid:not([data-mermaid-source])").forEach((el) => {
+      el.dataset.mermaidSource = el.textContent;
+    });
+  }
+
+  // Reset already-rendered diagrams back to their source text so the
+  // next mermaid.run() actually re-draws them against the new palette.
+  function resetForRerender() {
+    document.querySelectorAll(".mermaid[data-processed='true']").forEach((el) => {
+      const src = el.dataset.mermaidSource;
+      if (typeof src === "string") {
+        el.textContent = src;
+        el.removeAttribute("data-processed");
+        // mermaid stamps a fresh id each run; clear it so the next run
+        // doesn't collide with its own previous output
+        el.removeAttribute("id");
+      }
+    });
+  }
+
+  function ensureLoaded() {
+    if (_mermaid) return Promise.resolve(_mermaid);
+    if (_loadPromise) return _loadPromise;
+    const url = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    _loadPromise = import(url).then(({ default: m }) => {
+      _mermaid = m;
+      // expose so docs.js can also trigger re-renders after SPA swaps
+      window.__lashMermaid = m;
+      return m;
+    });
+    return _loadPromise;
+  }
+
   function init() {
     if (!document.querySelector(".mermaid")) return;
-
-    const LIGHT = {
-      background: "#ffffff",
-      primaryColor: "#ffffff",
-      primaryTextColor: "#1d1c19",
-      primaryBorderColor: "#cfcabd",
-      lineColor: "#7a7872",
-      secondaryColor: "#fafaf7",
-      tertiaryColor: "#f3f1ec",
-      clusterBkg: "#fafaf7",
-      clusterBorder: "#cfcabd",
-      edgeLabelBackground: "#ffffff",
-      textColor: "#1d1c19",
-      fontFamily: "Inter, system-ui, sans-serif",
-      actorBorder: "#c97a1f",
-      actorBkg: "#ffffff",
-      actorTextColor: "#1d1c19",
-      signalColor: "#4c4a45",
-      signalTextColor: "#1d1c19",
-      labelBoxBkgColor: "#fafaf7",
-      labelBoxBorderColor: "#cfcabd",
-      labelTextColor: "#1d1c19",
-      noteBkgColor: "#f6ebd8",
-      noteBorderColor: "#cfcabd",
-      noteTextColor: "#1d1c19",
-    };
-    const DARK = {
-      background: "#1b1a17",
-      primaryColor: "#1b1a17",
-      primaryTextColor: "#e8e4d0",
-      primaryBorderColor: "#5a5a50",
-      lineColor: "#8a8678",
-      secondaryColor: "#141412",
-      tertiaryColor: "#201d18",
-      clusterBkg: "#141412",
-      clusterBorder: "#5a5a50",
-      edgeLabelBackground: "#1b1a17",
-      textColor: "#e8e4d0",
-      fontFamily: "Inter, system-ui, sans-serif",
-      actorBorder: "#e8a33c",
-      actorBkg: "#1b1a17",
-      actorTextColor: "#e8e4d0",
-      signalColor: "#c0bca8",
-      signalTextColor: "#e8e4d0",
-      labelBoxBkgColor: "#141412",
-      labelBoxBorderColor: "#5a5a50",
-      labelTextColor: "#e8e4d0",
-      noteBkgColor: "#2b2218",
-      noteBorderColor: "#5a5a50",
-      noteTextColor: "#e8e4d0",
-    };
-    function activeTheme() {
-      const explicit = document.documentElement.getAttribute("data-theme");
-      if (explicit === "dark") return DARK;
-      if (explicit === "light") return LIGHT;
-      return window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? DARK
-        : LIGHT;
-    }
-
-    const url = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-    import(url)
-      .then(({ default: mermaid }) => {
-        mermaid.initialize({
+    snapshotSources();
+    ensureLoaded()
+      .then((m) => {
+        m.initialize({
           startOnLoad: false,
           theme: "base",
           securityLevel: "loose",
-          themeVariables: activeTheme(),
+          themeVariables: themeVarsFromCSS(),
         });
-        return mermaid.run({ querySelector: ".mermaid" });
+        resetForRerender();
+        return m.run({ querySelector: ".mermaid:not([data-processed='true'])" });
       })
       .then(setupZoom)
       .catch((err) => {
+        // surface to console, but don't break the page
         console.error("Mermaid load failed:", err);
       });
+  }
+
+  // Public re-render entry: idempotent, safe to call repeatedly. Used
+  // by the theme toggle and by docs.js after SPA content swaps.
+  function rerender() {
+    if (!document.querySelector(".mermaid")) return;
+    init();
+  }
+  window.__lashMermaidRerender = rerender;
+
+  // Watch <html data-theme> for changes — re-render whenever it flips.
+  function watchTheme() {
+    const obs = new MutationObserver(() => rerender());
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
   }
 
   function setupZoom() {
@@ -153,13 +200,11 @@
       zoomAt(factor, rect.width / 2, rect.height / 2);
     };
 
-    // Header buttons
     dlg.querySelector("[data-action='zoom-in']").addEventListener("click", () => zoomFromCenter(1.25));
     dlg.querySelector("[data-action='zoom-out']").addEventListener("click", () => zoomFromCenter(1 / 1.25));
     dlg.querySelector("[data-action='reset']").addEventListener("click", reset);
     dlg.querySelector("[data-action='close']").addEventListener("click", () => dlg.close());
 
-    // Wheel zoom around cursor
     body.addEventListener(
       "wheel",
       (e) => {
@@ -173,10 +218,8 @@
       { passive: false }
     );
 
-    // Drag to pan
     let drag = null;
     body.addEventListener("mousedown", (e) => {
-      // ignore right-click
       if (e.button !== 0) return;
       drag = { x: e.clientX - view.tx, y: e.clientY - view.ty };
       body.classList.add("is-panning");
@@ -192,12 +235,10 @@
       body.classList.remove("is-panning");
     });
 
-    // Click backdrop closes (but not when dragging)
     dlg.addEventListener("click", (e) => {
       if (e.target === dlg && !drag) dlg.close();
     });
 
-    // Keyboard: + / − / 0 to reset
     dlg.addEventListener("keydown", (e) => {
       if (e.key === "+" || e.key === "=") {
         e.preventDefault();
@@ -211,7 +252,6 @@
       }
     });
 
-    // Expose helpers on the dialog for openDialog
     dlg._diagramReset = reset;
 
     document.body.appendChild(dlg);
@@ -224,11 +264,8 @@
     dlg.querySelector(".diagram-modal__title").textContent = titleText;
     const stage = dlg.querySelector(".diagram-modal__stage");
 
-    // Reset pan/zoom for the new diagram
     dlg._diagramReset();
 
-    // Move the original SVG into the stage (avoids cross-document ID collisions on
-    // mermaid's internal markers/gradients), restore on close.
     stage.innerHTML = "";
     const svg = diagramEl.querySelector(".mermaid svg");
     if (svg) {
@@ -268,9 +305,13 @@
     dlg.showModal();
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
-  } else {
+  function boot() {
     init();
+    watchTheme();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
   }
 })();
