@@ -3,50 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Providers - lash Architecture</title>
+<title>providers - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../mermaid.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Providers</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a class="active" href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 10</div>
-        <h1>providers<span class="slash">/</span>transports</h1>
-        <p>Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate owns the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">providers<span class="slash">/</span>transports</h1>
+    <p class="opener__lede">Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate owns the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>Provider Boundary</h2>
             <p>The runtime hands every turn's <code>LlmRequest</code> to whichever <code>ProviderHandle</code> the session was opened with and expects back a normalized <code>LlmResponse</code> stream. Anything wire-specific stays inside the provider crate.</p>
@@ -155,15 +128,14 @@
           </div>
           <p>See <code>crates/lash-provider-openai/src/lib.rs</code> as the most general template — it handles both the direct Responses path and the generic Chat Completions path in one crate.</p>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <a href="./html-exporter.html"><span>Previous</span><strong>09 · HTML Exporter</strong></a>
-          <a href="./index.html"><span>Next</span><strong>Index</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Provider anchors: <code>crates/lash-core/src/provider/mod.rs</code>, <code>crates/lash-provider-openai/src</code>, <code>crates/lash-provider-anthropic/src</code>, <code>crates/lash-provider-codex/src</code>, <code>crates/lash-provider-google/src</code>, <code>crates/lash-providers-builtin/src/lib.rs</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./html-exporter.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>09 · html exporter</strong></a>
+    <a class="pager__next" href="./index.html"><span>next</span><strong>index</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

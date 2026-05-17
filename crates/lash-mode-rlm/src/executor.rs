@@ -169,7 +169,7 @@ async fn execute_code_inner(
                 tool_calls: Vec::new(),
                 images: Vec::new(),
                 printed_images: Vec::new(),
-                error: Some(format_parse_error(code, &err)),
+                error: Some(lashlang::format_parse_diagnostic(code, &err)),
                 duration_ms: start.elapsed().as_millis() as u64,
                 terminal_finish: None,
             };
@@ -884,47 +884,6 @@ async fn format_output_value(value: &FlowValue) -> String {
     }
 }
 
-fn format_parse_error(source: &str, err: &lashlang::ParseError) -> String {
-    let offset = err.offset();
-    let (line_no, column, line_text) = line_context(source, offset);
-    let caret_pad = " ".repeat(column.saturating_sub(1));
-    let mut message = format!("line {line_no}, column {column}: {err}\n{line_text}\n{caret_pad}^");
-    if matches!(
-        err,
-        lashlang::ParseError::Unexpected { found, .. } if found == "`if`"
-    ) {
-        message.push_str("\nhint: use `cond ? yes : no` for inline conditionals");
-    }
-    if matches!(
-        err,
-        lashlang::ParseError::Unexpected { found, .. } if found == "`for`"
-    ) {
-        message.push_str("\nhint: `for` is a statement. Put it on its own line, not inside an expression or record literal.");
-    }
-    message
-}
-
-fn line_context(source: &str, offset: usize) -> (usize, usize, String) {
-    let mut line_no = 1usize;
-    let mut line_start = 0usize;
-    for (idx, ch) in source.char_indices() {
-        if idx >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line_no += 1;
-            line_start = idx + 1;
-        }
-    }
-    let line_end = source[line_start..]
-        .find('\n')
-        .map(|rel| line_start + rel)
-        .unwrap_or(source.len());
-    let line_text = source[line_start..line_end].to_string();
-    let column = source[line_start..offset.min(source.len())].chars().count() + 1;
-    (line_no, column, line_text)
-}
-
 fn collect_files(root: &Path) -> std::io::Result<HashMap<String, String>> {
     let mut files = HashMap::new();
     walk_dir(root, root, &mut files)?;
@@ -1345,13 +1304,15 @@ while len(final_ids) < 100 && pool_i < len(candidate_pools) {
             Err(err) => err,
         };
 
-        let message = format_parse_error(source, &err);
+        let message = lashlang::format_parse_diagnostic(source, &err);
+        assert!(message.contains("unsupported `while` loop"), "{message}");
+        assert!(message.contains("--> line 2, column 1"), "{message}");
         assert!(
-            message.contains("line 2, column 1: unsupported `while` loop"),
+            message.contains("use bounded `for` loops over ranges or lists"),
             "{message}"
         );
         assert!(
-            message.contains("use bounded `for` loops over ranges/lists"),
+            message.contains("hint: use bounded `for` loops over ranges or lists"),
             "{message}"
         );
         assert!(message.contains("while len(final_ids) < 100"), "{message}");

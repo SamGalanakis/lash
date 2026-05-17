@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lashlang · runtime - lash architecture</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
+<script src="../theme.js"></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
+</head>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lashlang<span class="slash">/</span>runtime</h1>
+    <p class="opener__lede">The RLM execution path, image handling, VM internals, and the file map for staying synchronized when changing the language.</p>
+  </section>
+
+  <main class="body" id="content">
+<div class="section" id="rlm-execution-path">
+          <div class="section-header">
+            <h2>RLM Execution Path</h2>
+            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> in scope, and the resulting trajectory is persisted as mode events. A block ending with <code>continue_as</code> finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">RLM and Lashlang execution</div>
+            <div class="mermaid">
+sequenceDiagram
+  participant Model as LLM
+  participant Driver as RlmDriver
+  participant Runtime as RuntimeTurnDriver
+  participant Executor as RlmExecutionState
+  participant Host as HostBridge / ModeExecutionContext
+  participant Commit as TurnCommitPipeline
+
+  Model-->>Driver: prose + ```lashlang fence
+  Driver-->>Runtime: DriverAction::StartExec(code)
+  Runtime->>Executor: execute_code(code, ProjectedBindings)
+  Executor->>Host: call / start / await / cancel tool
+  Host-->>Executor: ToolResult / handle / error
+  Executor-->>Runtime: ExecResponse + observations + images
+  Runtime->>Commit: records tool calls + RLM trajectory in turn events
+  Runtime-->>Driver: Response::ExecResult or TurnOutcome::Handoff (continue_as)
+            </div>
+          </div>
+          <p>An end-to-end fanout-and-merge program. It enumerates candidate files, kicks off per-file analyses in parallel, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a successor when the budget would be exceeded.</p>
+          <pre><code>```lashlang
+paths = (call glob { pattern: "crates/lash/src/**/*.rs" })?
+if empty(paths) {
+  submit { reviewed: 0, by_owner: {} }
+}
+
+// Fan out: one subagent per file, capped at the first eight to keep
+// the parallel batch small.
+batch = slice(paths, null, 8)
+handles = {}
+for path in batch {
+  handles[path] = start call spawn_agent {
+    agent_name: format("review:{}", path),
+    task: format("review {} for TODOs and panics", path),
+    capability: "explore",
+    output: Type { owner: str, todos: int, panics: int }
+  }
+}
+
+// Resolve the whole record concurrently, then collapse into a histogram.
+resolved = await handles
+by_owner = {}
+errors = []
+for path in keys(resolved) {
+  wrapper = resolved[path]
+  if !wrapper.ok {
+    errors = push(errors, { path: path, error: wrapper.error })
+    continue
+  }
+  report = wrapper.value
+  current = by_owner[report.owner]
+  by_owner[report.owner] = {
+    todos: (current == null ? 0 : current.todos) + report.todos,
+    panics: (current == null ? 0 : current.panics) + report.panics
+  }
+}
+
+// Hand off the rest if we only got through a slice; otherwise submit.
+if len(paths) > len(batch) {
+  call continue_as {
+    task: "continue the review over the remaining files",
+    seed: { remaining: slice(paths, 8, null), by_owner: by_owner, errors: errors }
+  }
+}
+submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
+```</code></pre>
+        </div>
+
+        <div class="section" id="images-and-attachments">
+          <div class="section-header">
+            <h2>Images And Attachments</h2>
+            <p>Image support is a first-class runtime feature, not a plain record convention.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>print(image)</code></dt>
+            <dd>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</dd>
+            <dt><code>submit(image)</code></dt>
+            <dd>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="runtime-internals">
+          <div class="section-header">
+            <h2>Runtime Internals</h2>
+            <p>The implementation compiles AST to a compact VM instruction stream, then executes async host effects without blocking the RLM runtime.</p>
+          </div>
+          <ol class="principle-list">
+            <li>
+              <div>
+                <h3>Parser</h3>
+                <p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds <code>Program</code>, <code>Stmt</code>, <code>Expr</code>, assignment targets, parallel branches, and type expressions.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Compiler</h3>
+                <p><code>runtime/compiler.rs</code> lowers the AST into a <code>Chunk</code> of <code>Instruction</code>s (defined in <code>runtime/instruction.rs</code>), folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and optimized parallel call sets. <code>cache.rs</code> reuses compiled programs across fenced blocks via an LRU.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>VM</h3>
+                <p><code>runtime/vm.rs</code> walks the compiled <code>Chunk</code>, stores globals in <code>state.rs</code>'s <code>State</code>, records assignment conflicts inside parallel branches, calls host effects through <code>host.rs</code>'s <code>ToolHost</code>, and consults the <code>ProjectedBindings</code> defined in <code>value.rs</code> for any name not present in <code>State</code>. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment; <code>format.rs</code> and <code>json.rs</code> own <code>format(...)</code> and <code>json_parse</code>/serialization helpers. <code>entry_points.rs</code> wires the public <code>compile_source</code> / <code>execute_compiled*</code> / <code>profile_compiled*</code> surface re-exported from the crate root.</p>
+              </div>
+            </li>
+            <li>
+              <div>
+                <h3>Profiling</h3>
+                <p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> (in <code>examples/bench_support/mod.rs</code>) cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="section" id="important-files">
+          <div class="section-header">
+            <h2>Important Files</h2>
+            <p>Keep prompt reference, parser/runtime behavior, tests, and docs synchronized when changing the language.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Path</th><th>Role</th></tr></thead>
+              <tbody>
+                <tr><td><code>crates/lashlang/src/lexer.rs</code></td><td>Tokens, including raw triple-single-quote strings used for embedded code and heredoc-like content.</td></tr>
+                <tr><td><code>crates/lashlang/src/ast.rs</code></td><td>AST node types (<code>Program</code>, <code>Stmt</code>, <code>Expr</code>, <code>AssignTarget</code>, <code>ParallelBranches</code>, <code>TypeExpr</code>, …) shared by the parser and compiler.</td></tr>
+                <tr><td><code>crates/lashlang/src/parser.rs</code></td><td>AST construction for expressions, statements, type literals, calls, async, and control flow.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/mod.rs</code></td><td>Cross-cutting runtime types (<code>RuntimeError</code>, <code>RuntimeFailure</code>, <code>ExecutionScratch</code>, <code>ExecutionOutcome</code>, <code>CompiledProgram</code>, <code>ProfileReport</code>, <code>CompileStats</code>) and the <code>pub use</code> wiring that re-exports each focused submodule.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/compiler.rs</code></td><td>AST → bytecode <code>Chunk</code> lowering, type-literal const-folding, parallel-call optimization, builtin specialization.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/instruction.rs</code></td><td><code>Instruction</code> opcode enum and supporting types (<code>ParallelCallBranch</code>, profile tags, loop ops).</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/vm.rs</code></td><td>Bytecode executor — walks instructions, materializes intermediate values, dispatches to <code>ToolHost</code>, emits trace/profile data.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/value.rs</code></td><td><code>Value</code>, <code>ListValue</code>, <code>ImageValue</code>, <code>LASH_TYPE_KEY</code>, and the <code>ProjectedBindings</code> / <code>ProjectedValue</code> / <code>ProjectedHostValue</code> / <code>ProjectedRead*</code> seam.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and <code>Snapshot</code>/restore (including projected snapshot tagging).</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/host.rs</code></td><td><code>ToolHost</code>, <code>ToolHostCall</code>, and <code>ToolHostError</code> contracts plus the default <code>call_batch</code>/<code>start_call</code>/<code>await_handle</code>/<code>cancel_handle</code>/<code>print</code>/<code>yield_now</code> impls.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/cache.rs</code></td><td><code>CompiledProgramCache</code> with LRU stats for fenced-block reuse.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/record.rs</code></td><td>Record value form, ordered keys, interned symbols, and shared structural helpers.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/schema.rs</code></td><td>Runtime schema validation and Lash type descriptor support (<code>ValidationPlan</code>, <code>execute_validate_builtin</code>).</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/access.rs</code></td><td>Field/index read and path-assignment helpers.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/ops.rs</code></td><td>Value coercions, comparison/arithmetic, and most builtin function bodies.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/format.rs</code></td><td><code>format(...)</code> template engine and compiled-format fast paths.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/json.rs</code></td><td><code>json_parse</code>, JSON serialization, and round-trip helpers shared by snapshots and tool args.</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/entry_points.rs</code></td><td>Top-level <code>compile_source</code> / <code>execute_compiled*</code> / <code>profile_compiled*</code> / <code>prewarm</code> entry points re-exported from the crate root.</td></tr>
+                <tr><td><code>crates/lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, language reference shown to the model, and the <code>first_lashlang_fence_span</code> / <code>extract_first_lashlang_fence</code> extractors.</td></tr>
+                <tr><td><code>crates/lash-mode-rlm/src/executor.rs</code></td><td>Bridge between Lashlang tool calls and runtime tool execution, host-projected bindings (<code>history</code> and globals), snapshot/restore, and image conversion.</td></tr>
+                <tr><td><code>crates/lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
+                <tr><td><code>crates/lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling and benchmark entrypoints.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./lashlang-effects.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lashlang · effects</strong></a>
+    <a class="pager__next" href="./html-exporter.html"><span>next</span><strong>09 · html exporter</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

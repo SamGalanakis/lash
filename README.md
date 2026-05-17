@@ -4,7 +4,7 @@ A Rust runtime for durable LLM agents.
 
 Most agent stacks treat the LLM as the runtime and stitch state around it — a database for memory, a queue for retries, a sandbox for code. `lash` inverts that. The runtime is the durable end of the pair; the LLM is the variable call. Your app owns the outer boundaries — storage, auth, transport, product state. `lash` owns the turn — model calls, modes, tools, plugins, semantic stream events, usage, and terminal outcomes.
 
-**Docs**: <https://samgalanakis.github.io/lash/> — quickstart, embedding guide, plugins, persistence, durable workflow integration, architecture chapters.
+**Docs**: <https://lash.run/> — quickstart, embedding guide, plugins, persistence, durable workflow integration, architecture chapters.
 
 > **Alpha:** works today, API still moving fast — pin to a commit when you embed.
 
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-See [`docs/quickstart.html`](https://samgalanakis.github.io/lash/quickstart.html) for the full walkthrough, and [`docs/embedding.html`](https://samgalanakis.github.io/lash/embedding.html) for the complete facade API — session specs, plugin stacks, turn streaming, persistence, subagents, MCP wiring, and durable-workflow integration.
+See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walkthrough, and [`docs/embedding.html`](https://lash.run/embedding.html) for the complete facade API — session specs, plugin stacks, turn streaming, persistence, subagents, MCP wiring, and durable-workflow integration.
 
 ## Run the example
 
@@ -119,7 +119,7 @@ lash                           # interactive TUI
 lash -p "summarize this repo"  # single-shot, output to stdout
 ```
 
-CLI reference: [`docs/cli.html`](https://samgalanakis.github.io/lash/cli.html).
+CLI reference: [`docs/cli.html`](https://lash.run/cli.html).
 
 ## Development
 

@@ -1,112 +1,87 @@
-// docs/theme.js — light/dark theme toggle. Applies stored preference
-// before paint to avoid a flash, then injects a floating toggle.
-
+/* lash · docs · theme bootstrap + toggle
+   Runs BEFORE paint so there's no light/dark flash, then wires the
+   #theme-toggle button (if present) to flip the theme and re-run
+   the landscape generator (if loaded). */
 (function () {
-  const KEY = "lash-docs-theme";
-  const root = document.documentElement;
+  "use strict";
 
-  const get = () => {
-    try {
-      return localStorage.getItem(KEY);
-    } catch {
-      return null;
-    }
-  };
-  const set = (v) => {
-    try {
-      v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY);
-    } catch {}
-  };
+  // ── pre-paint init ──────────────────────────────────────
+  const KEY = "lash-theme";
+  const stored = (function () {
+    try { return localStorage.getItem(KEY); } catch (e) { return null; }
+  })();
+  const preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", stored || preferred);
 
-  // Apply theme to html element. Pass null to clear (= auto/system).
-  function apply(theme) {
-    if (theme === "light" || theme === "dark") {
-      root.setAttribute("data-theme", theme);
+  // ── visit marker ───────────────────────────────────────
+  // Tag the document so entrance animations (spine draw, TOC stagger)
+  // only play on first visit per session. After that, navigating
+  // between pages feels snappy instead of replaying every animation.
+  try {
+    const visited = sessionStorage.getItem("lash-visited");
+    if (visited) {
+      document.documentElement.classList.add("lash-revisit");
     } else {
-      root.removeAttribute("data-theme");
+      sessionStorage.setItem("lash-visited", "1");
     }
-  }
+  } catch (e) { /* private mode — let animations play */ }
 
-  // Resolve "current visible theme" — explicit override or system.
-  function effective() {
-    const stored = get();
-    if (stored === "light" || stored === "dark") return stored;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  }
+  // ── toggle wiring (runs after DOM is ready) ───────────────
+  function wire() {
+    const html       = document.documentElement;
+    const themeBtn   = document.getElementById("theme-toggle");
+    const themeGlyph = document.getElementById("theme-glyph");
+    const themeLabel = document.getElementById("theme-label");
+    if (!themeBtn) return;
 
-  // Apply stored preference immediately to prevent flash of wrong theme.
-  apply(get());
+    // sun and moon icons rendered inline as SVG — unicode glyphs
+    // (☀ ☾) don't carry across our font stack so they show as
+    // tofu boxes on some systems. Inline SVG always renders.
+    const SUN = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>';
+    const MOON = '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M11.8 10.4a5 5 0 1 1-6.2-7 5.3 5.3 0 0 0-.3 1.7 4.6 4.6 0 0 0 4.6 4.6c.7 0 1.3-.1 1.9-.4z"/></svg>';
 
-  function init() {
-    if (document.querySelector(".theme-toggle")) return; // already injected
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "theme-toggle";
-    btn.setAttribute("aria-label", "Toggle color theme");
-    btn.innerHTML =
-      '<span class="theme-toggle__icon" aria-hidden="true"></span>' +
-      '<span class="theme-toggle__label"></span>';
-
-    function refresh() {
-      const eff = effective();
-      btn.querySelector(".theme-toggle__icon").textContent =
-        eff === "dark" ? "☾" : "☀";
-      btn.querySelector(".theme-toggle__label").textContent =
-        eff === "dark" ? "Dark" : "Light";
-      btn.dataset.theme = eff;
-      btn.setAttribute(
-        "aria-label",
-        "Switch to " + (eff === "dark" ? "light" : "dark") + " theme",
-      );
-    }
-
-    btn.addEventListener("click", () => {
-      const next = effective() === "light" ? "dark" : "light";
-      set(next);
-      apply(next);
-      refresh();
-    });
-
-    // Respond to OS theme changes when the user has no explicit override.
-    window
-      .matchMedia("(prefers-color-scheme: dark)")
-      .addEventListener("change", () => {
-        if (!get()) refresh();
-      });
-
-    // Prefer hosting the toggle inside the top bar nav if it exists; otherwise
-    // fall back to a floating position. Listen for late injection by nav.js.
-    function place() {
-      const navHost = document.querySelector(".topbar__nav");
-      if (navHost) {
-        btn.classList.add("topbar__theme");
-        navHost.appendChild(btn);
+    function syncButton() {
+      const current = html.getAttribute("data-theme") || "dark";
+      if (current === "dark") {
+        if (themeGlyph) themeGlyph.innerHTML = SUN;
+        if (themeLabel) themeLabel.textContent = "light";
+        themeBtn.setAttribute("aria-label", "switch to light theme");
       } else {
-        document.body.appendChild(btn);
+        if (themeGlyph) themeGlyph.innerHTML = MOON;
+        if (themeLabel) themeLabel.textContent = "dark";
+        themeBtn.setAttribute("aria-label", "switch to dark theme");
       }
     }
-    place();
-    if (!document.querySelector(".topbar__nav")) {
-      // nav.js runs on DOMContentLoaded; wait a tick and re-place if needed.
-      requestAnimationFrame(() => {
-        if (
-          !btn.classList.contains("topbar__theme") &&
-          document.querySelector(".topbar__nav")
-        ) {
-          btn.remove();
-          place();
+
+    themeBtn.addEventListener("click", () => {
+      const current = html.getAttribute("data-theme") || "dark";
+      const next = current === "dark" ? "light" : "dark";
+      html.setAttribute("data-theme", next);
+      try { localStorage.setItem(KEY, next); } catch (e) {}
+      syncButton();
+      if (typeof window.__LASH_SCENE_RUN === "function") {
+        window.__LASH_SCENE_RUN();
+      }
+    });
+    syncButton();
+
+    // honour OS theme change when user has no explicit override
+    try {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (ev) => {
+        const userPref = localStorage.getItem(KEY);
+        if (userPref === "dark" || userPref === "light") return;
+        html.setAttribute("data-theme", ev.matches ? "dark" : "light");
+        syncButton();
+        if (typeof window.__LASH_SCENE_RUN === "function") {
+          window.__LASH_SCENE_RUN();
         }
       });
-    }
-    refresh();
+    } catch (e) { /* older browsers — silently ignore */ }
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
+    document.addEventListener("DOMContentLoaded", wire);
   } else {
-    init();
+    wire();
   }
 })();

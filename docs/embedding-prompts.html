@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash api · prompts · lash docs</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
+<script src="./theme.js"></script>
+<script src="./docs.js" defer></script>
+</head>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lash<span class="slash">/</span>prompts</h1>
+    <p class="opener__lede">Context-window strategy, projected bindings into RLM scope, prompt template slots, and typed plugin input.</p>
+  </section>
+
+  <main class="body" id="content">
+<div class="section" id="context-window">
+          <div class="section-header">
+            <h2>Context Window And History</h2>
+            <p><code>max_context_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or hand off.</p>
+          </div>
+          <p>Two history strategies, picked via the mode's context-approach setting:</p>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>RollingHistory</code> (default)</h3>
+              <p>Full ordered history each turn, trimmed only to fit <code>max_context_tokens</code>.</p>
+            </article>
+            <article class="panel">
+              <h3><code>ObservationalMemory</code></h3>
+              <p>Older turns collapse into rolling runtime-authored observations. Configurable: <code>observation_message_tokens</code> (default 30 000), <code>observation_buffer_tokens</code> (6 000), reflection thresholds.</p>
+            </article>
+          </div>
+          <pre><code>use lash_core::{ObservationalMemoryConfig, StandardContextApproach};
+
+let session = core
+    .session("long-running-thread")
+    .standard_context_approach(StandardContextApproach::ObservationalMemory(
+        ObservationalMemoryConfig::default(),
+    ))
+    .open()
+    .await?;</code></pre>
+          <p>RLM mode exposes the same knob and shares the enum, so a core with both modes can default one and override per session.</p>
+        </div>
+
+        <div class="section" id="projected-bindings">
+          <div class="section-header">
+            <h2>Projected Bindings</h2>
+            <p>Named, typed, read-only values placed directly in lashlang scope. RLM-only. Use for environment data the program should read without a tool call — current request, board state, tenant id, task spec, parent-session digest.</p>
+          </div>
+          <p>Two scopes:</p>
+          <div class="two-col">
+            <article class="panel">
+              <h3>Per turn</h3>
+              <p><code>TurnInput::rlm_project(...)</code> — values that change every turn.</p>
+            </article>
+            <article class="panel">
+              <h3>Per session</h3>
+              <p>Mode extension at session open — values that persist across turns.</p>
+            </article>
+          </div>
+          <pre><code>use lash::TurnInput;
+use lash_mode_rlm::{RlmProjectedBindings, RlmTurnInputExt, rlm_session_projection_extension};
+
+// Session-wide: applies to every turn the session runs.
+session
+    .control()
+    .mode()
+    .apply_session_extension(rlm_session_projection_extension(
+        RlmProjectedBindings::new()
+            .bind_json("tenant_id", serde_json::json!("acme"))?
+            .bind_json("task", serde_json::to_value(&amp;task)?)?,
+    ))
+    .await?;
+
+// Per-turn: layered on top of the session bindings for this turn only.
+let input = TurnInput::text("Play one move.")
+    .rlm_project(
+        RlmProjectedBindings::new()
+            .bind_json("board", serde_json::to_value(&amp;board)?)?,
+    )?;
+
+let result = session.turn(input).run().await?;</code></pre>
+          <p>The model reads these names directly in fenced lashlang:</p>
+          <pre><code>```lashlang
+let move_idx = best_move(board.cells, board.turn)
+submit({ "move": move_idx, "tenant": tenant_id })
+```</code></pre>
+          <p>Three bind methods, in order of growing power:</p>
+          <ul class="bullets">
+            <li><code>.bind_json(name, value)</code> — common case. Any <code>serde_json::Value</code>; re-typed on entry.</li>
+            <li><code>.bind_value(name, FlowValue)</code> — pass a native lashlang value, skipping the JSON round-trip.</li>
+            <li><code>.bind_lazy(name, Arc&lt;dyn ProjectedHostValue&gt;)</code> — for large host structures. Implement <code>get_field</code> / <code>get_index</code> / <code>len</code> / <code>render</code> / <code>materialize</code>; the executor calls them on demand.</li>
+          </ul>
+          <h3>Reserved names and the read-only guard</h3>
+          <p>Projected names are read-only — assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
+          <p>Duplicate names between session and turn scopes are rejected at <code>run()</code> time. Pick one scope; merge at the source.</p>
+          <h3>Seeds for handoffs and subagents</h3>
+          <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the successor or child session. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
+          <p>Deep reference: <a href="./architecture/lashlang-effects.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
+        </div>
+
+        <div class="section" id="prompt-templates">
+          <div class="section-header">
+            <h2>Prompt Templates And Slots</h2>
+            <p>One template chooses the layout; slot contributions supply per-layer content. Core, session, and turn layers inherit; lower layers replace or clear single slots without rebuilding the template.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Template layout is separate from slot content</div>
+            <pre><code>use lash::{
+    PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate,
+    PromptTemplateEntry, PromptTemplateSection,
+};
+
+let template = PromptTemplate::new(vec![
+    PromptTemplateSection::untitled(vec![
+        PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro),
+        PromptTemplateEntry::slot(PromptSlot::Intro),
+    ]),
+    PromptTemplateSection::titled(
+        "Guidance",
+        vec![PromptTemplateEntry::slot(PromptSlot::Guidance)],
+    ),
+]);
+
+let core = lash::LashCore::standard()
+    .provider(provider)
+    .model("gpt-5.4", None)
+    .max_context_tokens(200_000)
+    .prompt_template(template)
+    .prompt_contribution(PromptContribution::guidance(
+        "App",
+        "Answer as the host application assistant.",
+    ))
+    .build()?;
+
+let session = core
+    .session("customer-42")
+    .replace_prompt_slot(
+        PromptSlot::Guidance,
+        [PromptContribution::guidance(
+            "Tenant",
+            "Use the tenant's support policy.",
+        )],
+    )
+    .open()
+    .await?;
+
+let result = session
+    .turn(TurnInput::text("Draft the response."))
+    .prompt_contribution(PromptContribution::guidance(
+        "Turn",
+        "Keep this reply under 120 words.",
+    ))
+    .run()
+    .await?;</code></pre>
+          </div>
+        </div>
+
+        <div class="section" id="typed-plugin-input">
+          <div class="section-header">
+            <h2>Typed Plugin Input</h2>
+            <p>Strongly-typed per-session configuration and per-turn input. The binding activates a core plugin factory; the session plugin registers prompt contributions, tools, and hooks through <code>PluginRegistrar</code>.</p>
+          </div>
+          <div class="diagram">
+            <div class="diagram-title">Plugin and tool pattern</div>
+            <pre><code>#[derive(Clone, Debug)]
+struct BoardPlugin;
+
+#[derive(Clone, Debug)]
+struct BoardConfig;
+
+#[derive(Clone, Debug)]
+struct BoardTurnInput {
+    board: BoardState,
+}
+
+impl lash::PluginBinding for BoardPlugin {
+    const ID: &amp;'static str = "board";
+    type SessionConfig = BoardConfig;
+    type Input = BoardTurnInput;
+
+    fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::plugins::PluginFactory&gt; {
+        Arc::new(BoardPluginFactory)
+    }
+
+    fn requires_turn_input(_: &amp;Self::SessionConfig) -&gt; bool {
+        true
+    }
+}
+
+impl lash::plugins::SessionPlugin for BoardSessionPlugin {
+    fn id(&amp;self) -&gt; &amp;'static str { BoardPlugin::ID }
+
+    fn register(&amp;self, reg: &amp;mut lash::plugins::PluginRegistrar) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
+        reg.prompt().contribute(Arc::new(|ctx| {
+            Box::pin(async move {
+                let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
+                    return Ok(Vec::new());
+                };
+                Ok(vec![lash::PromptContribution::environment(
+                    "Board",
+                    format_board(&amp;input.board),
+                )])
+            })
+        }));
+        reg.tools().provider(Arc::new(BoardTools))
+    }
+}
+
+#[async_trait::async_trait]
+impl lash::tools::ToolProvider for BoardTools {
+    fn definitions(&amp;self) -&gt; Vec&lt;lash::tools::ToolDefinition&gt; {
+        vec![/* read_board, play_move, app tools */]
+    }
+
+    async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
+        let Some(input) = call.context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
+            return lash::tools::ToolResult::err_fmt("missing board input");
+        };
+        run_board_tool(call.name, call.args, &amp;input.board)
+    }
+}</code></pre>
+          </div>
+          <p>Human input follows the same rule: a host-owned tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
+          <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>
+          <pre><code>trait BoardTurnExt {
+    fn with_board(self, board: BoardState) -&gt; Self;
+}
+
+impl BoardTurnExt for lash::TurnBuilder {
+    fn with_board(self, board: BoardState) -&gt; Self {
+        self.with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
+    }
+}</code></pre>
+          <p>Install on the session; use the extension method before each run:</p>
+          <pre><code>let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .build()?;
+
+let session = core
+    .session(chat_id)
+    .rlm()
+    .plugin::&lt;BoardPlugin&gt;(BoardConfig)
+    .open()
+    .await?;
+
+let result = session
+    .turn(TurnInput::text("Play one move."))
+    .with_board(board)
+    .require_submit()?
+    .collect_with(&amp;sink)
+    .await?;</code></pre>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./embedding-turns.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · turns</strong></a>
+    <a class="pager__next" href="./embedding-advanced.html"><span>next</span><strong>lash api · advanced</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

@@ -19,7 +19,7 @@ pub enum ParseError {
     Unexpected { found: String, span: Span },
     #[error("`{keyword}` can only be used inside a `for` loop")]
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
-    #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges/lists")]
+    #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges or lists")]
     UnsupportedLoop { keyword: &'static str, span: Span },
 }
 

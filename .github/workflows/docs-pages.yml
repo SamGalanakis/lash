@@ -133,6 +133,7 @@ jobs:
           HTML
 
           touch "${site_dir}/.nojekyll"
+          echo "lash.run" > "${site_dir}/CNAME"
 
       - name: Upload Pages artifact
         if: steps.pages.outputs.enabled == 'true'

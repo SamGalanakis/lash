@@ -5,13 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>trace export · cross-session edges · lash</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="./styles.css?v=4">
-<script src="./theme.js"></script>
-<script src="./nav.js?v=8" defer></script>
-<script src="./search.js?v=8" defer></script>
-<script src="./codecopy.js" defer></script>
-<script src="./syntax.js" defer></script>
-<script src="./toc.js?v=4" defer></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
 <style>
   /* ───────────────────────────────────────────────────────────────
      trace export · cross-session edges
@@ -880,8 +877,23 @@
     .handoff-body { margin-left: 0; }
   }
 </style>
+<style>
+  /* the trace export is a self-styled dark mockup; only override the
+     few page-level rules that conflict with the new chrome */
+  .doc-page { background: var(--bg); color: var(--ink); padding: 0; margin: 0; max-width: none; }
+  .doc-frame { max-width: var(--page-max); margin: 0 auto; padding: var(--space-xl); }
+</style>
+
+<script src="./theme.js"></script>
+<script src="./docs.js" defer></script>
 </head>
-<body>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">trace<span class="slash">/</span>edges</h1>
+    <p class="opener__lede">A mockup of the html exporter's two-edge model — <code>continue_as</code> renders as an inline handoff divider, and <code>spawn_agent</code> renders as a drill-in card. Click any node to follow the call tree.</p>
+  </section>
+
+  <div id="content">
 
 <div class="doc-page">
   <div class="doc-frame">
@@ -1619,5 +1631,9 @@
   })();
 </script>
 
+  </div>
+
+    </div>
+  </div>
 </body>
 </html>

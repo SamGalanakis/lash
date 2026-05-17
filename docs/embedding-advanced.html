@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lash api · advanced · lash docs</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="./styles.css">
+<script src="./theme.js"></script>
+<script src="./docs.js" defer></script>
+</head>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lash<span class="slash">/</span>advanced</h1>
+    <p class="opener__lede">Storage boundaries, session lifecycle, durable workflows, subagents, MCP servers, the advanced runtime surface, and a complete example.</p>
+  </section>
+
+  <main class="body" id="content">
+<div class="section" id="app-storage">
+          <div class="section-header">
+            <h2>App Storage</h2>
+            <p>Product storage stays separate from runtime storage.</p>
+          </div>
+          <div class="two-col">
+            <article class="panel"><h3>App state</h3><p>Chat tables, accounts, frontend state, auth, transport. The example app uses SQLite plus NDJSON to the browser.</p></article>
+            <article class="panel"><h3>Runtime state</h3><p>Pass a <code>SessionStoreFactory</code> to <code>LashCoreBuilder::store_factory</code>, or a concrete store to <code>SessionBuilder::store</code>, for durable runtime state across process restarts.</p></article>
+          </div>
+        </div>
+
+        <div class="section" id="session-lifecycle">
+          <div class="section-header">
+            <h2>Session Lifecycle</h2>
+            <p>Two states: <strong>active</strong> (resident, ready) and <strong>parked</strong> (flushed; only id + store reference held). Opening an existing id rehydrates from the store — one read of the graph head plus referenced snapshots.</p>
+          </div>
+          <p>Sessions park automatically when the handle drops. Long-running servers can hold thousands of session ids cheaply. Residency policy controls in-memory trimming while a session is active:</p>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>Residency::KeepAll</code> (default)</h3>
+              <p>All graph nodes stay resident. Fastest re-reads. Interactive sessions.</p>
+            </article>
+            <article class="panel">
+              <h3><code>Residency::ActivePathOnly</code></h3>
+              <p>Only active-path nodes resident; orphans on disk. Lower memory, occasional store reads when crossing forks. Long-lived multi-session servers.</p>
+            </article>
+          </div>
+          <pre><code>use lash::Residency;
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .advanced()
+    .residency(Residency::ActivePathOnly)
+    .build()?;</code></pre>
+          <p>Plugin background work — tasks tracked via <code>ToolContext::tasks()</code>, post-turn observation summaries, MCP warm-ups — continues past turn return. To drain it before returning (one-shot processes that need observations persisted before exit):</p>
+          <pre><code>session.control().state().await_background_work().await?;</code></pre>
+          <p>Exposed by the CLI as <code>--await-background-work</code> on <code>lash --print</code>. Embedders rarely need it outside short-lived processes.</p>
+        </div>
+
+        <div class="section" id="durable-workflows">
+          <div class="section-header">
+            <h2>Durable Workflows</h2>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool batches, mid-turn worker migration — <code>lash-sansio</code> exposes the state machine as an effect / response protocol for an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>).</p>
+          </div>
+          <p>Shape: <code>TurnMachine::poll_effect()</code> yields the next side effect (<code>LlmCall</code>, <code>ToolCalls</code>, <code>ExecCode</code>, <code>Checkpoint</code>, …); the workflow runs it as a durable activity keyed by <code>EffectId</code>; <code>TurnMachine::handle_response(...)</code> feeds the result back. <code>checkpoint()</code> / <code>restore_from_checkpoint(...)</code> round-trip the whole machine. <code>EffectId</code> is deterministic across replays — the n-th effect of a fresh turn is always <code>EffectId(n)</code>.</p>
+          <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
+        </div>
+
+        <div class="section" id="subagents">
+          <div class="section-header">
+            <h2>Subagents</h2>
+            <p>Same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry and host; child policy resolves from the live parent snapshot.</p>
+          </div>
+          <pre><code>use std::sync::Arc;
+use lash::{plugins::PluginFactory, SessionSpec};
+use lash_subagents::{default_registry, SubagentsPluginFactory};
+
+let registry = Arc::new(default_registry(&amp;tier_models));
+let host = Arc::new(AppSubagentHost::new(child_store_factory));
+
+let subagents = SubagentsPluginFactory::new(registry, host)
+    .with_session_spec(SessionSpec::inherit().max_turns(8));
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
+    .build()?;</code></pre>
+          <p>Capabilities return <code>SessionSpec</code> overlays. <code>StaticCapability</code> pins exact child authority; <code>TierCapability</code> backs the built-in <code>explore</code> and <code>peer</code> tiers. Do not construct <code>SessionPolicy</code> directly — it's the resolved runtime artifact.</p>
+          <h3>Built-in tiers</h3>
+          <div class="two-col">
+            <article class="panel">
+              <h3><code>explore</code></h3>
+              <p>Read-only investigator. RLM by default. Cannot spawn further subagents. For scan / summarise / verify tasks.</p>
+            </article>
+            <article class="panel">
+              <h3><code>peer</code></h3>
+              <p>Parallel self. Inherits parent execution mode and tool authority, including recursive spawning. For a parallel branch of the same work.</p>
+            </article>
+          </div>
+          <p>Both tiers consult <code>tier_models</code> for an override, then fall back to <code>default_agent_model(tier)</code>, then the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>
+          <h3>Capability resolution</h3>
+          <p><code>Capability::resolve(ctx)</code> sees the live parent <code>SessionPolicy</code> and returns a <code>SessionSpec</code>. The runtime composes spec against parent policy to produce effective child config. The spec is what's persisted, so a resumed subagent re-derives the same authority.</p>
+          <p>Three interactive-only tools are always stripped from subagents: <code>ask</code>, <code>showcase</code>, <code>plan_exit</code>. A subagent calling them would block indefinitely.</p>
+          <h3>Usage attribution</h3>
+          <p>Child sessions emit <code>TurnEvent::ChildUsage</code> on the parent's stream, tagged with <code>source</code> (<code>"subagent"</code>, <code>"compaction"</code>, <code>"observer"</code>) and child <code>session_id</code>. <code>TurnResult.children_usage</code> rolls up per <code>(source, model)</code>; <code>total_usage()</code> sums parent + children. Finer splits: fold <code>ChildUsage</code> from the stream directly.</p>
+        </div>
+
+        <div class="section" id="mcp-servers">
+          <div class="section-header">
+            <h2>MCP Servers</h2>
+            <p><code>lash-plugin-mcp</code> wraps the <code>rmcp</code> SDK with three transports: <code>stdio</code>, <code>streamable_http</code>, <code>sse</code>. The plugin owns a shared connection pool — stdio servers spawn once per process, not per session.</p>
+          </div>
+          <pre><code>use std::collections::BTreeMap;
+use lash_plugin_mcp::{McpPluginFactory, McpServerConfig};
+
+let mut servers = BTreeMap::new();
+servers.insert(
+    "docs".to_string(),
+    McpServerConfig::stdio("uvx", vec!["mcp-server-docs".into()]),
+);
+servers.insert(
+    "web".to_string(),
+    McpServerConfig::streamable_http("https://mcp.example.com/rpc"),
+);
+
+let mcp = McpPluginFactory::new(servers).await?;
+
+let core = LashCore::rlm()
+    .provider(provider)
+    .model(model, None)
+    .max_context_tokens(200_000)
+    .plugin(std::sync::Arc::new(mcp))
+    .build()?;</code></pre>
+          <p>Tools appear as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> with original schemas preserved. <code>attach_server</code> / <code>detach_server</code> mutate the live pool without rebuilding the core.</p>
+          <h3>Lifecycle and failure isolation</h3>
+          <p>Servers connect once at <code>McpPluginFactory::new(...)</code>. Built session plugins clone the shared <code>Arc&lt;McpConnectionPool&gt;</code>, so startup cost is one-per-process, not one-per-chat.</p>
+          <p>After <code>attach_server</code>, new tools are visible to sessions on their next tool-surface refresh (start of next turn). <code>detach_server</code> shuts the server down and removes its tools; in-flight calls fail rather than hang.</p>
+          <pre><code>// Hot-swap a server at runtime.
+mcp.attach_server(
+    "new-tool".to_string(),
+    McpServerConfig::stdio("uvx", vec!["mcp-server-new".into()]),
+).await?;
+
+mcp.detach_server("old-tool").await?;</code></pre>
+          <p>Failures are isolated: an exited child, a 500ing endpoint, or a dropped SSE stream surfaces as <code>ToolResult::err(...)</code> on the affected tool; other servers keep working. If a server is unreachable at <code>new</code> time, the call fails — use <code>McpPluginFactory::empty()</code> plus runtime <code>attach_server</code> when initial connectivity is unreliable.</p>
+        </div>
+
+        <div class="section" id="advanced-runtime">
+          <div class="section-header">
+            <h2>Advanced Runtime</h2>
+            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared background task hosts, residency policy, imported <code>RuntimeCoreConfig</code>, termination policy.</p>
+          </div>
+          <pre><code>let core = LashCore::rlm()
+    .provider(provider)
+    .model("anthropic/claude-sonnet-4.6", None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .advanced()
+    .residency(Residency::ActivePathOnly)
+    .build()?;</code></pre>
+          <p>Streaming is semantic: <code>TurnBuilder::stream</code> emits <code>TurnActivity</code> and resolves to a <code>TurnResult</code>. Raw runtime telemetry belongs in tracing, not the app surface.</p>
+        </div>
+
+        <div class="section" id="complete-example">
+          <div class="section-header">
+            <h2>Complete Example</h2>
+            <p>The browser example: app-owned chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal rendering from <code>TurnOutput</code>.</p>
+          </div>
+          <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
+# then open http://127.0.0.1:3000</code></pre>
+          <p>Source: <code>examples/agent-service</code>. Walkthrough: <a href="./example-agent-service.html">Agent Service</a>.</p>
+        </div>
+
+        <div class="section" id="related-guides">
+          <div class="section-header">
+            <h2>Related Guides</h2>
+            <p>Focused walkthroughs.</p>
+          </div>
+          <div class="module-grid">
+            <article class="panel"><h3><a href="./quickstart.html">Quickstart</a></h3><p>Minimal builder, one turn, prose extraction.</p></article>
+            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM submit, typed plugin input, app tools, streaming, per-chat model selection, SQLite.</p></article>
+            <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p><code>PluginFactory</code>, <code>SessionPlugin</code>, registering tools and hooks, cheap-build contract, four reference plugins.</p></article>
+            <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p><code>lash-sqlite-store</code>, what's persisted, in-memory mode, GC and vacuum.</p></article>
+            <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
+            <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
+            <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>lash-sansio</code>: state machine, deterministic <code>EffectId</code>, checkpoint / restore. Temporal, Restate.</p></article>
+          </div>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./embedding-prompts.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lash api · prompts</strong></a>
+    <a class="pager__next" href="./example-agent-service.html"><span>next</span><strong>agent service</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

@@ -3,50 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Runtime - lash Architecture</title>
+<title>runtime - lash architecture</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="../styles.css?v=4">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
 <script src="../theme.js"></script>
-<script src="../nav.js?v=8" defer></script>
-<script src="../search.js?v=8" defer></script>
-<script src="../codecopy.js" defer></script>
-<script src="../syntax.js" defer></script>
-<script src="../mermaid.js" defer></script>
-<script src="../toc.js?v=4" defer></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
 </head>
-<body>
-  <div class="page">
-    <main class="frame">
-      <aside class="sidebar" aria-label="Architecture navigation">
-        <a class="sidebar__exit" href="../index.html">← Docs</a>
-        <details class="sidebar__disclosure" open>
-          <summary>
-            <span class="sidebar__label">Architecture</span>
-            <span class="sidebar__current">Runtime</span>
-          </summary>
-          <ol class="sidebar__chapters">
-            <li><a href="./overview.html">Overview</a></li>
-            <li><a href="./modules.html">Modules</a></li>
-            <li><a href="./flow.html">Data Flow</a></li>
-            <li><a href="./execution.html">Execution</a></li>
-            <li><a class="active" href="./runtime.html">Runtime</a></li>
-            <li><a href="./abstractions.html">Abstractions</a></li>
-            <li><a href="./deps.html">Dependencies</a></li>
-            <li><a href="./lashlang.html">Lashlang</a></li>
-            <li><a href="./html-exporter.html">HTML Exporter</a></li>
-            <li><a href="./providers.html">Providers</a></li>
-            <li><a href="./durability.html">Durability</a></li>
-          </ol>
-        </details>
-      </aside>
-      <header class="hero">
-        <div class="eyebrow">Architecture chapter 05</div>
-        <h1>runtime<span class="slash">/</span>host</h1>
-        <p>The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and the app-facing <code>lash</code> API outside the core session model.</p>
-      </header>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">runtime<span class="slash">/</span>host</h1>
+    <p class="opener__lede">The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and the app-facing <code>lash</code> API outside the core session model.</p>
+  </section>
 
-      <section class="content">
-        <div class="section">
+  <main class="body" id="content">
+<div class="section">
           <div class="section-header">
             <h2>Runtime Shape</h2>
             <p><code>LashRuntime</code> holds the live session registry, the managed-sessions map, the active handoff continuation table, the pending first-turn input queue, and a usage ledger. Sans-IO computes protocol effects, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
@@ -161,15 +135,14 @@ flowchart LR
             </div>
           </div>
         </div>
+  </main>
 
-        <div class="section-nav">
-          <a href="./execution.html"><span>Previous</span><strong>Execution</strong></a>
-          <a href="./abstractions.html"><span>Next</span><strong>Abstractions</strong></a>
-        </div>
-      </section>
-
-      <footer class="footer">Runtime anchors: <code>crates/lash-core/src/runtime/*</code>, <code>crates/lash-core/src/session.rs</code>, <code>crates/lash-core/src/plugin/mod.rs</code>, <code>crates/lash-sqlite-store/src/lib.rs</code>, <code>crates/lash-core/src/lib.rs</code>.</footer>
-    </main>
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./execution.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>execution</strong></a>
+    <a class="pager__next" href="./abstractions.html"><span>next</span><strong>abstractions</strong><span class="arrow" aria-hidden="true">→</span></a>
   </div>
+</section>
 </body>
 </html>

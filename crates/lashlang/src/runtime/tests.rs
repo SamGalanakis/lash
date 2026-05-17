@@ -18,6 +18,13 @@ impl ToolHost for Host {
             _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
         }
     }
+
+    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
+        match handle {
+            Value::Record(_) => Ok(Value::Null),
+            _ => Err(ToolHostError::new("expected handle record")),
+        }
+    }
 }
 
 async fn exec(source: &str) -> Result<Value, RuntimeError> {
@@ -83,6 +90,78 @@ async fn golden_runtime_diagnostic_contract_is_exact() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn golden_lashlang_diagnostic_corpus_is_exact() {
+    let mut projected = ProjectedBindings::new();
+    projected.insert(
+        "history",
+        ProjectedValue::scalar(
+            "history",
+            Value::List(vec![Value::String("entry".into())].into()),
+        ),
+    );
+
+    let mut cases = Vec::new();
+    cases.push(diagnostic_case(
+        "parse_unsupported_while",
+        format_parse_diagnostic("x = 0\nwhile x < 3 {\n  x = x + 1\n}"),
+    ));
+    cases.push(diagnostic_case(
+        "parse_inline_if",
+        format_parse_diagnostic("submit if true { 1 }"),
+    ));
+    cases.push(diagnostic_case(
+        "parse_inline_for",
+        format_parse_diagnostic("submit [for x in [1] { x }]"),
+    ));
+    cases.push(diagnostic_case(
+        "parse_loop_control_outside_loop",
+        format_parse_diagnostic("break"),
+    ));
+    cases.push(diagnostic_case(
+        "parse_missing_type_keyword",
+        format_parse_diagnostic("Payload = Type { nested: { ok: bool } }"),
+    ));
+    cases.push(diagnostic_case(
+        "runtime_finish_inside_parallel",
+        runtime_diagnostic("parallel {\n  submit \"nope\"\n}\nsubmit \"done\"").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_bad_wrapper_unwrap",
+        runtime_diagnostic("submit ({ ok: false, error: \"boom\" })?").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_failed_tool_unwrap",
+        runtime_diagnostic("submit (call err {})?").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_invalid_await_handle",
+        runtime_diagnostic("submit (await 1)?").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_read_only_projected_assignment",
+        runtime_diagnostic_with_projected("history = []\nsubmit history", &projected).await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_invalid_validate_type_argument",
+        runtime_diagnostic("submit validate({ ok: true }, \"not a type\")").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_validation_failure",
+        runtime_diagnostic("submit validate({ count: \"x\" }, Type { count: int })").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_unknown_name",
+        runtime_diagnostic("submit missing").await,
+    ));
+    cases.push(diagnostic_case(
+        "runtime_unknown_builtin",
+        runtime_diagnostic("submit nope()").await,
+    ));
+
+    insta::assert_snapshot!("lashlang_diagnostic_corpus", cases.join("\n\n---\n\n"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn golden_serialized_state_snapshot_contract_is_exact() {
     let program = crate::parse(
         r#"
@@ -120,6 +199,29 @@ fn diagnostic_message(err: crate::ExecuteError) -> String {
         panic!("expected diagnostic runtime error");
     };
     message
+}
+
+fn format_parse_diagnostic(source: &str) -> String {
+    let err = crate::parse(source).expect_err("parse should fail");
+    crate::format_parse_diagnostic(source, &err)
+}
+
+async fn runtime_diagnostic(source: &str) -> String {
+    runtime_diagnostic_with_projected(source, &ProjectedBindings::default()).await
+}
+
+async fn runtime_diagnostic_with_projected(source: &str, projected: &ProjectedBindings) -> String {
+    let compiled = compile_source(source).expect("source should compile");
+    let mut state = State::new();
+    let failure =
+        execute_compiled_traced_with_projected_bindings(&compiled, &mut state, &Host, projected)
+            .await
+            .expect_err("runtime should fail");
+    crate::format_runtime_diagnostic(source, &failure.error, failure.span)
+}
+
+fn diagnostic_case(name: &str, diagnostic: String) -> String {
+    format!("{name}\n{diagnostic}")
 }
 
 fn compiled_program_snapshot(source: &str) -> String {

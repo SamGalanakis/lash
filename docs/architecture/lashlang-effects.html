@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>lashlang · effects - lash architecture</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">
+<link rel="stylesheet" href="../styles.css">
+<script src="../theme.js"></script>
+<script src="./mermaid.js" defer></script>
+<script src="../docs.js" defer></script>
+</head>
+<body class="docs-page">
+<section class="opener">
+    <h1 class="opener__title">lashlang<span class="slash">/</span>effects</h1>
+    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, tool calls, async handles, parallel blocks, builtins, and type literals.</p>
+  </section>
+
+  <main class="body" id="content">
+<div class="section" id="projected-host-bindings">
+          <div class="section-header">
+            <h2>Projected Host Bindings</h2>
+            <p>The host can inject named, read-only values into Lashlang scope without copying them into VM <code>State</code>. They behave like ordinary variables for read access but rejecting reassignment keeps the host-managed values authoritative.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>ProjectedBindings</code></dt>
+            <dd>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</dd>
+            <dt><code>ProjectedValue</code></dt>
+            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</dd>
+            <dt><code>ProjectedHostValue</code></dt>
+            <dd>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</dd>
+            <dt>Reserved names</dt>
+            <dd><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</dd>
+            <dt>Tool arguments</dt>
+            <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then its before-tool hook materializes those markers before ordinary tools validate or execute. Tool implementations should parse <code>ToolCall.args</code> as plain JSON. The only preserved markers are root entries under <code>seed:</code> for projection-aware RLM control tools such as <code>continue_as</code> and RLM <code>spawn_agent</code>, where the marker means "re-project this value in the successor".</dd>
+          </dl>
+        </div>
+
+        <div class="section" id="tool-calls-and-async-handles">
+          <div class="section-header">
+            <h2>Tool Calls And Async Handles</h2>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>call</code></dt>
+            <dd><code>call tool { arg: expr }</code> returns <code>{ ok: true, value: ... }</code> or <code>{ ok: false, error: "..." }</code>. Use <code>?</code> for ordinary happy-path calls and keep the wrapper for retries or expected failures.</dd>
+            <dt><code>start call</code></dt>
+            <dd><code>start call tool { ... }</code> returns a handle directly. Monitors and subagents are long-lived handle-producing tools; generic async tool starts use the same shape.</dd>
+            <dt><code>await</code></dt>
+            <dd><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</dd>
+            <dt><code>cancel</code></dt>
+            <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</dd>
+          </dl>
+          <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome.</p>
+          <pre><code>// Fail-fast: the block aborts if the file can't be read.
+manifest = (call read_file { path: "Cargo.toml" })?
+lines = split(manifest, "\n")
+
+// Inspect-the-wrapper: we expect this read might miss.
+optional = call read_file { path: "CHANGELOG.md" }
+notes = optional.ok ? slice(optional.value, 0, 200) : format("no changelog: {}", optional.error)
+
+// Iterate over a glob and skip files that fail to read.
+items = []
+for path in (call glob { pattern: "src/**/*.rs" })? {
+  hit = call read_file { path: path }
+  if !hit.ok {
+    continue
+  }
+  items = push(items, { path: path, chars: len(hit.value) })
+}
+submit { line_count: len(lines), notes: notes, items: items }</code></pre>
+          <p>Background work uses <code>start call</code>; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to <code>(call ...)</code>.</p>
+          <pre><code>// Kick off two long-running subagents in the background.
+left = start call spawn_agent {
+  agent_name: "audit_a",
+  task: "audit module a",
+  capability: "explore"
+}
+right = start call spawn_agent {
+  agent_name: "audit_b",
+  task: "audit module b",
+  capability: "explore"
+}
+
+// Resolve both concurrently as a record of wrappers.
+results = await { a: left, b: right }
+if !results.a.ok {
+  submit { error: results.a.error }
+}
+submit {
+  a: results.a.value,
+  b: results.b.ok ? results.b.value : null
+}</code></pre>
+        </div>
+
+        <div class="section" id="parallel-blocks">
+          <div class="section-header">
+            <h2>Parallel Blocks</h2>
+            <p><code>parallel</code> is for independent work. Branches must not depend on each other's output, and branch-local assignments are merged only when unambiguous.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Named branches</dt>
+            <dd><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</dd>
+            <dt>Positional branches</dt>
+            <dd><code>parallel { call ..., call ... }</code> (or with newlines as separators) returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
+          </dl>
+          <pre><code>a = start call spawn_agent { agent_name: "one", task: "Read file A", capability: "explore" }
+b = start call spawn_agent { agent_name: "two", task: "Read file B", capability: "explore" }
+results = parallel { one: (await a)?, two: (await b)? }
+submit { a: results.one, b: results.two }</code></pre>
+        </div>
+
+        <div class="section" id="builtins">
+          <div class="section-header">
+            <h2>Builtins</h2>
+            <p>Builtins are pure value helpers except for validation errors. They are called as ordinary functions and are optimized by the compiler where static type literals allow it.</p>
+          </div>
+          <div class="table">
+            <table>
+              <thead><tr><th>Builtin</th><th>Behavior</th></tr></thead>
+              <tbody>
+                <tr><td><code>len(x)</code>, <code>empty(x)</code></td><td>Length/emptiness for strings, lists, records, and projected lists. <code>len(null)</code> is <code>0</code>.</td></tr>
+                <tr><td><code>slice(x, start, end)</code></td><td>Substring or sublist. <code>null</code> bounds mean start/end; negative bounds count from the end.</td></tr>
+                <tr><td><code>range(end)</code>, <code>range(start, end)</code>, <code>range(start, end, step)</code></td><td>Integer lists with an exclusive end bound. <code>step</code> may be positive or negative, but not <code>0</code>.</td></tr>
+                <tr><td><code>ceil_div(a, b)</code>, <code>floor_div(a, b)</code></td><td>Finite-integer division helpers for chunk/count math; <code>b</code> must not be <code>0</code>.</td></tr>
+                <tr><td><code>push(list, item)</code></td><td>Returns a new list with <code>item</code> appended.</td></tr>
+                <tr><td><code>split</code>, <code>join</code>, <code>trim</code></td><td>Common string shaping helpers.</td></tr>
+                <tr><td><code>find(s, needle, start?)</code></td><td>Returns the zero-based character index of the first literal match, or <code>null</code>. <code>start</code> defaults to <code>0</code> and is a non-negative character index. An empty <code>needle</code> returns <code>start</code> when it is in bounds.</td></tr>
+                <tr><td><code>grep_text(s, needle)</code></td><td>Literal in-memory line search; <code>needle</code> must be non-empty. Returns one record per matching line: <code>{ line: int, text: str, match: str, start: int, end: int }</code>; <code>line</code> is 1-based, <code>text</code> is the line without its line ending, and <code>start</code>/<code>end</code> are zero-based character offsets within that line's <code>text</code>, with <code>end</code> exclusive.</td></tr>
+                <tr><td><code>starts_with</code>, <code>ends_with</code>, <code>contains</code></td><td>Prefix/suffix checks plus membership for strings, lists, projected lists, and record keys.</td></tr>
+                <tr><td><code>keys(record)</code>, <code>values(record)</code></td><td>Record key and value extraction in record order.</td></tr>
+                <tr><td><code>to_string</code>, <code>to_int</code>, <code>to_float</code></td><td>Conversion helpers. <code>to_string(image)</code> emits metadata, not binary image data.</td></tr>
+                <tr><td><code>json_parse(s)</code></td><td>Parses JSON into Lashlang values.</td></tr>
+                <tr><td><code>format(template, ...args)</code></td><td>Positional interpolation with <code>{}</code>, explicit slots like <code>{0}</code>, and escaped braces via <code>{{</code>/<code>}}</code>.</td></tr>
+                <tr><td><code>validate(value, Type { ... })</code></td><td>Returns <code>value</code> unchanged when it matches the type literal; aborts with a validation error otherwise.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="section" id="type-literals">
+          <div class="section-header">
+            <h2>Type Literals</h2>
+            <p><code>Type { ... }</code> values describe structured records for validation and dynamic tool output contracts. They are runtime values, not a static type checker for all code.</p>
+          </div>
+          <dl class="def-list">
+            <dt>Shapes</dt>
+            <dd>Scalars: <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>dict</code>, <code>any</code>, <code>null</code>. Collections: <code>list[shape]</code>, <code>enum["a", "b"]</code>, nested <code>Type { ... }</code>, named refs, and unions with <code>|</code>.</dd>
+            <dt>Optional vs nullable</dt>
+            <dd><code>email: str?</code> means the field may be absent, but if present it must be a string. <code>email: str | null</code> means the field is required and may be <code>null</code>.</dd>
+            <dt>Nested objects</dt>
+            <dd>Nested record shapes must use the <code>Type</code> keyword: <code>profile: Type { name: str }</code>. A bare <code>{ name: str }</code> is a record value form and is rejected in type positions.</dd>
+            <dt>Contract boundary</dt>
+            <dd>Tools such as <code>llm_query</code> and <code>spawn_agent</code> can expose output schemas derived from these shapes, but Lashlang v1 keeps this as contract truthfulness rather than model-authored generics.</dd>
+          </dl>
+          <pre><code>Payload = Type {
+  id: str,
+  score: float | null,
+  tags: list[str],
+  status: enum["new", "done"],
+  note: str?
+}
+validated = validate(candidate, Payload)</code></pre>
+          <p>Type literals can be passed directly to tools that accept output schemas, and they double as runtime guards on JSON parsed from untrusted text. Validation errors carry a JSON-pointer-style path to the bad field.</p>
+          <pre><code>Package = Type {
+  name: str,
+  version: str,
+  labels: list[str],
+  meta: Type {
+    pages: int,
+    published: int
+  }
+}
+
+raw = (call read_file { path: "package.json" })?
+parsed = json_parse(raw)
+package = validate(parsed, Package)
+
+// Constrain a subagent's output shape via the same Type literal.
+result = (call spawn_agent {
+  agent_name: "summarizer",
+  task: format("summarize {} v{}", package.name, package.version),
+  capability: "summarize",
+  output: Type { headline: str, bullets: list[str] }
+})?
+
+submit { package: package, summary: result }</code></pre>
+        </div>
+  </main>
+
+  <section class="pager" aria-label="chapter navigation">
+  <div class="pager__rail">read on &middot;</div>
+  <div class="pager__main">
+    <a class="pager__prev" href="./lashlang.html"><span class="arrow" aria-hidden="true">←</span><span>previous</span><strong>lashlang · language</strong></a>
+    <a class="pager__next" href="./lashlang-runtime.html"><span>next</span><strong>lashlang · runtime</strong><span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+</body>
+</html>

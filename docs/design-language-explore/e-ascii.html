@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E — ASCII · lash design exploration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Chivo+Mono:wght@300;400;500;700&family=Spectral:wght@400;500;600&family=VT323&display=swap">
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     Direction E — "ASCII"
+     Soft tech. Warm-paper background like AMCA; box-drawing chrome
+     in the spirit of well-set technical RFCs and Geist Pixel.
+     Pixel-flavored chapter mark via a single bitmap face used
+     sparingly. ASCII frames for section heads. Schematic mono
+     diagrams. The page reads like a `man` page that learned to
+     breathe.
+     ────────────────────────────────────────────────────────────── */
+
+  :root {
+    --paper:       #f5efe0;
+    --paper-deep:  #efe9d9;
+    --paper-faint: #ebe4d2;
+    --ink:         #1d1c19;
+    --ink-mid:     #4c4a45;
+    --ink-dim:     #7a7872;
+    --ink-faint:   #b0aea6;
+    --rule:        #d9d3c1;
+    --rule-strong: #c5bea8;
+    --sodium:      #c97a1f;
+    --sodium-deep: #a35e10;
+    --sodium-soft: #f6ebd8;
+    --lichen:      #6f8055;
+
+    --space-2xs: 0.25rem;
+    --space-xs:  0.5rem;
+    --space-sm:  0.75rem;
+    --space-md:  1rem;
+    --space-lg:  1.5rem;
+    --space-xl:  2rem;
+    --space-2xl: 3rem;
+    --space-3xl: 4rem;
+
+    --font-display: "Big Shoulders Display", "Helvetica Neue", sans-serif;
+    --font-body:    "Spectral", "Iowan Old Style", Georgia, serif;
+    --font-mono:    "Chivo Mono", "JetBrains Mono", ui-monospace, monospace;
+    --font-pixel:   "VT323", "Chivo Mono", monospace;
+
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink-mid);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+    /* faint pixel/dot underlay for tech-paper feel */
+    background-image: radial-gradient(rgba(29, 28, 25, 0.045) 1px, transparent 1px);
+    background-size: 8px 8px;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    color: var(--sodium-deep);
+    background: transparent;
+  }
+  strong { color: var(--ink); font-weight: 600; }
+  pre {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    line-height: 1.62;
+    color: var(--ink);
+  }
+  p { margin: 0 0 var(--space-md); max-width: 70ch; }
+
+  /* ── tape strip header ─────────────────────────────── */
+  .strip {
+    position: sticky; top: 0; z-index: 5;
+    border-bottom: 1px solid var(--rule);
+    background: color-mix(in srgb, var(--paper) 92%, transparent);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .strip__inner {
+    max-width: 80rem;
+    margin: 0 auto;
+    padding: var(--space-xs) var(--space-xl);
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .strip__brand { color: var(--ink); font-weight: 500; }
+  .strip__path b { color: var(--sodium); font-weight: 500; }
+  .strip__pos b  { color: var(--ink); font-weight: 500; }
+
+  /* ── page ─────────────────────────────────────────── */
+  .page {
+    max-width: 80rem;
+    margin: 0 auto;
+    padding: var(--space-3xl) var(--space-xl) var(--space-3xl);
+  }
+
+  /* ── ASCII frame component
+     The frame uses inline-block monospace lines so it scales with
+     the column. Each frame piece can be selected if needed. */
+
+  .ascii {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    line-height: 1;
+    color: var(--ink-dim);
+    letter-spacing: 0;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .ascii.is-sodium { color: var(--sodium); }
+  .ascii.is-thick { font-size: 0.86rem; }
+
+  /* ── hero / chapter mark — pixel display moment ────── */
+  .cover {
+    padding-bottom: var(--space-2xl);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: var(--space-2xl);
+  }
+  .cover__rail {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: var(--space-md);
+  }
+  .cover__rail b { color: var(--sodium); font-weight: 500; }
+  .cover__rail::before, .cover__rail::after {
+    content: "";
+    height: 1px;
+    background: var(--rule);
+    flex: 0 0 1.6rem;
+  }
+  .cover__rail::after { flex: 1 1 auto; }
+
+  .cover__pixel {
+    font-family: var(--font-pixel);
+    font-size: clamp(5rem, 11vw, 9rem);
+    line-height: 0.88;
+    color: var(--ink);
+    letter-spacing: 0.02em;
+    font-weight: 400;
+    text-transform: lowercase;
+    image-rendering: pixelated;
+    margin: 0;
+  }
+  .cover__pixel .slash { color: var(--sodium); }
+
+  .cover__sub {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-md);
+    margin-top: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .cover__sub b { color: var(--ink); font-weight: 500; }
+  .cover__lede {
+    margin-top: var(--space-xl);
+    max-width: 60ch;
+    font-size: 1.1rem;
+    line-height: 1.6;
+    color: var(--ink-mid);
+  }
+
+  /* ── ASCII-framed section ───────────────────────────── */
+  .block {
+    margin: var(--space-3xl) 0;
+  }
+  .block__head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+  }
+  .block__id {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--sodium);
+    margin-bottom: var(--space-2xs);
+  }
+  .block__title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(2rem, 4.5vw, 3.2rem);
+    line-height: 0.96;
+    letter-spacing: -0.02em;
+    text-transform: lowercase;
+    color: var(--ink);
+  }
+  .block__meta {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    white-space: nowrap;
+  }
+  .block__meta b { color: var(--sodium); font-weight: 500; }
+  .block__divider {
+    margin: var(--space-md) 0 var(--space-lg);
+  }
+  .block__lede {
+    margin: 0 0 var(--space-xl);
+    max-width: 66ch;
+    color: var(--ink-mid);
+    font-size: 1.04rem;
+  }
+
+  /* ── mode part — ASCII-framed cards ─────────────────── */
+  .parts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+    gap: var(--space-lg);
+  }
+  .part {
+    padding: var(--space-md) 0 0;
+    position: relative;
+  }
+  .part__frame {
+    margin: 0 0 var(--space-md);
+    color: var(--rule-strong);
+  }
+  .part__body {
+    padding: 0 var(--space-md) var(--space-md);
+  }
+  .part__tag {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--sodium);
+    margin-bottom: var(--space-xs);
+  }
+  .part h3 {
+    margin: 0 0 var(--space-sm);
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.5rem;
+    line-height: 1.1;
+    text-transform: lowercase;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .part p {
+    margin: 0;
+    color: var(--ink-mid);
+    font-size: 1rem;
+  }
+
+  /* ── ASCII flow diagram block ────────────────────────── */
+  .diagram {
+    margin: var(--space-md) 0;
+    padding: var(--space-md) var(--space-lg);
+    background: var(--paper-deep);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    line-height: 1.55;
+    color: var(--ink);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .diagram .accent { color: var(--sodium); font-weight: 500; }
+  .diagram .dim { color: var(--ink-dim); }
+
+  /* ── code panel ─────────────────────────────────────── */
+  .code {
+    margin: var(--space-md) 0 0;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--paper-deep);
+    overflow: hidden;
+  }
+  .code__head {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--space-2xs) var(--space-md);
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-faint);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .code__head b { color: var(--ink); font-weight: 500; }
+  .code pre {
+    padding: var(--space-md) var(--space-lg);
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    line-height: 1.7;
+    overflow-x: auto;
+  }
+  .code .kw  { color: var(--sodium-deep); font-weight: 500; }
+  .code .str { color: var(--ink-mid); }
+  .code .com { color: var(--ink-dim); font-style: italic; }
+
+  /* ── color swatch grid with ASCII coordinates ─────── */
+  .palette {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: var(--space-md);
+  }
+  .swatch {
+    padding: var(--space-md);
+    background: var(--paper-deep);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+  }
+  .swatch__chip {
+    height: 4rem;
+    margin-bottom: var(--space-sm);
+    border-radius: 3px;
+    border: 1px solid var(--rule);
+  }
+  .swatch__name {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--ink);
+    font-weight: 500;
+    display: flex;
+    justify-content: space-between;
+  }
+  .swatch__id {
+    color: var(--sodium);
+  }
+  .swatch__coord {
+    margin-top: var(--space-2xs);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--ink-dim);
+    letter-spacing: 0.04em;
+  }
+
+  /* ── type specimen rows ────────────────────────────── */
+  .type {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-md);
+  }
+  .type__row {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 1fr);
+    column-gap: var(--space-xl);
+    align-items: baseline;
+    padding: var(--space-md) 0;
+    border-top: 1px dashed var(--rule);
+  }
+  .type__row:first-child { border-top: 1px solid var(--rule-strong); }
+  .type__row:last-child { border-bottom: 1px solid var(--rule-strong); }
+  .type__meta {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--sodium);
+  }
+  .type__meta b { display: block; color: var(--ink); font-weight: 500; margin-bottom: 0.2em; }
+  .type__sample.is-display { font-family: var(--font-display); font-weight: 700; font-size: clamp(2.2rem, 5vw, 3rem); line-height: 1; color: var(--ink); text-transform: lowercase; letter-spacing: -0.02em; }
+  .type__sample.is-body    { font-family: var(--font-body);    font-weight: 400; font-size: 1.08rem; line-height: 1.55; color: var(--ink); max-width: 56ch; }
+  .type__sample.is-mono    { font-family: var(--font-mono);    font-weight: 500; font-size: 0.98rem; letter-spacing: 0.02em; color: var(--ink); }
+  .type__sample.is-pixel   { font-family: var(--font-pixel);   font-weight: 400; font-size: 2.6rem; color: var(--ink); letter-spacing: 0.02em; line-height: 1; }
+
+  /* ── principle list with ASCII bullets ─────────────── */
+  .rules {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: rulectr;
+  }
+  .rules > li {
+    counter-increment: rulectr;
+    display: grid;
+    grid-template-columns: 4rem minmax(0, 1fr);
+    column-gap: var(--space-md);
+    padding: var(--space-lg) 0;
+    border-bottom: 1px dashed var(--rule);
+  }
+  .rules > li:first-child { border-top: 1px solid var(--rule-strong); }
+  .rules > li:last-child { border-bottom: 1px solid var(--rule-strong); }
+  .rules > li::before {
+    content: "[" counter(rulectr, decimal-leading-zero) "]";
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.10em;
+    color: var(--sodium);
+    padding-top: 0.4rem;
+  }
+  .rules h4 {
+    margin: 0 0 var(--space-2xs);
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.35rem;
+    line-height: 1.12;
+    text-transform: lowercase;
+    color: var(--ink);
+    letter-spacing: -0.008em;
+  }
+  .rules p { margin: 0; color: var(--ink-mid); font-size: 1rem; }
+
+  /* ── colophon ─────────────────────────────────────── */
+  .colophon {
+    margin-top: var(--space-3xl);
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--space-md);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .colophon b { color: var(--ink); font-weight: 500; }
+  .colophon .accent { color: var(--sodium); }
+
+  @media (max-width: 820px) {
+    body { background-size: 6px 6px; }
+    .strip__inner { grid-template-columns: 1fr auto; row-gap: var(--space-2xs); padding: var(--space-xs) var(--space-md); }
+    .strip__path { display: none; }
+    .page { padding: var(--space-xl) var(--space-md); }
+    .cover__pixel { font-size: clamp(3.6rem, 16vw, 6rem); }
+    .block__head { grid-template-columns: 1fr; row-gap: var(--space-2xs); }
+    .block__meta { font-size: 0.66rem; }
+    .type__row { grid-template-columns: 1fr; row-gap: var(--space-sm); }
+    .ascii { font-size: 0.62rem; }
+  }
+</style>
+</head>
+<body>
+  <header class="strip">
+    <div class="strip__inner">
+      <span class="strip__brand">lash · docs</span>
+      <span class="strip__path">architecture <b>·</b> execution <b>·</b> mode dispatch <b>·</b> handoffs</span>
+      <span class="strip__pos">ch <b>04</b> · § <b>04.2</b></span>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="cover">
+      <div class="cover__rail">chapter <b>04</b></div>
+      <h1 class="cover__pixel">execution<span class="slash">/</span>runtime</h1>
+      <div class="cover__sub">
+        <span><b>warm-iron</b> palette</span>
+        <span>·</span>
+        <span><b>three</b> voices</span>
+        <span>·</span>
+        <span><b>rev</b> 02.1</span>
+      </div>
+      <p class="cover__lede">Execution starts in the CLI bootstrap, then branches into interactive TUI or the autonomous <code>--print</code> path. Inside a turn, the active mode decides whether model output becomes native tool calls or Lashlang code execution.</p>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <div>
+          <div class="block__id">§ 04.2 · mode dispatch</div>
+          <h2 class="block__title">mode execution</h2>
+        </div>
+        <span class="block__meta">M.<b>01</b>–M.<b>02</b></span>
+      </div>
+      <pre class="ascii block__divider">═══════════════════════════════════════════════════════════════════════════════</pre>
+      <p class="block__lede">Two modes ship as <code>ModePreset</code>s — <code>standard()</code> and <code>rlm()</code>. Each contributes a protocol driver and preamble, so the runtime loop does not need provider-specific branches. Background work and handoffs are cross-cutting outcomes that either mode can coordinate with, not modes of their own.</p>
+
+      <div class="parts">
+        <article class="part">
+<pre class="ascii part__frame">╭─[M.01]──────────────────────╮
+│            standard         │
+╰─────────────────────────────╯</pre>
+          <div class="part__body">
+            <h3>native provider tool calls</h3>
+            <p>Standard mode interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches mode-native tools first, then registered <code>ToolProvider</code>s.</p>
+          </div>
+        </article>
+        <article class="part">
+<pre class="ascii part__frame">╭─[M.02]──────────────────────╮
+│            rlm              │
+╰─────────────────────────────╯</pre>
+          <div class="part__body">
+            <h3>persistent lashlang execution</h3>
+            <p>RLM mode extracts closed <code>lashlang</code> fences and runs them through a persistent VM. Read-only host bindings project via <code>ProjectedBindings</code>. <code>continue_as</code>, <code>llm_query</code>, and <code>stream_mask</code> manage handoff, completion, and UI masking.</p>
+          </div>
+        </article>
+      </div>
+
+      <div style="margin-top: var(--space-xl)">
+        <p class="block__lede" style="margin-bottom: var(--space-sm)">A turn that ends with <code>continue_as</code> becomes a handoff, not a new mode:</p>
+<pre class="diagram"><span class="dim">turn  ┐</span>
+<span class="dim">      │   ┌──────────────┐    ┌──────────────┐</span>
+<span class="dim">      ├──▶│ </span><span class="accent">StandardDriver</span><span class="dim"> │──▶ tool dispatch ──▶ session graph</span>
+<span class="dim">      │   └──────────────┘    └──────────────┘</span>
+<span class="dim">      │   ┌──────────────┐    ┌──────────────┐    ┌────────────────────┐</span>
+<span class="dim">      └──▶│ </span><span class="accent">RlmDriver</span><span class="dim">      │──▶ lashlang vm  ──▶ </span><span class="accent">continue_as → handoff</span><span class="dim">       │</span>
+<span class="dim">          └──────────────┘    └──────────────┘    └────────────────────┘</span></pre>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <div>
+          <div class="block__id">§ 04.3 · facade</div>
+          <h2 class="block__title">core shape</h2>
+        </div>
+        <span class="block__meta">api · <b>3 types</b></span>
+      </div>
+      <pre class="ascii block__divider">───────────────────────────────────────────────────────────────────────────────</pre>
+      <p class="block__lede">The facade is small. A <code>LashCore</code> is shared configuration; a <code>LashSession</code> is one conversation; a <code>TurnBuilder</code> drives a single turn through a sink.</p>
+
+      <div class="code">
+        <div class="code__head"><b>examples/hello-turn.rs</b><span>rust · 11 lines</span></div>
+<pre><code><span class="com">// hello, turn</span>
+<span class="kw">let</span> core = LashCore::standard()
+    .provider(provider)
+    .model(<span class="str">"anthropic/claude-sonnet-4.6"</span>, None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .build()?;
+
+<span class="kw">let</span> session = core.session(chat_id).standard().open().<span class="kw">await</span>?;
+<span class="kw">let</span> result = session
+    .turn(TurnInput::text(user_text))
+    .stream(&amp;events)
+    .<span class="kw">await</span>?;</code></pre>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <div>
+          <div class="block__id">§ 04.4 · palette</div>
+          <h2 class="block__title">palette</h2>
+        </div>
+        <span class="block__meta">hue ~75 · <b>warm</b></span>
+      </div>
+      <pre class="ascii block__divider">───────────────────────────────────────────────────────────────────────────────</pre>
+      <p class="block__lede">Warm paper neutrals tuned for daylight reading. Sodium amber marks the active edge — section position, plan mode, prompts — and almost nothing else gets the spotlight.</p>
+
+      <div class="palette">
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--paper);box-shadow:inset 0 0 0 1px var(--rule)"></div>
+          <div class="swatch__name">paper <span class="swatch__id">N.01</span></div>
+          <div class="swatch__coord">#f5efe0</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--paper-deep)"></div>
+          <div class="swatch__name">paper-deep <span class="swatch__id">N.02</span></div>
+          <div class="swatch__coord">#efe9d9</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--ink-faint)"></div>
+          <div class="swatch__name">ink-faint <span class="swatch__id">N.03</span></div>
+          <div class="swatch__coord">#b0aea6</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--ink-dim)"></div>
+          <div class="swatch__name">ink-dim <span class="swatch__id">N.04</span></div>
+          <div class="swatch__coord">#7a7872</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--ink-mid)"></div>
+          <div class="swatch__name">ink-mid <span class="swatch__id">N.05</span></div>
+          <div class="swatch__coord">#4c4a45</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--ink)"></div>
+          <div class="swatch__name">ink <span class="swatch__id">N.06</span></div>
+          <div class="swatch__coord">#1d1c19</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--sodium)"></div>
+          <div class="swatch__name">sodium <span class="swatch__id">A.01</span></div>
+          <div class="swatch__coord">#c97a1f</div>
+        </div>
+        <div class="swatch">
+          <div class="swatch__chip" style="background:var(--sodium-deep)"></div>
+          <div class="swatch__name">sodium-deep <span class="swatch__id">A.02</span></div>
+          <div class="swatch__coord">#a35e10</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <div>
+          <div class="block__id">§ 04.5 · type</div>
+          <h2 class="block__title">type</h2>
+        </div>
+        <span class="block__meta"><b>4</b> voices, used sparingly</span>
+      </div>
+      <pre class="ascii block__divider">───────────────────────────────────────────────────────────────────────────────</pre>
+      <p class="block__lede">A bold display face, a refined body serif, a tight monospace — plus one pixel face used only for chapter marks and rare display moments.</p>
+
+      <div class="type">
+        <div class="type__row">
+          <div class="type__meta"><b>display</b>big shoulders · 700</div>
+          <div class="type__sample is-display">a workshop console</div>
+        </div>
+        <div class="type__row">
+          <div class="type__meta"><b>body</b>spectral · 400</div>
+          <div class="type__sample is-body">The runtime is a state machine that emits effects and applies responses. Hosts satisfy effects and project responses back into the same machine.</div>
+        </div>
+        <div class="type__row">
+          <div class="type__meta"><b>mono</b>chivo mono · 500</div>
+          <div class="type__sample is-mono">LashCore::standard().model("…", None).build()?</div>
+        </div>
+        <div class="type__row">
+          <div class="type__meta"><b>pixel</b>vt323 · 400</div>
+          <div class="type__sample is-pixel">execution/runtime</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block__head">
+        <div>
+          <div class="block__id">§ 04.6 · principles</div>
+          <h2 class="block__title">principles</h2>
+        </div>
+        <span class="block__meta"><b>4</b> rules</span>
+      </div>
+      <pre class="ascii block__divider">───────────────────────────────────────────────────────────────────────────────</pre>
+
+      <ol class="rules">
+        <li>
+          <div>
+            <h4>accent means action</h4>
+            <p>Sodium is reserved for the active edge — current section, plan mode, prompts. Passive surfaces use ink hierarchy instead. The accent works because it is rare.</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h4>structure before ornament</h4>
+            <p>Every rule, rail, and block should clarify hierarchy before it tries to look good. Beauty comes from discipline; if a divider is decorative, remove it.</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h4>editorial breaks the grid</h4>
+            <p>Three card grids in a row is a template, not a design. At least one section per page uses a non-card layout — hanging numbers, hairline-divided lists, asymmetric prose.</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <h4>long sessions stay calm</h4>
+            <p>No high-saturation backgrounds, no fragile thin text, no ornamental overload. The palette and typography survive hours of reading.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <footer class="colophon">
+      <span>set in <b>big shoulders display</b> · <b>spectral</b> · <b>chivo mono</b> · <b>vt323</b></span>
+      <span class="accent">→ 05 / runtime</span>
+    </footer>
+  </main>
+</body>
+</html>

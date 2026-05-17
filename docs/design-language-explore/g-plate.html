@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>G — Plate · lash design exploration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=Chivo+Mono:wght@400;500;700&family=Spectral:wght@400;500;600&display=swap">
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     Direction G — "Plate"
+     The page is an engineering drawing plate. The conceit is single-
+     idea and committed: a title block in the corner, plate number
+     instead of chapter number, scale bar, leader-line callouts on
+     diagrams, cross-references that look like drawing references
+     (→ PLATE 05/§3). Warm paper background. The page edges have a
+     drawing border. Big Shoulders display speaks SECTION but is
+     used as a heading for the document, not for impact alone.
+     Lineage: aircraft maintenance manuals, 1960s engineering refs,
+     hot-metal-typeset technical books.
+     ────────────────────────────────────────────────────────────── */
+
+  :root {
+    --paper:       #f5efe0;
+    --paper-deep:  #efe9d9;
+    --paper-faint: #ebe4d2;
+    --ink:         #1d1c19;
+    --ink-mid:     #4c4a45;
+    --ink-dim:     #7a7872;
+    --ink-faint:   #b0aea6;
+    --rule:        #c5bea8;        /* slightly darker for plate-border feel */
+    --rule-soft:   #d9d3c1;
+    --sodium:      #c97a1f;
+    --sodium-deep: #a35e10;
+    --sodium-soft: #f6ebd8;
+
+    --space-2xs: 0.25rem;
+    --space-xs:  0.5rem;
+    --space-sm:  0.75rem;
+    --space-md:  1rem;
+    --space-lg:  1.5rem;
+    --space-xl:  2rem;
+    --space-2xl: 3rem;
+    --space-3xl: 4rem;
+
+    --font-display: "Big Shoulders Display", "Helvetica Neue", sans-serif;
+    --font-body:    "Spectral", "Iowan Old Style", Georgia, serif;
+    --font-mono:    "Chivo Mono", "JetBrains Mono", ui-monospace, monospace;
+
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink-mid);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  p { margin: 0 0 var(--space-md); max-width: 64ch; }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    color: var(--sodium-deep);
+    background: transparent;
+    padding: 0;
+  }
+  strong { color: var(--ink); font-weight: 600; }
+
+  /* ── drawing border — the plate edge ─────────────────── */
+  .plate {
+    max-width: 84rem;
+    margin: var(--space-xl) auto;
+    padding: var(--space-md);
+  }
+  .plate__frame {
+    position: relative;
+    padding: var(--space-2xl) var(--space-2xl) var(--space-xl);
+    /* double-line drawing border */
+    border: 1px solid var(--rule);
+    box-shadow: inset 0 0 0 4px var(--paper), inset 0 0 0 5px var(--rule-soft);
+  }
+
+  /* ── plate header — top corner marks like a drawing ─── */
+  .plate__corner {
+    position: absolute;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-color: var(--ink);
+  }
+  .plate__corner.tl { top: 8px; left: 8px; border-left: 1px solid; border-top: 1px solid; }
+  .plate__corner.tr { top: 8px; right: 8px; border-right: 1px solid; border-top: 1px solid; }
+  .plate__corner.bl { bottom: 8px; left: 8px; border-left: 1px solid; border-bottom: 1px solid; }
+  .plate__corner.br { bottom: 8px; right: 8px; border-right: 1px solid; border-bottom: 1px solid; }
+
+  /* ── identification block at top ───────────────────── */
+  .ident {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-xl);
+    padding-bottom: var(--space-lg);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: var(--space-2xl);
+  }
+  .ident__sub {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: var(--space-sm);
+  }
+  .ident__sub b { color: var(--sodium); font-weight: 500; }
+  .ident__title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(2.6rem, 6vw, 4.8rem);
+    line-height: 0.96;
+    letter-spacing: -0.025em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+  .ident__title .sep { color: var(--ink-faint); margin: 0 0.18em; }
+  .ident__title .sub { color: var(--ink-mid); font-weight: 700; }
+
+  /* ── title block — bottom-right corner of plate ─────── */
+  .titleblock {
+    width: 18rem;
+    border: 1px solid var(--rule);
+    background: var(--paper-deep);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    line-height: 1.3;
+  }
+  .titleblock__cell {
+    padding: 0.45rem var(--space-sm);
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .titleblock__cell:nth-child(2n) { border-right: none; }
+  .titleblock__cell:nth-last-child(-n+2) { border-bottom: none; }
+  .titleblock__cell .lbl {
+    display: block;
+    color: var(--ink-dim);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 0.62rem;
+    margin-bottom: 0.18rem;
+  }
+  .titleblock__cell .val {
+    color: var(--ink);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .titleblock__cell .val.sodium { color: var(--sodium); }
+  .titleblock__full {
+    grid-column: 1 / -1;
+    padding: 0.45rem var(--space-sm);
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-faint);
+  }
+  .titleblock__full .val {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: 0.94rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  /* ── lede ───────────────────────────────────────────── */
+  .lede {
+    margin: var(--space-md) 0 var(--space-2xl);
+    max-width: 60ch;
+    font-size: 1.12rem;
+    line-height: 1.55;
+    color: var(--ink-mid);
+  }
+
+  /* ── scale bar — a small visual flourish ─────────────── */
+  .scalebar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin: var(--space-2xl) 0;
+    padding: var(--space-sm) 0;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .scalebar__rule {
+    flex: 1 1 auto;
+    height: 8px;
+    background:
+      linear-gradient(to right,
+        var(--ink) 0 16.66%, transparent 16.66% 33.33%,
+        var(--ink) 33.33% 50%,  transparent 50% 66.66%,
+        var(--ink) 66.66% 83.33%, transparent 83.33% 100%);
+    background-color: var(--paper-deep);
+    border: 1px solid var(--ink);
+    max-width: 18rem;
+  }
+  .scalebar__lbl b { color: var(--ink); font-weight: 500; }
+
+  /* ── detail header ───────────────────────────────────── */
+  .detail {
+    margin: var(--space-3xl) 0;
+  }
+  .detail__head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    column-gap: var(--space-md);
+    align-items: end;
+    padding-bottom: var(--space-sm);
+    border-bottom: 1px solid var(--ink);
+    margin-bottom: var(--space-lg);
+  }
+  .detail__id {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--sodium);
+  }
+  .detail__title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(1.8rem, 3.2vw, 2.5rem);
+    line-height: 1;
+    letter-spacing: -0.012em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+  .detail__ref {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .detail__ref b { color: var(--ink); font-weight: 500; }
+  .detail__lede {
+    margin: 0 0 var(--space-xl);
+    max-width: 68ch;
+    color: var(--ink-mid);
+    font-size: 1.04rem;
+  }
+
+  /* ── leader-line annotated diagram ──────────────────── */
+  .diagram {
+    margin: var(--space-md) 0 var(--space-lg);
+    padding: var(--space-xl);
+    background: var(--paper-deep);
+    border: 1px solid var(--rule);
+    position: relative;
+  }
+  .diagram__title {
+    position: absolute;
+    top: -0.6rem;
+    left: var(--space-md);
+    padding: 0 var(--space-xs);
+    background: var(--paper-deep);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .diagram__title b { color: var(--sodium); font-weight: 500; }
+  .diagram__svg {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  /* svg drawing tokens — set on the actual elements via stroke/fill */
+
+  /* ── modes table — engineering listing ──────────────── */
+  .modes {
+    border: 1px solid var(--rule);
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--font-body);
+  }
+  .modes thead th {
+    padding: var(--space-sm) var(--space-md);
+    text-align: left;
+    border-bottom: 1px solid var(--ink);
+    background: var(--paper-deep);
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .modes td {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+    font-size: 0.98rem;
+  }
+  .modes td.id   { font-family: var(--font-mono); font-size: 0.84rem; color: var(--sodium); width: 4.5rem; }
+  .modes td.name { font-family: var(--font-mono); font-size: 0.84rem; color: var(--ink); font-weight: 500; width: 8rem; letter-spacing: 0.02em; text-transform: lowercase; }
+  .modes td.desc { color: var(--ink-mid); }
+  .modes td.desc code { font-size: 0.84em; color: var(--sodium-deep); }
+  .modes td.ref  { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink-dim); white-space: nowrap; }
+  .modes td.ref b { color: var(--ink); font-weight: 500; }
+
+  /* ── code listing ───────────────────────────────────── */
+  .code {
+    margin: var(--space-md) 0 0;
+    border: 1px solid var(--rule);
+    background: var(--paper-deep);
+    position: relative;
+  }
+  .code__title {
+    position: absolute;
+    top: -0.6rem;
+    left: var(--space-md);
+    padding: 0 var(--space-xs);
+    background: var(--paper-deep);
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .code__title b { color: var(--sodium); font-weight: 500; }
+  .code pre {
+    margin: 0;
+    padding: var(--space-md) var(--space-xl);
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    line-height: 1.7;
+    color: var(--ink);
+    overflow-x: auto;
+  }
+  .code .kw  { color: var(--sodium-deep); font-weight: 500; }
+  .code .str { color: var(--ink-mid); }
+  .code .com { color: var(--ink-dim); font-style: italic; }
+
+  /* ── palette block ──────────────────────────────────── */
+  .palette {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: var(--space-md);
+  }
+  .swatch {
+    padding: var(--space-md);
+    background: var(--paper-deep);
+    border: 1px solid var(--rule);
+  }
+  .swatch__chip {
+    height: 4rem;
+    margin-bottom: var(--space-sm);
+    border: 1px solid var(--rule);
+  }
+  .swatch__line {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .swatch__name { color: var(--ink); font-weight: 500; }
+  .swatch__id { color: var(--sodium); }
+  .swatch__coord {
+    margin-top: var(--space-2xs);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--ink-dim);
+  }
+
+  /* ── type — plate-style sample sheet ────────────────── */
+  .type-plate {
+    border: 1px solid var(--rule);
+    background: var(--paper-deep);
+  }
+  .type-plate__row {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 1fr) 8rem;
+    column-gap: var(--space-xl);
+    align-items: baseline;
+    padding: var(--space-lg) var(--space-xl);
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .type-plate__row:last-child { border-bottom: none; }
+  .type-plate__meta {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  .type-plate__meta b { display: block; color: var(--ink); font-weight: 500; margin-bottom: 0.2em; }
+  .type-plate__sample.is-display { font-family: var(--font-display); font-weight: 700; font-size: clamp(2rem, 4.5vw, 2.8rem); line-height: 1; color: var(--ink); text-transform: lowercase; letter-spacing: -0.018em; }
+  .type-plate__sample.is-body    { font-family: var(--font-body);    font-weight: 400; font-size: 1.04rem; line-height: 1.55; color: var(--ink); max-width: 50ch; }
+  .type-plate__sample.is-mono    { font-family: var(--font-mono);    font-weight: 500; font-size: 0.96rem; letter-spacing: 0.02em; color: var(--ink); }
+  .type-plate__id {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--sodium);
+    text-align: right;
+  }
+
+  /* ── principles, table form ─────────────────────────── */
+  .rules {
+    border: 1px solid var(--rule);
+    border-collapse: collapse;
+    width: 100%;
+    counter-reset: rulectr;
+    margin: var(--space-md) 0 0;
+  }
+  .rules tr {
+    counter-increment: rulectr;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .rules tr:last-child { border-bottom: none; }
+  .rules td {
+    padding: var(--space-md);
+    vertical-align: top;
+  }
+  .rules td.no {
+    width: 4rem;
+    font-family: var(--font-mono);
+    font-size: 0.86rem;
+    color: var(--sodium);
+    letter-spacing: 0.10em;
+  }
+  .rules td.no::before { content: "§ "; }
+  .rules h4 {
+    margin: 0 0 var(--space-2xs);
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.3rem;
+    line-height: 1.12;
+    text-transform: lowercase;
+    color: var(--ink);
+    letter-spacing: -0.008em;
+  }
+  .rules p {
+    margin: 0;
+    color: var(--ink-mid);
+    font-size: 1rem;
+  }
+  .rules td.ref {
+    width: 9rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    text-align: right;
+  }
+  .rules td.ref b { color: var(--ink); font-weight: 500; }
+
+  /* ── final title block + signoff ─────────────────────── */
+  .signoff {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--space-xl);
+    margin-top: var(--space-3xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--ink);
+  }
+  .signoff__note {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    max-width: 56ch;
+  }
+  .signoff__note b { color: var(--ink); font-weight: 500; }
+  .signoff__note .accent { color: var(--sodium); font-weight: 500; }
+
+  /* ── viewport ───────────────────────────────────────── */
+  @media (max-width: 900px) {
+    .plate { padding: var(--space-xs); margin: var(--space-md) auto; }
+    .plate__frame { padding: var(--space-md); box-shadow: inset 0 0 0 3px var(--paper), inset 0 0 0 4px var(--rule-soft); }
+    .plate__corner { width: 1rem; height: 1rem; }
+    .ident { grid-template-columns: 1fr; row-gap: var(--space-md); }
+    .titleblock { width: 100%; }
+    .detail__head { grid-template-columns: auto 1fr; row-gap: var(--space-2xs); }
+    .detail__ref { grid-column: 1 / -1; }
+    .modes thead { display: none; }
+    .modes, .modes tbody, .modes tr, .modes td { display: block; width: auto; }
+    .modes tr { padding: var(--space-md) 0; border-bottom: 1px solid var(--rule-soft); }
+    .modes td { padding: var(--space-2xs) var(--space-md); border-bottom: none; }
+    .type-plate__row { grid-template-columns: 1fr; row-gap: var(--space-sm); padding: var(--space-md); }
+    .type-plate__id { text-align: left; }
+    .rules td.ref { display: none; }
+    .signoff { grid-template-columns: 1fr; row-gap: var(--space-md); }
+  }
+</style>
+</head>
+<body>
+  <div class="plate">
+    <div class="plate__frame">
+      <span class="plate__corner tl"></span>
+      <span class="plate__corner tr"></span>
+      <span class="plate__corner bl"></span>
+      <span class="plate__corner br"></span>
+
+      <header class="ident">
+        <div>
+          <div class="ident__sub"><b>plate 04</b> · execution / runtime · sheet 1 of 1</div>
+          <h1 class="ident__title">EXECUTION <span class="sep">/</span> <span class="sub">RUNTIME</span></h1>
+          <p class="lede">Execution starts in the CLI bootstrap, then branches into interactive TUI or the autonomous <code>--print</code> path. Inside a turn, the active mode decides whether model output becomes native tool calls or Lashlang code execution.</p>
+        </div>
+
+        <div class="titleblock">
+          <div class="titleblock__full">
+            <span class="val">lash · architecture · execution</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">plate</span>
+            <span class="val sodium">04 / 11</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">rev</span>
+            <span class="val">02.1</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">drawn</span>
+            <span class="val">s.g.</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">checked</span>
+            <span class="val">— —</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">date</span>
+            <span class="val">2026 · 05 · 16</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">scale</span>
+            <span class="val">1 : 1</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="scalebar">
+        <span class="scalebar__lbl"><b>scale</b> 1:1 · standard reading distance</span>
+        <span class="scalebar__rule"></span>
+        <span class="scalebar__lbl">0 · 10ch · 20ch · 30ch</span>
+      </div>
+
+      <section class="detail">
+        <div class="detail__head">
+          <span class="detail__id">§ 04.2 — DETAIL A</span>
+          <h2 class="detail__title">mode execution</h2>
+          <span class="detail__ref">REF <b>PLATE 04 / §4.2</b></span>
+        </div>
+        <p class="detail__lede">Two modes ship as <code>ModePreset</code>s — <code>standard()</code> and <code>rlm()</code>. Each contributes a protocol driver and preamble, so the runtime loop does not need provider-specific branches. Background work and handoffs are cross-cutting outcomes that either mode can coordinate with, not modes of their own.</p>
+
+        <div class="diagram">
+          <div class="diagram__title"><b>fig. 04.2.a</b> · mode dispatch path · not to scale</div>
+          <svg class="diagram__svg" viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg" aria-label="Mode dispatch diagram with leader-line annotations">
+            <defs>
+              <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d1c19"/>
+              </marker>
+              <marker id="arr-sodium" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#c97a1f"/>
+              </marker>
+            </defs>
+
+            <!-- main flow: turn → mode driver → effect -->
+            <g font-family="Chivo Mono, monospace" font-size="11" fill="#1d1c19">
+              <!-- turn -->
+              <rect x="40" y="90" width="100" height="42" fill="none" stroke="#1d1c19" stroke-width="1"/>
+              <text x="90" y="115" text-anchor="middle" letter-spacing="0.08em">TURN</text>
+
+              <!-- arrow to driver -->
+              <line x1="140" y1="111" x2="222" y2="111" stroke="#1d1c19" stroke-width="1" marker-end="url(#arr)"/>
+
+              <!-- driver decision node (diamond) -->
+              <polygon points="280,80 340,111 280,142 220,111" fill="none" stroke="#1d1c19" stroke-width="1"/>
+              <text x="280" y="115" text-anchor="middle" letter-spacing="0.08em">MODE?</text>
+
+              <!-- standard branch -->
+              <line x1="340" y1="111" x2="430" y2="60" stroke="#1d1c19" stroke-width="1" marker-end="url(#arr)"/>
+              <rect x="430" y="42" width="180" height="36" fill="none" stroke="#1d1c19" stroke-width="1"/>
+              <text x="520" y="65" text-anchor="middle" letter-spacing="0.08em">StandardDriver</text>
+
+              <!-- rlm branch -->
+              <line x1="340" y1="111" x2="430" y2="160" stroke="#1d1c19" stroke-width="1" marker-end="url(#arr)"/>
+              <rect x="430" y="142" width="180" height="36" fill="none" stroke="#1d1c19" stroke-width="1"/>
+              <text x="520" y="165" text-anchor="middle" letter-spacing="0.08em">RlmDriver</text>
+
+              <!-- effect output -->
+              <line x1="610" y1="60" x2="680" y2="60" stroke="#1d1c19" stroke-width="1"/>
+              <line x1="610" y1="160" x2="680" y2="160" stroke="#1d1c19" stroke-width="1"/>
+            </g>
+
+            <!-- leader-line callouts -->
+            <g font-family="Chivo Mono, monospace" font-size="9" fill="#7a7872" letter-spacing="0.12em">
+              <!-- callout 1: M.01 to StandardDriver -->
+              <circle cx="520" cy="60" r="3" fill="#c97a1f"/>
+              <line x1="520" y1="60" x2="640" y2="22" stroke="#c97a1f" stroke-width="0.75" stroke-dasharray="2 2"/>
+              <text x="645" y="20" fill="#c97a1f" letter-spacing="0.14em">M.01 · STANDARD</text>
+              <text x="645" y="32" fill="#7a7872">native tool calls</text>
+
+              <!-- callout 2: M.02 to RlmDriver -->
+              <circle cx="520" cy="160" r="3" fill="#c97a1f"/>
+              <line x1="520" y1="160" x2="640" y2="198" stroke="#c97a1f" stroke-width="0.75" stroke-dasharray="2 2"/>
+              <text x="645" y="195" fill="#c97a1f" letter-spacing="0.14em">M.02 · RLM</text>
+              <text x="645" y="207" fill="#7a7872">lashlang vm</text>
+
+              <!-- callout 3: decision -->
+              <circle cx="280" cy="80" r="3" fill="#c97a1f"/>
+              <line x1="280" y1="80" x2="280" y2="22" stroke="#c97a1f" stroke-width="0.75" stroke-dasharray="2 2"/>
+              <text x="234" y="18" fill="#c97a1f" letter-spacing="0.14em">D.01 · DISPATCH</text>
+
+              <!-- callout 4: turn input -->
+              <circle cx="90" cy="90" r="3" fill="#c97a1f"/>
+              <line x1="90" y1="90" x2="90" y2="42" stroke="#c97a1f" stroke-width="0.75" stroke-dasharray="2 2"/>
+              <text x="40" y="38" fill="#c97a1f" letter-spacing="0.14em">T.01 · TURN</text>
+            </g>
+          </svg>
+        </div>
+
+        <table class="modes">
+          <thead>
+            <tr><th>ID</th><th>name</th><th>behavior</th><th>ref</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="id">M.01</td>
+              <td class="name">standard</td>
+              <td class="desc">Standard mode interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches mode-native tools first, then registered <code>ToolProvider</code>s.</td>
+              <td class="ref">→ <b>PLATE 02</b> / §3</td>
+            </tr>
+            <tr>
+              <td class="id">M.02</td>
+              <td class="name">rlm</td>
+              <td class="desc">RLM mode extracts <code>lashlang</code> fences and runs them through a persistent VM. Read-only host bindings project into Lashlang scope via <code>ProjectedBindings</code>. <code>continue_as</code>, <code>llm_query</code>, and the <code>stream_mask</code> plugin manage handoff, completion, and live UI masking.</td>
+              <td class="ref">→ <b>PLATE 08</b> / §1</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="detail">
+        <div class="detail__head">
+          <span class="detail__id">§ 04.3 — DETAIL B</span>
+          <h2 class="detail__title">core shape</h2>
+          <span class="detail__ref">REF <b>EMBEDDING.MD</b></span>
+        </div>
+        <p class="detail__lede">The facade is small. A <code>LashCore</code> is shared configuration; a <code>LashSession</code> is one conversation; a <code>TurnBuilder</code> drives a single turn through a sink.</p>
+
+        <div class="code">
+          <div class="code__title"><b>listing 04.3.a</b> · examples/hello-turn.rs · rust</div>
+<pre><code><span class="com">// hello, turn</span>
+<span class="kw">let</span> core = LashCore::standard()
+    .provider(provider)
+    .model(<span class="str">"anthropic/claude-sonnet-4.6"</span>, None)
+    .max_context_tokens(200_000)
+    .store_factory(store_factory)
+    .build()?;
+
+<span class="kw">let</span> session = core.session(chat_id).standard().open().<span class="kw">await</span>?;
+<span class="kw">let</span> result = session
+    .turn(TurnInput::text(user_text))
+    .stream(&amp;events)
+    .<span class="kw">await</span>?;</code></pre>
+        </div>
+      </section>
+
+      <section class="detail">
+        <div class="detail__head">
+          <span class="detail__id">§ 04.4 — DETAIL C</span>
+          <h2 class="detail__title">palette</h2>
+          <span class="detail__ref">SPEC <b>PALETTE.WARM-IRON</b></span>
+        </div>
+        <p class="detail__lede">Warm paper neutrals tuned for daylight reading. Sodium amber marks the active edge — section position, plan mode, prompts — and almost nothing else gets the spotlight.</p>
+
+        <div class="palette">
+          <div class="swatch"><div class="swatch__chip" style="background:var(--paper)"></div><div class="swatch__line"><span class="swatch__name">paper</span><span class="swatch__id">N.01</span></div><div class="swatch__coord">#f5efe0</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--paper-deep)"></div><div class="swatch__line"><span class="swatch__name">paper-deep</span><span class="swatch__id">N.02</span></div><div class="swatch__coord">#efe9d9</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--ink-faint)"></div><div class="swatch__line"><span class="swatch__name">ink-faint</span><span class="swatch__id">N.03</span></div><div class="swatch__coord">#b0aea6</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--ink-dim)"></div><div class="swatch__line"><span class="swatch__name">ink-dim</span><span class="swatch__id">N.04</span></div><div class="swatch__coord">#7a7872</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--ink-mid)"></div><div class="swatch__line"><span class="swatch__name">ink-mid</span><span class="swatch__id">N.05</span></div><div class="swatch__coord">#4c4a45</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--ink)"></div><div class="swatch__line"><span class="swatch__name">ink</span><span class="swatch__id">N.06</span></div><div class="swatch__coord">#1d1c19</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--sodium)"></div><div class="swatch__line"><span class="swatch__name">sodium</span><span class="swatch__id">A.01</span></div><div class="swatch__coord">#c97a1f</div></div>
+          <div class="swatch"><div class="swatch__chip" style="background:var(--sodium-deep)"></div><div class="swatch__line"><span class="swatch__name">sodium-deep</span><span class="swatch__id">A.02</span></div><div class="swatch__coord">#a35e10</div></div>
+        </div>
+      </section>
+
+      <section class="detail">
+        <div class="detail__head">
+          <span class="detail__id">§ 04.5 — DETAIL D</span>
+          <h2 class="detail__title">type</h2>
+          <span class="detail__ref">SPEC <b>TYPE.THREE-VOICES</b></span>
+        </div>
+        <p class="detail__lede">A bold display face, a refined body serif, a tight monospace. Three voices, no more.</p>
+
+        <div class="type-plate">
+          <div class="type-plate__row">
+            <div class="type-plate__meta"><b>display</b>big shoulders · 700</div>
+            <div class="type-plate__sample is-display">a workshop console</div>
+            <div class="type-plate__id">T.01</div>
+          </div>
+          <div class="type-plate__row">
+            <div class="type-plate__meta"><b>body</b>spectral · 400</div>
+            <div class="type-plate__sample is-body">The runtime is a state machine that emits effects and applies responses. Hosts satisfy effects and project responses back into the same machine.</div>
+            <div class="type-plate__id">T.02</div>
+          </div>
+          <div class="type-plate__row">
+            <div class="type-plate__meta"><b>mono</b>chivo mono · 500</div>
+            <div class="type-plate__sample is-mono">LashCore::standard().model("…", None).build()?</div>
+            <div class="type-plate__id">T.03</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="detail">
+        <div class="detail__head">
+          <span class="detail__id">§ 04.6 — DETAIL E</span>
+          <h2 class="detail__title">principles</h2>
+          <span class="detail__ref">REF <b>STYLEGUIDE.MD</b></span>
+        </div>
+
+        <table class="rules">
+          <tbody>
+            <tr>
+              <td class="no">1</td>
+              <td>
+                <h4>accent means action</h4>
+                <p>Sodium is reserved for the active edge — current section, plan mode, prompts. Passive surfaces use ink hierarchy instead. The accent works because it is rare.</p>
+              </td>
+              <td class="ref">REF <b>A.01</b></td>
+            </tr>
+            <tr>
+              <td class="no">2</td>
+              <td>
+                <h4>structure before ornament</h4>
+                <p>Every rule, rail, and block should clarify hierarchy before it tries to look good. Beauty comes from discipline; if a divider is decorative, remove it.</p>
+              </td>
+              <td class="ref">REF <b>—</b></td>
+            </tr>
+            <tr>
+              <td class="no">3</td>
+              <td>
+                <h4>editorial breaks the grid</h4>
+                <p>Three card grids in a row is a template, not a design. At least one section per plate uses a non-card layout — table, hanging numbers, asymmetric prose, leader-line callouts.</p>
+              </td>
+              <td class="ref">REF <b>—</b></td>
+            </tr>
+            <tr>
+              <td class="no">4</td>
+              <td>
+                <h4>long sessions stay calm</h4>
+                <p>No high-saturation backgrounds, no fragile thin text, no ornamental overload. The plate is a calm reference surface, not a dashboard.</p>
+              </td>
+              <td class="ref">REF <b>A.01</b></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <footer class="signoff">
+        <div class="signoff__note">
+          <span>set in <b>big shoulders display</b> · <b>spectral</b> · <b>chivo mono</b> · printed on warm-paper · accent <span class="accent">A.01 sodium</span> reserved for the active edge</span>
+        </div>
+        <div class="titleblock" style="width: 14rem">
+          <div class="titleblock__full"><span class="val">END OF PLATE</span></div>
+          <div class="titleblock__cell">
+            <span class="lbl">next</span>
+            <span class="val sodium">→ 05</span>
+          </div>
+          <div class="titleblock__cell">
+            <span class="lbl">sheet</span>
+            <span class="val">1/1</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </div>
+</body>
+</html>
