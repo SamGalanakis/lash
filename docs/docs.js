@@ -516,6 +516,9 @@
       drawSpineSnake();
       loadMermaidIfNeeded();
       runMermaidIfReady();
+      if (typeof window.__LASH_HIGHLIGHT === "function") {
+        window.__LASH_HIGHLIGHT();
+      }
       if (typeof window.__LASH_SCENE_RUN === "function") {
         window.__LASH_SCENE_RUN();
       }
