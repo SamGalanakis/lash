@@ -87,7 +87,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.130"
+version = "0.2.131"
 license = "MIT"
 
 # Centralized external versions. Members opt in with
