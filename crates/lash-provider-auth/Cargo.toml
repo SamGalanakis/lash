@@ -1,8 +1,17 @@
 [package]
 name = "lash-provider-auth"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "OAuth helpers and credential storage shared by lash provider crates."
+keywords = ["lash", "agent", "oauth", "auth", "llm"]
+categories = ["api-bindings", "authentication"]
 
 [dependencies]
 base64 = { workspace = true }

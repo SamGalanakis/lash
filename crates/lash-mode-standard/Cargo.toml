@@ -1,14 +1,23 @@
 [package]
 name = "lash-mode-standard"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Standard mode (native provider tool calls) for the lash agent runtime."
+keywords = ["lash", "agent", "mode", "tools", "llm"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-sqlite-store = { path = "../lash-sqlite-store" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.1" }
 tokio = { workspace = true, features = ["full"] }

@@ -1,8 +1,17 @@
 [package]
 name = "lash-trace"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Trace types and JSONL exporter for the lash agent runtime."
+keywords = ["lash", "agent", "trace", "jsonl", "observability"]
+categories = ["asynchronous", "development-tools::debugging"]
 
 [features]
 default = []

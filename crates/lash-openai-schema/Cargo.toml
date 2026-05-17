@@ -1,11 +1,19 @@
 [package]
 name = "lash-openai-schema"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
 description = "OpenAI JSON Schema projection helpers shared by Lash providers."
+keywords = ["lash", "agent", "openai", "schema", "json"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

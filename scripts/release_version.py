@@ -11,6 +11,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+# Pre-release versions (e.g. "0.1.0-alpha.1") are honoured but never
+# auto-bumped — during an alpha series the workspace version is set
+# manually and CI's auto-sync no-ops.
+PRERELEASE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-[A-Za-z0-9.-]+$")
 
 
 def main() -> int:
@@ -26,8 +30,11 @@ def main() -> int:
         if len(sys.argv) != 3:
             print("set requires a version argument", file=sys.stderr)
             return 1
-        version = parse_version(sys.argv[2])
-        apply_version(version)
+        value = sys.argv[2]
+        if not (VERSION_RE.fullmatch(value) or PRERELEASE_RE.fullmatch(value)):
+            print(f"unsupported version format: {value!r}", file=sys.stderr)
+            return 1
+        apply_version_text(value)
         return 0
 
     print(f"unknown command: {command}", file=sys.stderr)
@@ -46,6 +53,11 @@ def print_usage() -> None:
 
 def compute_next_version() -> str:
     workspace_version = read_workspace_version()
+    # Pre-release versions ("0.1.0-alpha.1") are kept as-is — they are
+    # managed by hand. Auto-bumping resumes once the workspace promotes
+    # to a clean semver release.
+    if PRERELEASE_RE.fullmatch(workspace_version):
+        return workspace_version
     latest_tag = read_latest_release_tag()
     if latest_tag is None:
         return workspace_version
@@ -66,8 +78,12 @@ def read_workspace_version() -> str:
     )
     if not match:
         raise SystemExit("failed to find [workspace.package] version in Cargo.toml")
-    parse_version(match.group(1))
-    return match.group(1)
+    value = match.group(1)
+    # accept either clean semver or a pre-release tag; neither shape
+    # raises here so the helper can still report the current version
+    if not (VERSION_RE.fullmatch(value) or PRERELEASE_RE.fullmatch(value)):
+        raise SystemExit(f"unsupported workspace version: {value!r}")
+    return value
 
 
 def read_latest_release_tag() -> str | None:
@@ -98,7 +114,10 @@ def format_version(version: tuple[int, int, int]) -> str:
 
 
 def apply_version(version: tuple[int, int, int]) -> None:
-    version_text = format_version(version)
+    apply_version_text(format_version(version))
+
+
+def apply_version_text(version_text: str) -> None:
     update_workspace_version(version_text)
     update_lockfile_versions(version_text)
 

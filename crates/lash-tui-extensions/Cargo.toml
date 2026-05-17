@@ -6,8 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash = { path = "../lash" }
-lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode" }
-lash-tui = { path = "../lash-tui" }
+lash-runtime = { path = "../lash", version = "=0.1.0-alpha.1" }
+lash-plugin-plan-mode = { path = "../lash-plugin-plan-mode", version = "=0.1.0-alpha.1" }
+lash-tui = { path = "../lash-tui", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

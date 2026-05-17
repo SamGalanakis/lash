@@ -1,10 +1,19 @@
 [package]
 name = "lash-rlm-types"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Shared types for RLM mode in the lash agent runtime."
+keywords = ["lash", "agent", "rlm", "types", "lashlang"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -1,13 +1,22 @@
 [package]
 name = "lash-mode-rlm"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "RLM mode (persistent Lashlang execution) for the lash agent runtime."
+keywords = ["lash", "agent", "rlm", "lashlang", "llm"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core" }
-lashlang = { path = "../lashlang" }
-lash-rlm-types = { path = "../lash-rlm-types" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.1" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -18,7 +27,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", features = ["testing"] }
-lash-sansio = { path = "../lash-sansio" }
-lash-mode-standard = { path = "../lash-mode-standard" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", features = ["testing"] }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
+lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.1" }
 insta = "1"

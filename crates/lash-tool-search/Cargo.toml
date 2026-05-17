@@ -1,16 +1,25 @@
 [package]
 name = "lash-tool-search"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Code-search tool (ripgrep-backed) for the lash agent runtime."
+keywords = ["lash", "agent", "tools", "search", "llm"]
+categories = ["asynchronous", "development-tools"]
 
 [features]
 default = []
 fff-zlob = ["fff-search/zlob"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false }
-lash-tool-support = { path = "../lash-tool-support" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 # Keep this exact until fff-search/zlob publish a Zig-compatible replacement.
 fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
@@ -20,5 +29,5 @@ tokio = { workspace = true, features = ["rt", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }

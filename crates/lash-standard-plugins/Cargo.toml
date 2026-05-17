@@ -1,8 +1,17 @@
 [package]
 name = "lash-standard-plugins"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Default plugin stack bundle for the lash agent runtime."
+keywords = ["lash", "agent", "plugins", "llm", "runtime"]
+categories = ["asynchronous", "api-bindings"]
 
 [features]
 default = []
@@ -10,12 +19,12 @@ fff-zlob = ["lash-tool-search/fff-zlob"]
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false }
-lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory" }
-lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history" }
-lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery" }
-lash-tool-apply-patch = { path = "../lash-tool-apply-patch" }
-lash-tool-files = { path = "../lash-tool-files" }
-lash-tool-search = { path = "../lash-tool-search" }
-lash-tool-shell = { path = "../lash-tool-shell" }
-lash-tool-web = { path = "../lash-tool-web" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.1" }
+lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history", version = "=0.1.0-alpha.1" }
+lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery", version = "=0.1.0-alpha.1" }
+lash-tool-apply-patch = { path = "../lash-tool-apply-patch", version = "=0.1.0-alpha.1" }
+lash-tool-files = { path = "../lash-tool-files", version = "=0.1.0-alpha.1" }
+lash-tool-search = { path = "../lash-tool-search", version = "=0.1.0-alpha.1" }
+lash-tool-shell = { path = "../lash-tool-shell", version = "=0.1.0-alpha.1" }
+lash-tool-web = { path = "../lash-tool-web", version = "=0.1.0-alpha.1" }

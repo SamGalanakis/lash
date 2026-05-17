@@ -1,12 +1,21 @@
 [package]
 name = "lash-tool-shell"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Shell-execution tool for the lash agent runtime."
+keywords = ["lash", "agent", "tools", "shell", "llm"]
+categories = ["asynchronous", "command-line-interface"]
 
 [dependencies]
-lash-core = { path = "../lash-core", default-features = false }
-lash-tool-support = { path = "../lash-tool-support" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.1" }
 async-trait = { workspace = true }
 libc = "0.2"
 portable-pty = "0.9"
@@ -15,4 +24,4 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "r
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["testing"] }
