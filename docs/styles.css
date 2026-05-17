@@ -523,6 +523,94 @@ pre::before {
   color: var(--ink-dim);
 }
 
+/* ── syntax highlighting — Prism token palette tied to warm-iron.
+   Token classes come from Prism (syntax.js loads it on demand). We
+   only set colours; layout + font + monospace come from `pre` above.
+   Both themes share the same token surface; only the tones flip. */
+:root[data-theme="dark"] {
+  --tok-comment:     #6f6a5c;
+  --tok-keyword:     #e8a33c;
+  --tok-string:      #b6c79a;
+  --tok-number:      #e0b178;
+  --tok-type:        #d6caa6;
+  --tok-function:    #e8e4d0;
+  --tok-builtin:     #e8a33c;
+  --tok-attribute:   #c98a5f;
+  --tok-macro:       #e8a33c;
+  --tok-operator:    #a8a395;
+  --tok-punctuation: #837d6e;
+  --tok-lifetime:    #d8a878;
+  --tok-property:    #d6caa6;
+  --tok-bool:        #e8a33c;
+  --tok-regex:       #b6c79a;
+  --tok-tag:         #e8a33c;
+  --tok-deleted:     #d77272;
+  --tok-inserted:    #b6c79a;
+}
+:root[data-theme="light"] {
+  --tok-comment:     #8e8676;
+  --tok-keyword:     #a35e10;
+  --tok-string:      #3f6b34;
+  --tok-number:      #a35e10;
+  --tok-type:        #2b2722;
+  --tok-function:    #1d1c19;
+  --tok-builtin:     #a35e10;
+  --tok-attribute:   #c97a1f;
+  --tok-macro:       #a35e10;
+  --tok-operator:    #4c4a45;
+  --tok-punctuation: #6a665c;
+  --tok-lifetime:    #a35e10;
+  --tok-property:    #2b2722;
+  --tok-bool:        #a35e10;
+  --tok-regex:       #3f6b34;
+  --tok-tag:         #a35e10;
+  --tok-deleted:     #8a2828;
+  --tok-inserted:    #3f6b34;
+}
+pre code .token { background: transparent; }
+pre code .token.comment,
+pre code .token.prolog,
+pre code .token.cdata     { color: var(--tok-comment); font-style: italic; }
+pre code .token.doc-comment { color: var(--tok-comment); font-style: italic; }
+pre code .token.keyword,
+pre code .token.atrule,
+pre code .token.important { color: var(--tok-keyword); }
+pre code .token.string,
+pre code .token.char,
+pre code .token.attr-value,
+pre code .token.regex,
+pre code .token.url-link  { color: var(--tok-string); }
+pre code .token.number,
+pre code .token.boolean,
+pre code .token.constant,
+pre code .token.symbol    { color: var(--tok-number); }
+pre code .token.class-name,
+pre code .token.type      { color: var(--tok-type); }
+pre code .token.function,
+pre code .token.function-definition,
+pre code .token.method    { color: var(--tok-function); }
+pre code .token.builtin,
+pre code .token.namespace { color: var(--tok-builtin); }
+pre code .token.attribute,
+pre code .token.attr-name { color: var(--tok-attribute); }
+pre code .token.macro,
+pre code .token.macro-rules,
+pre code .token.macro.property { color: var(--tok-macro); }
+pre code .token.operator,
+pre code .token.entity    { color: var(--tok-operator); }
+pre code .token.punctuation { color: var(--tok-punctuation); }
+pre code .token.lifetime-annotation { color: var(--tok-lifetime); font-style: italic; }
+pre code .token.property,
+pre code .token.key       { color: var(--tok-property); }
+pre code .token.tag       { color: var(--tok-tag); }
+pre code .token.deleted   { color: var(--tok-deleted); }
+pre code .token.inserted  { color: var(--tok-inserted); }
+pre code .token.italic    { font-style: italic; }
+pre code .token.bold      { font-weight: 600; }
+/* shell prompt + flag accents */
+pre code .language-bash .token.variable,
+pre code .language-bash .token.environment { color: var(--tok-builtin); }
+
 /* ── definition list (editorial — hanging mono terms) ── */
 .defs,
 .def-list {
