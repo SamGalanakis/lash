@@ -50,8 +50,8 @@
     },
     {
       label: "architecture",
-      href: "architecture/index.html",
       items: [
+        { name: "system",          href: "architecture/index.html" },
         { name: "overview",        href: "architecture/overview.html" },
         { name: "modules",         href: "architecture/modules.html" },
         { name: "flow",            href: "architecture/flow.html" },
@@ -194,11 +194,8 @@
 
     const out = [];
     for (const group of TOC) {
-      const titleHtml = group.href
-        ? `<a href="${escapeHtml(base + group.href)}">${escapeHtml(group.label)}</a>`
-        : `<span class="toc__group-title-text">${escapeHtml(group.label)}</span>`;
       const containsActive = containsHref(group, cur);
-      const groupActive = (group.href && cur === group.href) || containsActive;
+      const groupActive = containsActive;
       const hasItems = group.items && group.items.length > 0;
       // Groups default to collapsed. Auto-open the group containing
       // the active page (so users see where they are), plus any
@@ -211,19 +208,33 @@
       ].filter(Boolean).join(" ");
       out.push(`<nav class="${classes}" data-group="${escapeHtml(group.label)}">`);
       const titleClasses = "toc__group-title" + (groupActive ? " is-active" : "");
-      const caret = hasItems ? `<button class="toc__caret-btn" type="button" aria-label="toggle ${escapeHtml(group.label)}">${CARET_SVG}</button>` : '<span class="toc__caret-spacer" aria-hidden="true"></span>';
-      out.push(`<p class="${titleClasses}">${caret}${titleHtml}</p>`);
+      // Title is a button when the group has items — the whole row
+      // toggles collapse, not just the caret. The caret stays as a
+      // visual indicator that rotates with the group's open state.
       if (hasItems) {
+        out.push(
+          `<button class="${titleClasses}" type="button" aria-expanded="${!isCollapsed}">` +
+            `<span class="toc__caret-wrap" aria-hidden="true">${CARET_SVG}</span>` +
+            `<span class="toc__group-title-text">${escapeHtml(group.label)}</span>` +
+          `</button>`
+        );
         out.push('<ol class="toc__items">');
         for (const item of group.items) out.push(renderChild(item));
         out.push("</ol>");
+      } else {
+        out.push(
+          `<p class="${titleClasses}">` +
+            `<span class="toc__caret-spacer" aria-hidden="true"></span>` +
+            `<span class="toc__group-title-text">${escapeHtml(group.label)}</span>` +
+          `</p>`
+        );
       }
       out.push(`</nav>`);
     }
     host.innerHTML = out.join("\n");
 
-    // wire caret toggles
-    host.querySelectorAll(".toc__caret-btn").forEach((btn) => {
+    // wire title toggles — the whole title row is the toggle button
+    host.querySelectorAll("button.toc__group-title").forEach((btn) => {
       btn.addEventListener("click", (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -231,6 +242,7 @@
         if (!group) return;
         const label = group.getAttribute("data-group");
         const nowCollapsed = group.classList.toggle("is-collapsed");
+        btn.setAttribute("aria-expanded", String(!nowCollapsed));
         const current = getExpandedGroups();
         if (nowCollapsed) current.delete(label);
         else current.add(label);
