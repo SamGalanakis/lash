@@ -49,7 +49,7 @@ jobs:
         run: cargo test -p lash-core --locked
 
       - name: Test lash facade
-        run: cargo test -p lash --locked
+        run: cargo test -p lash-runtime --locked
 
       - name: Test first-party standard plugins
         run: cargo test -p lash-standard-plugins --locked --features fff-zlob
