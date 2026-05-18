@@ -125,14 +125,24 @@
   }
 
   function tocBase() {
-    // absolute URL path up to and including the /docs/ directory, so
-    // TOC links resolve correctly from any current page after SPA
-    // navigation (relative bases would rot once the URL changes
-    // without rebuilding the TOC).
-    let p = location.pathname;
+    // absolute URL path of the docs ROOT, so TOC links + dynamic
+    // script injections resolve correctly from any page no matter
+    // how deeply nested. Derive from docs.js's own <script src> —
+    // wherever this file lives is, by definition, the docs root.
+    // Falls back to a /docs/ path scan, then /, for legacy setups.
+    const scripts = document.querySelectorAll('script[src]');
+    for (const s of scripts) {
+      const src = s.getAttribute("src") || "";
+      if (/(^|\/)docs\.js(?:\?|$)/.test(src)) {
+        try {
+          const url = new URL(src, location.href);
+          return url.pathname.replace(/docs\.js$/, "");
+        } catch (e) { /* fall through */ }
+      }
+    }
+    const p = location.pathname;
     const idx = p.indexOf("/docs/");
     if (idx >= 0) return p.slice(0, idx + 6);
-    // fallback for sites served at root
     return "/";
   }
 
@@ -1016,6 +1026,19 @@
       s.defer = true;
       s.setAttribute("data-scene", "");
       document.head.appendChild(s);
+    }
+    // load the channel switcher if it isn't already on the page;
+    // when it loads it auto-builds against .band__right (just appended
+    // a few lines above), so no explicit init call is needed.
+    if (!document.querySelector('script[data-channel]')) {
+      const s = document.createElement("script");
+      s.src = base + "channel.js";
+      s.defer = true;
+      s.setAttribute("data-channel", "");
+      document.head.appendChild(s);
+    } else if (typeof window.__LASH_CHANNEL_INIT === "function") {
+      // band was just rebuilt — re-attach the switcher
+      window.__LASH_CHANNEL_INIT();
     }
   }
 

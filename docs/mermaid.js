@@ -81,7 +81,10 @@
   function ensureLoaded() {
     if (_mermaid) return Promise.resolve(_mermaid);
     if (_loadPromise) return _loadPromise;
-    const url = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    // Pin to a specific minor — `mermaid@11` floats and v11.15 has been
+    // observed throwing "Syntax error in text" on diagrams that parsed
+    // fine on earlier minors. Bump deliberately when upgrading.
+    const url = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
     _loadPromise = import(url).then(({ default: m }) => {
       _mermaid = m;
       // expose so docs.js can also trigger re-renders after SPA swaps

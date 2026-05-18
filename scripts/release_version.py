@@ -148,6 +148,7 @@ def apply_version(version: tuple[int, int, int]) -> None:
 
 def apply_version_text(version_text: str) -> None:
     update_workspace_version(version_text)
+    update_workspace_dependency_versions(version_text)
     update_lockfile_versions(version_text)
 
 
@@ -162,6 +163,33 @@ def update_workspace_version(version: str) -> None:
     if count != 1:
         raise SystemExit("failed to update workspace version in Cargo.toml")
     CARGO_TOML.write_text(updated)
+
+
+def update_workspace_dependency_versions(version: str) -> None:
+    workspace_packages = read_workspace_package_names()
+    for manifest in sorted(ROOT.glob("**/Cargo.toml")):
+        if "target" in manifest.relative_to(ROOT).parts:
+            continue
+        text = manifest.read_text()
+        updated_lines = []
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            name_match = re.match(r"([A-Za-z0-9_-]+)\s*=", stripped)
+            if (
+                name_match
+                and name_match.group(1) in workspace_packages
+                and "path =" in line
+                and "version =" in line
+            ):
+                line = re.sub(
+                    r'version = "=[^"]+"',
+                    f'version = "={version}"',
+                    line,
+                )
+            updated_lines.append(line)
+        updated = "\n".join(updated_lines) + "\n"
+        if updated != text:
+            manifest.write_text(updated)
 
 
 def update_lockfile_versions(version: str) -> None:
