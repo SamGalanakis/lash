@@ -290,22 +290,52 @@ code {
   color: var(--ink-faint);
   margin-left: 0.05rem;
 }
+/* Menu styles that apply IN ALL CASES (when actually visible) —
+   colour, font, shadow. Note: no `display` here, so the UA's
+   `display: none` default for `[popover]` (closed) and `[hidden]`
+   (fallback) wins until we explicitly open it. */
 .channel__menu {
-  position: absolute;
-  top: calc(100% + 0.35rem);
-  right: 0;
+  margin: 0;
+  padding: 0;
   min-width: 7rem;
   background: var(--bg-elev, var(--bg));
   border: 1px solid var(--rule-strong);
   border-radius: 3px;
-  display: flex;
-  flex-direction: column;
   z-index: 50;
   font-family: var(--font-mono);
   font-size: 0.66rem;
   letter-spacing: 0.16em;
   text-transform: lowercase;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+/* Open popover: flex layout, anchored under the trigger button. */
+.channel__btn { anchor-name: --channel-btn; }
+.channel__menu:popover-open {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  inset: auto;
+  position-anchor: --channel-btn;
+  top: anchor(bottom);
+  right: anchor(right);
+  margin-top: 0.35rem;
+}
+/* Browsers without CSS anchor positioning: hard-snap under the
+   band's right edge. Same metrics for both cases. */
+@supports not (anchor-name: --x) {
+  .channel__menu:popover-open {
+    top: 3.4rem;
+    right: var(--space-md, 1rem);
+  }
+}
+/* Manual-toggle fallback (no popover API) — re-style when the menu
+   has no popover attribute and isn't hidden. */
+.channel__menu:not([popover]):not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
 }
 .channel__opt {
   padding: 0.55rem 0.75rem;
