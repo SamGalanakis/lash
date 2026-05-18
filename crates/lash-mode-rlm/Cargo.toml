@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "rlm", "lashlang", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.1" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.1" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.2" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.2" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -26,7 +26,7 @@ tempfile = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", features = ["testing"] }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
-lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.1" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", features = ["testing"] }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.2" }
+lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.2" }
 insta = "1"
