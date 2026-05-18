@@ -77,8 +77,8 @@ pub mod persistence {
         PersistedSessionConfig, PersistedSessionRead, PersistedSessionState, PersistedTurnState,
         RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint,
         SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta, SessionMeta,
-        SessionNodeRecord, SessionReadScope, SessionReadView, SessionStoreCreateRequest,
-        SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
+        SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
+        SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
         load_persisted_session_state, load_persisted_session_state_active_path,
     };
 }
