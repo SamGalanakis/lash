@@ -186,7 +186,7 @@ $ lash --print "Investigate the latest test failure." \
         <div class="section" id="config-file">
           <div class="section-header">
             <h2>Config File</h2>
-            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is owned by <code>LashConfig</code> in <code>crates/lash-cli/src/config.rs</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
+            <p>Configuration lives at <code>~/.lash/config.json</code> (overridable via the <code>LASH_HOME</code> environment variable). The schema is defined by <code>LashConfig</code> in <code>crates/lash-cli/src/config.rs</code> and uses <code>serde(deny_unknown_fields)</code> — unknown top-level fields are rejected to catch typos.</p>
           </div>
           <pre><code>{
   "active_provider": "openai",

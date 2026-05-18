@@ -17,20 +17,20 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">runtime<span class="slash">/</span>host</h1>
-    <p class="opener__lede">The async runtime is the host boundary around the pure turn machine. It owns residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and the app-facing <code>lash</code> API outside the core session model.</p>
+    <p class="opener__lede">The async runtime is the host boundary around the pure turn machine. It manages residency, persistence, plugin hooks, provider calls, background work, usage accounting, and read projections while keeping CLI rendering and the app-facing <code>lash</code> API outside the core session model.</p>
   </section>
 
   <main class="body" id="content">
 <div class="section">
           <div class="section-header">
             <h2>Runtime Shape</h2>
-            <p><code>LashRuntime</code> holds the live session registry, the managed-sessions map, the active handoff continuation table, the pending first-turn input queue, and a usage ledger. Sans-IO computes protocol effects, <code>RuntimeEffectHost</code> owns nondeterministic host work, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
+            <p><code>LashRuntime</code> holds the live session registry, the managed-sessions map, the active handoff continuation table, the pending first-turn input queue, and a usage ledger. Sans-IO computes protocol effects, <code>RuntimeEffectHost</code> handles nondeterministic host work, plugins contribute behavior, providers complete requests, and persistence records durable turn results.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Runtime composition</div>
             <div class="mermaid">
 flowchart TD
-  Host["CLI / lash / benchmark runner"] --> Runtime["LashRuntime"]
+  Host["CLI / app host / embedded service"] --> Runtime["LashRuntime"]
   Runtime --> Env["RuntimeEnvironment<br/>providers, tools, tasks, traces"]
   Runtime --> Manager["RuntimeSessionManager"]
   Runtime --> Persistence["RuntimePersistence trait"]
@@ -50,40 +50,40 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Runtime Effect Host</h2>
-            <p><code>RuntimeTurnDriver</code> only polls <code>TurnMachine</code>, builds an <code>EffectInvocation</code>, invokes the configured <code>RuntimeEffectHost</code>, and feeds the returned response back. The local host preserves today's in-process behavior; custom hosts can persist or schedule effects before delegating to <code>RuntimeEffectExecutor::run_local</code>.</p>
+            <p><code>RuntimeTurnDriver</code> only polls <code>TurnMachine</code>, builds an <code>EffectInvocation</code>, invokes the configured <code>RuntimeEffectHost</code>, and feeds the returned response back. The local host preserves today's in-process behavior; custom hosts can persist or schedule effects before delegating to the typed local executor method for that effect.</p>
           </div>
-          <p>Every invocation carries session id, origin, turn index, mode iteration, effect id, effect kind, a stable idempotency key, cancellation, and a serialized <code>TurnCheckpoint</code> for turn-originated effects. The boundary covers turn LLM calls, direct/plugin LLM completions, tool batches, RLM exec, checkpoints, sleeps, and execution-surface sync.</p>
+          <p>Every invocation carries session id, origin, turn index, mode iteration, effect id, effect kind, a stable idempotency key, cancellation, and a serialized <code>TurnCheckpoint</code> for turn-originated effects. The boundary covers turn LLM calls, direct/plugin LLM completions, tool batches, RLM exec, checkpoints, and execution-surface sync.</p>
           <p>Install it through <code>RuntimeCoreConfig::with_effect_host</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, or <code>EmbeddedRuntimeBuilder::with_effect_host</code>. <code>RuntimeEnvironment</code> carries one <code>core: RuntimeCoreConfig</code>; builder methods for attachments, prompt, traces, termination, and effect hosting mutate that core instead of mirroring fields on the environment. The app facade's advanced builder also accepts an effect host for embedders that stay on <code>lash</code>.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Residency And Sessions</h2>
-            <p>The runtime can be interactive, app-owned, or benchmark-owned. The same session machinery supports active sessions, managed child sessions, parked runtimes, and resumable app hosts.</p>
+            <p>Lash can run behind the CLI or inside any long-lived host application. The same session machinery supports active sessions, managed child sessions, parked runtimes, and resumable hosts.</p>
           </div>
           <div class="mode-grid">
-            <article class="panel"><small>interactive</small><h3>CLI-owned runtime</h3><p><code>lash-cli</code> composes providers, plugins, MCP servers, traces, and terminal rendering around a live <code>LashRuntime</code>.</p></article>
-            <article class="panel"><small>app</small><h3>App-owned sessions</h3><p><code>lash</code> exposes <code>LashCore</code>/<code>LashSession</code> for long-lived host applications. Hosts open sessions from ids and stores; parking/resume remains runtime plumbing behind the facade.</p></article>
-            <article class="panel"><small>evaluated</small><h3>Benchmark-owned runtime</h3><p>Benchmark runners use the same runtime with controlled plugins, store paths, trace capture, and task-specific validation.</p></article>
+            <article class="panel"><small>interactive</small><h3>CLI host</h3><p><code>lash-cli</code> composes providers, plugins, MCP servers, traces, and terminal rendering around a live <code>LashRuntime</code>.</p></article>
+            <article class="panel"><small>application</small><h3>Application sessions</h3><p><code>lash</code> exposes <code>LashCore</code>/<code>LashSession</code> for long-lived host applications. Hosts open sessions from ids and stores; parking/resume remains runtime plumbing behind the facade.</p></article>
+            <article class="panel"><small>embedded</small><h3>Host services</h3><p>Services can compose the same core with their own providers, plugins, stores, traces, and validation around product-specific session ids.</p></article>
           </div>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Host Capabilities</h2>
-            <p><code>RuntimeSessionManager</code> implements focused plugin host traits rather than one broad mutable runtime handle. Tool authors do not receive those bridge traits directly; <code>ToolContext</code> projects them into explicit methods such as <code>session_model()</code>, <code>tool_catalog()</code>, <code>sessions()</code>, <code>tasks()</code>, and <code>direct_completion(...)</code>.</p>
+            <p><code>RuntimeSessionManager</code> implements one concrete <code>RuntimeSessionHost</code> boundary with typed operations for plugin and tool needs. Tool authors do not receive the runtime handle directly; <code>ToolContext</code> projects host capabilities into explicit methods such as <code>session_model()</code>, <code>tool_catalog()</code>, <code>sessions()</code>, <code>tasks()</code>, and <code>direct_completion(...)</code>.</p>
           </div>
           <div class="table">
             <table>
-              <thead><tr><th>Trait</th><th>Runtime responsibility</th></tr></thead>
+              <thead><tr><th>RuntimeSessionHost area</th><th>Runtime responsibility</th></tr></thead>
               <tbody>
-                <tr><td><code>SessionSnapshotHost</code>, <code>ToolCatalogHost</code></td><td>Read current state and tool catalogs through stable projections.</td></tr>
-                <tr><td><code>ToolStateHost</code></td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
-                <tr><td><code>SessionLifecycleHost</code>, <code>TurnHost</code></td><td>Create, fork, continue, and stream managed sessions.</td></tr>
-                <tr><td><code>SessionGraphHost</code></td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
-                <tr><td><code>TaskHost</code>, <code>MonitorHost</code></td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>
-                <tr><td><code>TraceHost</code></td><td>Expose trace sinks to hooks without exposing session internals. Human input is provided by host-owned tools such as the CLI <code>ask</code> implementation, not by a runtime prompt event.</td></tr>
-                <tr><td><code>DirectCompletionHost</code></td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>
+                <tr><td>Session snapshots and catalogs</td><td>Read current state and tool catalogs through stable projections.</td></tr>
+                <tr><td>Tool state</td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
+                <tr><td>Session lifecycle and turns</td><td>Create, fork, continue, and stream managed sessions.</td></tr>
+                <tr><td>Session graph writes</td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
+                <tr><td>Tasks and monitors</td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>
+                <tr><td>Trace access</td><td>Expose trace sinks to hooks without exposing session internals. Human input is provided by host tools such as the CLI <code>ask</code> implementation, not by a runtime prompt event.</td></tr>
+                <tr><td>Direct completions</td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>
               </tbody>
             </table>
           </div>
@@ -129,7 +129,7 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Persistence And Usage</h2>
-            <p>Persistence is turn-scoped. Commits update the session graph, checkpoint blobs, session heads, usage ledger, and settled assistant prose together so read views and benchmark cost reports agree. Modes describe outcomes; the shared runtime commit path owns final transcript materialization.</p>
+            <p>Persistence is turn-scoped. Commits update the session graph, checkpoint blobs, session heads, usage ledger, and settled assistant prose together so read views and host reports agree. Modes describe outcomes; the shared runtime commit path handles final transcript materialization.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Commit and accounting path</div>

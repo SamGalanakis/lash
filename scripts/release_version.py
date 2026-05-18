@@ -12,9 +12,10 @@ CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 # Pre-release versions (e.g. "0.1.0-alpha.1") are honoured but never
-# auto-bumped — during an alpha series the workspace version is set
-# manually and CI's auto-sync no-ops.
+# promoted to a stable release by CI. Numeric pre-release series do
+# auto-advance when the current tag already exists.
 PRERELEASE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-[A-Za-z0-9.-]+$")
+PRERELEASE_NUMBER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)-(.+)\.(\d+)$")
 
 
 def main() -> int:
@@ -53,11 +54,8 @@ def print_usage() -> None:
 
 def compute_next_version() -> str:
     workspace_version = read_workspace_version()
-    # Pre-release versions ("0.1.0-alpha.1") are kept as-is — they are
-    # managed by hand. Auto-bumping resumes once the workspace promotes
-    # to a clean semver release.
     if PRERELEASE_RE.fullmatch(workspace_version):
-        return workspace_version
+        return compute_next_prerelease_version(workspace_version)
     latest_tag = read_latest_release_tag()
     if latest_tag is None:
         return workspace_version
@@ -68,6 +66,30 @@ def compute_next_version() -> str:
     if workspace_tuple > latest_tuple:
         return workspace_version
     return format_version((latest_tuple[0], latest_tuple[1], latest_tuple[2] + 1))
+
+
+def compute_next_prerelease_version(workspace_version: str) -> str:
+    match = PRERELEASE_NUMBER_RE.fullmatch(workspace_version)
+    if not match:
+        current_tag = f"v{workspace_version}"
+        if tag_exists(current_tag):
+            raise SystemExit(
+                f"{current_tag} already exists; use a numeric pre-release suffix "
+                "such as alpha.1 so CI can advance it"
+            )
+        return workspace_version
+
+    major, minor, patch, label, current_number = match.groups()
+    prefix = f"{major}.{minor}.{patch}-{label}."
+    next_number = int(current_number)
+    for tag in read_release_tags():
+        value = tag.removeprefix("v")
+        if not value.startswith(prefix):
+            continue
+        tag_match = PRERELEASE_NUMBER_RE.fullmatch(value)
+        if tag_match:
+            next_number = max(next_number, int(tag_match.group(5)) + 1)
+    return f"{prefix}{next_number}"
 
 
 def read_workspace_version() -> str:
@@ -87,6 +109,14 @@ def read_workspace_version() -> str:
 
 
 def read_latest_release_tag() -> str | None:
+    for tag in read_release_tags():
+        value = tag.removeprefix("v")
+        if VERSION_RE.fullmatch(value):
+            return tag
+    return None
+
+
+def read_release_tags() -> list[str]:
     result = subprocess.run(
         ["git", "tag", "--list", "v*", "--sort=-version:refname"],
         cwd=ROOT,
@@ -94,12 +124,11 @@ def read_latest_release_tag() -> str | None:
         capture_output=True,
         text=True,
     )
-    for line in result.stdout.splitlines():
-        tag = line.strip()
-        if tag:
-            parse_version(tag.removeprefix("v"))
-            return tag
-    return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def tag_exists(tag: str) -> bool:
+    return tag in set(read_release_tags())
 
 
 def parse_version(value: str) -> tuple[int, int, int]:

@@ -79,7 +79,7 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         Err(err) =&gt; ToolResult::err_fmt(format_args!("{err}")),
     }
 }</code></pre>
-          <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime bridge traits such as <code>ToolHookHost</code> remain internal <code>lash-core</code> wiring, not plugin-facing API. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
+          <p><code>ToolContext</code> exposes no public <code>host()</code> escape hatch. Runtime host wiring stays inside <code>lash-core</code>; plugin-facing code uses explicit context capabilities. Import direct-call request/result types from <code>lash::direct</code>; plugin authors should not depend on provider internals for one-shot model calls.</p>
         </div>
 
         <div class="section" id="tool-execution-modes">

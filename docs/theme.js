@@ -26,6 +26,21 @@
     }
   } catch (e) { /* private mode — let animations play */ }
 
+  // ── FOUC guard ──────────────────────────────────────────
+  // On full navs the page paints raw HTML (serif fallback, no
+  // docs-layout grid) before fonts download and docs.js mounts
+  // the shell. Hide body until fonts are ready, with a failsafe
+  // timeout so a flaky font CDN can't strand the page.
+  const markReady = () => document.documentElement.classList.add("lash-ready");
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(markReady);
+  } else {
+    markReady();
+  }
+  // Failsafe — paint at most ~600ms after page load even if a font
+  // never resolves. Better to flash than to stall.
+  setTimeout(markReady, 600);
+
   // ── toggle wiring (runs after DOM is ready) ───────────────
   function wire() {
     const html       = document.documentElement;

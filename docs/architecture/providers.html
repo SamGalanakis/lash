@@ -16,7 +16,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">providers<span class="slash">/</span>transports</h1>
-    <p class="opener__lede">Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate owns the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
+    <p class="opener__lede">Every LLM call goes through a <code>ProviderHandle</code>. The runtime stays wire-agnostic — request shapes are <code>LlmRequest</code>, response shapes are <code>LlmResponse</code> — and each provider crate handles the schema normalization, auth flow, transport, model policy, and cache-marker placement specific to its vendor.</p>
   </section>
 
   <main class="body" id="content">
@@ -45,7 +45,7 @@
             <table>
               <thead><tr><th>Provider</th><th>Kind</th><th>Transport / Auth</th></tr></thead>
               <tbody>
-                <tr><td>OpenAI API (direct)</td><td><code>openai</code></td><td>Bearer API-key auth against <code>https://api.openai.com/v1/responses</code>. Responses-only path; owns Responses reasoning replay and prompt-cache fields.</td></tr>
+                <tr><td>OpenAI API (direct)</td><td><code>openai</code></td><td>Bearer API-key auth against <code>https://api.openai.com/v1/responses</code>. Responses-only path; handles Responses reasoning replay and prompt-cache fields.</td></tr>
                 <tr><td>OpenAI-compatible</td><td><code>openai-compatible</code></td><td>Bearer API-key auth against a caller-supplied <code>base_url</code>; posts Chat Completions to <code>{base_url}/chat/completions</code>. Used for OpenRouter, Together, vLLM, etc.</td></tr>
                 <tr><td>Codex subscription</td><td><code>codex</code></td><td>OAuth device-code flow against ChatGPT Codex Responses backend with Codex-specific headers.</td></tr>
                 <tr><td>Anthropic</td><td><code>anthropic</code></td><td>API-key auth against <code>/v1/messages</code> with Anthropic version header and beta flags.</td></tr>

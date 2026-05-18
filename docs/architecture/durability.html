@@ -23,9 +23,9 @@
 <div class="section">
           <div class="section-header">
             <h2>Runtime Effect Boundary</h2>
-            <p><code>lash-sansio::TurnMachine</code> is still a sans-IO state machine: it yields effects and waits for matching responses. <code>lash-core</code> now wraps every reply-producing, nondeterministic effect in <code>RuntimeEffectHost::invoke</code>. The default <code>LocalRuntimeEffectHost</code> runs the local executor immediately; a durable host can persist, dedupe, schedule, or remote the same <code>RuntimeEffect</code> before calling <code>RuntimeEffectExecutor::run_local</code>.</p>
+            <p><code>lash-sansio::TurnMachine</code> is still a sans-IO state machine: it yields effects and waits for matching responses. <code>lash-core</code> now wraps every reply-producing, nondeterministic effect in a typed <code>RuntimeEffectHost</code> method. The default <code>LocalRuntimeEffectHost</code> runs the local executor immediately; a durable host can persist, dedupe, schedule, or remote each effect before calling the matching local executor method.</p>
           </div>
-          <p>That shape is exactly what durable workflow runtimes (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) want from a library they're embedding. Lash does not ship a Temporal or Restate adapter yet; the adapter point is the host trait. The workflow ledger can key each invocation, persist its result, and replay with the completed effect already in hand while Lash owns the state-machine checkpoint and response application.</p>
+          <p>That shape is exactly what durable workflow runtimes (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) want from a library they're embedding. Lash does not ship a Temporal or Restate adapter yet; the adapter point is the host trait. The workflow ledger can key each invocation, persist its result, and replay with the completed effect already in hand while Lash manages the state-machine checkpoint and response application.</p>
           <p>Embedders who only need in-process durability use <code>LocalRuntimeEffectHost</code> plus the regular <a href="../persistence.html">session store</a>. Embedders who need sub-turn durability install a custom effect host through <code>RuntimeCoreConfig::with_effect_host</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, or the embedded runtime builder.</p>
         </div>
 
@@ -120,7 +120,7 @@
             <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
             <li><code>synced_mode_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
           </ul>
-          <p>The <code>TurnMachineConfig</code> passed to <code>restore_from_checkpoint</code> is <em>not</em> serialised — it carries the protocol driver, projector, tool registry, system prompt builder, and other host-owned plugins. The host reconstructs it the same way it built it for <code>new()</code>, then hands it back alongside the deserialised checkpoint. This is intentional: the config is what makes the abstract machine concrete, and it lives at the same layer as the workflow runtime that's driving the machine.</p>
+          <p>The <code>TurnMachineConfig</code> passed to <code>restore_from_checkpoint</code> is <em>not</em> serialised — it carries the protocol driver, projector, tool registry, system prompt builder, and other host-supplied plugins. The host reconstructs it the same way it built it for <code>new()</code>, then hands it back alongside the deserialised checkpoint. This is intentional: the config is what makes the abstract machine concrete, and it lives at the same layer as the workflow runtime that's driving the machine.</p>
         </div>
 
         <div class="section">
@@ -140,20 +140,20 @@
         <div class="section">
           <div class="section-header">
             <h2>Driving Effects From A Workflow</h2>
-            <p>The runtime turn driver still owns the <code>TurnMachine</code> poll/response loop. A workflow integration wraps the effect boundary instead of reimplementing that loop:</p>
+            <p>The runtime turn driver still runs the <code>TurnMachine</code> poll/response loop. A workflow integration wraps the effect boundary instead of reimplementing that loop:</p>
           </div>
           <pre><code>#[async_trait::async_trait]
 impl RuntimeEffectHost for WorkflowEffectHost {
-    async fn invoke(
+    async fn llm_call(
         &amp;self,
         invocation: EffectInvocation,
-        effect: RuntimeEffect,
-        executor: RuntimeEffectExecutor&lt;'_&gt;,
-    ) -&gt; RuntimeEffectOutcome {
+        request: Arc&lt;LlmRequest&gt;,
+        executor: TurnEffectLocalExecutor&lt;'_&gt;,
+    ) -&gt; (Result&lt;LlmResponse, LlmCallError&gt;, bool) {
         let key = invocation.metadata.idempotency_key.clone();
         self.workflow
-            .run_activity(key, invocation.metadata.clone(), effect.clone(), || async move {
-                executor.run_local(effect).await
+            .run_activity(key, invocation.metadata.clone(), || async move {
+                executor.llm_call(request).await
             })
             .await
     }
