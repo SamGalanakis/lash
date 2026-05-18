@@ -1,7 +1,9 @@
 use crossterm::event::Event as TermEvent;
-use lash_core::{BackgroundTaskRecord, PromptRequest, PromptResponse, TurnActivity};
+use lash_core::{BackgroundTaskRecord, TurnActivity};
 use lash_tui_extensions::TuiHostEffect;
 use tokio::sync::mpsc;
+
+use crate::prompt_model::{PromptRequest, PromptResponse};
 
 /// Unified event type for the main loop.
 pub enum AppEvent {

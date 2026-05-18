@@ -616,8 +616,9 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for StandardDriver {
         if let Some(max_turns) = ctx.max_turns()
             && next_mode_iteration >= ctx.mode_run_offset() + max_turns
         {
+            let message_id = fresh_message_id();
             actions.push(DriverAction::AppendEvents(vec![conversation_event(
-                turn_limit_exhausted_message(max_turns),
+                turn_limit_exhausted_message(message_id, max_turns),
             )]));
             actions.push(DriverAction::Finish(TurnOutcome::Stopped(
                 TurnStop::MaxTurns,

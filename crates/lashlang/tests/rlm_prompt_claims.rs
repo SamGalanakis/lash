@@ -27,7 +27,6 @@ struct MockHost {
     // `{ handle: "h<n>", tool: "<name>" }`, and `await_handle` looks up
     // the pending tool result by handle id.
     pending: Mutex<HashMap<String, Value>>,
-    handle_names: Mutex<HashMap<String, String>>,
     next_handle: Mutex<u32>,
 }
 
@@ -83,30 +82,20 @@ impl ToolHost for MockHost {
             }
             "apply_patch" => Ok(Value::String("patch applied".into())),
             "spawn_agent" => {
-                let name = args
-                    .get("agent_name")
+                let task = args
+                    .get("task")
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.to_string()),
                         _ => None,
                     })
                     .unwrap_or_default();
                 let mut record = Record::default();
-                record.insert("claim".into(), Value::String(format!("done:{name}").into()));
+                record.insert("claim".into(), Value::String(format!("done:{task}").into()));
                 Ok(Value::Record(record.into()))
             }
             "list_async_handles" => {
-                let names = self.handle_names.lock().unwrap().clone();
-                let mut subagent = Record::default();
-                for (handle_id, name) in names {
-                    let mut handle = Record::default();
-                    handle.insert("__handle__".into(), Value::String("task".into()));
-                    handle.insert("id".into(), Value::String(handle_id.into()));
-                    handle.insert("tool".into(), Value::String("spawn_agent".into()));
-                    subagent.insert(name, Value::Record(handle.into()));
-                }
                 let mut out = Record::default();
                 out.insert("monitor".into(), Value::Record(Record::default().into()));
-                out.insert("subagent".into(), Value::Record(subagent.into()));
                 out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
             }
@@ -127,14 +116,6 @@ impl ToolHost for MockHost {
             .lock()
             .unwrap()
             .insert(handle_id.clone(), result);
-        if name == "spawn_agent"
-            && let Some(Value::String(agent_name)) = args.get("agent_name")
-        {
-            self.handle_names
-                .lock()
-                .unwrap()
-                .insert(handle_id.clone(), agent_name.to_string());
-        }
         let mut record = Record::default();
         record.insert("__handle__".into(), Value::String("task".into()));
         record.insert("id".into(), Value::String(handle_id.into()));
@@ -153,7 +134,6 @@ impl ToolHost for MockHost {
                 _ => None,
             })
             .ok_or_else(|| ToolHostError::new("handle record missing `id` field"))?;
-        self.handle_names.lock().unwrap().remove(&id);
         self.pending
             .lock()
             .unwrap()
@@ -166,7 +146,6 @@ impl ToolHost for MockHost {
             && let Some(Value::String(id)) = record.get("id")
         {
             self.pending.lock().unwrap().remove(id.as_str());
-            self.handle_names.lock().unwrap().remove(id.as_str());
         }
         Ok(Value::Null)
     }
@@ -1027,12 +1006,11 @@ async fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
-        r#"a = start call spawn_agent { agent_name: "chunk_1", task: "x", capability: "explore" }
-b = start call spawn_agent { agent_name: "chunk_2", task: "y", capability: "explore" }
-handles = (call list_async_handles {})?
+        r#"a = start call spawn_agent { task: "chunk_1", capability: "explore" }
+b = start call spawn_agent { task: "chunk_2", capability: "explore" }
 results = parallel {
-  a: (await handles.subagent.chunk_1)?,
-  b: (await handles.subagent.chunk_2)?,
+  a: (await a)?,
+  b: (await b)?,
 }
 submit [results.a.claim, results.b.claim]"#,
     ) else {

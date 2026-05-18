@@ -74,6 +74,42 @@ async fn runtime_event_bridge_coalesces_text_before_structural_event() {
 }
 
 #[test]
+fn completed_runtime_stream_rejects_late_activity() {
+    assert!(session_activity_is_current(7, 7, true));
+    assert!(!session_activity_is_current(6, 7, true));
+    assert!(!session_activity_is_current(7, 7, false));
+}
+
+#[test]
+fn late_submitted_value_after_reconciliation_is_not_rendered_again() {
+    let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
+    app.timeline = vec![
+        UiTimelineItem::Splash,
+        UiTimelineItem::TurnStart(crate::app::Turn::user(false)),
+        UiTimelineItem::UserInput("hi".into()),
+        UiTimelineItem::LashlangCode("\nsubmit \"Hi! How can I help?\"".into()),
+        UiTimelineItem::AssistantText("Hi! How can I help?".into()),
+    ]
+    .into();
+
+    if session_activity_is_current(1, 1, false) {
+        app.handle_turn_activity(TurnActivity::independent(TurnEvent::SubmittedValue {
+            value: serde_json::json!("Hi! How can I help?"),
+        }));
+    }
+
+    let assistant_texts: Vec<&str> = app
+        .timeline
+        .iter()
+        .filter_map(|block| match block {
+            UiTimelineItem::AssistantText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["Hi! How can I help?"]);
+}
+
+#[test]
 fn promote_pending_steers_to_queue_preserves_order() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.queue_pending_steer(PreparedTurn::new("after tool 1".into(), Vec::new()));

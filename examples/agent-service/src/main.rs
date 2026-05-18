@@ -166,10 +166,18 @@ struct ChatModelSelection {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamItem {
-    Event { event: TurnActivity },
+    Event { event: Box<TurnActivity> },
     Message { message: ChatMessage },
     Error { message: String },
     Done,
+}
+
+impl StreamItem {
+    fn event(event: TurnActivity) -> Self {
+        Self::Event {
+            event: Box::new(event),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -502,7 +510,7 @@ impl ChannelTurnEvents {
                 .expect("turn state lock")
                 .assistant_prose
                 .push_str(text);
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         // Keep persisted message order tied to event start order. The browser
@@ -550,7 +558,7 @@ impl ChannelTurnEvents {
                         .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         if let TurnEvent::CodeBlockStarted { code, .. } = &event {
@@ -580,7 +588,7 @@ impl ChannelTurnEvents {
                         .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
@@ -609,7 +617,7 @@ impl ChannelTurnEvents {
                         .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallCompleted { .. }) {
@@ -641,7 +649,7 @@ impl ChannelTurnEvents {
                     })
                     .await;
             }
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::CodeBlockCompleted { .. }) {
@@ -671,17 +679,17 @@ impl ChannelTurnEvents {
                     })
                     .await;
             }
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
         if matches!(
             &event,
             TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
         ) {
-            let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+            let _ = self.tx.send(StreamItem::event(activity)).await;
             return;
         }
-        let _ = self.tx.send(StreamItem::Event { event: activity }).await;
+        let _ = self.tx.send(StreamItem::event(activity)).await;
     }
 }
 

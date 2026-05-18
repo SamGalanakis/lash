@@ -17,6 +17,7 @@ use helpers::*;
 
 mod assembler;
 mod child_sessions;
+mod effect_host;
 mod persistence;
 mod plugins;
 mod projection;

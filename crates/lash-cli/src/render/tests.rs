@@ -5,9 +5,10 @@ use crate::SkillCatalog;
 use crate::activity::ActivityState;
 use crate::app::timeline_from_read_view;
 use crate::assistant_text::normalize_assistant_text;
+use crate::prompt_model::PromptRequest;
 use crate::theme;
 use async_trait::async_trait;
-use lash_core::{Part, PartKind, PromptRequest};
+use lash_core::{Part, PartKind};
 use lash_tui_extensions::{
     SlashCommandSpec, TuiExtension, TuiExtensionContext, TuiExtensions, TuiHostEffect,
 };
@@ -22,12 +23,41 @@ fn timeline_items_from_test_read_view(
     tool_calls: &[lash_core::ToolCallRecord],
     ui_state: &crate::app::UiProjectionState,
 ) -> Vec<crate::app::UiTimelineItem> {
-    let read_view = lash_core::SessionReadView::from_derived_message_view(
-        lash_core::SessionStateEnvelope::default(),
-        Arc::new(events.to_vec()),
-        Arc::new(messages.to_vec()),
-        Arc::new(tool_calls.to_vec()),
-    );
+    let mut graph = lash_core::SessionGraph::default();
+    for event in events {
+        match event {
+            lash_core::SessionEventRecord::Conversation(record) => {
+                graph.append_message(record.to_message());
+            }
+            lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
+                record,
+                ..
+            }) => {
+                graph.append_active_read_delta(&[], std::slice::from_ref(record));
+            }
+            lash_core::SessionEventRecord::Mode(event) => {
+                graph.append_mode_event(event.clone());
+            }
+        }
+    }
+    let event_message_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Conversation(record) => Some(record.id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let missing_messages = messages
+        .iter()
+        .filter(|message| !event_message_ids.contains(message.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    graph.append_active_read_delta(&missing_messages, tool_calls);
+    let state = lash_core::SessionStateEnvelope {
+        session_graph: graph,
+        ..lash_core::SessionStateEnvelope::default()
+    };
+    let read_view = lash_core::SessionReadView::from_exported_state(&state);
     timeline_from_read_view(&read_view, ui_state)
         .items()
         .to_vec()
@@ -135,13 +165,10 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
     let blocks = state.project_tool_call(
         "spawn_agent",
         serde_json::json!({
-            "agent_name":"probe_repo_shape",
             "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with 1) top-level directories/files summary and 2) whether the workspace looks healthy.",
             "capability":"explore"
         }),
-        serde_json::json!({
-            "agent_name":"probe_repo_shape",
-            }),
+        serde_json::json!({ "summary": "ok" }),
         true,
         0,
     );
@@ -157,7 +184,7 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
         .collect::<Vec<_>>();
 
     assert!(rendered.iter().all(|line| line.chars().count() <= 56));
-    assert_eq!(rendered[0], "◆ spawn subagent · probe_repo_shape");
+    assert!(rendered[0].starts_with("◆ spawn subagent · In /home/sam/code/lash,"));
     assert!(
         rendered
             .iter()
@@ -167,11 +194,6 @@ fn subagent_headline_stays_compact_and_task_wraps_in_detail_rows() {
         rendered
             .iter()
             .any(|line| line.contains("workspace looks healthy."))
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line == "    Agent probe_repo_shape")
     );
     assert!(
         rendered
@@ -1097,7 +1119,7 @@ fn activity_detail_lines_are_visible_at_l0() {
             "command": "cargo build",
             "persistent": false,
             "timeout_ms": 300000,
-            "run_state": "running",
+            "state": "running",
         }),
         true,
         3,

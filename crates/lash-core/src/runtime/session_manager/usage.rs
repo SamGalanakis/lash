@@ -72,7 +72,7 @@ impl ChildUsageEventRelay {
 }
 
 impl UsageCapability {
-    pub(in crate::runtime::session_manager) fn record_token_usage(
+    pub(in crate::runtime) fn record_token_usage(
         &self,
         source: &str,
         model: &str,
@@ -97,7 +97,7 @@ impl UsageCapability {
         drained
     }
 
-    pub(in crate::runtime::session_manager) async fn persist_current_usage_ledger(
+    pub(in crate::runtime) async fn persist_current_usage_ledger(
         &self,
         current: &CurrentSessionCapability,
     ) -> Result<(), crate::PluginError> {

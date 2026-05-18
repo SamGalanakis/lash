@@ -300,7 +300,7 @@ impl Session {
                 tools,
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
-                subagent: self.plugins().subagent_authority().cloned(),
+                subagent: self.plugins().subagent_context().cloned(),
             }) {
             Ok(surface) => Arc::new(surface),
             Err(err) => {
@@ -405,7 +405,7 @@ impl Session {
     pub(crate) fn mode_execution_context(
         &self,
         session_id: &str,
-        host: Arc<dyn crate::plugin::ToolHookHost>,
+        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,

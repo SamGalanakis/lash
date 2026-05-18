@@ -66,6 +66,37 @@ impl ModePreset {
         }
     }
 
+    pub fn rlm_with_projection_resolver(
+        projection_resolver: Arc<dyn lash_mode_rlm::ProjectionResolver>,
+    ) -> Self {
+        Self::rlm_with_config_and_projection_resolver(
+            lash_mode_rlm::RlmModePluginConfig::default(),
+            projection_resolver,
+        )
+    }
+
+    pub fn rlm_with_config_and_projection_resolver(
+        config: lash_mode_rlm::RlmModePluginConfig,
+        projection_resolver: Arc<dyn lash_mode_rlm::ProjectionResolver>,
+    ) -> Self {
+        Self {
+            mode_id: ModeId::rlm(),
+            factory: Arc::new(
+                lash_mode_rlm::BuiltinRlmModePluginFactory::new(config)
+                    .with_projection_resolver(projection_resolver),
+            ),
+            standard_context_approach: None,
+        }
+    }
+
+    pub fn with_standard_context_approach(
+        mut self,
+        standard_context_approach: Option<StandardContextApproach>,
+    ) -> Self {
+        self.standard_context_approach = standard_context_approach;
+        self
+    }
+
     pub fn mode_id(&self) -> &ModeId {
         &self.mode_id
     }

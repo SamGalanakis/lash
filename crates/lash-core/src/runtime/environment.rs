@@ -25,10 +25,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
+use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
-use super::TerminationPolicy;
 use super::host::BackgroundTaskHost;
+use super::{RuntimeCoreConfig, RuntimeEffectHost, TerminationPolicy};
 
 /// Where session nodes live at runtime.
 ///
@@ -58,7 +58,7 @@ pub enum Residency {
 /// Cloning is cheap — every field is either `Arc`-wrapped or small.
 /// Default values preserve legacy behaviour so existing embedders can
 /// adopt incrementally.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
     // `PluginSession` is built from it via `PluginHost::build_session`.
@@ -78,32 +78,7 @@ pub struct RuntimeEnvironment {
     // built with this environment.
     pub session_store_factory: Option<Arc<dyn crate::SessionStoreFactory>>,
 
-    // All fields below mirror `RuntimeCoreConfig` and carry the same
-    // semantics. They live on `RuntimeEnvironment` directly so
-    // embedders don't have to build a separate core config.
-    pub attachment_store: Arc<dyn crate::AttachmentStore>,
-    pub prompt: crate::PromptLayer,
-    pub trace_sink: Option<Arc<dyn TraceSink>>,
-    pub trace_level: TraceLevel,
-    pub trace_context: TraceContext,
-    pub termination: TerminationPolicy,
-}
-
-impl Default for RuntimeEnvironment {
-    fn default() -> Self {
-        Self {
-            plugin_host: None,
-            residency: Residency::default(),
-            background_task_host: None,
-            session_store_factory: None,
-            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
-            prompt: crate::PromptLayer::new(),
-            trace_sink: None,
-            trace_level: TraceLevel::Standard,
-            trace_context: TraceContext::default(),
-            termination: TerminationPolicy::default(),
-        }
-    }
+    pub core: RuntimeCoreConfig,
 }
 
 impl RuntimeEnvironment {
@@ -168,18 +143,23 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
+    pub fn with_runtime_core_config(mut self, core: RuntimeCoreConfig) -> Self {
+        self.env.core = core;
+        self
+    }
+
     pub fn with_attachment_store(mut self, store: Arc<dyn crate::AttachmentStore>) -> Self {
-        self.env.attachment_store = store;
+        self.env.core = self.env.core.with_attachment_store(store);
         self
     }
 
     pub fn with_prompt_template(mut self, template: crate::PromptTemplate) -> Self {
-        self.env.prompt.template = Some(template);
+        self.env.core = self.env.core.with_prompt_template(template);
         self
     }
 
     pub fn with_prompt_contribution(mut self, contribution: crate::PromptContribution) -> Self {
-        self.env.prompt.add_contribution(contribution);
+        self.env.core = self.env.core.with_prompt_contribution(contribution);
         self
     }
 
@@ -188,46 +168,131 @@ impl RuntimeEnvironmentBuilder {
         slot: crate::PromptSlot,
         contributions: impl IntoIterator<Item = crate::PromptContribution>,
     ) -> Self {
-        self.env.prompt.replace_slot(slot, contributions);
+        self.env.core = self.env.core.with_replaced_prompt_slot(slot, contributions);
         self
     }
 
     pub fn with_cleared_prompt_slot(mut self, slot: crate::PromptSlot) -> Self {
-        self.env.prompt.clear_slot(slot);
+        self.env.core = self.env.core.with_cleared_prompt_slot(slot);
         self
     }
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
-        self.env.prompt = prompt;
+        self.env.core = self.env.core.with_prompt_layer(prompt);
         self
     }
 
     pub fn with_trace_jsonl_path(mut self, path: Option<PathBuf>) -> Self {
-        self.env.trace_sink = path.map(|p| Arc::new(JsonlTraceSink::new(p)) as Arc<dyn TraceSink>);
+        self.env.core = self.env.core.with_trace_jsonl_path(path);
         self
     }
 
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn TraceSink>>) -> Self {
-        self.env.trace_sink = sink;
+        self.env.core = self.env.core.with_trace_sink(sink);
         self
     }
 
     pub fn with_trace_level(mut self, level: TraceLevel) -> Self {
-        self.env.trace_level = level;
+        self.env.core = self.env.core.with_trace_level(level);
         self
     }
 
     pub fn with_trace_context(mut self, context: TraceContext) -> Self {
-        self.env.trace_context = context;
+        self.env.core = self.env.core.with_trace_context(context);
         self
     }
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
-        self.env.termination = termination;
+        self.env.core = self.env.core.with_termination(termination);
+        self
+    }
+
+    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
+        self.env.core = self.env.core.with_effect_host(effect_host);
         self
     }
 
     pub fn build(self) -> RuntimeEnvironment {
         self.env
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_methods_configure_runtime_core() {
+        let attachment_store: Arc<dyn crate::AttachmentStore> =
+            Arc::new(crate::InMemoryAttachmentStore::new());
+        let effect_host: Arc<dyn RuntimeEffectHost> =
+            Arc::new(crate::runtime::LocalRuntimeEffectHost);
+        let trace_context = TraceContext::default().for_session("session-1");
+        let termination = TerminationPolicy {
+            treat_missing_done_as_failure: false,
+        };
+
+        let env = RuntimeEnvironment::builder()
+            .with_attachment_store(Arc::clone(&attachment_store))
+            .with_prompt_template(crate::default_prompt_template())
+            .with_trace_jsonl_path(Some(
+                std::env::temp_dir().join("lash-runtime-environment-builder-test.jsonl"),
+            ))
+            .with_trace_level(TraceLevel::Extended)
+            .with_trace_context(trace_context.clone())
+            .with_termination(termination.clone())
+            .with_effect_host(Arc::clone(&effect_host))
+            .build();
+
+        assert!(Arc::ptr_eq(&env.core.attachment_store, &attachment_store));
+        assert!(env.core.prompt.template.is_some());
+        assert!(env.core.trace_sink.is_some());
+        assert_eq!(env.core.trace_level, TraceLevel::Extended);
+        assert_eq!(env.core.trace_context, trace_context);
+        assert_eq!(
+            env.core.termination.treat_missing_done_as_failure,
+            termination.treat_missing_done_as_failure
+        );
+        assert!(Arc::ptr_eq(&env.core.effect_host, &effect_host));
+    }
+
+    #[test]
+    fn runtime_core_config_replaces_core_config() {
+        let core = RuntimeCoreConfig::default()
+            .with_trace_level(TraceLevel::Extended)
+            .with_termination(TerminationPolicy {
+                treat_missing_done_as_failure: false,
+            });
+
+        let env = RuntimeEnvironment::builder()
+            .with_trace_level(TraceLevel::Standard)
+            .with_runtime_core_config(core)
+            .build();
+
+        assert_eq!(env.core.trace_level, TraceLevel::Extended);
+        assert!(!env.core.termination.treat_missing_done_as_failure);
+    }
+
+    #[test]
+    fn runtime_environment_does_not_mirror_runtime_core_config_fields() {
+        let source = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/environment.rs"),
+        )
+        .expect("read environment source");
+        for field in [
+            ["pub ", "attachment_store:"].concat(),
+            ["pub ", "prompt:"].concat(),
+            ["pub ", "trace_sink:"].concat(),
+            ["pub ", "trace_level:"].concat(),
+            ["pub ", "trace_context:"].concat(),
+            ["pub ", "termination:"].concat(),
+            ["pub ", "effect_host:"].concat(),
+            ["mirror ", "`RuntimeCoreConfig`"].concat(),
+        ] {
+            assert!(
+                !source.contains(&field),
+                "found mirrored field/comment: {field}"
+            );
+        }
     }
 }

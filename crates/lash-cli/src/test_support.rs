@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lash_core::{PromptRequest, PromptResponse, SessionEvent, TurnEvent};
+use lash_core::{SessionEvent, TurnEvent};
 use lash_tui::ScreenSnapshot;
 use lash_tui_extensions::TuiExtensions;
 use tokio::sync::Mutex;
 
 use crate::app::{App, PreparedTurn, PromptState};
 use crate::overlay::PromptFocus;
+use crate::prompt_model::{PromptRequest, PromptResponse};
 use crate::ui_trace::{TraceRepoStatus, render_screen_snapshot};
 use crate::{apply_ui_host_effects, render};
 
@@ -187,7 +188,7 @@ fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
             output: output.clone(),
             duration_ms: *duration_ms,
         }),
-        SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginSurface {
+        SessionEvent::PluginEvent { plugin_id, event } => Some(TurnEvent::PluginRuntime {
             plugin_id: plugin_id.clone(),
             event: event.clone(),
         }),
@@ -198,7 +199,7 @@ fn test_session_event_to_turn_event(event: &SessionEvent) -> Option<TurnEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{PluginSurfaceEvent, SessionEvent};
+    use lash_core::{PluginRuntimeEvent, SessionEvent};
     use serde_json::json;
 
     fn line_index_containing(lines: &[String], needle: &str) -> Option<usize> {
@@ -348,32 +349,30 @@ mod tests {
         let mut harness = UiHarness::new(72, 20);
         harness.dispatch_event(SessionEvent::PluginEvent {
             plugin_id: "plan_mode".into(),
-            event: PluginSurfaceEvent::ModeIndicatorUpsert {
-                key: "status".into(),
-                label: "PLAN".into(),
-            },
-        });
-        harness.dispatch_event(SessionEvent::PluginEvent {
-            plugin_id: "plan_mode".into(),
-            event: PluginSurfaceEvent::PanelUpsert {
-                key: "board".into(),
-                title: "TASK BOARD".into(),
-                content: "- First\n- Second".into(),
+            event: PluginRuntimeEvent::Custom {
+                name: "plan_mode.state".into(),
+                payload: json!({
+                    "session_id": "test-session",
+                    "enabled": true,
+                    "plan_path": ".lash/plans/test-session.md"
+                }),
             },
         });
 
         let screen = harness.render();
         let lines = screen.visible_lines_trimmed();
 
-        assert!(lines.iter().any(|line| line.contains("TASK BOARD")));
-        assert!(lines.iter().any(|line| line.contains("First")));
-        assert!(lines.iter().any(|line| line.contains("Second")));
+        assert!(lines.iter().any(|line| line.contains("PLAN")));
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("PLAN · lash · staging"))
+                .any(|line| line.contains(".lash/plans/test-session.md"))
         );
-        assert!(!lines.iter().any(|line| line.contains("test-session")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("plan · lash · staging"))
+        );
     }
 
     #[test]

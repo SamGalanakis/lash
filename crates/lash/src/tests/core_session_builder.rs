@@ -448,6 +448,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
             session_id: Some("managed-child-store".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "root-with-child-store".to_string(),
+                originating_tool_call_id: None,
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
@@ -494,6 +495,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
             session_id: Some("child-needs-own-store".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "root-store".to_string(),
+                originating_tool_call_id: None,
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
@@ -539,6 +541,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
             session_id: Some("explicit-root-child".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "explicit-root-store".to_string(),
+                originating_tool_call_id: None,
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,

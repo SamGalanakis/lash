@@ -1,0 +1,282 @@
+use std::sync::Arc;
+
+use lash_core::ToolArgumentProjectionPolicy;
+use lash_rlm_types::{PROJECTED_JSON_TAG, PROJECTION_REF_JSON_TAG};
+use lashlang::{ImageValue, ProjectedFuture, Record as FlowRecord, Value as FlowValue};
+use serde_json::Value;
+
+use crate::projected_bindings::{ProjectionRef, RlmProjectedSeedError};
+
+pub(crate) fn normalize_tool_args_for_projection(
+    args: Value,
+    policy: &ToolArgumentProjectionPolicy,
+) -> Value {
+    match policy {
+        ToolArgumentProjectionPolicy::MaterializeProjectedValues => {
+            materialize_projected_json(args)
+        }
+        ToolArgumentProjectionPolicy::PreserveProjectedRefsInField { field } => {
+            normalize_seed_preserving_tool_args(args, field)
+        }
+    }
+}
+
+fn normalize_seed_preserving_tool_args(args: Value, field: &str) -> Value {
+    let Value::Object(args) = args else {
+        return materialize_projected_json(args);
+    };
+    Value::Object(
+        args.into_iter()
+            .map(|(key, value)| {
+                let value = if key == field {
+                    normalize_projected_seed(value)
+                } else {
+                    materialize_projected_json(value)
+                };
+                (key, value)
+            })
+            .collect(),
+    )
+}
+
+fn normalize_projected_seed(seed: Value) -> Value {
+    let Value::Object(seed) = seed else {
+        return materialize_projected_json(seed);
+    };
+    Value::Object(
+        seed.into_iter()
+            .map(|(key, value)| {
+                let value = if lash_rlm_types::projection_inner(&value).is_some() {
+                    value
+                } else {
+                    materialize_projected_json(value)
+                };
+                (key, value)
+            })
+            .collect(),
+    )
+}
+
+fn materialize_projected_json(value: Value) -> Value {
+    if let Some(inner) = lash_rlm_types::projection_inner(&value) {
+        return materialize_projected_json(inner.clone());
+    }
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(materialize_projected_json).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, materialize_projected_json(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+pub(crate) async fn flow_record_to_tool_args(
+    record: &FlowRecord,
+    policy: &ToolArgumentProjectionPolicy,
+) -> Value {
+    match policy {
+        ToolArgumentProjectionPolicy::MaterializeProjectedValues => {
+            flow_record_to_materialized_json(record).await
+        }
+        ToolArgumentProjectionPolicy::PreserveProjectedRefsInField { field } => {
+            flow_record_to_seed_preserving_tool_args(record, field).await
+        }
+    }
+}
+
+async fn flow_record_to_seed_preserving_tool_args(record: &FlowRecord, field: &str) -> Value {
+    let mut object = serde_json::Map::with_capacity(record.len());
+    for (key, value) in record.iter() {
+        let value = if key == field {
+            flow_seed_to_json(value).await
+        } else {
+            flow_value_to_materialized_json(value).await
+        };
+        object.insert(key.to_string(), value);
+    }
+    Value::Object(object)
+}
+
+async fn flow_seed_to_json(value: &FlowValue) -> Value {
+    let FlowValue::Record(record) = value else {
+        return flow_value_to_materialized_json(value).await;
+    };
+    let mut object = serde_json::Map::with_capacity(record.len());
+    for (key, value) in record.iter() {
+        let value = if matches!(value, FlowValue::Projected(_)) {
+            flow_to_json_value(value).await
+        } else {
+            flow_value_to_materialized_json(value).await
+        };
+        object.insert(key.to_string(), value);
+    }
+    Value::Object(object)
+}
+
+pub(crate) fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
+    Box::pin(async move {
+        match value {
+            FlowValue::Null => Value::Null,
+            FlowValue::Bool(value) => Value::Bool(*value),
+            FlowValue::Number(value) => json_number(*value),
+            FlowValue::String(value) => Value::String(value.to_string()),
+            FlowValue::Image(image) => serde_json::to_value(image)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            FlowValue::List(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    out.push(flow_to_json_value(value).await);
+                }
+                Value::Array(out)
+            }
+            FlowValue::Record(record) => flow_record_to_json_value(record).await,
+            FlowValue::Projected(value) => {
+                if let Some(reference) = value.projection_ref() {
+                    let mut ref_obj = serde_json::Map::with_capacity(1);
+                    ref_obj.insert(PROJECTION_REF_JSON_TAG.to_string(), reference.clone());
+                    let mut obj = serde_json::Map::with_capacity(1);
+                    obj.insert(PROJECTED_JSON_TAG.to_string(), Value::Object(ref_obj));
+                    return Value::Object(obj);
+                }
+                let inner = flow_to_json_value(&value.materialize_async().await).await;
+                let mut obj = serde_json::Map::with_capacity(1);
+                obj.insert(PROJECTED_JSON_TAG.to_string(), inner);
+                Value::Object(obj)
+            }
+        }
+    })
+}
+
+pub(crate) async fn flow_record_to_json_value(record: &FlowRecord) -> Value {
+    let mut object = serde_json::Map::with_capacity(record.len());
+    for (key, value) in record.iter() {
+        object.insert(key.to_string(), flow_to_json_value(value).await);
+    }
+    Value::Object(object)
+}
+
+fn flow_value_to_materialized_json<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
+    Box::pin(async move {
+        match value {
+            FlowValue::Null => Value::Null,
+            FlowValue::Bool(value) => Value::Bool(*value),
+            FlowValue::Number(value) => json_number(*value),
+            FlowValue::String(value) => Value::String(value.to_string()),
+            FlowValue::Image(image) => serde_json::to_value(image)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            FlowValue::List(values) => {
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    out.push(flow_value_to_materialized_json(value).await);
+                }
+                Value::Array(out)
+            }
+            FlowValue::Record(record) => flow_record_to_materialized_json(record).await,
+            FlowValue::Projected(value) => {
+                flow_value_to_materialized_json(&value.materialize_async().await).await
+            }
+        }
+    })
+}
+
+async fn flow_record_to_materialized_json(record: &FlowRecord) -> Value {
+    let mut object = serde_json::Map::with_capacity(record.len());
+    for (key, value) in record.iter() {
+        object.insert(
+            key.to_string(),
+            flow_value_to_materialized_json(value).await,
+        );
+    }
+    Value::Object(object)
+}
+
+fn json_number(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 {
+        let as_i64 = value as i64 as f64;
+        if as_i64 == value {
+            return Value::Number(serde_json::Number::from(value as i64));
+        }
+        let as_u64 = value as u64 as f64;
+        if as_u64 == value {
+            return Value::Number(serde_json::Number::from(value as u64));
+        }
+    }
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+pub(crate) fn json_to_flow_value(value: Value) -> FlowValue {
+    match value {
+        Value::Null => FlowValue::Null,
+        Value::Bool(value) => FlowValue::Bool(value),
+        Value::Number(value) => FlowValue::Number(value.as_f64().unwrap_or_default()),
+        Value::String(value) => FlowValue::String(value.into()),
+        Value::Array(values) => {
+            FlowValue::List(values.into_iter().map(json_to_flow_value).collect())
+        }
+        Value::Object(map) => json_map_to_image(&map)
+            .map(FlowValue::Image)
+            .unwrap_or_else(|| {
+                FlowValue::Record(Arc::new(
+                    map.into_iter()
+                        .map(|(key, value)| (key, json_to_flow_value(value)))
+                        .collect::<FlowRecord>(),
+                ))
+            }),
+    }
+}
+
+fn json_map_to_image(map: &serde_json::Map<String, Value>) -> Option<ImageValue> {
+    if map.get("type")?.as_str()? != "image" {
+        return None;
+    }
+    Some(ImageValue::new(
+        map.get("id")?.as_str()?.to_string(),
+        map.get("label")?.as_str()?.to_string(),
+        map.get("size")?.as_u64()?,
+        optional_json_u32(map.get("width")?)?,
+        optional_json_u32(map.get("height")?)?,
+    ))
+}
+
+fn optional_json_u32(value: &Value) -> Option<Option<u32>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some),
+        _ => None,
+    }
+}
+
+pub(crate) async fn format_output_value(value: &FlowValue) -> String {
+    match value {
+        FlowValue::Null => "null".to_string(),
+        FlowValue::String(text) => text.to_string(),
+        FlowValue::Bool(value) => value.to_string(),
+        FlowValue::Number(value) => value.to_string(),
+        FlowValue::Image(_)
+        | FlowValue::List(_)
+        | FlowValue::Record(_)
+        | FlowValue::Projected(_) => serde_json::to_string(&flow_to_json_value(value).await)
+            .unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+pub(crate) fn projection_ref_from_seed_value(
+    name: &str,
+    value: &Value,
+) -> Result<Option<ProjectionRef>, RlmProjectedSeedError> {
+    let Some(inner) = lash_rlm_types::projection_ref_inner(value) else {
+        return Ok(None);
+    };
+    serde_json::from_value::<ProjectionRef>(inner.clone())
+        .map(Some)
+        .map_err(|err| RlmProjectedSeedError::invalid_projection_ref(name, err))
+}

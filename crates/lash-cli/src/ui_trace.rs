@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use lash_core::{PluginSurfaceEvent, PromptRequest, TurnActivity, TurnEvent};
+use lash_core::{PluginRuntimeEvent, TurnActivity, TurnEvent};
 use lash_tui::{PerfCounters, ScreenSnapshot};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, PreparedTurn};
+use crate::prompt_model::{PromptRequest, PromptSelectionMode};
 use crate::repo_status::RepoStatus;
 use crate::{render, scratch_tui};
 
@@ -150,7 +151,7 @@ impl TracePromptRequest {
             }
         } else {
             match request.selection_mode {
-                lash_core::PromptSelectionMode::Single => Self::Single {
+                PromptSelectionMode::Single => Self::Single {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
@@ -159,7 +160,7 @@ impl TracePromptRequest {
                         markdown: panel.markdown.clone(),
                     }),
                 },
-                lash_core::PromptSelectionMode::Multi => Self::Multi {
+                PromptSelectionMode::Multi => Self::Multi {
                     question: request.question.clone(),
                     options: request.options.clone(),
                     allow_note: request.allows_note(),
@@ -202,7 +203,7 @@ pub(crate) enum TraceSessionEvent {
     },
     PluginEvent {
         plugin_id: String,
-        event: TracePluginSurfaceEvent,
+        event: TracePluginRuntimeEvent,
     },
 }
 
@@ -238,9 +239,9 @@ impl TraceSessionEvent {
             TurnEvent::Error { message } => Some(Self::Error {
                 message: message.clone(),
             }),
-            TurnEvent::PluginSurface { plugin_id, event } => Some(Self::PluginEvent {
+            TurnEvent::PluginRuntime { plugin_id, event } => Some(Self::PluginEvent {
                 plugin_id: plugin_id.clone(),
-                event: TracePluginSurfaceEvent::from_event(event),
+                event: TracePluginRuntimeEvent::from_event(event),
             }),
             TurnEvent::ToolCallStarted { .. }
             | TurnEvent::Usage { .. }
@@ -258,26 +259,7 @@ impl TraceSessionEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum TracePluginSurfaceEvent {
-    ModeIndicatorUpsert {
-        key: String,
-        label: String,
-    },
-    ModeIndicatorClear {
-        key: String,
-    },
-    PanelUpsert {
-        key: String,
-        title: String,
-        content: String,
-    },
-    PanelAppend {
-        key: String,
-        content: String,
-    },
-    PanelClear {
-        key: String,
-    },
+pub(crate) enum TracePluginRuntimeEvent {
     Status {
         key: String,
         label: String,
@@ -289,38 +271,17 @@ pub(crate) enum TracePluginSurfaceEvent {
     },
 }
 
-impl TracePluginSurfaceEvent {
-    pub(crate) fn from_event(event: &PluginSurfaceEvent) -> Self {
+impl TracePluginRuntimeEvent {
+    pub(crate) fn from_event(event: &PluginRuntimeEvent) -> Self {
         match event {
-            PluginSurfaceEvent::ModeIndicatorUpsert { key, label } => Self::ModeIndicatorUpsert {
-                key: key.clone(),
-                label: label.clone(),
-            },
-            PluginSurfaceEvent::ModeIndicatorClear { key } => {
-                Self::ModeIndicatorClear { key: key.clone() }
-            }
-            PluginSurfaceEvent::PanelUpsert {
-                key,
-                title,
-                content,
-            } => Self::PanelUpsert {
-                key: key.clone(),
-                title: title.clone(),
-                content: content.clone(),
-            },
-            PluginSurfaceEvent::PanelAppend { key, content } => Self::PanelAppend {
-                key: key.clone(),
-                content: content.clone(),
-            },
-            PluginSurfaceEvent::PanelClear { key } => Self::PanelClear { key: key.clone() },
-            PluginSurfaceEvent::Status {
+            PluginRuntimeEvent::Status {
                 key, label, detail, ..
             } => Self::Status {
                 key: key.clone(),
                 label: label.clone(),
                 detail: detail.clone(),
             },
-            PluginSurfaceEvent::Custom { name, payload } => Self::Custom {
+            PluginRuntimeEvent::Custom { name, payload } => Self::Custom {
                 name: name.clone(),
                 payload: payload.clone(),
             },

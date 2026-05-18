@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
 use lash_core::{
-    ExecutionMode, PluginStack, StandardContextApproach, ToolOutputBudgetPluginFactory,
-    ToolProvider,
+    PluginStack, StandardContextApproach, ToolOutputBudgetPluginFactory, ToolProvider,
 };
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
@@ -14,189 +13,135 @@ use lash_tool_search::Grep;
 use lash_tool_shell::StandardShellPluginFactory;
 use lash_tool_web::{FetchUrl, WebSearch};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DefaultToolBundle {
-    CoreRuntime,
-    RollingHistory,
-    ObservationalMemory,
-    Shell,
-    Editing,
-    Files,
-    Search,
-    UserPrompts,
-    Web,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DefaultToolSurfaceProfile {
-    pub bundles: Vec<DefaultToolBundle>,
-    pub interactive_extras: bool,
-}
-
-impl DefaultToolSurfaceProfile {
-    pub fn for_runtime(
-        standard_context_approach: Option<&StandardContextApproach>,
-        interactive: bool,
-        web_enabled: bool,
-    ) -> Self {
-        let mut bundles = vec![DefaultToolBundle::CoreRuntime];
-        if let Some(standard_context_approach) = standard_context_approach {
-            bundles.push(match standard_context_approach.kind() {
-                lash_core::StandardContextApproachKind::RollingHistory => {
-                    DefaultToolBundle::RollingHistory
-                }
-                lash_core::StandardContextApproachKind::ObservationalMemory => {
-                    DefaultToolBundle::ObservationalMemory
-                }
-            });
-        }
-        bundles.extend([
-            DefaultToolBundle::Shell,
-            DefaultToolBundle::Editing,
-            DefaultToolBundle::Files,
-            DefaultToolBundle::Search,
-        ]);
-        if interactive {
-            bundles.push(DefaultToolBundle::UserPrompts);
-        }
-        if web_enabled {
-            bundles.push(DefaultToolBundle::Web);
-        }
-        Self {
-            bundles,
-            interactive_extras: interactive,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct DefaultPluginStackOptions {
-    pub execution_mode: ExecutionMode,
+#[derive(Clone, Debug, Default)]
+pub struct StandardToolStackOptions {
     pub standard_context_approach: Option<StandardContextApproach>,
-    pub bundles: Vec<DefaultToolBundle>,
     pub tavily_api_key: Option<String>,
 }
 
-pub fn default_plugin_stack(mut options: DefaultPluginStackOptions) -> PluginStack {
-    if options.bundles.is_empty() {
-        options.bundles = DefaultToolSurfaceProfile::for_runtime(
-            options.standard_context_approach.as_ref(),
-            true,
-            options.tavily_api_key.is_some(),
-        )
-        .bundles;
-    }
+pub fn standard_tool_stack(options: StandardToolStackOptions) -> PluginStack {
     let mut stack = PluginStack::new();
-    for bundle in options.bundles {
-        match bundle {
-            DefaultToolBundle::CoreRuntime => {
-                stack.push(Arc::new(ToolDiscoveryPluginFactory::new()));
-                stack.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
-            }
-            DefaultToolBundle::RollingHistory => {
-                stack.push(Arc::new(RollingHistoryPluginFactory::default()));
-            }
-            DefaultToolBundle::ObservationalMemory => {
-                stack.push(Arc::new(ObservationalMemoryPluginFactory));
-            }
-            DefaultToolBundle::Shell => {
-                stack.push(Arc::new(StandardShellPluginFactory::new()));
-            }
-            DefaultToolBundle::Editing => {
-                stack.push(Arc::new(StaticPluginFactory::new(
-                    "apply_patch",
-                    PluginSpec::new()
-                        .with_tool_provider(Arc::new(ApplyPatchTool) as Arc<dyn ToolProvider>),
-                )));
-            }
-            DefaultToolBundle::Files => {
-                stack.push(Arc::new(ReadFilePluginFactory::new()));
-                stack.push(Arc::new(StaticPluginFactory::new(
-                    "glob",
-                    PluginSpec::new().with_tool_provider(Arc::new(Glob) as Arc<dyn ToolProvider>),
-                )));
-                stack.push(Arc::new(StaticPluginFactory::new(
-                    "ls",
-                    PluginSpec::new().with_tool_provider(Arc::new(Ls) as Arc<dyn ToolProvider>),
-                )));
-            }
-            DefaultToolBundle::Search => {
-                stack.push(Arc::new(StaticPluginFactory::new(
-                    "grep",
-                    PluginSpec::new()
-                        .with_tool_provider(Arc::new(Grep::new()) as Arc<dyn ToolProvider>),
-                )));
-            }
-            DefaultToolBundle::UserPrompts => {}
-            DefaultToolBundle::Web => {
-                if let Some(key) = options.tavily_api_key.clone() {
-                    let search_key = key.clone();
-                    stack.push(Arc::new(StaticPluginFactory::new(
-                        "search_web",
-                        PluginSpec::new().with_tool_provider(
-                            Arc::new(WebSearch::new(search_key)) as Arc<dyn ToolProvider>
-                        ),
-                    )));
-                    stack.push(Arc::new(StaticPluginFactory::new(
-                        "fetch_url",
-                        PluginSpec::new().with_tool_provider(
-                            Arc::new(FetchUrl::new(key)) as Arc<dyn ToolProvider>
-                        ),
-                    )));
-                }
-            }
-        }
+    push_core_runtime_tools(&mut stack);
+    push_standard_context_tools(&mut stack, options.standard_context_approach.as_ref());
+    push_local_runtime_tools(&mut stack);
+    if let Some(key) = options.tavily_api_key {
+        push_web_tools(&mut stack, key);
     }
     stack
+}
+
+pub fn locked_down_rlm_plugin_stack() -> PluginStack {
+    PluginStack::runtime()
+}
+
+fn push_core_runtime_tools(stack: &mut PluginStack) {
+    stack.push(Arc::new(ToolDiscoveryPluginFactory::new()));
+    stack.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
+}
+
+fn push_standard_context_tools(
+    stack: &mut PluginStack,
+    standard_context_approach: Option<&StandardContextApproach>,
+) {
+    match standard_context_approach.map(StandardContextApproach::kind) {
+        Some(lash_core::StandardContextApproachKind::RollingHistory) => {
+            stack.push(Arc::new(RollingHistoryPluginFactory::default()));
+        }
+        Some(lash_core::StandardContextApproachKind::ObservationalMemory) => {
+            stack.push(Arc::new(ObservationalMemoryPluginFactory));
+        }
+        None => {}
+    }
+}
+
+fn push_local_runtime_tools(stack: &mut PluginStack) {
+    stack.push(Arc::new(StandardShellPluginFactory::new()));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "apply_patch",
+        PluginSpec::new().with_tool_provider(Arc::new(ApplyPatchTool) as Arc<dyn ToolProvider>),
+    )));
+    stack.push(Arc::new(ReadFilePluginFactory::new()));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "glob",
+        PluginSpec::new().with_tool_provider(Arc::new(Glob) as Arc<dyn ToolProvider>),
+    )));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "ls",
+        PluginSpec::new().with_tool_provider(Arc::new(Ls) as Arc<dyn ToolProvider>),
+    )));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "grep",
+        PluginSpec::new().with_tool_provider(Arc::new(Grep::new()) as Arc<dyn ToolProvider>),
+    )));
+}
+
+fn push_web_tools(stack: &mut PluginStack, tavily_api_key: String) {
+    let search_key = tavily_api_key.clone();
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "search_web",
+        PluginSpec::new()
+            .with_tool_provider(Arc::new(WebSearch::new(search_key)) as Arc<dyn ToolProvider>),
+    )));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "fetch_url",
+        PluginSpec::new()
+            .with_tool_provider(Arc::new(FetchUrl::new(tavily_api_key)) as Arc<dyn ToolProvider>),
+    )));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn rolling_history_profile_for_interactive_standard_includes_prompt_tools() {
-        let profile = DefaultToolSurfaceProfile::for_runtime(
-            Some(&StandardContextApproach::RollingHistory(Default::default())),
-            true,
-            false,
-        );
-        assert!(profile.bundles.contains(&DefaultToolBundle::UserPrompts));
-        assert!(profile.bundles.contains(&DefaultToolBundle::RollingHistory));
-        assert!(
-            !profile
-                .bundles
-                .contains(&DefaultToolBundle::ObservationalMemory)
-        );
+    fn stack_ids(stack: &PluginStack) -> Vec<&'static str> {
+        stack
+            .factories()
+            .iter()
+            .map(|factory| factory.id())
+            .collect()
     }
 
     #[test]
-    fn observational_memory_profile_selects_om_bundle() {
-        let profile = DefaultToolSurfaceProfile::for_runtime(
-            Some(&StandardContextApproach::ObservationalMemory(
+    fn rolling_history_context_installs_rolling_history_only() {
+        let stack = standard_tool_stack(StandardToolStackOptions {
+            standard_context_approach: Some(StandardContextApproach::RollingHistory(
                 Default::default(),
             )),
-            false,
-            false,
-        );
-        assert!(
-            profile
-                .bundles
-                .contains(&DefaultToolBundle::ObservationalMemory)
-        );
-        assert!(!profile.bundles.contains(&DefaultToolBundle::RollingHistory));
+            tavily_api_key: None,
+        });
+        let ids = stack_ids(&stack);
+
+        assert!(ids.contains(&"rolling_history"));
+        assert!(!ids.contains(&"observational_memory"));
     }
 
     #[test]
-    fn observational_memory_bundle_advertises_om_support() {
-        let host = lash_core::PluginHost::new(vec![
-            Arc::new(RollingHistoryPluginFactory::default()) as Arc<dyn lash_core::PluginFactory>,
-            Arc::new(ObservationalMemoryPluginFactory) as Arc<dyn lash_core::PluginFactory>,
-        ]);
+    fn observational_memory_context_installs_om_support() {
+        let stack = standard_tool_stack(StandardToolStackOptions {
+            standard_context_approach: Some(StandardContextApproach::ObservationalMemory(
+                Default::default(),
+            )),
+            tavily_api_key: None,
+        });
+        let host = lash_core::PluginHost::new(stack.into_factories());
+
         assert!(host.supports_standard_context_approach(
             &lash_core::StandardContextApproach::ObservationalMemory(
                 lash_core::ObservationalMemoryConfig::default(),
             )
         ));
+    }
+
+    #[test]
+    fn web_tools_are_explicitly_keyed() {
+        let without_web = stack_ids(&standard_tool_stack(StandardToolStackOptions::default()));
+        let with_web = stack_ids(&standard_tool_stack(StandardToolStackOptions {
+            tavily_api_key: Some("key".to_string()),
+            ..Default::default()
+        }));
+
+        assert!(!without_web.contains(&"search_web"));
+        assert!(with_web.contains(&"search_web"));
+        assert!(with_web.contains(&"fetch_url"));
     }
 }

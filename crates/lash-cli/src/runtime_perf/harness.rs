@@ -1,17 +1,19 @@
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use lash_core::provider::ProviderReliability;
-use lash_core::{
-    AppendSessionNodesRequest, LashRuntime, LocalBackgroundTaskHost, MessageRole, PluginHost,
-    PluginMessage, PluginSpec, ProviderHandle, ProviderOptions, RuntimePersistence,
-    SessionAppendNode, SessionPolicy, TurnOutcome,
+use lash::{
+    LashCore, ModeId, ModePreset,
+    advanced::{PluginMessage, StandardContextApproach, TurnOutcome},
+    messages::MessageRole,
+    persistence::SessionStateEnvelope,
+    plugins::{
+        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginSpec,
+        StaticPluginFactory,
+    },
+    provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_provider_openai::OpenAiCompatibleProvider;
-use lash_standard_plugins::{
-    DefaultPluginStackOptions, DefaultToolSurfaceProfile, default_plugin_stack,
-};
+use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 
 use super::openai_compat::OpenAiCompatBenchServer;
 use super::providers::{
@@ -25,32 +27,62 @@ const DEFAULT_PROMPT: &str =
 const HISTORY_EXCHANGES: usize = 18;
 
 pub(crate) struct BenchmarkRuntime {
-    runtime: LashRuntime,
+    session: lash::LashSession,
+    store: Arc<RuntimePerfStore>,
     _openai_compat_server: Option<OpenAiCompatBenchServer>,
 }
 
-impl Deref for BenchmarkRuntime {
-    type Target = LashRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
+impl BenchmarkRuntime {
+    pub(crate) fn usage_report(&self) -> lash::usage::SessionUsageReport {
+        self.session.usage_report()
     }
-}
 
-impl DerefMut for BenchmarkRuntime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.runtime
+    pub(crate) fn read_view(&self) -> lash::persistence::SessionReadView {
+        self.session.read_view()
+    }
+
+    pub(crate) fn graph_node_count(&self) -> usize {
+        self.store.graph_node_count()
+    }
+
+    pub(crate) async fn set_turn_phase_probe(
+        &self,
+        probe: Arc<dyn lash::advanced::RuntimeTurnPhaseProbe>,
+    ) {
+        self.session.set_turn_phase_probe(probe).await;
+    }
+
+    pub(crate) async fn run_turn(
+        &self,
+        input: lash::TurnInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<lash::TurnResult> {
+        self.session
+            .turn(input)
+            .cancel(cancel)
+            .collect_session_events_with(&lash::advanced::NoopEventSink)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    pub(crate) async fn await_background_work(&self) -> anyhow::Result<()> {
+        self.session.background_tasks().await_all().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn export_state(&self) -> SessionStateEnvelope {
+        self.session.control().state().export().await
     }
 }
 pub(crate) fn validate_runtime_perf_turn(
     scenario: RuntimePerfScenario,
     turn_index: usize,
     outcome: &TurnOutcome,
-    assistant_output: &lash_core::AssistantOutput,
+    assistant_output: &lash::turn::AssistantOutput,
 ) -> anyhow::Result<()> {
     let expected = "runtime perf benchmark ok";
     match outcome {
-        TurnOutcome::Finished(lash_core::TurnFinish::AssistantMessage { text }) => {
+        TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { text }) => {
             let valid = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
                 text.contains(expected) || assistant_output.safe_text.contains(expected)
             } else {
@@ -66,7 +98,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 text
             );
         }
-        TurnOutcome::Finished(lash_core::TurnFinish::SubmittedValue { value }) => {
+        TurnOutcome::Finished(lash::advanced::TurnFinish::SubmittedValue { value }) => {
             if value.as_str() == Some(expected) {
                 return Ok(());
             }
@@ -77,7 +109,7 @@ pub(crate) fn validate_runtime_perf_turn(
                 value
             );
         }
-        TurnOutcome::Finished(lash_core::TurnFinish::ToolValue { tool_name, value }) => {
+        TurnOutcome::Finished(lash::advanced::TurnFinish::ToolValue { tool_name, value }) => {
             anyhow::bail!(
                 "runtime perf scenario {} turn {} finished with tool value from {}: {}",
                 scenario.name(),
@@ -150,81 +182,85 @@ pub(crate) async fn build_runtime(
         ),
         _ => benchmark_provider(scenario).into_handle(),
     };
-    let policy = SessionPolicy {
-        model: "mock-model".to_string(),
-        provider,
-        max_context_tokens: Some(200_000),
-        execution_mode: execution_mode.clone(),
+    let mode_id = ModeId::new(execution_mode.plugin_id());
+    let store = Arc::new(RuntimePerfStore::default());
+    let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
-        ..SessionPolicy::default()
-    };
-
-    let profile =
-        DefaultToolSurfaceProfile::for_runtime(standard_context_approach.as_ref(), false, false);
-    let store = Arc::new(RuntimePerfStore::default()) as Arc<dyn RuntimePersistence>;
-    let factories = default_plugin_stack(DefaultPluginStackOptions {
-        execution_mode,
-        standard_context_approach: standard_context_approach.clone(),
-        bundles: profile.bundles,
         tavily_api_key: None,
     });
-    let mut factories = factories.into_factories();
-    factories.push(Arc::new(lash_core::BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()));
-    factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(
+    plugin_stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
+    plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
     )));
     if matches!(scenario, RuntimePerfScenario::RlmLargeToolSurface) {
-        factories.push(Arc::new(lash_core::plugin::StaticPluginFactory::new(
+        plugin_stack.push(Arc::new(StaticPluginFactory::new(
             "runtime_perf_large_tool_surface",
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface)),
         )));
     }
-    factories.push(Arc::new(
-        lash_mode_standard::BuiltinStandardModePluginFactory,
-    ));
-    factories.push(Arc::new(
-        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-    ));
-    let plugin_host = PluginHost::new(factories);
-    let builder = LashRuntime::builder()
-        .with_policy(policy.clone())
-        .with_store(Arc::clone(&store))
-        .with_background_task_host(Arc::new(LocalBackgroundTaskHost::default()))
-        .with_plugin_host(plugin_host);
-    let runtime = builder.build().await?;
+    let core = LashCore::builder()
+        .install_mode(mode_preset(&mode_id, standard_context_approach)?)
+        .default_mode(mode_id.clone())
+        .provider(provider)
+        .model("mock-model", None)
+        .max_context_tokens(200_000)
+        .store_factory(Arc::new(RuntimePerfStoreFactory {
+            store: Arc::clone(&store),
+        }))
+        .plugins(plugin_stack)
+        .build()?;
+    let session = core
+        .session(format!("runtime-perf-{}", scenario.name()))
+        .mode(mode_id)
+        .open()
+        .await?;
     Ok(BenchmarkRuntime {
-        runtime,
+        session,
+        store,
         _openai_compat_server: openai_compat_server,
     })
 }
 
+fn mode_preset(
+    mode: &ModeId,
+    standard_context_approach: Option<StandardContextApproach>,
+) -> anyhow::Result<ModePreset> {
+    match mode.as_str() {
+        "standard" => {
+            Ok(ModePreset::standard().with_standard_context_approach(standard_context_approach))
+        }
+        "rlm" => Ok(ModePreset::rlm()),
+        other => anyhow::bail!("unsupported runtime perf mode `{other}`"),
+    }
+}
+
 pub(crate) async fn seed_runtime_state(
-    runtime: &mut LashRuntime,
+    runtime: &mut BenchmarkRuntime,
     scenario: RuntimePerfScenario,
 ) -> anyhow::Result<()> {
-    let mut nodes = Vec::with_capacity(HISTORY_EXCHANGES * 2);
+    let mut messages = Vec::with_capacity(HISTORY_EXCHANGES * 2);
     for index in 0..HISTORY_EXCHANGES {
-        nodes.push(SessionAppendNode::message(PluginMessage::text(
+        messages.push(PluginMessage::text(
             MessageRole::User,
             format!(
                 "Historical user turn {index}: trace the performance-sensitive path through runtime/session graph/tool prep."
             ),
-        )));
-        nodes.push(SessionAppendNode::message(PluginMessage::text(
+        ));
+        messages.push(PluginMessage::text(
             MessageRole::Assistant,
             format!(
                 "Historical assistant turn {index}: inspected runtime.rs, turn_runner.rs, and token ledger export surfaces."
             ),
-        )));
+        ));
     }
 
     runtime
-        .append_session_nodes(AppendSessionNodesRequest {
-            nodes,
-            requires_ancestor_node_id: None,
-        })
+        .session
+        .control()
+        .state()
+        .append_messages(messages)
         .await
         .map_err(|err| anyhow::anyhow!("seed historical messages: {err}"))?;
 
@@ -236,18 +272,18 @@ pub(crate) async fn seed_runtime_state(
             .map(|message| message.id.clone())
             .ok_or_else(|| anyhow::anyhow!("OM scenario expected seeded messages"))?;
         runtime
-            .append_session_nodes(AppendSessionNodesRequest {
-                nodes: vec![SessionAppendNode::plugin(
-                    OM_ACTIVE_STATE_PLUGIN_TYPE,
-                    serde_json::json!({
-                        "observed_through_message_id": observed_through_message_id,
-                        "observations": "Date: Apr 13, 2026\n* 🔴 User is evaluating Lash runtime performance without model inference.\n* 🟡 Historical inspection focused on runtime, token ledger export, and tool initialization overhead.\n* ✅ Shared process-wide search cache was added for indexed grep state.",
-                        "current_task": "Primary: Benchmark runtime overhead.\nSecondary: Compare standard, rlm, and observational memory paths.",
-                        "suggested_response": "Report the runtime benchmark numbers and the dominant overheads directly."
-                    }),
-                )],
-                requires_ancestor_node_id: None,
-            })
+            .session
+            .control()
+            .state()
+            .append_plugin_body(
+                OM_ACTIVE_STATE_PLUGIN_TYPE,
+                serde_json::json!({
+                    "observed_through_message_id": observed_through_message_id,
+                    "observations": "Date: Apr 13, 2026\n* 🔴 User is evaluating Lash runtime performance without model inference.\n* 🟡 Historical inspection focused on runtime, token ledger export, and tool initialization overhead.\n* ✅ Shared process-wide search cache was added for indexed grep state.",
+                    "current_task": "Primary: Benchmark runtime overhead.\nSecondary: Compare standard, rlm, and observational memory paths.",
+                    "suggested_response": "Report the runtime benchmark numbers and the dominant overheads directly."
+                }),
+            )
             .await
             .map_err(|err| anyhow::anyhow!("seed OM reflection node: {err}"))?;
     }
@@ -256,7 +292,7 @@ pub(crate) async fn seed_runtime_state(
 }
 
 pub(crate) async fn prepare_turn(
-    runtime: &mut LashRuntime,
+    runtime: &mut BenchmarkRuntime,
     scenario: RuntimePerfScenario,
     turn_index: usize,
 ) -> anyhow::Result<()> {

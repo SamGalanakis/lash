@@ -102,4 +102,87 @@ impl ModeExecutionContext {
     pub(crate) fn tool_execution_mode(&self, name: &str) -> crate::ToolExecutionMode {
         crate::tool_dispatch::resolve_tool_execution_mode(&self.dispatch, name)
     }
+
+    pub fn tool_argument_projection_policy(
+        &self,
+        name: &str,
+    ) -> crate::ToolArgumentProjectionPolicy {
+        crate::tool_dispatch::resolve_tool_argument_projection_policy(&self.dispatch, name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_dispatch::ToolDispatchContext;
+    use crate::{ExecutionMode, ToolCall, ToolProvider, ToolResult};
+
+    struct NoopTools;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for NoopTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            Vec::new()
+        }
+
+        fn resolve_contract(&self, _name: &str) -> Option<Arc<crate::ToolContract>> {
+            None
+        }
+
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+            ToolResult::err_fmt("not used")
+        }
+    }
+
+    #[test]
+    fn tool_argument_projection_policy_resolves_from_active_surface_and_defaults_unknown() {
+        let tool = crate::ToolDefinition::raw(
+            "seedy",
+            "Seed-aware",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_argument_projection(
+            crate::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
+        );
+        let plugins = crate::plugin::PluginHost::empty()
+            .build_standard_session("session", None)
+            .expect("plugin session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: Arc::new(NoopTools),
+            surface: Arc::new(crate::ToolSurface::from_tools(
+                vec![tool.manifest()],
+                ExecutionMode::standard(),
+                std::collections::BTreeMap::new(),
+            )),
+            host: Arc::new(crate::testing::MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let ctx = ModeExecutionContext::new(
+            "session".to_string(),
+            ExecutionMode::standard(),
+            dispatch,
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            None,
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+
+        assert_eq!(
+            ctx.tool_argument_projection_policy("seedy"),
+            crate::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed")
+        );
+        assert_eq!(
+            ctx.tool_argument_projection_policy("missing"),
+            crate::ToolArgumentProjectionPolicy::MaterializeProjectedValues
+        );
+    }
 }

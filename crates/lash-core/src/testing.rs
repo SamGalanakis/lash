@@ -10,10 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
-use crate::plugin::{
-    PluginError, SessionCreateRequest, SessionHandle, SessionLifecycleHost, SessionSnapshot,
-    SessionSnapshotHost, ToolCatalogHost, ToolStateHost, TurnHost,
-};
+use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
 use crate::provider::{
     AgentModelSelection, ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState,
     ProviderTransport, VariantRequestConfig,
@@ -295,7 +292,7 @@ pub fn mock_session_policy() -> SessionPolicy {
 /// A `ToolContext` backed by a default [`MockSessionManager`], suitable for
 /// unit-testing a `ToolProvider` in isolation. Use [`mock_tool_context_with_host`]
 /// when the tool under test interacts with host state and needs a configured
-/// `MockSessionManager` (or another `ToolHookHost` implementation).
+/// `MockSessionManager` (or another `RuntimeSessionHost` implementation).
 pub fn mock_tool_context() -> crate::ToolContext {
     mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
 }
@@ -304,7 +301,7 @@ pub fn mock_tool_context() -> crate::ToolContext {
 /// when a tool reads from the host (snapshots, tool state, lifecycle hooks)
 /// and the test wants to assert against captured interactions.
 pub fn mock_tool_context_with_host(
-    host: Arc<dyn crate::plugin::ToolHookHost>,
+    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
 ) -> crate::ToolContext {
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
@@ -424,7 +421,7 @@ impl MockSessionManager {
 }
 
 #[async_trait::async_trait]
-impl SessionSnapshotHost for MockSessionManager {
+impl crate::plugin::RuntimeSessionHost for MockSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
         Ok(self.snapshot.clone())
     }
@@ -432,17 +429,9 @@ impl SessionSnapshotHost for MockSessionManager {
     async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
         Ok(self.snapshot.clone())
     }
-}
-
-#[async_trait::async_trait]
-impl ToolCatalogHost for MockSessionManager {
     async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
         Ok(self.tool_catalog.clone())
     }
-}
-
-#[async_trait::async_trait]
-impl ToolStateHost for MockSessionManager {
     async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
         self.tool_registry
             .as_ref()
@@ -466,10 +455,6 @@ impl ToolStateHost for MockSessionManager {
             .apply_state(snapshot)
             .map_err(|err| PluginError::Session(err.to_string()))
     }
-}
-
-#[async_trait::async_trait]
-impl SessionLifecycleHost for MockSessionManager {
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -495,10 +480,6 @@ impl SessionLifecycleHost for MockSessionManager {
             .push(session_id.to_string());
         Ok(())
     }
-}
-
-#[async_trait::async_trait]
-impl TurnHost for MockSessionManager {
     async fn start_turn_stream(
         &self,
         session_id: &str,
@@ -525,13 +506,6 @@ impl TurnHost for MockSessionManager {
         Ok(())
     }
 }
-
-impl crate::plugin::TaskHost for MockSessionManager {}
-impl crate::plugin::MonitorHost for MockSessionManager {}
-impl crate::plugin::SessionGraphHost for MockSessionManager {}
-impl crate::plugin::DirectCompletionHost for MockSessionManager {}
-impl crate::plugin::TraceHost for MockSessionManager {}
-
 // ─────────────────────────────────────────────────────────────────────
 // Minimal in-tree plugin fake advertising support for a given
 // `StandardContextApproachKind`. Lash tests use this instead of pulling in
@@ -924,11 +898,11 @@ mod test_mode_fakes {
             text_streamed: bool,
         ) -> Vec<DriverAction> {
             use crate::sansio::{CheckpointResumeAction, PendingToolCall};
+            use crate::session_model::fresh_message_id;
             use crate::{
                 CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
             };
             use lash_sansio::llm::types::LlmOutputPart;
-            use lash_sansio::session_model::fresh_message_id;
             use lash_sansio::session_model::make_error_event;
 
             let parts = crate::normalized_response_parts(&llm_response);
@@ -1075,10 +1049,11 @@ mod test_mode_fakes {
             completed: Vec<CompletedToolCall>,
         ) -> Vec<DriverAction> {
             use crate::sansio::CheckpointResumeAction;
+            use crate::session_model::fresh_message_id;
             use crate::{
                 CheckpointKind, Message, MessageRole, Part, PartKind, PruneState, SessionEvent,
             };
-            use lash_sansio::session_model::{fresh_message_id, reassign_part_ids};
+            use lash_sansio::session_model::reassign_part_ids;
             let mut actions = Vec::new();
             let mut result_parts = Vec::new();
             let mut terminal_outcome = None;
@@ -1166,9 +1141,10 @@ mod test_mode_fakes {
             if let Some(max_turns) = ctx.max_turns()
                 && next_mode_iteration >= ctx.mode_run_offset() + max_turns
             {
+                let message_id = fresh_message_id();
                 actions.push(DriverAction::AppendEvents(vec![
                     SessionEventRecord::Conversation(ConversationRecord::from_message(
-                        crate::turn_limit_exhausted_message(max_turns),
+                        crate::turn_limit_exhausted_message(message_id, max_turns),
                     )),
                 ]));
                 actions.push(DriverAction::Finish(TurnOutcome::Stopped(

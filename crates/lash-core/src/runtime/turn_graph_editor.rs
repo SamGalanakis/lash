@@ -4,14 +4,14 @@ use std::sync::Arc;
 use crate::session_graph::SessionReadModel;
 use crate::session_graph::build_active_read_replacement;
 use crate::session_graph::tool_call_record_active_read_key;
-use crate::session_model::SessionEventRecord;
+use crate::session_model::{ModeEvent, SessionEventRecord};
 use crate::store::GraphCommitDelta;
 use crate::{
     BaseRenderCache, Message, MessageSequence, SessionGraph, SessionNodeRecord, ToolCallRecord,
 };
 
 #[derive(Debug)]
-pub(super) struct TurnGraphOverlay {
+pub(super) struct TurnGraphEditor {
     base_graph: Arc<SessionGraph>,
     active_events: Arc<Vec<SessionEventRecord>>,
     active_messages: MessageSequence,
@@ -23,7 +23,7 @@ pub(super) struct TurnGraphOverlay {
     committed_node_ids: HashSet<String>,
 }
 
-impl TurnGraphOverlay {
+impl TurnGraphEditor {
     pub(super) fn new(base_graph: Arc<SessionGraph>, base_read_model: SessionReadModel) -> Self {
         let append_builder = base_graph.append_builder();
         let active_messages = MessageSequence::from_base(base_read_model.messages);
@@ -61,7 +61,6 @@ impl TurnGraphOverlay {
         self.graph_tool_calls.as_slice()
     }
 
-    #[allow(dead_code)]
     pub(super) fn read_model(&self) -> SessionReadModel {
         SessionReadModel {
             active_events: Arc::clone(&self.active_events),
@@ -80,46 +79,61 @@ impl TurnGraphOverlay {
             .iter()
             .map(tool_call_record_active_read_key)
             .collect::<HashSet<_>>();
-        self.append_events(records.into_iter().filter_map(|record| {
-            let stable_key = tool_call_record_active_read_key(&record);
-            if seen_tool_call_keys.insert(stable_key.clone()) {
-                Some(SessionEventRecord::Tool(
-                    crate::session_model::ToolEvent::Invocation { stable_key, record },
-                ))
+        let appendable_tool_calls = records
+            .into_iter()
+            .filter(|record| {
+                let stable_key = tool_call_record_active_read_key(record);
+                if seen_tool_call_keys.insert(stable_key.clone()) {
+                    true
+                } else {
+                    tracing::debug!(
+                        stable_key,
+                        call_id = record.call_id.as_deref(),
+                        tool = record.tool.as_str(),
+                        "skipping duplicate tool call record"
+                    );
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        self.append_tool_call_records(appendable_tool_calls);
+    }
+
+    pub(super) fn append_mode_events<I>(&mut self, events: I)
+    where
+        I: IntoIterator<Item = ModeEvent>,
+    {
+        let events = events.into_iter().collect::<Vec<_>>();
+        if events.is_empty() {
+            return;
+        }
+        let nodes = self.append_builder.append_mode_events(events);
+        Arc::make_mut(&mut self.active_events).extend(nodes.iter().filter_map(|node| {
+            if let Some(SessionEventRecord::Mode(event)) = node.event() {
+                Some(SessionEventRecord::Mode(event.clone()))
             } else {
-                tracing::debug!(
-                    stable_key,
-                    call_id = record.call_id.as_deref(),
-                    tool = record.tool.as_str(),
-                    "skipping duplicate tool call record"
-                );
                 None
             }
         }));
+        self.append_appended_nodes(nodes);
     }
 
-    pub(super) fn append_events<I>(&mut self, events: I)
+    fn append_tool_call_records<I>(&mut self, records: I)
     where
-        I: IntoIterator<Item = SessionEventRecord>,
+        I: IntoIterator<Item = ToolCallRecord>,
     {
-        for event in events {
-            let node = self.append_builder.append_event_record(event.clone());
-            self.append_appended_nodes(node);
-            Arc::make_mut(&mut self.active_events).push(event.clone());
-            match event {
-                SessionEventRecord::Conversation(record) => {
-                    self.active_messages.push(record.to_message());
-                }
-                SessionEventRecord::Tool(crate::session_model::ToolEvent::Invocation {
-                    record,
-                    ..
-                }) => {
-                    self.graph_tool_calls.push(record.clone());
-                    Arc::make_mut(&mut self.read_tool_calls).push(record);
-                }
-                _ => {}
-            }
+        let records = records.into_iter().collect::<Vec<_>>();
+        if records.is_empty() {
+            return;
         }
+        let nodes = self
+            .append_builder
+            .append_tool_call_records(records.clone());
+        Arc::make_mut(&mut self.active_events)
+            .extend(nodes.iter().filter_map(|node| node.event().cloned()));
+        self.append_appended_nodes(nodes);
+        self.graph_tool_calls.extend(records.clone());
+        Arc::make_mut(&mut self.read_tool_calls).extend(records);
     }
 
     pub(super) fn message_delta_if_current_preserved<'a>(
@@ -358,7 +372,7 @@ mod tests {
     fn record_tool_calls_skips_duplicate_stable_keys() {
         let base_graph = Arc::new(SessionGraph::default());
         let base_read_model = base_graph.read_model();
-        let mut overlay = TurnGraphOverlay::new(base_graph, base_read_model);
+        let mut overlay = TurnGraphEditor::new(base_graph, base_read_model);
         let record = tool_record("call-1");
 
         overlay.record_tool_calls([record.clone(), record]);

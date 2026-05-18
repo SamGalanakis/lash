@@ -49,8 +49,6 @@ pub struct ToolSurface {
     #[serde(skip)]
     resolve_contract: Option<ToolContractResolver>,
     #[serde(skip)]
-    build_model_tool_specs: bool,
-    #[serde(skip)]
     prompt_tool_docs: OnceLock<Arc<str>>,
     #[serde(skip)]
     model_tool_specs: OnceLock<Arc<Vec<LlmToolSpec>>>,
@@ -66,7 +64,6 @@ impl Clone for ToolSurface {
             tools: self.tools.clone(),
             tool_list_notes: self.tool_list_notes.clone(),
             resolve_contract: self.resolve_contract.clone(),
-            build_model_tool_specs: self.build_model_tool_specs,
             prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
@@ -93,7 +90,6 @@ impl std::fmt::Debug for ToolSurface {
         f.debug_struct("ToolSurface")
             .field("tools", &self.tools)
             .field("tool_list_notes", &self.tool_list_notes)
-            .field("build_model_tool_specs", &self.build_model_tool_specs)
             .finish_non_exhaustive()
     }
 }
@@ -104,7 +100,6 @@ impl Default for ToolSurface {
             tools: Vec::new(),
             tool_list_notes: Vec::new(),
             resolve_contract: None,
-            build_model_tool_specs: false,
             prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
@@ -154,7 +149,6 @@ impl ToolSurface {
                 .collect(),
             tool_list_notes: Vec::new(),
             resolve_contract,
-            build_model_tool_specs: mode.plugin_id() != "rlm",
             prompt_tool_docs: OnceLock::new(),
             model_tool_specs: OnceLock::new(),
             tool_names: OnceLock::new(),
@@ -231,9 +225,6 @@ impl ToolSurface {
     }
 
     pub fn model_tool_specs(&self) -> Arc<Vec<LlmToolSpec>> {
-        if !self.build_model_tool_specs {
-            return Arc::clone(self.model_tool_specs.get_or_init(|| Arc::new(Vec::new())));
-        }
         Arc::clone(self.model_tool_specs.get_or_init(|| {
             Arc::new(
                 self.tools
@@ -490,13 +481,13 @@ mod tests {
     }
 
     #[test]
-    fn rlm_callable_only_surface_does_not_resolve_contracts_for_specs() {
+    fn callable_only_surface_resolves_model_specs_lazily() {
         let contract_resolutions = Arc::new(AtomicUsize::new(0));
         let callable = tool("large_callable", ToolAvailability::Callable);
         let resolver_count = Arc::clone(&contract_resolutions);
         let surface = build_tool_surface(ToolSurfaceBuildInput {
             tools: vec![callable.manifest()],
-            mode: crate::ExecutionMode::new("rlm"),
+            mode: crate::ExecutionMode::new("custom"),
             resolve_contract: Some(Arc::new(move |name| {
                 resolver_count.fetch_add(1, Ordering::SeqCst);
                 (name == "large_callable").then(|| Arc::new(callable.contract()))
@@ -508,9 +499,9 @@ mod tests {
             surface.tool_names().as_ref(),
             &vec!["large_callable".to_string()]
         );
-        assert_eq!(surface.model_tool_specs().len(), 0);
+        assert_eq!(surface.model_tool_specs().len(), 1);
         assert_eq!(surface.prompt_tool_docs(), "");
-        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(contract_resolutions.load(Ordering::SeqCst), 1);
     }
 
     #[test]

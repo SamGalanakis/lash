@@ -114,8 +114,8 @@ pub fn append_assistant_text_part(out: &mut String, next: &str) {
 
 /// System-level "turn limit reached" message that both protocol
 /// drivers append when their mode_iteration count exceeds `max_turns`.
-pub fn turn_limit_exhausted_message(max_turns: usize) -> Message {
-    let id = crate::session_model::fresh_message_id();
+pub fn turn_limit_exhausted_message(message_id: impl Into<String>, max_turns: usize) -> Message {
+    let id = message_id.into();
     Message {
         id: id.clone(),
         role: MessageRole::System,

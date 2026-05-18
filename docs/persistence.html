@@ -67,7 +67,7 @@ pub trait RuntimePersistence: Send + Sync {
 }</code></pre>
           <p>Conflicts surface as a turn-level <code>Err</code> with <code>RuntimeError { code: "store_commit_failed", .. }</code> — not a <code>TurnStop</code> variant. The next read is identical to the read before the failed call. Hosts expecting concurrent access (multi-tab UIs, agent fleets) should serialize at their own layer or re-open against the refreshed head.</p>
           <p>In-memory sessions (no <code>store_factory</code>) enforce the same CAS against an in-process counter.</p>
-          <p>For per-effect durability under an external workflow runtime (Temporal, Restate), see <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
+          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectHost</code>; see <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
         </div>
 
         <div class="section" id="wiring">

@@ -6,10 +6,7 @@ use tokio::sync::Mutex;
 
 use lash_plugin_plan_mode::{PlanModePluginConfig, PlanModePluginFactory};
 
-use lash_core::plugin::runtime_host::{
-    RuntimeSessionHost, SessionLifecycleHost, SessionSnapshotHost, ToolCatalogHost, ToolStateHost,
-    TurnHost,
-};
+use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::plugin::{
     PluginDirective, PluginError, SessionPluginMode, SessionStartPoint, ToolCallHookContext,
     ToolResultHookContext, ToolSurfaceContext,
@@ -56,8 +53,8 @@ trait PlanTestHostCore: Send + Sync {
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
     async fn prompt_user(
         &self,
-        _request: lash_core::PromptRequest,
-    ) -> Result<lash_core::PromptResponse, PluginError> {
+        _request: lash_plugin_plan_mode::PlanModePromptRequest,
+    ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
         Err(PluginError::Session("prompt unavailable".to_string()))
     }
 }
@@ -65,7 +62,7 @@ trait PlanTestHostCore: Send + Sync {
 macro_rules! impl_plan_test_host {
     ($ty:ty) => {
         #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::SessionSnapshotHost for $ty {
+        impl lash_core::plugin::runtime_host::RuntimeSessionHost for $ty {
             async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
                 PlanTestHostCore::snapshot_current(self).await
             }
@@ -75,20 +72,12 @@ macro_rules! impl_plan_test_host {
             ) -> Result<SessionSnapshot, PluginError> {
                 PlanTestHostCore::snapshot_session(self, session_id).await
             }
-        }
-
-        #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::ToolCatalogHost for $ty {
             async fn tool_catalog(
                 &self,
                 session_id: &str,
             ) -> Result<Vec<serde_json::Value>, PluginError> {
                 PlanTestHostCore::tool_catalog(self, session_id).await
             }
-        }
-
-        #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::ToolStateHost for $ty {
             async fn tool_state(
                 &self,
                 session_id: &str,
@@ -102,10 +91,6 @@ macro_rules! impl_plan_test_host {
             ) -> Result<u64, PluginError> {
                 PlanTestHostCore::apply_tool_state(self, session_id, snapshot).await
             }
-        }
-
-        #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::SessionLifecycleHost for $ty {
             async fn create_session(
                 &self,
                 request: SessionCreateRequest,
@@ -115,10 +100,6 @@ macro_rules! impl_plan_test_host {
             async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
                 PlanTestHostCore::close_session(self, session_id).await
             }
-        }
-
-        #[async_trait::async_trait]
-        impl lash_core::plugin::runtime_host::TurnHost for $ty {
             async fn start_turn_stream(
                 &self,
                 session_id: &str,
@@ -138,17 +119,11 @@ macro_rules! impl_plan_test_host {
         impl lash_plugin_plan_mode::PlanModePrompt for $ty {
             async fn prompt_user(
                 &self,
-                request: lash_core::PromptRequest,
-            ) -> Result<lash_core::PromptResponse, PluginError> {
+                request: lash_plugin_plan_mode::PlanModePromptRequest,
+            ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
                 PlanTestHostCore::prompt_user(self, request).await
             }
         }
-
-        impl lash_core::plugin::runtime_host::TaskHost for $ty {}
-        impl lash_core::plugin::runtime_host::MonitorHost for $ty {}
-        impl lash_core::plugin::runtime_host::SessionGraphHost for $ty {}
-        impl lash_core::plugin::runtime_host::DirectCompletionHost for $ty {}
-        impl lash_core::plugin::runtime_host::TraceHost for $ty {}
     };
 }
 
@@ -436,30 +411,19 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                     && message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()")
                     && message.content.contains("single source of truth")
-                    && message.content.contains("panel only shows the file path"))
+                    && message.content.contains("host can surface the file path"))
     )));
     assert!(before_turn.iter().any(|emitted| {
         emitted.plugin_id == "plan_mode"
             && matches!(
                 &emitted.value,
-                PluginDirective::EmitEvents { events }
+                PluginDirective::EmitRuntimeEvents { events }
                     if events.iter().any(|event| matches!(
                         event,
-                        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorUpsert { label, .. }
-                            if label == "plan"
-                    ))
-            )
-    }));
-    assert!(before_turn.iter().any(|emitted| {
-        emitted.plugin_id == "plan_mode"
-            && matches!(
-                &emitted.value,
-                PluginDirective::EmitEvents { events }
-                    if events.iter().any(|event| matches!(
-                        event,
-                        lash_core::plugin::PluginSurfaceEvent::PanelUpsert { title, content, .. }
-                            if title == "PLAN"
-                                && content.contains("Path: `.lash/plans/run-session.md`")
+                        lash_core::plugin::PluginRuntimeEvent::Custom { name, payload }
+                            if name == "plan_mode.state"
+                                && payload.get("enabled").and_then(|value| value.as_bool()) == Some(true)
+                                && payload.get("plan_path").and_then(|value| value.as_str()) == Some(".lash/plans/run-session.md")
                     ))
             )
     }));
@@ -470,6 +434,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             "root".to_string(),
             "exec_command".to_string(),
             json!({"cmd":"cargo test -q"}),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -482,6 +447,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             "root".to_string(),
             "read_file".to_string(),
             json!({"path":"src/main.rs"}),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -564,6 +530,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({
                 "path":"src/main.rs"
             }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -578,6 +545,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({
                 "query":"surrealdb datetime best practices"
             }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -588,7 +556,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let plan_patch_allowed = session
         .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }), lash_core::TurnContext::default(), manager.clone()))
+            }), lash_core::ToolArgumentProjectionPolicy::default(), lash_core::TurnContext::default(), manager.clone()))
         .await
         .expect("before_tool_call");
     assert!(plan_patch_allowed.is_empty());
@@ -600,6 +568,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             json!({
                 "input": "*** Begin Patch\n*** Add File: src/main.rs\n+fn main() {}\n*** End Patch"
             }),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -637,7 +606,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
                 message.content.contains(".lash/plans/run-session.md")
                     && message.content.contains("plan_exit()")
                     && message.content.contains("single source of truth")
-                    && message.content.contains("panel only shows the file path"))
+                    && message.content.contains("host can surface the file path"))
     )));
 
     session
@@ -725,6 +694,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
             "root".to_string(),
             "read_file".to_string(),
             json!({"path":"src/main.rs"}),
+            lash_core::ToolArgumentProjectionPolicy::default(),
             lash_core::TurnContext::default(),
             manager.clone(),
         ))
@@ -735,7 +705,7 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let apply_patch_allowed = session
         .before_tool_call(ToolCallHookContext::new("root".to_string(), "apply_patch".to_string(), json!({
                 "input": "*** Begin Patch\n*** Add File: .lash/plans/run-session.md\n+# Plan\n*** End Patch"
-            }), lash_core::TurnContext::default(), manager.clone()))
+            }), lash_core::ToolArgumentProjectionPolicy::default(), lash_core::TurnContext::default(), manager.clone()))
         .await
         .expect("before_tool_call");
     assert!(apply_patch_allowed.is_empty());
@@ -806,14 +776,14 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
 
         async fn prompt_user(
             &self,
-            request: lash_core::PromptRequest,
-        ) -> Result<lash_core::PromptResponse, PluginError> {
+            request: lash_plugin_plan_mode::PlanModePromptRequest,
+        ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
             assert!(request.question.contains(".lash/plans/run-session.md"));
-            assert!(request.allows_note());
-            let panel = request.panel.expect("plan review panel");
-            assert_eq!(panel.title, "PLAN");
-            assert_eq!(panel.markdown, ready_plan_markdown().trim_end());
-            Ok(lash_core::PromptResponse::Single {
+            assert!(request.allow_note);
+            let review = request.review.expect("plan review");
+            assert_eq!(review.title, "PLAN");
+            assert_eq!(review.markdown, ready_plan_markdown().trim_end());
+            Ok(lash_plugin_plan_mode::PlanModePromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: Some("start with the safe slice".to_string()),
             })
@@ -897,7 +867,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
     );
 
     let dynamic =
-        lash_core::plugin::runtime_host::ToolStateHost::tool_state(manager.as_ref(), "root")
+        lash_core::plugin::runtime_host::RuntimeSessionHost::tool_state(manager.as_ref(), "root")
             .await
             .expect("tool state");
     assert!(dynamic.get("plan_exit").is_some_and(|tool| {
@@ -966,16 +936,16 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
 
         async fn prompt_user(
             &self,
-            request: lash_core::PromptRequest,
-        ) -> Result<lash_core::PromptResponse, PluginError> {
+            request: lash_plugin_plan_mode::PlanModePromptRequest,
+        ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
             assert_eq!(
                 request.question,
                 "Review the plan in `.lash/plans/run-session.md`. What next?"
             );
-            let panel = request.panel.expect("plan review panel");
-            assert_eq!(panel.title, "PLAN");
-            assert!(panel.markdown.contains("# Plan"));
-            Ok(lash_core::PromptResponse::Single {
+            let review = request.review.expect("plan review");
+            assert_eq!(review.title, "PLAN");
+            assert!(review.markdown.contains("# Plan"));
+            Ok(lash_plugin_plan_mode::PlanModePromptResponse::Single {
                 selection: "Start implementing now".to_string(),
                 note: None,
             })
@@ -1092,9 +1062,9 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
 
         async fn prompt_user(
             &self,
-            _request: lash_core::PromptRequest,
-        ) -> Result<lash_core::PromptResponse, PluginError> {
-            Ok(lash_core::PromptResponse::Single {
+            _request: lash_plugin_plan_mode::PlanModePromptRequest,
+        ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
+            Ok(lash_plugin_plan_mode::PlanModePromptResponse::Single {
                 selection: "Start in fresh context".to_string(),
                 note: None,
             })
@@ -1268,7 +1238,7 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     assert!(
         directives
             .iter()
-            .any(|owned| matches!(owned.value, PluginDirective::EmitEvents { .. }))
+            .any(|owned| matches!(owned.value, PluginDirective::EmitRuntimeEvents { .. }))
     );
     assert!(
         directives

@@ -95,13 +95,35 @@ submit({ "move": move_idx, "tenant": tenant_id })
           <ul class="bullets">
             <li><code>.bind_json(name, value)</code> — common case. Any <code>serde_json::Value</code>; re-typed on entry.</li>
             <li><code>.bind_value(name, FlowValue)</code> — pass a native lashlang value, skipping the JSON round-trip.</li>
-            <li><code>.bind_lazy(name, Arc&lt;dyn ProjectedHostValue&gt;)</code> — for large host structures. Implement <code>get_field</code> / <code>get_index</code> / <code>len</code> / <code>render</code> / <code>materialize</code>; the executor calls them on demand.</li>
+            <li><code>.bind_lazy(name, ProjectionRef)</code> — for large host structures. Register the host object with a <code>ProjectionResolver</code>, bind the stable ref, and let RLM resolve it immediately before Lashlang execution.</li>
           </ul>
+          <p>Lazy bindings no longer accept a raw <code>Arc&lt;dyn ProjectedHostValue&gt;</code> through the public RLM API. Keep the object behind a resolver so snapshots, handoffs, and child seeds carry an opaque <code>ProjectionRef</code> instead of accidentally materializing the large value.</p>
+          <pre><code>use std::sync::Arc;
+use lash::{LashCore, ModeId, ModePreset, PluginStack, TurnInput};
+use lash_mode_rlm::{
+    ProjectionRegistry, RlmProjectedBindings, RlmTurnInputExt,
+};
+
+let registry = Arc::new(ProjectionRegistry::new());
+let core = LashCore::builder()
+    .install_mode(ModePreset::rlm_with_projection_resolver(registry.clone()))
+    .default_mode(ModeId::rlm())
+    .plugins(PluginStack::runtime())
+    .build()?;
+
+// `my_docs_projection` implements `lashlang::ProjectedHostValue`.
+let docs_ref = registry.register_memory(Arc::new(my_docs_projection));
+let input = TurnInput::text("Answer using docs only when needed.")
+    .rlm_project(
+        RlmProjectedBindings::new()
+            .bind_lazy("docs", docs_ref)?,
+    )?;</code></pre>
+          <p><code>ProjectionRegistry::register_memory(...)</code> returns refs that remain valid while that registry lives. After process loss, or if the RLM factory was built with a different resolver, execution fails with an unavailable-projection error rather than replacing the binding with <code>null</code>.</p>
           <h3>Reserved names and the read-only guard</h3>
           <p>Projected names are read-only — assignment inside lashlang raises a protocol error. The runtime reserves <code>history</code>; override by narrowing through your own projected handle, not by rebinding.</p>
           <p>Duplicate names between session and turn scopes are rejected at <code>run()</code> time. Pick one scope; merge at the source.</p>
           <h3>Seeds for handoffs and subagents</h3>
-          <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the successor or child session. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
+          <p><code>continue_as</code> and <code>spawn_agent</code> accept a <code>seed:</code> map whose entries re-project in the successor or child session. Ref-backed projected values keep their <code>ProjectionRef</code>; value-backed projected values serialize as JSON. See <a href="./embedding-advanced.html#subagents">Subagents</a> and <a href="./architecture/lashlang-effects.html#projected-host-bindings">Projected Host Bindings</a>.</p>
           <p>Deep reference: <a href="./architecture/lashlang-effects.html#projected-host-bindings">Architecture → Lashlang → Projected Host Bindings</a>.</p>
         </div>
 

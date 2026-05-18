@@ -275,6 +275,7 @@ impl ProjectedBindings {
 pub struct ProjectedValue {
     name: Arc<str>,
     kind: ProjectedKind,
+    projection_ref: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -357,29 +358,53 @@ impl ProjectedValue {
         Self {
             name: name.into(),
             kind: ProjectedKind::Scalar(Arc::new(value)),
+            projection_ref: None,
         }
     }
 
     pub fn custom(name: impl Into<Arc<str>>, value: Arc<dyn ProjectedHostValue>) -> Self {
+        Self::custom_inner(name, value, None)
+    }
+
+    pub fn custom_with_projection_ref(
+        name: impl Into<Arc<str>>,
+        value: Arc<dyn ProjectedHostValue>,
+        projection_ref: serde_json::Value,
+    ) -> Self {
+        Self::custom_inner(name, value, Some(projection_ref))
+    }
+
+    fn custom_inner(
+        name: impl Into<Arc<str>>,
+        value: Arc<dyn ProjectedHostValue>,
+        projection_ref: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind: ProjectedKind::Custom(value),
+            projection_ref,
         }
     }
 
-    pub(crate) fn unavailable_after_restore(
+    pub(crate) fn unavailable_after_restore_with_projection_ref(
         name: impl Into<Arc<str>>,
         type_name: impl Into<Arc<str>>,
+        projection_ref: Option<serde_json::Value>,
     ) -> Self {
         let name = name.into();
         Self {
             name: name.clone(),
             kind: ProjectedKind::Custom(Arc::new(UnavailableProjectedValue::new(name, type_name))),
+            projection_ref,
         }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn projection_ref(&self) -> Option<&serde_json::Value> {
+        self.projection_ref.as_ref()
     }
 
     /// Wrap a derived value as a `ProjectedValue` carrying a path-extended name

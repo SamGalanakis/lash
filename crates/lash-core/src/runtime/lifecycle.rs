@@ -54,7 +54,7 @@ impl LashRuntime {
         state.discard_runtime_snapshots();
         session
             .plugins()
-            .emit_runtime_event(crate::PluginRuntimeEvent::SessionRestored(
+            .emit_runtime_event(crate::PluginLifecycleEvent::SessionRestored(
                 crate::SessionReadView::from_persisted_state(&state),
             ))
             .await;
@@ -166,15 +166,7 @@ impl LashRuntime {
                 state.plugin_snapshot.as_ref(),
             )
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        let core = RuntimeCoreConfig {
-            attachment_store: Arc::clone(&env.attachment_store),
-            prompt: env.prompt.clone(),
-            trace_sink: env.trace_sink.clone(),
-            trace_level: env.trace_level,
-            trace_context: env.trace_context.clone(),
-            termination: env.termination.clone(),
-        };
-        let mut embedded = EmbeddedRuntimeHost::new(core);
+        let mut embedded = EmbeddedRuntimeHost::new(env.core.clone());
         if let Some(factory) = env.session_store_factory.as_ref() {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));
         }

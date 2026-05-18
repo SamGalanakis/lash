@@ -12,7 +12,7 @@ use lash_core::plugin::{
     ToolCallHookContext, ToolResultHookContext, TurnResultHookContext,
 };
 use lash_core::{
-    MessageRole, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolCall, ToolContext,
+    MessageRole, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolCall, ToolContext,
     ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use serde::{Deserialize, Serialize};
@@ -221,9 +221,9 @@ impl SessionPlugin for AutoresearchPlugin {
                             state.running.clone(),
                             state.last_run.clone(),
                         );
-                        return Ok(vec![PluginDirective::emit_events(vec![status_event(
-                            &summary,
-                        )?])]);
+                        return Ok(vec![PluginDirective::emit_runtime_events(vec![
+                            status_event(&summary)?,
+                        ])]);
                     }
                     Ok(Vec::new())
                 })
@@ -243,9 +243,9 @@ impl SessionPlugin for AutoresearchPlugin {
                         return Ok(Vec::new());
                     }
                     let summary = full_summary_from_runtime(&after_root, &after_state)?;
-                    Ok(vec![PluginDirective::emit_events(vec![status_event(
-                        &summary,
-                    )?])])
+                    Ok(vec![PluginDirective::emit_runtime_events(vec![
+                        status_event(&summary)?,
+                    ])])
                 })
             }));
 
@@ -933,8 +933,8 @@ fn prompt_text(summary: &StatusSummary) -> String {
     )
 }
 
-fn status_event(summary: &StatusSummary) -> Result<PluginSurfaceEvent, PluginError> {
-    Ok(PluginSurfaceEvent::Custom {
+fn status_event(summary: &StatusSummary) -> Result<PluginRuntimeEvent, PluginError> {
+    Ok(PluginRuntimeEvent::Custom {
         name: "autoresearch.status".to_string(),
         payload: serde_json::to_value(summary).map_err(|err| {
             PluginError::Session(format!("failed to encode autoresearch status: {err}"))

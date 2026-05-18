@@ -110,7 +110,7 @@ fn find_done(effects: &[Effect]) -> Option<(&lash_sansio::MessageSequence, usize
     effects.iter().find_map(|e| match e {
         Effect::Done {
             messages,
-            events: _,
+            event_delta: _,
             mode_iteration,
         } => Some((messages, *mode_iteration)),
         _ => None,
@@ -621,8 +621,8 @@ fn prose_or_submit_response_finishes_with_assistant_message() {
     assert!(
         !effects.iter().any(|effect| matches!(
             effect,
-            Effect::Progress { events, .. }
-                if events.iter().any(|event| matches!(
+            Effect::Progress { event_delta, .. }
+                if event_delta.iter().any(|event| matches!(
                     event,
                     lash_sansio::SessionEventRecord::Conversation(record)
                         if record.to_message().role == MessageRole::Assistant

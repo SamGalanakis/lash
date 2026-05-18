@@ -13,11 +13,15 @@ use crate::{ExecutionMode, StandardContextApproach};
 pub use lash_sansio::session_model::{
     ConversationRecord, ErrorEnvelope, MAIN_AGENT_INTRO, Message, MessageRole, Part, PartKind,
     PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    PruneState, SessionEvent, StateSnapshotEvent, TokenUsage, ToolEvent,
-    TurnTerminationPolicyState, default_prompt_template, format_tool_output_content,
-    format_tool_result_content, fresh_message_id, make_error_envelope, make_error_event,
-    reassign_part_ids, render_prompt, render_transcript_prompt, shared_parts,
+    PruneState, SessionEvent, TokenUsage, ToolEvent, TurnTerminationPolicyState,
+    default_prompt_template, format_tool_output_content, format_tool_result_content,
+    make_error_envelope, make_error_event, reassign_part_ids, render_prompt,
+    render_transcript_prompt, shared_parts,
 };
+
+pub fn fresh_message_id() -> String {
+    format!("m{}", uuid::Uuid::new_v4().simple())
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModeEvent {

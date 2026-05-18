@@ -10,7 +10,6 @@ name = "bench-longmemeval-rlm"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["full"] }
 lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.1" }
 lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.1" }
 lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.1" }

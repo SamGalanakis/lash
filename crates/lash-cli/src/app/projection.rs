@@ -213,6 +213,7 @@ fn rlm_owned_tool_call_ids(projection: &lash_core::ChronologicalProjection) -> H
         .flat_map(|event| match event {
             lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry) => entry.tool_call_ids,
             lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(_)
+            | lash_rlm_types::RlmModeEvent::RlmSeed(_)
             | lash_rlm_types::RlmModeEvent::RlmDiagnostic(_) => Vec::new(),
         })
         .collect()

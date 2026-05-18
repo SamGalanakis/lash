@@ -63,11 +63,12 @@ CREATE TABLE IF NOT EXISTS session_meta (
     created_at       TEXT NOT NULL,
     model            TEXT NOT NULL,
     cwd              TEXT,
-    parent_session_id TEXT
+    parent_session_id TEXT,
+    relation_json    TEXT
 );
 ";
 
-const SCHEMA_VERSION: i32 = 15;
+const SCHEMA_VERSION: i32 = 16;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
@@ -248,6 +249,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string)),
                 parent_session_id: request.parent_session_id.clone(),
+                relation: request.relation.clone(),
             });
         }
         Ok(store as Arc<dyn RuntimePersistence>)
@@ -385,22 +387,50 @@ fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta
 }
 
 fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
-    conn.query_row(
-        "SELECT session_id, session_name, created_at, model, cwd, parent_session_id
-         FROM session_meta WHERE singleton = 1",
-        [],
-        |row| {
-            Ok(SessionMeta {
-                session_id: row.get(0)?,
-                session_name: row.get(1)?,
-                created_at: row.get(2)?,
-                model: row.get(3)?,
-                cwd: row.get(4)?,
-                parent_session_id: row.get(5)?,
-            })
-        },
-    )
+    let has_relation_json = table_has_column(conn, "session_meta", "relation_json").ok()?;
+    let query = if has_relation_json {
+        "SELECT session_id, session_name, created_at, model, cwd, parent_session_id, relation_json
+         FROM session_meta WHERE singleton = 1"
+    } else {
+        "SELECT session_id, session_name, created_at, model, cwd, parent_session_id, NULL
+         FROM session_meta WHERE singleton = 1"
+    };
+    conn.query_row(query, [], |row| {
+        let parent_session_id: Option<String> = row.get(5)?;
+        let relation_json: Option<String> = row.get(6)?;
+        let relation = relation_json
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_else(|| {
+                parent_session_id
+                    .as_ref()
+                    .map(|parent_session_id| lash_core::SessionRelation::Child {
+                        parent_session_id: parent_session_id.clone(),
+                        originating_tool_call_id: None,
+                    })
+                    .unwrap_or_default()
+            });
+        Ok(SessionMeta {
+            session_id: row.get(0)?,
+            session_name: row.get(1)?,
+            created_at: row.get(2)?,
+            model: row.get(3)?,
+            cwd: row.get(4)?,
+            parent_session_id,
+            relation,
+        })
+    })
     .ok()
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
@@ -688,7 +718,7 @@ impl Store {
             return;
         };
         let commits = self.commit_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        if commits.is_multiple_of(interval) {
+        if interval != 0 && commits % interval == 0 {
             let _ = self.gc_unreachable();
         }
     }
@@ -1121,17 +1151,19 @@ impl Store {
 
     pub fn save_session_meta(&self, meta: SessionMeta) {
         let conn = self.conn.lock().unwrap();
+        let relation_json = serde_json::to_string(&meta.relation).ok();
         if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id, relation_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 meta.session_id,
                 meta.session_name,
                 meta.created_at,
                 meta.model,
                 meta.cwd,
-                meta.parent_session_id
+                meta.parent_session_id,
+                relation_json
             ],
         ) {
             tracing::warn!(
@@ -1328,17 +1360,20 @@ impl RuntimePersistence for Store {
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let relation_json = serde_json::to_string(&meta.relation)
+            .map_err(|err| StoreError::Backend(err.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id, relation_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 meta.session_id,
                 meta.session_name,
                 meta.created_at,
                 meta.model,
                 meta.cwd,
-                meta.parent_session_id
+                meta.parent_session_id,
+                relation_json
             ],
         )
         .map_err(sqlite_error)?;
@@ -1399,6 +1434,14 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "ALTER TABLE session_head ADD COLUMN head_revision INTEGER NOT NULL DEFAULT 0;",
         )?;
+        conn.execute_batch("ALTER TABLE session_meta ADD COLUMN relation_json TEXT;")?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.execute_batch(SCHEMA)?;
+        return Ok(());
+    }
+
+    if user_version == 15 {
+        conn.execute_batch("ALTER TABLE session_meta ADD COLUMN relation_json TEXT;")?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         conn.execute_batch(SCHEMA)?;
         return Ok(());

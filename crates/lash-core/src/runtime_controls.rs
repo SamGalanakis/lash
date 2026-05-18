@@ -231,7 +231,7 @@ pub fn tasks_stop_tool_definition() -> ToolDefinition {
     )
     .with_examples(vec![
         r#"tasks_stop(task_id="monitor:app-errors")"#.into(),
-        r#"tasks_stop(task_id="subagent:/root/inspect_auth")"#.into(),
+        r#"tasks_stop(task_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }

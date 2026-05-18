@@ -76,7 +76,7 @@ fn internal_failure_completed_tool_call(message: String) -> crate::sansio::Compl
 }
 
 impl RuntimeTurnDriver {
-    pub(super) async fn run_tool_calls(
+    pub(in crate::runtime) async fn run_tool_calls(
         &mut self,
         pending_tools: Vec<crate::sansio::PendingToolCall>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,

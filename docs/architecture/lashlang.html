@@ -45,7 +45,7 @@
           </div>
           <dl class="def-list">
             <dt>REPL state</dt>
-            <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through <code>ProjectedBindings</code> are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose.</dd>
+            <dd>Variables persist across fenced blocks in the active RLM execution state. Read-only host bindings projected through RLM's projection API are already in scope (e.g., <code>history</code>) and should be used directly instead of reconstructed from prompt prose. Lazy app projections are ref-backed and resolved before each block runs.</dd>
             <dt>Completion</dt>
             <dd><code>submit</code> ends the program and turn. <code>call continue_as { task: ..., seed: { ... } }</code> is a host tool (not a keyword) that ends the current trajectory and queues a fresh-window successor session. In schema-constrained runs, a bad submitted shape produces a runtime nudge asking the model to fix the value and submit again from another fenced block.</dd>
           </dl>
@@ -53,7 +53,7 @@
 text = (call read_file { path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```</code></pre>
-          <p>A typical handoff packs the concrete state the successor needs and ends the block. Computed expressions default to global state on the successor; values rooted at a projected binding (like <code>input.prompt</code>) stay projected.</p>
+          <p>A typical handoff packs the concrete state the successor needs and ends the block. Computed expressions default to global state on the successor; values rooted at a projected binding (like <code>input.prompt</code>) stay projected, preserving their <code>ProjectionRef</code> when one exists.</p>
           <pre><code>```lashlang
 findings = []
 for path in (call glob { pattern: "src/**/*.rs" })? {

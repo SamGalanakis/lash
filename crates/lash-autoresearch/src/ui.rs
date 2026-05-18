@@ -215,13 +215,13 @@ impl TuiExtension for AutoresearchTuiExtension {
     }
 
     fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
-        let TurnEvent::PluginSurface { plugin_id, event } = event else {
+        let TurnEvent::PluginRuntime { plugin_id, event } = event else {
             return Vec::new();
         };
         if plugin_id != PLUGIN_ID {
             return Vec::new();
         }
-        let lash_core::PluginSurfaceEvent::Custom { name, payload } = event else {
+        let lash_core::PluginRuntimeEvent::Custom { name, payload } = event else {
             return Vec::new();
         };
         if name != "autoresearch.status" {

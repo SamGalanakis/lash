@@ -24,7 +24,7 @@
 <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. This keeps provider calls, tools, code execution, persistence, and streaming outside the pure state machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: per-turn, apply them via <code>TurnInput::rlm_project(bindings)</code> from <code>lash_mode_rlm::RlmTurnInputExt</code>; per-session, install <code>rlm_session_projection_extension(bindings)</code> as a session-level mode extension (see <code>crates/lash-mode-rlm/src/projected_bindings.rs</code>).</p>
+            <p>The runtime owns host effects; <code>TurnMachine</code> owns protocol state. Reply-producing nondeterministic work crosses <code>RuntimeEffectHost</code> with invocation metadata before the response returns to the machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: inline bindings store values, lazy bindings store <code>ProjectionRef</code>s resolved by RLM immediately before execution.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
@@ -32,6 +32,7 @@
 sequenceDiagram
   participant Host as CLI / app host
   participant Runtime as LashRuntime
+  participant EffectHost as RuntimeEffectHost
   participant Plugins as PluginSession
   participant Machine as TurnMachine
   participant Provider as ProviderHandle
@@ -46,17 +47,23 @@ sequenceDiagram
   loop poll effect
     Machine-->>Runtime: Effect
     alt LlmCall
-      Runtime->>Provider: complete(LlmRequest)
-      Provider-->>Runtime: stream events + LlmResponse
+      Runtime->>EffectHost: invoke(RuntimeEffect::LlmCall)
+      EffectHost->>Provider: complete(LlmRequest)
+      Provider-->>EffectHost: stream events + LlmResponse
+      EffectHost-->>Runtime: RuntimeEffectOutcome::LlmComplete
       Runtime->>Machine: Response::LlmComplete
     else ToolCalls
-      Runtime->>Tools: native/mode/provider tools
-      Tools-->>Runtime: ToolResult + ToolImage[]
+      Runtime->>EffectHost: invoke(RuntimeEffect::ToolBatch)
+      EffectHost->>Tools: native/mode/provider tools
+      Tools-->>EffectHost: ToolResult + ToolImage[]
+      EffectHost-->>Runtime: RuntimeEffectOutcome::ToolResults
       Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
       Runtime->>Machine: Response::ToolResults
     else ExecCode
-      Runtime->>Lang: execute lashlang (with ProjectedBindings)
-      Lang-->>Runtime: ExecResponse + observations
+      Runtime->>EffectHost: invoke(RuntimeEffect::ExecCode)
+      EffectHost->>Lang: execute lashlang (with resolved ProjectedBindings)
+      Lang-->>EffectHost: ExecResponse + observations
+      EffectHost-->>Runtime: RuntimeEffectOutcome::ExecResult
       Runtime->>Machine: Response::ExecResult
     else Progress / Done
       Runtime->>Store: graph delta + checkpoint + usage
@@ -166,7 +173,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Runtime satisfies effects; sans-IO applies responses.</h3>
-                <p>Provider calls, tools, checkpoints, sleeps, and code execution are host responsibilities.</p>
+                <p>Provider calls, direct completions, tools, checkpoints, sleeps, execution-surface sync, and code execution cross <code>RuntimeEffectHost</code> before responses return to <code>TurnMachine</code>.</p>
               </div>
             </li>
             <li>

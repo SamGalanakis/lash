@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use lash::{
     LashSession, TurnActivity, TurnActivitySink, TurnEvent, TurnInput,
-    plugins::PluginSurfaceEvent,
     usage::{SessionUsageReport, TokenLedgerEntry, diff_usage_reports},
 };
 use lash_core::{SessionStateEnvelope, TurnOutcome};
@@ -12,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::SkillCatalog;
 use crate::app::PreparedTurn;
 use crate::turn_runner::{make_turn_input, spawn_session_turn};
-use crate::{plugin_surface, util};
+use crate::util;
 
 pub(crate) struct AutonomousPersistenceContext {
     pub(crate) await_background_work: bool,
@@ -34,7 +32,6 @@ pub(crate) struct AutonomousRenderer {
     pub(crate) streamed_text: bool,
     pub(crate) wrote_stdout: bool,
     pub(crate) stdout_text: String,
-    pub(crate) plugin_panels: BTreeMap<String, (String, String)>,
 }
 
 impl AutonomousRenderer {
@@ -43,7 +40,6 @@ impl AutonomousRenderer {
             streamed_text: false,
             wrote_stdout: false,
             stdout_text: String::new(),
-            plugin_panels: BTreeMap::new(),
         }
     }
 
@@ -92,35 +88,7 @@ impl AutonomousRenderer {
             TurnEvent::Error { message } => {
                 eprintln!("error: {message}");
             }
-            TurnEvent::PluginSurface { plugin_id, event } => match event {
-                PluginSurfaceEvent::PanelUpsert {
-                    key,
-                    title,
-                    content,
-                } => {
-                    self.plugin_panels.insert(
-                        plugin_surface::surface_key(&plugin_id, &key),
-                        (title, content),
-                    );
-                }
-                PluginSurfaceEvent::PanelAppend { key, content } => {
-                    if !content.is_empty()
-                        && let Some((_, existing)) = self
-                            .plugin_panels
-                            .get_mut(&plugin_surface::surface_key(&plugin_id, &key))
-                    {
-                        existing.push_str(&content);
-                    }
-                }
-                PluginSurfaceEvent::PanelClear { key } => {
-                    self.plugin_panels
-                        .remove(&plugin_surface::surface_key(&plugin_id, &key));
-                }
-                PluginSurfaceEvent::ModeIndicatorUpsert { .. }
-                | PluginSurfaceEvent::ModeIndicatorClear { .. }
-                | PluginSurfaceEvent::Status { .. }
-                | PluginSurfaceEvent::Custom { .. } => {}
-            },
+            TurnEvent::PluginRuntime { .. } => {}
             // Reasoning summaries are a TUI-only affordance; in
             // autonomous mode we deliberately discard them to keep stdout
             // aligned with the model's final answer.
@@ -139,23 +107,7 @@ impl AutonomousRenderer {
     }
 
     pub(crate) fn rendered_plugin_output(&self) -> Option<String> {
-        let sections = self
-            .plugin_panels
-            .values()
-            .map(|(title, content)| {
-                let body = content.trim();
-                if body.is_empty() {
-                    title.clone()
-                } else {
-                    format!("{title}\n{body}")
-                }
-            })
-            .collect::<Vec<_>>();
-        if sections.is_empty() {
-            None
-        } else {
-            Some(sections.join("\n\n"))
-        }
+        None
     }
 
     pub(crate) fn finish_output(&mut self, final_text: &str) {

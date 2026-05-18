@@ -86,17 +86,6 @@ impl SessionReadMeta {
         }
     }
 
-    fn from_state_owned(state: SessionStateEnvelope) -> Self {
-        Self {
-            session_id: state.session_id,
-            policy: state.policy,
-            turn_index: state.turn_index,
-            token_usage: state.token_usage,
-            last_prompt_usage: state.last_prompt_usage,
-            mode_turn_options: state.mode_turn_options,
-        }
-    }
-
     fn from_persisted_ref(state: &PersistedSessionState) -> Self {
         Self {
             session_id: state.session_id.clone(),
@@ -141,36 +130,11 @@ enum SessionReadGraph {
     Owned(Arc<crate::SessionGraph>),
     Derived {
         cache: OnceLock<Arc<crate::SessionGraph>>,
-        base_graph: Option<Arc<crate::SessionGraph>>,
+        base_graph: Arc<crate::SessionGraph>,
     },
 }
 
 impl SessionReadView {
-    pub fn from_derived_message_view(
-        mut state: SessionStateEnvelope,
-        active_events: Arc<Vec<crate::SessionEventRecord>>,
-        messages: Arc<Vec<crate::Message>>,
-        tool_calls: Arc<Vec<crate::ToolCallRecord>>,
-    ) -> Self {
-        Self(Arc::new(SessionReadState {
-            meta: SessionReadMeta::from_state_owned({
-                state.session_graph = crate::SessionGraph::default();
-                state
-            }),
-            graph: SessionReadGraph::Derived {
-                cache: OnceLock::new(),
-                base_graph: None,
-            },
-            read_model: crate::session_graph::SessionReadModel {
-                active_events,
-                messages,
-                tool_calls,
-                prompt_render_cache: Arc::new(crate::BaseRenderCache::new()),
-            },
-            chronological_projection: OnceLock::new(),
-        }))
-    }
-
     fn from_graph_message_sequence_meta(
         meta: SessionReadMeta,
         base_graph: Arc<crate::SessionGraph>,
@@ -183,7 +147,7 @@ impl SessionReadView {
             meta,
             graph: SessionReadGraph::Derived {
                 cache: OnceLock::new(),
-                base_graph: Some(base_graph),
+                base_graph,
             },
             read_model: crate::session_graph::SessionReadModel {
                 active_events,
@@ -257,10 +221,7 @@ impl SessionReadView {
         match &self.0.graph {
             SessionReadGraph::Owned(graph) => graph,
             SessionReadGraph::Derived { cache, base_graph } => cache.get_or_init(|| {
-                let mut graph = base_graph
-                    .as_ref()
-                    .map(|graph| graph.as_ref().clone())
-                    .unwrap_or_default();
+                let mut graph = base_graph.as_ref().clone();
                 graph.replace_active_read_state(
                     self.0.read_model.messages.as_slice(),
                     self.0.read_model.tool_calls.as_slice(),
@@ -342,7 +303,7 @@ pub struct TurnTransformContext {
     pub state: SessionReadView,
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
     pub max_context_tokens: Option<usize>,
-    pub host: Arc<dyn super::HistoryHost>,
+    pub host: Arc<dyn super::RuntimeSessionHost>,
 }
 
 /// Context passed to a history rewriter.
@@ -351,7 +312,7 @@ pub struct RewriteContext {
     pub session_id: String,
     pub trigger: RewriteTrigger,
     pub state: SessionReadView,
-    pub host: Arc<dyn super::HistoryHost>,
+    pub host: Arc<dyn super::RuntimeSessionHost>,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

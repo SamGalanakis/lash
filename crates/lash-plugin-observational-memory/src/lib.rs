@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lash_core::plugin::{
-    PluginError, PluginFactory, PluginRegistrar, PluginRuntimeEvent, PluginSessionContext,
+    PluginError, PluginFactory, PluginLifecycleEvent, PluginRegistrar, PluginSessionContext,
     SessionPlugin,
 };
 use lash_core::{
@@ -24,7 +24,7 @@ pub use constants::{
 };
 
 use context_transform::ObservationalMemoryTransform;
-use host::OmHistoryHost;
+use host::OmRuntimeHost;
 use transitions::{
     maybe_buffer_observations, maybe_buffer_reflection, should_run_async_maintenance,
 };
@@ -98,7 +98,7 @@ impl SessionPlugin for ObservationalMemoryPlugin {
         reg.session().on_event(Arc::new(move |event| {
             let config = config.clone();
             Box::pin(async move {
-                if let PluginRuntimeEvent::TurnPersisted(ctx) = event {
+                if let PluginLifecycleEvent::TurnPersisted(ctx) = event {
                     let graph = ctx.state.to_owned_state().session_graph;
                     if !should_run_async_maintenance(&config, &graph) {
                         return Ok(());
@@ -130,7 +130,7 @@ async fn run_async_maintenance(
     graph: lash_core::SessionGraph,
     ctx: SessionStateChangedContext,
 ) -> Result<(), PluginError> {
-    let om_host = OmHistoryHost::new(&ctx.session_id, &ctx.host);
+    let om_host = OmRuntimeHost::new(&ctx.session_id, &ctx.host);
     maybe_buffer_observations(&config, &om_host, ctx.state.policy(), &graph).await?;
     maybe_buffer_reflection(&config, &om_host, ctx.state.policy(), &graph).await?;
     Ok(())

@@ -8,9 +8,7 @@
 
 use lash_sansio::PromptUsage;
 
-use crate::session_model::{
-    Message, SessionEventRecord, SessionPolicy, TokenUsage, plugin_message_to_message,
-};
+use crate::session_model::{Message, SessionPolicy, TokenUsage, plugin_message_to_message};
 use crate::{PersistedTurnState, ToolCallRecord};
 
 use super::usage::TokenLedgerEntry;
@@ -404,16 +402,10 @@ pub(super) fn append_session_nodes_to_state(
         match node {
             crate::SessionAppendNode::Message { message } => {
                 let message = plugin_message_to_message(message);
-                node_ids.push(
-                    state
-                        .session_graph
-                        .append_event(SessionEventRecord::Conversation(
-                            crate::session_model::ConversationRecord::from_message(message),
-                        )),
-                );
+                node_ids.push(state.session_graph.append_message(message));
             }
-            crate::SessionAppendNode::Event { event } => {
-                node_ids.push(state.session_graph.append_event(event.clone()));
+            crate::SessionAppendNode::ModeEvent { event } => {
+                node_ids.push(state.session_graph.append_mode_event(event.clone()));
             }
             crate::SessionAppendNode::Plugin { plugin_type, body } => {
                 node_ids.push(

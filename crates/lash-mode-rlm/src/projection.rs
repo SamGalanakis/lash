@@ -22,9 +22,22 @@ pub fn project_rlm_globals_from_events<'a>(
     let mut globals = serde_json::Map::new();
     for event in events {
         if let lash_core::SessionEventRecord::Mode(event) = event
-            && let Some(RlmModeEvent::RlmGlobalsPatch(patch)) = decode_rlm_mode_event(event)
+            && let Some(event) = decode_rlm_mode_event(event)
         {
-            lash_rlm_types::apply_globals_patch(&mut globals, &patch);
+            match event {
+                RlmModeEvent::RlmGlobalsPatch(patch) => {
+                    lash_rlm_types::apply_globals_patch(&mut globals, &patch);
+                }
+                RlmModeEvent::RlmSeed(seed) => {
+                    lash_rlm_types::apply_globals_patch(
+                        &mut globals,
+                        &lash_rlm_types::RlmGlobalsPatchPluginBody {
+                            set_default: seed.globals,
+                        },
+                    );
+                }
+                RlmModeEvent::RlmTrajectoryEntry(_) | RlmModeEvent::RlmDiagnostic(_) => {}
+            }
         }
     }
     globals

@@ -50,11 +50,11 @@ pub(super) struct ManagedSessionTurn {
 }
 
 #[derive(Clone)]
-struct CurrentSessionCapability {
-    session_id: String,
+pub(in crate::runtime) struct CurrentSessionCapability {
+    pub(in crate::runtime) session_id: String,
     snapshot: CurrentSnapshot,
     policy: SessionPolicy,
-    host: RuntimeHost,
+    pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
     async_tool_handles: Option<crate::session::AsyncToolHandleMap>,
@@ -72,7 +72,7 @@ struct ManagedSessionCapability {
 }
 
 #[derive(Clone)]
-struct UsageCapability {
+pub(in crate::runtime) struct UsageCapability {
     /// Session-scoped token cost ledger shared with the parent
     /// `LashRuntime`. All managers created from the same runtime
     /// write to the same Arc. Drained at turn-commit time.

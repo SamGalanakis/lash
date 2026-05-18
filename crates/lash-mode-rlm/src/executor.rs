@@ -1,25 +1,25 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+mod host_bridge;
+mod projections;
+
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use lash_core::plugin::project_observation_text;
 use lash_core::{
-    AttachmentRef, ExecRequest, ExecResponse, ModeExecutionContext, ModeToolBatchItem,
-    ModeToolReply, RlmPrintImage, SessionError, TextProjectionMetadata, ToolOutputBudgetConfig,
+    ExecRequest, ExecResponse, ModeExecutionContext, SessionError, ToolOutputBudgetConfig,
 };
-use lash_rlm_types::PROJECTED_JSON_TAG;
-use lashlang::{
-    CompiledProgramCache, ExecutionOutcome, ExecutionScratch, ImageValue, ProjectedBindings,
-    ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
-    ProjectedValue, Record as FlowRecord, State as FlowState, ToolHost, ToolHostCall,
-    ToolHostError, Value as FlowValue,
-};
-use serde_json::{Value, json};
+use lashlang::{CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State as FlowState};
+use serde_json::json;
 
-use crate::projected_bindings::{
-    RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+use self::host_bridge::HostBridge;
+use self::projections::{
+    projected_bindings, prune_projected_binding_names, prune_protected_bindings,
+    prune_reserved_projected_bindings, rehydrate_projected_globals,
 };
-use crate::projection::{RlmHistoryProjection, rlm_history_projection};
+use crate::projected_bindings::{
+    ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+};
+use crate::projection_codec::{flow_to_json_value, json_to_flow_value};
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
@@ -123,6 +123,7 @@ pub async fn execute_code(
     ctx: ModeExecutionContext,
     request: ExecRequest,
     session_projected_bindings: RlmProjectedBindings,
+    projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> Result<(RlmExecutionState, ExecResponse), SessionError> {
     let start = std::time::Instant::now();
     let clean_code = clean_model_code(&request.code);
@@ -132,6 +133,7 @@ pub async fn execute_code(
         &clean_code,
         start,
         session_projected_bindings,
+        projection_resolver,
     ))
     .await;
     Ok((state, response))
@@ -157,6 +159,7 @@ async fn execute_code_inner(
     code: &str,
     start: std::time::Instant,
     session_projected_bindings: RlmProjectedBindings,
+    projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
     let compiled = match state.program_cache.get_or_compile(code) {
@@ -176,36 +179,47 @@ async fn execute_code_inner(
         }
     };
 
-    let projected = match projected_bindings(&ctx, session_projected_bindings) {
-        Ok(projected) => projected,
-        Err(err) => {
-            return ExecResponse {
-                output: String::new(),
-                observations: Vec::new(),
-                observation_truncation: Vec::new(),
-                tool_calls: Vec::new(),
-                images: Vec::new(),
-                printed_images: Vec::new(),
-                error: Some(err),
-                duration_ms: start.elapsed().as_millis() as u64,
-                terminal_finish: None,
-            };
-        }
-    };
+    if let Err(err) =
+        rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
+    {
+        return ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: Some(err),
+            duration_ms: start.elapsed().as_millis() as u64,
+            terminal_finish: None,
+        };
+    }
+
+    let projected =
+        match projected_bindings(&ctx, session_projected_bindings, projection_resolver).await {
+            Ok(projected) => projected,
+            Err(err) => {
+                return ExecResponse {
+                    output: String::new(),
+                    observations: Vec::new(),
+                    observation_truncation: Vec::new(),
+                    tool_calls: Vec::new(),
+                    images: Vec::new(),
+                    printed_images: Vec::new(),
+                    error: Some(err),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    terminal_finish: None,
+                };
+            }
+        };
     let projected_names = projected.names().collect::<Vec<_>>();
     prune_projected_binding_names(&mut state.rlm, projected_names.iter().map(String::as_str));
     let tool_result_projectors = tool_result_projectors(&ctx);
-    let host = HostBridge {
+    let host = HostBridge::new(
         ctx,
-        observe_projection: state.observe_projection.clone(),
+        state.observe_projection.clone(),
         tool_result_projectors,
-        observations: Mutex::new(Vec::new()),
-        observation_truncation: Mutex::new(Vec::new()),
-        printed_images: Mutex::new(Vec::new()),
-        tool_calls: Mutex::new(Vec::new()),
-        tool_images: Mutex::new(Vec::new()),
-        next_tool_index: Mutex::new(0),
-    };
+    );
 
     let result = Box::pin(
         lashlang::execute_compiled_traced_with_scratch_and_projected_bindings(
@@ -253,459 +267,11 @@ async fn execute_code_inner(
     }
 }
 
-fn projected_bindings(
-    ctx: &ModeExecutionContext,
-    session_bindings: RlmProjectedBindings,
-) -> Result<ProjectedBindings, String> {
-    let mut bindings = ProjectedBindings::new();
-    bindings
-        .try_insert(
-            "history",
-            ProjectedValue::custom(
-                "history",
-                Arc::new(HistoryProjectedValue {
-                    projection: Arc::new(rlm_history_projection(
-                        ctx.chronological_projection().as_ref(),
-                    )),
-                }),
-            ),
-        )
-        .map_err(|err| format!("`{}` is reserved as an RLM built-in binding", err.name()))?;
-    insert_projected_bindings(&mut bindings, session_bindings)?;
-    if let Some(extension) = ctx
-        .turn_context()
-        .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
-    {
-        insert_projected_bindings(&mut bindings, extension.bindings.clone())?;
-    }
-    Ok(bindings)
-}
-
-fn insert_projected_bindings(
-    target: &mut ProjectedBindings,
-    bindings: RlmProjectedBindings,
-) -> Result<(), String> {
-    let host_bindings = bindings.into_projected_bindings();
-    for name in host_bindings.names().collect::<Vec<_>>() {
-        let value = host_bindings
-            .get(&name)
-            .expect("name came from projected bindings");
-        target.try_insert(name, value).map_err(|err| {
-            format!(
-                "`{}` is already bound as an RLM projected binding",
-                err.name()
-            )
-        })?;
-    }
-    Ok(())
-}
-
 fn tool_result_projectors(ctx: &ModeExecutionContext) -> Vec<crate::RlmToolResultProjector> {
     ctx.turn_context()
         .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
         .map(|extension| extension.tool_result_projectors.clone())
         .unwrap_or_default()
-}
-
-struct HistoryProjectedValue {
-    projection: Arc<RlmHistoryProjection>,
-}
-
-impl ProjectedHostValue for HistoryProjectedValue {
-    fn type_name(&self) -> &str {
-        "list"
-    }
-
-    fn read_one(
-        &self,
-        request: ProjectedReadRequest,
-    ) -> ProjectedFuture<'_, ProjectedReadResponse> {
-        Box::pin(async move {
-            match request {
-                ProjectedReadRequest::Len => ProjectedReadResponse::Len(self.projection.len()),
-                ProjectedReadRequest::Index(index) => {
-                    let Ok(Some(index)) = projected_index(&index, self.projection.len()) else {
-                        return ProjectedReadResponse::Missing;
-                    };
-                    self.projection
-                        .item(index)
-                        .and_then(|item| serde_json::to_value(item).ok())
-                        .map(json_to_flow_value)
-                        .map(ProjectedReadResponse::Value)
-                        .unwrap_or(ProjectedReadResponse::Missing)
-                }
-                ProjectedReadRequest::Render => ProjectedReadResponse::Text(
-                    serde_json::to_string(self.projection.history())
-                        .unwrap_or_else(|_| "[]".to_string()),
-                ),
-                ProjectedReadRequest::Materialize => {
-                    ProjectedReadResponse::Value(json_to_flow_value(self.projection.value()))
-                }
-                _ => ProjectedReadResponse::Missing,
-            }
-        })
-    }
-}
-
-fn projected_index(index: &FlowValue, len: usize) -> Result<Option<usize>, ()> {
-    let FlowValue::Number(index) = index else {
-        return Err(());
-    };
-    if !index.is_finite() || index.fract() != 0.0 {
-        return Err(());
-    }
-    let len = len as isize;
-    let index = *index as isize;
-    let normalized = if index < 0 { len + index } else { index };
-    if normalized < 0 || normalized >= len {
-        return Ok(None);
-    }
-    Ok(Some(normalized as usize))
-}
-
-struct HostBridge {
-    ctx: ModeExecutionContext,
-    observe_projection: ToolOutputBudgetConfig,
-    tool_result_projectors: Vec<crate::RlmToolResultProjector>,
-    observations: Mutex<Vec<String>>,
-    observation_truncation: Mutex<Vec<TextProjectionMetadata>>,
-    printed_images: Mutex<Vec<AttachmentRef>>,
-    tool_calls: Mutex<Vec<lash_core::ToolCallRecord>>,
-    tool_images: Mutex<Vec<RlmPrintImage>>,
-    next_tool_index: Mutex<usize>,
-}
-
-impl ToolHost for HostBridge {
-    async fn call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ToolHostError> {
-        let index = self.next_index();
-        let reply = self
-            .ctx
-            .call_tool(
-                uuid::Uuid::new_v4().to_string(),
-                name.clone(),
-                self.tool_payload(&args).await,
-                index,
-            )
-            .await;
-        self.consume_reply(&name, reply)
-    }
-
-    async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<FlowValue, ToolHostError>> {
-        if calls.is_empty() {
-            return Vec::new();
-        }
-        let mut batch = Vec::with_capacity(calls.len());
-        for call in &calls {
-            batch.push(ModeToolBatchItem {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: call.name.clone(),
-                args: self.tool_payload(&call.args).await,
-            });
-        }
-        let replies = self.ctx.call_tool_batch(batch).await;
-        if replies.len() != calls.len() {
-            return calls
-                .into_iter()
-                .map(|_| {
-                    Err(ToolHostError::new(
-                        "tool batch returned the wrong number of results",
-                    ))
-                })
-                .collect();
-        }
-        replies
-            .into_iter()
-            .zip(calls)
-            .map(|(reply, call)| self.consume_reply(&call.name, reply))
-            .collect()
-    }
-
-    async fn start_call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ToolHostError> {
-        let reply = self
-            .ctx
-            .start_tool_call(
-                uuid::Uuid::new_v4().to_string(),
-                name.clone(),
-                self.tool_payload(&args).await,
-            )
-            .await;
-        self.consume_reply(&name, reply)
-    }
-
-    async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
-        let reply = self
-            .ctx
-            .await_tool_handle(
-                uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle).await,
-            )
-            .await;
-        self.consume_reply("await_handle", reply)
-    }
-
-    async fn cancel_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
-        let reply = self
-            .ctx
-            .cancel_tool_handle(
-                uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle).await,
-            )
-            .await;
-        self.consume_reply("cancel_handle", reply)
-    }
-
-    async fn print(&self, value: FlowValue) -> Result<(), ToolHostError> {
-        let attachment_store = self.ctx.attachment_store();
-        let images = collect_printed_images(&value, attachment_store.as_ref()).await?;
-        let raw_text = format_output_value(&value).await;
-        let (_projected_text, metadata) =
-            project_observation_text(&raw_text, &self.observe_projection);
-        self.observations
-            .lock()
-            .map_err(|_| ToolHostError::new("observation buffer poisoned"))?
-            .push(raw_text);
-        self.observation_truncation
-            .lock()
-            .map_err(|_| ToolHostError::new("observation metadata buffer poisoned"))?
-            .push(metadata);
-        if !images.is_empty() {
-            self.printed_images
-                .lock()
-                .map_err(|_| ToolHostError::new("printed image buffer poisoned"))?
-                .extend(images);
-        }
-        Ok(())
-    }
-
-    async fn yield_now(&self) {
-        tokio::task::yield_now().await;
-    }
-}
-
-impl HostBridge {
-    fn next_index(&self) -> usize {
-        let mut guard = self
-            .next_tool_index
-            .lock()
-            .expect("tool index lock poisoned");
-        let next = *guard;
-        *guard += 1;
-        next
-    }
-
-    async fn tool_payload(&self, args: &FlowRecord) -> Value {
-        let mut payload = flow_record_to_json_value(args).await;
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__session_id__".to_string())
-                .or_insert_with(|| Value::String(self.ctx.session_id().to_string()));
-        }
-        payload
-    }
-
-    fn consume_reply(
-        &self,
-        tool_name: &str,
-        reply: ModeToolReply,
-    ) -> Result<FlowValue, ToolHostError> {
-        let projected_tool_name = reply
-            .record
-            .as_ref()
-            .map(|record| record.tool.as_str())
-            .unwrap_or(tool_name)
-            .to_string();
-        if let Some(record) = reply.record {
-            self.tool_calls
-                .lock()
-                .map_err(|_| ToolHostError::new("tool call buffer poisoned"))?
-                .push(record);
-        }
-        if reply.output.is_success() {
-            let value = reply.output.value_for_projection();
-            for projector in &self.tool_result_projectors {
-                if let Some(value) = projector(&projected_tool_name, &value) {
-                    return Ok(value);
-                }
-            }
-            Ok(lift_tool_result_to_flow_value(
-                value,
-                Vec::new(),
-                self.ctx.attachment_store().as_ref(),
-            ))
-        } else {
-            Err(ToolHostError::new(tool_error_message(
-                reply.output.value_for_projection(),
-            )))
-        }
-    }
-
-    fn into_collected(self) -> CollectedExecutionOutput {
-        CollectedExecutionOutput {
-            observations: self.observations.into_inner().unwrap_or_default(),
-            observation_truncation: self.observation_truncation.into_inner().unwrap_or_default(),
-            printed_images: self.printed_images.into_inner().unwrap_or_default(),
-            tool_calls: self.tool_calls.into_inner().unwrap_or_default(),
-            tool_images: self.tool_images.into_inner().unwrap_or_default(),
-        }
-    }
-}
-
-struct CollectedExecutionOutput {
-    observations: Vec<String>,
-    observation_truncation: Vec<TextProjectionMetadata>,
-    printed_images: Vec<AttachmentRef>,
-    tool_calls: Vec<lash_core::ToolCallRecord>,
-    tool_images: Vec<RlmPrintImage>,
-}
-
-async fn collect_printed_images(
-    value: &FlowValue,
-    attachment_store: &dyn lash_core::AttachmentStore,
-) -> Result<Vec<AttachmentRef>, ToolHostError> {
-    let mut seen = HashSet::new();
-    let mut images = Vec::new();
-    collect_printed_images_inner(value, attachment_store, &mut seen, &mut images).await?;
-    Ok(images)
-}
-
-fn collect_printed_images_inner<'a>(
-    value: &'a FlowValue,
-    attachment_store: &'a dyn lash_core::AttachmentStore,
-    seen: &'a mut HashSet<String>,
-    images: &'a mut Vec<AttachmentRef>,
-) -> ProjectedFuture<'a, Result<(), ToolHostError>> {
-    Box::pin(async move {
-        match value {
-            FlowValue::Image(image) => {
-                if !seen.insert(image.id.clone()) {
-                    return Ok(());
-                }
-                let reference = attachment_store
-                    .get(&lash_core::AttachmentId::new(image.id.clone()))
-                    .ok()
-                    .map(|stored| stored.meta.as_ref())
-                    .ok_or_else(|| {
-                        ToolHostError::new(format!(
-                            "image bytes for `{}` are unavailable or were pruned",
-                            image.id
-                        ))
-                    })?;
-                images.push(reference);
-            }
-            FlowValue::List(values) => {
-                for value in values.iter() {
-                    collect_printed_images_inner(value, attachment_store, seen, images).await?;
-                }
-            }
-            FlowValue::Record(record) => {
-                for (_, value) in record.iter() {
-                    collect_printed_images_inner(value, attachment_store, seen, images).await?;
-                }
-            }
-            FlowValue::Projected(value) => {
-                collect_printed_images_inner(
-                    &value.materialize_async().await,
-                    attachment_store,
-                    seen,
-                    images,
-                )
-                .await?;
-            }
-            FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
-        }
-        Ok(())
-    })
-}
-
-fn lift_tool_result_to_flow_value(
-    result: Value,
-    tool_images: Vec<RlmPrintImage>,
-    attachment_store: &dyn lash_core::AttachmentStore,
-) -> FlowValue {
-    if tool_images.is_empty() {
-        return json_to_flow_value(result);
-    }
-
-    let image_values = tool_images
-        .into_iter()
-        .filter_map(|image| register_tool_image(image, attachment_store).ok())
-        .map(FlowValue::Image)
-        .collect::<Vec<_>>();
-
-    if image_values.is_empty() {
-        return json_to_flow_value(result);
-    }
-
-    if is_image_only_tool_payload(&result) {
-        return if image_values.len() == 1 {
-            image_values.into_iter().next().unwrap_or(FlowValue::Null)
-        } else {
-            FlowValue::List(image_values.into())
-        };
-    }
-
-    let mut value = json_to_flow_value(result);
-    let images_value = FlowValue::List(image_values.into());
-    match &mut value {
-        FlowValue::Record(record) => {
-            Arc::make_mut(record).insert("images".to_string(), images_value);
-            value
-        }
-        _ => {
-            let mut record = FlowRecord::new();
-            record.insert("payload".to_string(), value);
-            record.insert("images".to_string(), images_value);
-            FlowValue::Record(Arc::new(record))
-        }
-    }
-}
-
-fn register_tool_image(
-    mut image: RlmPrintImage,
-    attachment_store: &dyn lash_core::AttachmentStore,
-) -> Result<ImageValue, lash_core::AttachmentStoreError> {
-    let reference = if let Some(reference) = image.reference.take() {
-        reference
-    } else if let Some(media_type) = lash_core::MediaType::from_mime(&image.mime) {
-        let meta = lash_core::AttachmentCreateMeta::new(
-            media_type,
-            image.width,
-            image.height,
-            Some(image.label.clone()),
-        );
-        attachment_store.put(std::mem::take(&mut image.data), meta)?
-    } else {
-        let meta = lash_core::AttachmentCreateMeta::new(
-            lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-            image.width,
-            image.height,
-            Some(image.label.clone()),
-        );
-        attachment_store.put(std::mem::take(&mut image.data), meta)?
-    };
-    Ok(ImageValue::new(
-        reference.id.to_string(),
-        reference.label.clone().unwrap_or_default(),
-        reference.byte_len,
-        reference.width,
-        reference.height,
-    ))
-}
-
-fn is_image_only_tool_payload(result: &Value) -> bool {
-    match result {
-        Value::String(text) => text.trim_start().starts_with("[Image:"),
-        Value::Null => true,
-        Value::Array(values) => values.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        _ => false,
-    }
-}
-
-fn tool_error_message(value: Value) -> String {
-    match value {
-        Value::String(text) => text,
-        other => serde_json::to_string(&other).unwrap_or_else(|_| "tool call failed".to_string()),
-    }
 }
 
 fn snapshot_runtime(rlm: &FlowState) -> Result<String, String> {
@@ -745,143 +311,6 @@ fn apply_global_defaults(
 
 fn is_reserved_global_name(key: &str) -> bool {
     key == "history"
-}
-
-fn prune_reserved_projected_bindings(rlm: &mut FlowState) {
-    prune_protected_bindings(rlm, &BTreeSet::new());
-}
-
-fn prune_protected_bindings(rlm: &mut FlowState, protected_names: &BTreeSet<String>) {
-    prune_projected_binding_names(
-        rlm,
-        std::iter::once("history").chain(protected_names.iter().map(String::as_str)),
-    );
-}
-
-fn prune_projected_binding_names<'a>(
-    rlm: &mut FlowState,
-    names: impl IntoIterator<Item = &'a str>,
-) {
-    let mut snapshot = rlm.snapshot();
-    for key in names {
-        snapshot.globals.remove(key);
-    }
-    *rlm = FlowState::from_snapshot(snapshot);
-}
-
-fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
-    Box::pin(async move {
-        match value {
-            FlowValue::Null => Value::Null,
-            FlowValue::Bool(value) => Value::Bool(*value),
-            FlowValue::Number(value) => json_number(*value),
-            FlowValue::String(value) => Value::String(value.to_string()),
-            FlowValue::Image(image) => serde_json::to_value(image)
-                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            FlowValue::List(values) => {
-                let mut out = Vec::with_capacity(values.len());
-                for value in values.iter() {
-                    out.push(flow_to_json_value(value).await);
-                }
-                Value::Array(out)
-            }
-            FlowValue::Record(record) => flow_record_to_json_value(record).await,
-            FlowValue::Projected(value) => {
-                // Canonical JSON encoding for projected values: a single-key
-                // object `{"__projected__": <inner>}` rather than the bare
-                // inner value. RLM's before-tool hook materializes wrappers
-                // for ordinary tool arguments and preserves root `seed`
-                // wrappers for projection-aware control tools.
-                let inner = flow_to_json_value(&value.materialize_async().await).await;
-                let mut obj = serde_json::Map::with_capacity(1);
-                obj.insert(PROJECTED_JSON_TAG.to_string(), inner);
-                Value::Object(obj)
-            }
-        }
-    })
-}
-
-async fn flow_record_to_json_value(record: &FlowRecord) -> Value {
-    let mut object = serde_json::Map::with_capacity(record.len());
-    for (key, value) in record.iter() {
-        object.insert(key.to_string(), flow_to_json_value(value).await);
-    }
-    Value::Object(object)
-}
-
-fn json_number(value: f64) -> Value {
-    if value.is_finite() && value.fract() == 0.0 {
-        let as_i64 = value as i64 as f64;
-        if as_i64 == value {
-            return Value::Number(serde_json::Number::from(value as i64));
-        }
-        let as_u64 = value as u64 as f64;
-        if as_u64 == value {
-            return Value::Number(serde_json::Number::from(value as u64));
-        }
-    }
-    serde_json::Number::from_f64(value)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
-}
-
-fn json_to_flow_value(value: Value) -> FlowValue {
-    match value {
-        Value::Null => FlowValue::Null,
-        Value::Bool(value) => FlowValue::Bool(value),
-        Value::Number(value) => FlowValue::Number(value.as_f64().unwrap_or_default()),
-        Value::String(value) => FlowValue::String(value.into()),
-        Value::Array(values) => {
-            FlowValue::List(values.into_iter().map(json_to_flow_value).collect())
-        }
-        Value::Object(map) => json_map_to_image(&map)
-            .map(FlowValue::Image)
-            .unwrap_or_else(|| {
-                FlowValue::Record(Arc::new(
-                    map.into_iter()
-                        .map(|(key, value)| (key, json_to_flow_value(value)))
-                        .collect::<FlowRecord>(),
-                ))
-            }),
-    }
-}
-
-fn json_map_to_image(map: &serde_json::Map<String, Value>) -> Option<ImageValue> {
-    if map.get("type")?.as_str()? != "image" {
-        return None;
-    }
-    Some(ImageValue::new(
-        map.get("id")?.as_str()?.to_string(),
-        map.get("label")?.as_str()?.to_string(),
-        map.get("size")?.as_u64()?,
-        optional_json_u32(map.get("width")?)?,
-        optional_json_u32(map.get("height")?)?,
-    ))
-}
-
-fn optional_json_u32(value: &Value) -> Option<Option<u32>> {
-    match value {
-        Value::Null => Some(None),
-        Value::Number(number) => number
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .map(Some),
-        _ => None,
-    }
-}
-
-async fn format_output_value(value: &FlowValue) -> String {
-    match value {
-        FlowValue::Null => "null".to_string(),
-        FlowValue::String(text) => text.to_string(),
-        FlowValue::Bool(value) => value.to_string(),
-        FlowValue::Number(value) => value.to_string(),
-        FlowValue::Image(_)
-        | FlowValue::List(_)
-        | FlowValue::Record(_)
-        | FlowValue::Projected(_) => serde_json::to_string(&flow_to_json_value(value).await)
-            .unwrap_or_else(|_| value.to_string()),
-    }
 }
 
 fn collect_files(root: &Path) -> std::io::Result<HashMap<String, String>> {
@@ -935,7 +364,19 @@ fn clear_dir(root: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use super::projections::projected_index;
     use super::*;
+    use crate::projected_bindings::ProjectionRef;
+    use crate::projection_codec::{
+        flow_record_to_json_value, flow_record_to_tool_args, flow_to_json_value,
+    };
+    use lash_rlm_types::PROJECTED_JSON_TAG;
+    use lashlang::{
+        ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+        ProjectedReadResponse, ProjectedValue, Record as FlowRecord, ToolHost, ToolHostError,
+        Value as FlowValue,
+    };
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -1271,6 +712,71 @@ mod tests {
     }
 
     #[test]
+    fn flow_to_json_value_preserves_projection_ref_without_materializing() {
+        block_on(async {
+            let host = Arc::new(SnapshotProjectedToolText::default());
+            let reference = ProjectionRef::new("memory", serde_json::json!("doc"));
+            let projected = ProjectedValue::custom_with_projection_ref(
+                "doc",
+                host.clone(),
+                serde_json::json!(reference),
+            );
+            let value = flow_to_json_value(&FlowValue::Projected(projected)).await;
+            assert_eq!(host.render_count.load(Ordering::SeqCst), 0);
+            assert_eq!(host.materialize_count.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    PROJECTED_JSON_TAG: {
+                        lash_rlm_types::PROJECTION_REF_JSON_TAG: {
+                            "kind": "memory",
+                            "key": "doc",
+                        }
+                    }
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn executor_snapshot_round_trips_projection_ref_metadata() {
+        let reference = ProjectionRef::new("memory", serde_json::json!("doc"));
+        let mut state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let mut snapshot = state.rlm.snapshot();
+        snapshot.globals.insert(
+            "doc".to_string(),
+            FlowValue::Projected(ProjectedValue::custom_with_projection_ref(
+                "doc",
+                Arc::new(SnapshotProjectedToolText::default()),
+                serde_json::json!(reference),
+            )),
+        );
+        state.rlm = FlowState::from_snapshot(snapshot);
+
+        let bytes = state
+            .snapshot_execution_state()
+            .expect("executor snapshot")
+            .expect("snapshot bytes");
+        let outer: Value = serde_json::from_slice(&bytes).expect("snapshot json");
+        let vars = outer
+            .get("vars")
+            .and_then(Value::as_str)
+            .expect("vars string");
+        assert!(vars.contains("projection_ref"));
+        assert!(vars.contains("\"kind\":\"memory\""));
+
+        let restored = restore_runtime(vars).expect("restore runtime");
+        let restored_snapshot = restored.snapshot();
+        let Some(FlowValue::Projected(projected)) = restored_snapshot.globals.get("doc") else {
+            panic!("expected restored projected value");
+        };
+        assert_eq!(
+            projected.projection_ref(),
+            Some(&serde_json::json!({"kind": "memory", "key": "doc"}))
+        );
+    }
+
+    #[test]
     fn flow_record_to_json_value_marks_only_projected_entries() {
         block_on(async {
             let projected = ProjectedValue::scalar("input", FlowValue::String("p".into()));
@@ -1288,6 +794,84 @@ mod tests {
             assert!(proj.contains_key(PROJECTED_JSON_TAG));
             // glob entry stays a bare string
             assert_eq!(obj.get("glob").and_then(|v| v.as_str()).expect("glob"), "g");
+        });
+    }
+
+    #[test]
+    fn flow_record_to_tool_args_materializes_ordinary_tools() {
+        block_on(async {
+            let projected = ProjectedValue::scalar("input", FlowValue::String("p".into()));
+            let mut record = FlowRecord::default();
+            record.insert("query".to_string(), FlowValue::Projected(projected));
+
+            let value = flow_record_to_tool_args(
+                &record,
+                &lash_core::ToolArgumentProjectionPolicy::MaterializeProjectedValues,
+            )
+            .await;
+
+            assert_eq!(value, serde_json::json!({ "query": "p" }));
+        });
+    }
+
+    #[test]
+    fn flow_record_to_tool_args_preserves_only_seed_projected_roots() {
+        block_on(async {
+            let reference = ProjectionRef::new("memory", serde_json::json!("doc"));
+            let projected_root = ProjectedValue::custom_with_projection_ref(
+                "doc",
+                Arc::new(SnapshotProjectedToolText::default()),
+                serde_json::json!(reference),
+            );
+            let mut computed = FlowRecord::default();
+            computed.insert(
+                "summary".to_string(),
+                FlowValue::Projected(ProjectedValue::scalar(
+                    "summary",
+                    FlowValue::String("materialized summary".into()),
+                )),
+            );
+            let mut seed = FlowRecord::default();
+            seed.insert("problem".to_string(), FlowValue::Projected(projected_root));
+            seed.insert(
+                "computed".to_string(),
+                FlowValue::Record(Arc::new(computed)),
+            );
+            let mut record = FlowRecord::default();
+            record.insert(
+                "task".to_string(),
+                FlowValue::Projected(ProjectedValue::scalar(
+                    "task",
+                    FlowValue::String("inspect".into()),
+                )),
+            );
+            record.insert("seed".to_string(), FlowValue::Record(Arc::new(seed)));
+
+            let value = flow_record_to_tool_args(
+                &record,
+                &lash_core::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
+            )
+            .await;
+
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "task": "inspect",
+                    "seed": {
+                        "problem": {
+                            "__projected__": {
+                                "__projection_ref__": {
+                                    "kind": "memory",
+                                    "key": "doc"
+                                }
+                            }
+                        },
+                        "computed": {
+                            "summary": "materialized summary"
+                        }
+                    }
+                })
+            );
         });
     }
 

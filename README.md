@@ -16,7 +16,7 @@ Every turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta
 
 ### Sans-IO state machine for workflow integration
 
-`lash-sansio::TurnMachine` is a pure effect / response state machine with deterministic `EffectId`. Snapshot it, ship the bytes to another worker, resume against the same logical effect. Built for Temporal, Restate, and other durable-workflow runtimes.
+`lash-core::RuntimeEffectHost` is the durable boundary around nondeterministic work. LLM calls, tool batches, RLM exec, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata and idempotency keys. The default host runs in process; workflow adapters can persist or schedule the same effect contract.
 
 ### Two execution modes, one commit unit
 
@@ -24,7 +24,7 @@ Every turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. `parallel { }` blocks for concurrent tool batches, projected read-only bindings from the host, no syscalls, fully checkpointable.
+A small typed DSL the model can emit and the runtime can execute deterministically. `parallel { }` blocks for concurrent tool batches, projected read-only bindings from stable host projection refs, no syscalls, fully checkpointable.
 
 ### Plugin architecture
 

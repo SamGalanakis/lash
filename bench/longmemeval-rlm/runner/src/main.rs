@@ -14,20 +14,15 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, ValueEnum};
 use dataset::{LongMemEvalQuestion, load_questions};
 use lash::{
-    SessionSpec, TurnInput,
+    LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        AssembledTurn, EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
     },
-    plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
+    persistence::RuntimePersistence,
+    plugins::{PluginSpec, StaticPluginFactory},
     prompt::{PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection},
     provider::ProviderHandle,
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, UsageTotals, diff_usage_reports},
-};
-use lash_core::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, LocalBackgroundTaskHost,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
@@ -35,7 +30,7 @@ use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_sqlite_store::Store;
-use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory};
+use lash_subagents::SubagentsPluginFactory;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -575,7 +570,7 @@ async fn run_question(
     output_dir: &Path,
     provider: &ProviderHandle,
     args: &Args,
-    execution_mode: ExecutionMode,
+    execution_mode: ModeId,
     standard_context_approach: Option<&StandardContextApproach>,
     question: LongMemEvalQuestion,
 ) -> anyhow::Result<QuestionResult> {
@@ -594,49 +589,32 @@ async fn run_question(
     let store = Arc::new(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
-    let policy = SessionPolicy {
-        model: args.model.clone(),
-        provider: provider.clone(),
-        max_context_tokens: Some(args.max_context_tokens),
-        execution_mode: execution_mode.clone(),
-        standard_context_approach: standard_context_approach.cloned(),
-        model_variant: args.variant.clone(),
-        ..SessionPolicy::default()
-    };
-    let root_plugins = build_plugin_session(
-        execution_mode,
-        standard_context_approach.cloned(),
-        args.session_tools,
-        benchmark_context,
-        &policy,
-    )?;
-    let services = PersistentRuntimeServices::new_with_bridges(
-        root_plugins,
-        TurnInjectionBridge::new(),
-        TurnInputInjectionBridge::new(),
-        store.clone() as Arc<dyn RuntimePersistence>,
-    );
-    let host = BackgroundRuntimeHost::new(
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
-                .with_trace_jsonl_path(Some(trace_path.clone()))
-                .with_prompt_template(prompt_template(args.prompt_profile, args.session_tools)),
-        ),
-        Arc::new(LocalBackgroundTaskHost::default()),
-    );
-    let mut runtime = LashRuntime::from_persistent_background_state(
-        policy.clone(),
-        host,
-        services,
-        PersistedSessionState {
-            session_id: "root".to_string(),
-            policy,
-            ..PersistedSessionState::default()
-        },
-    )
-    .await?;
+    let core = LashCore::builder()
+        .install_mode(mode_preset(
+            &execution_mode,
+            standard_context_approach.cloned(),
+        )?)
+        .default_mode(execution_mode.clone())
+        .provider(provider.clone())
+        .model(args.model.clone(), args.variant.clone())
+        .max_context_tokens(args.max_context_tokens)
+        .trace_jsonl_path(Some(trace_path.clone()))
+        .prompt_template(prompt_template(args.prompt_profile, args.session_tools))
+        .plugins(build_plugin_stack(
+            standard_context_approach.cloned(),
+            args.session_tools,
+            benchmark_context,
+            &args.model,
+        ))
+        .build()?;
+    let session = core
+        .session("root")
+        .mode(execution_mode.clone())
+        .store(store.clone() as Arc<dyn RuntimePersistence>)
+        .open()
+        .await?;
 
-    let before_usage = runtime.usage_report();
+    let before_usage = session.usage_report();
     let cancel = tokio_util::sync::CancellationToken::new();
     let sink = JsonlEventSink::new(
         question_dir.join("events.jsonl"),
@@ -644,27 +622,17 @@ async fn run_question(
         cancel.clone(),
     )?;
     let started_at = std::time::Instant::now();
-    let turn = runtime
-        .stream_turn(
-            (TurnInput {
-                items: vec![InputItem::Text { text: prompt }],
-                image_blobs: Default::default(),
-                mode_turn_options: None,
-                trace_turn_id: None,
-                mode_extension: None,
-                turn_context: TurnContext::default(),
-            })
-            .rlm_project(build_projected_bindings(&question)?)?,
-            &sink,
-            cancel,
-        )
+    let turn = session
+        .turn(TurnInput::text(prompt).rlm_project(build_projected_bindings(&question)?)?)
+        .cancel(cancel)
+        .collect_session_events_with(&sink)
         .await
         .context("run benchmark question")?;
     if args.await_background_work {
-        runtime.await_background_work().await?;
+        session.background_tasks().await_all().await?;
     }
     let elapsed_seconds = started_at.elapsed().as_secs_f64();
-    let after_usage = runtime.usage_report();
+    let after_usage = session.usage_report();
     let usage = diff_usage_reports(&before_usage, &after_usage)
         .map(|rows| SessionUsageReport::from_entries(&rows))
         .map_err(anyhow::Error::msg)
@@ -741,46 +709,52 @@ async fn run_question(
     Ok(result)
 }
 
-fn build_plugin_session(
-    execution_mode: ExecutionMode,
+fn mode_preset(
+    execution_mode: &ModeId,
+    standard_context_approach: Option<StandardContextApproach>,
+) -> anyhow::Result<ModePreset> {
+    match execution_mode.as_str() {
+        "standard" => {
+            Ok(ModePreset::standard().with_standard_context_approach(standard_context_approach))
+        }
+        "rlm" => Ok(ModePreset::rlm()),
+        other => bail!("unsupported execution mode `{other}`"),
+    }
+}
+
+fn build_plugin_stack(
     standard_context_approach: Option<StandardContextApproach>,
     session_tools: bool,
     benchmark_context: BenchmarkQuestionContext,
-    session_policy: &SessionPolicy,
-) -> anyhow::Result<Arc<PluginSession>> {
-    let mut factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(ToolOutputBudgetPluginFactory::default())];
+    model: &str,
+) -> PluginStack {
+    let mut stack = PluginStack::runtime();
     if let Some(standard_context_approach) = &standard_context_approach {
         match standard_context_approach {
             StandardContextApproach::RollingHistory(_) => {
-                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
+                stack.push(Arc::new(RollingHistoryPluginFactory::default()));
             }
             StandardContextApproach::ObservationalMemory(_) => {
-                factories.push(Arc::new(ObservationalMemoryPluginFactory));
+                stack.push(Arc::new(ObservationalMemoryPluginFactory));
             }
         }
     }
     let mut subagent_models = std::collections::BTreeMap::new();
-    subagent_models.insert("explore".to_string(), session_policy.model.clone());
-    subagent_models.insert("peer".to_string(), session_policy.model.clone());
+    subagent_models.insert("explore".to_string(), model.to_string());
+    subagent_models.insert("peer".to_string(), model.to_string());
     let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
-    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-    factories.push(Arc::new(LlmToolsPluginFactory::default()));
-    factories.push(Arc::new(
-        SubagentsPluginFactory::new(registry, subagent_host)
-            .with_session_spec(SessionSpec::inherit()),
+    stack.push(Arc::new(LlmToolsPluginFactory::default()));
+    stack.push(Arc::new(
+        SubagentsPluginFactory::new(registry).with_session_spec(SessionSpec::inherit()),
     ));
     if session_tools {
-        factories.push(Arc::new(StaticPluginFactory::new(
+        stack.push(Arc::new(StaticPluginFactory::new(
             "longmemeval_tools",
             PluginSpec::new()
                 .with_tool_provider(Arc::new(LongMemEvalSessionTools::new(benchmark_context))),
         )));
     }
-    let plugin_host = PluginHost::new(factories);
-    plugin_host
-        .build_session("root", execution_mode, standard_context_approach, None)
-        .context("build plugin session")
+    stack
 }
 
 fn build_projected_bindings(
@@ -882,7 +856,7 @@ Format each work step like this:
 Brief reasoning here in plain prose.
 
 ```lashlang
-candidate = start call spawn_agent { agent_name: "narrow_candidates", task: "narrow the search to likely sessions", capability: "explore" }
+candidate = start call spawn_agent { task: "narrow the search to likely sessions", capability: "explore" }
 result = (await candidate)?
 print result
 ```
@@ -977,10 +951,10 @@ fn read_env_var(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn parse_execution_mode(raw: &str) -> anyhow::Result<ExecutionMode> {
+fn parse_execution_mode(raw: &str) -> anyhow::Result<ModeId> {
     match raw {
-        "rlm" => Ok(ExecutionMode::new("rlm")),
-        "standard" => Ok(ExecutionMode::standard()),
+        "rlm" => Ok(ModeId::rlm()),
+        "standard" => Ok(ModeId::standard()),
         _ => bail!("unsupported execution mode `{raw}`"),
     }
 }
@@ -996,10 +970,10 @@ fn parse_standard_context_approach(raw: &str) -> anyhow::Result<StandardContextA
 }
 
 fn resolve_standard_context_approach(
-    execution_mode: &ExecutionMode,
+    execution_mode: &ModeId,
     raw: Option<&str>,
 ) -> anyhow::Result<Option<StandardContextApproach>> {
-    if *execution_mode == ExecutionMode::standard() {
+    if *execution_mode == ModeId::standard() {
         return parse_standard_context_approach(raw.unwrap_or(DEFAULT_CONTEXT_APPROACH)).map(Some);
     }
     if raw.is_some() {
@@ -1008,8 +982,8 @@ fn resolve_standard_context_approach(
     Ok(None)
 }
 
-fn execution_mode_label(mode: &ExecutionMode) -> &str {
-    mode.plugin_id()
+fn execution_mode_label(mode: &ModeId) -> &str {
+    mode.as_str()
 }
 
 fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {
@@ -1433,7 +1407,7 @@ fn non_empty_text(text: &str) -> Option<String> {
 }
 
 fn format_failure_reason(
-    turn: &AssembledTurn,
+    turn: &lash::TurnResult,
     error_records: &[SinkErrorRecord],
 ) -> Option<String> {
     if turn_completed(&turn.outcome) {

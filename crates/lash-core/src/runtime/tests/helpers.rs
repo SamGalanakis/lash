@@ -425,6 +425,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
             model: request.policy.model.clone(),
             cwd: None,
             parent_session_id: request.parent_session_id.clone(),
+            relation: request.relation.clone(),
         });
         self.stores
             .lock()
@@ -515,7 +516,7 @@ pub(super) struct RuntimeTestPlugin {
     pub(super) before_turn: Option<crate::plugin::BeforeTurnHook>,
     pub(super) checkpoint: Option<crate::plugin::CheckpointHook>,
     pub(super) tool_result_projector: Option<crate::plugin::ToolResultProjector>,
-    pub(super) runtime_event: Option<crate::plugin::PluginRuntimeEventHook>,
+    pub(super) runtime_event: Option<crate::plugin::PluginLifecycleEventHook>,
     pub(super) external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
 }
 
@@ -768,6 +769,7 @@ impl crate::ToolProvider for ChildSessionTool {
                 session_id: Some("subagent-child".to_string()),
                 relation: crate::SessionRelation::Child {
                     parent_session_id: context.session_id().to_string(),
+                    originating_tool_call_id: None,
                 },
                 start: crate::SessionStartPoint::Empty,
                 policy: None,

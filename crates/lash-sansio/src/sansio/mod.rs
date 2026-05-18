@@ -7,7 +7,6 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -20,8 +19,8 @@ use crate::llm::types::{
 use crate::session_model::message::MessageOrigin;
 use crate::session_model::{
     Message, MessageRole, MessageSequence, Part, PartKind, PruneState, SessionEvent,
-    SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, fresh_message_id,
-    make_error_event, reassign_part_ids,
+    SessionEventRecord, TokenUsage, ToolEvent, TurnTerminationPolicyState, make_error_event,
+    reassign_part_ids,
 };
 use crate::{
     CheckpointKind, ModelToolReturn, PluginMessage, ToolCallOutput, TurnOutcome, TurnStop,
@@ -126,8 +125,6 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
         id: EffectId,
         checkpoint: CheckpointKind,
     },
-    /// Retry backoff.
-    Sleep { id: EffectId, duration: Duration },
     /// Host-implemented fire-and-forget logging.
     Log { event: LogEvent },
     /// Fire-and-forget event (no response needed).
@@ -139,13 +136,13 @@ pub enum Effect<M: ModeProtocol = UnitModeProtocol> {
     /// state machine has applied semantic message or mode-step changes.
     Progress {
         messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        event_delta: Vec<SessionEventRecord<M::Event>>,
         mode_iteration: usize,
     },
     /// Turn is done.
     Done {
         messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord<M::Event>>>,
+        event_delta: Vec<SessionEventRecord<M::Event>>,
         mode_iteration: usize,
     },
 }
@@ -158,8 +155,7 @@ impl<M: ModeProtocol> Effect<M> {
             | Self::CancelLlm { id }
             | Self::ToolCalls { id, .. }
             | Self::ExecCode { id, .. }
-            | Self::Checkpoint { id, .. }
-            | Self::Sleep { id, .. } => Some(*id),
+            | Self::Checkpoint { id, .. } => Some(*id),
             Self::Log { .. } | Self::Emit(_) | Self::Progress { .. } | Self::Done { .. } => None,
         }
     }
@@ -192,22 +188,18 @@ pub enum CheckpointEffect<M: ModeProtocol = UnitModeProtocol> {
         id: EffectId,
         checkpoint: CheckpointKind,
     },
-    Sleep {
-        id: EffectId,
-        duration: Duration,
-    },
     Log {
         event: LogEvent,
     },
     Emit(SessionEvent),
     Progress {
         messages: Vec<Message>,
-        events: Vec<SessionEventRecord<M::Event>>,
+        event_delta: Vec<SessionEventRecord<M::Event>>,
         mode_iteration: usize,
     },
     Done {
         messages: Vec<Message>,
-        events: Vec<SessionEventRecord<M::Event>>,
+        event_delta: Vec<SessionEventRecord<M::Event>>,
         mode_iteration: usize,
     },
 }
@@ -253,8 +245,6 @@ pub enum Response {
         messages: Vec<PluginMessage>,
         transient_messages: Vec<PluginMessage>,
     },
-    /// Sleep completed.
-    Timeout { id: EffectId },
 }
 
 #[derive(Clone, Serialize, serde::Deserialize)]
@@ -514,8 +504,12 @@ pub struct TurnCheckpoint<M: ModeProtocol = UnitModeProtocol> {
     state: MachineState<M>,
     pending_effects: Vec<CheckpointEffect<M>>,
     next_effect_id: u64,
+    #[serde(default)]
+    next_synthetic_message_id: u64,
     messages: Vec<Message>,
     events: Vec<SessionEventRecord<M::Event>>,
+    #[serde(default)]
+    progress_event_cursor: usize,
     mode_iteration: usize,
     mode_run_offset: usize,
     cumulative_usage: TokenUsage,
@@ -598,30 +592,26 @@ impl<M: ModeProtocol> CheckpointEffect<M> {
                 id: *id,
                 checkpoint: *checkpoint,
             },
-            Effect::Sleep { id, duration } => Self::Sleep {
-                id: *id,
-                duration: *duration,
-            },
             Effect::Log { event } => Self::Log {
                 event: event.clone(),
             },
             Effect::Emit(event) => Self::Emit(event.clone()),
             Effect::Progress {
                 messages,
-                events,
+                event_delta,
                 mode_iteration,
             } => Self::Progress {
                 messages: messages.iter().cloned().collect(),
-                events: events.as_ref().clone(),
+                event_delta: event_delta.clone(),
                 mode_iteration: *mode_iteration,
             },
             Effect::Done {
                 messages,
-                events,
+                event_delta,
                 mode_iteration,
             } => Self::Done {
                 messages: messages.iter().cloned().collect(),
-                events: events.as_ref().clone(),
+                event_delta: event_delta.clone(),
                 mode_iteration: *mode_iteration,
             },
         }
@@ -641,25 +631,24 @@ impl<M: ModeProtocol> CheckpointEffect<M> {
             Self::ToolCalls { id, calls } => Effect::ToolCalls { id, calls },
             Self::ExecCode { id, code } => Effect::ExecCode { id, code },
             Self::Checkpoint { id, checkpoint } => Effect::Checkpoint { id, checkpoint },
-            Self::Sleep { id, duration } => Effect::Sleep { id, duration },
             Self::Log { event } => Effect::Log { event },
             Self::Emit(event) => Effect::Emit(event),
             Self::Progress {
                 messages,
-                events,
+                event_delta,
                 mode_iteration,
             } => Effect::Progress {
                 messages: MessageSequence::from_owned(messages),
-                events: Arc::new(events),
+                event_delta,
                 mode_iteration,
             },
             Self::Done {
                 messages,
-                events,
+                event_delta,
                 mode_iteration,
             } => Effect::Done {
                 messages: MessageSequence::from_owned(messages),
-                events: Arc::new(events),
+                event_delta,
                 mode_iteration,
             },
         }
@@ -723,8 +712,10 @@ pub struct TurnMachine<M: ModeProtocol = UnitModeProtocol> {
     pending_effects: VecDeque<Effect<M>>,
     active_effect_redelivery: bool,
     next_effect_id: u64,
+    next_synthetic_message_id: u64,
     messages: MessageSequence,
     events: Arc<Vec<SessionEventRecord<M::Event>>>,
+    progress_event_cursor: usize,
     mode_iteration: usize,
     mode_run_offset: usize,
     cumulative_usage: TokenUsage,
@@ -754,13 +745,16 @@ impl<M: ModeProtocol> TurnMachine<M> {
         events: Arc<Vec<SessionEventRecord<M::Event>>>,
         mode_run_offset: usize,
     ) -> Self {
+        let next_synthetic_message_id = messages.len() as u64;
         Self {
             config,
             state: MachineState::PreparingMode,
             pending_effects: VecDeque::new(),
             active_effect_redelivery: false,
             next_effect_id: 1,
+            next_synthetic_message_id,
             messages,
+            progress_event_cursor: events.len(),
             events,
             mode_iteration: mode_run_offset,
             mode_run_offset,
@@ -803,8 +797,10 @@ impl<M: ModeProtocol> TurnMachine<M> {
             state: self.state.clone(),
             pending_effects,
             next_effect_id: self.next_effect_id,
+            next_synthetic_message_id: self.next_synthetic_message_id,
             messages: self.messages.iter().cloned().collect(),
             events: self.events.as_ref().clone(),
+            progress_event_cursor: self.progress_event_cursor,
             mode_iteration: self.mode_iteration,
             mode_run_offset: self.mode_run_offset,
             cumulative_usage: self.cumulative_usage.clone(),
@@ -833,8 +829,10 @@ impl<M: ModeProtocol> TurnMachine<M> {
             pending_effects,
             active_effect_redelivery,
             next_effect_id: checkpoint.next_effect_id,
+            next_synthetic_message_id: checkpoint.next_synthetic_message_id,
             messages: MessageSequence::from_owned(checkpoint.messages),
             events: Arc::new(checkpoint.events),
+            progress_event_cursor: checkpoint.progress_event_cursor,
             mode_iteration: checkpoint.mode_iteration,
             mode_run_offset: checkpoint.mode_run_offset,
             cumulative_usage: checkpoint.cumulative_usage,
@@ -860,14 +858,24 @@ impl<M: ModeProtocol> TurnMachine<M> {
         id
     }
 
+    fn next_synthetic_message_id(&mut self, scope: &str) -> String {
+        let id = format!(
+            "m_sansio_{}_{}_{}",
+            self.mode_run_offset, scope, self.next_synthetic_message_id
+        );
+        self.next_synthetic_message_id += 1;
+        id
+    }
+
     fn emit(&mut self, event: SessionEvent) {
         self.pending_effects.push_back(Effect::Emit(event));
     }
 
     fn emit_progress(&mut self) {
+        let event_delta = self.next_event_delta();
         self.pending_effects.push_back(Effect::Progress {
             messages: self.messages.clone(),
-            events: Arc::clone(&self.events),
+            event_delta,
             mode_iteration: self.mode_iteration,
         });
     }
@@ -885,14 +893,24 @@ impl<M: ModeProtocol> TurnMachine<M> {
         self.emit(SessionEvent::TurnOutcome { outcome });
         self.emit(SessionEvent::Done);
         let msgs = std::mem::take(&mut self.messages);
-        let events = Arc::clone(&self.events);
+        let event_delta = self.next_event_delta();
         let mode_iteration = self.mode_iteration;
         self.state = MachineState::Finished;
         self.pending_effects.push_back(Effect::Done {
             messages: msgs,
-            events,
+            event_delta,
             mode_iteration,
         });
+    }
+
+    fn next_event_delta(&mut self) -> Vec<SessionEventRecord<M::Event>> {
+        if self.progress_event_cursor >= self.events.len() {
+            self.progress_event_cursor = self.events.len();
+            return Vec::new();
+        }
+        let delta = self.events[self.progress_event_cursor..].to_vec();
+        self.progress_event_cursor = self.events.len();
+        delta
     }
 
     /// Drain the next pending effect. Returns `None` when the host must call
@@ -1033,9 +1051,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
             SessionEventRecord::Mode(mode_event) => {
                 Arc::make_mut(&mut self.events).push(SessionEventRecord::Mode(mode_event));
             }
-            SessionEventRecord::StateSnapshot(snapshot) => {
-                Arc::make_mut(&mut self.events).push(SessionEventRecord::StateSnapshot(snapshot));
-            }
         }
     }
 
@@ -1070,13 +1085,19 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     progress_dirty = true;
                 }
                 DriverAction::ScheduleTurnLimitFinal => {
-                    self.termination.maybe_schedule_turn_limit_final(
+                    if let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
                         self.mode_iteration,
                         self.mode_run_offset,
                         self.config.max_turns,
-                        self.messages.make_mut(),
-                    );
-                    progress_dirty = true;
+                    ) {
+                        let message_id = self.next_synthetic_message_id("turn_limit");
+                        self.termination.schedule_turn_limit_final(
+                            max_turns,
+                            self.messages.make_mut(),
+                            message_id,
+                        );
+                        progress_dirty = true;
+                    }
                 }
                 DriverAction::Finish(outcome) => {
                     if progress_dirty {
@@ -1112,7 +1133,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
                 messages,
                 transient_messages,
             } => self.handle_checkpoint(id, messages, transient_messages),
-            Response::Timeout { id } => self.handle_timeout(id),
         }
     }
 
@@ -1172,39 +1192,39 @@ impl<M: ModeProtocol> TurnMachine<M> {
     }
 
     fn append_checkpoint_messages(&mut self, plugin_messages: &[PluginMessage], transient: bool) {
-        let appended = plugin_messages
+        let mut appended = Vec::new();
+        for message in plugin_messages
             .iter()
             .filter(|message| matches!(message.role, MessageRole::User | MessageRole::System))
-            .map(|message| {
-                let message_id = fresh_message_id();
-                let mut parts = if message.parts.is_empty() {
-                    vec![Part {
-                        id: format!("{message_id}.p0"),
-                        kind: PartKind::Text,
-                        content: message.content.clone(),
-                        attachment: None,
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_replay: None,
-                        prune_state: PruneState::Intact,
-                        reasoning_meta: None,
-                        response_meta: None,
-                    }]
-                } else {
-                    message.parts.clone()
-                };
-                reassign_part_ids(&message_id, &mut parts);
-                Message {
-                    id: message_id.clone(),
-                    role: message.role,
-                    parts: Arc::new(parts),
-                    origin: Some(MessageOrigin::Plugin {
-                        plugin_id: "plugin".to_string(),
-                        transient,
-                    }),
-                }
-            })
-            .collect::<Vec<_>>();
+        {
+            let message_id = self.next_synthetic_message_id("checkpoint");
+            let mut parts = if message.parts.is_empty() {
+                vec![Part {
+                    id: format!("{message_id}.p0"),
+                    kind: PartKind::Text,
+                    content: message.content.clone(),
+                    attachment: None,
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_replay: None,
+                    prune_state: PruneState::Intact,
+                    reasoning_meta: None,
+                    response_meta: None,
+                }]
+            } else {
+                message.parts.clone()
+            };
+            reassign_part_ids(&message_id, &mut parts);
+            appended.push(Message {
+                id: message_id.clone(),
+                role: message.role,
+                parts: Arc::new(parts),
+                origin: Some(MessageOrigin::Plugin {
+                    plugin_id: "plugin".to_string(),
+                    transient,
+                }),
+            });
+        }
         if !appended.is_empty() {
             self.messages.extend(appended);
         }
@@ -1247,12 +1267,18 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     self.finish(TurnOutcome::Stopped(TurnStop::MaxTurns));
                     return;
                 }
-                self.termination.maybe_schedule_turn_limit_final(
+                if let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
                     self.mode_iteration,
                     self.mode_run_offset,
                     self.config.max_turns,
-                    self.messages.make_mut(),
-                );
+                ) {
+                    let message_id = self.next_synthetic_message_id("turn_limit");
+                    self.termination.schedule_turn_limit_final(
+                        max_turns,
+                        self.messages.make_mut(),
+                        message_id,
+                    );
+                }
             }
             self.state = MachineState::PrepareIteration;
             self.emit_progress();
@@ -1517,8 +1543,6 @@ impl<M: ModeProtocol> TurnMachine<M> {
         };
         self.apply_actions(actions);
     }
-
-    fn handle_timeout(&mut self, _id: EffectId) {}
 }
 
 fn token_usage_from_llm_usage(usage: &crate::llm::types::LlmUsage) -> TokenUsage {

@@ -11,7 +11,7 @@ pub struct ToolSurfaceContext {
     pub tools: Vec<ToolManifest>,
     pub resolve_contract: Option<lash_sansio::ToolContractResolver>,
     pub tool_access: SessionToolAccess,
-    pub subagent: Option<SubagentSessionAuthority>,
+    pub subagent: Option<SubagentSessionContext>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,7 +53,7 @@ pub struct PrepareTurnRequest {
     pub session_id: String,
     pub state: SessionReadView,
     pub messages: crate::MessageSequence,
-    pub host: Arc<dyn TurnHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
     pub turn_context: crate::TurnContext,
 }
 
@@ -70,19 +70,19 @@ pub struct TurnFinalization {
     pub events: Vec<crate::SessionEvent>,
 }
 
-pub(crate) async fn emit_plugin_surface_events(
+pub(crate) async fn emit_plugin_runtime_events(
     event_tx: &mpsc::Sender<crate::SessionEvent>,
     plugin_id: &str,
-    events: Vec<PluginSurfaceEvent>,
+    events: Vec<PluginRuntimeEvent>,
 ) {
-    for event in plugin_surface_session_events(plugin_id, events) {
+    for event in plugin_runtime_session_events(plugin_id, events) {
         crate::session_model::send_event(event_tx, event).await;
     }
 }
 
-pub(crate) fn plugin_surface_session_events(
+pub(crate) fn plugin_runtime_session_events(
     plugin_id: &str,
-    events: Vec<PluginSurfaceEvent>,
+    events: Vec<PluginRuntimeEvent>,
 ) -> Vec<crate::SessionEvent> {
     events
         .into_iter()
@@ -116,8 +116,8 @@ pub enum PluginDirective {
     ShortCircuitTool {
         output: ToolCallOutput,
     },
-    EmitEvents {
-        events: Vec<PluginSurfaceEvent>,
+    EmitRuntimeEvents {
+        events: Vec<PluginRuntimeEvent>,
     },
     EmitTrace {
         name: String,
@@ -142,8 +142,8 @@ impl PluginDirective {
         }
     }
 
-    pub fn emit_events(events: Vec<PluginSurfaceEvent>) -> Self {
-        Self::EmitEvents { events }
+    pub fn emit_runtime_events(events: Vec<PluginRuntimeEvent>) -> Self {
+        Self::EmitRuntimeEvents { events }
     }
 
     pub fn emit_trace(name: impl Into<String>, payload: serde_json::Value) -> Self {

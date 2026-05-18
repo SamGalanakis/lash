@@ -1,7 +1,7 @@
 use super::*;
 
 impl RuntimeTurnDriver {
-    pub(super) async fn run_checkpoint(
+    pub(in crate::runtime) async fn run_checkpoint(
         &mut self,
         machine: &mut TurnMachine,
         checkpoint: CheckpointKind,
@@ -99,7 +99,7 @@ impl RuntimeTurnDriver {
         Ok(model)
     }
 
-    pub(super) async fn run_exec_code(
+    pub(in crate::runtime) async fn run_exec_code(
         &mut self,
         code: &str,
         messages: crate::MessageSequence,

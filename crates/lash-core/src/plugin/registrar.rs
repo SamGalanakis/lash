@@ -81,7 +81,7 @@ pub struct PluginRegistrar {
     pub(crate) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(crate) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
     pub(crate) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
-    pub(crate) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
+    pub(crate) runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
     pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(crate) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
@@ -195,7 +195,7 @@ pub struct SessionRegistrations<'a> {
 }
 
 impl SessionRegistrations<'_> {
-    pub fn on_event(self, hook: PluginRuntimeEventHook) {
+    pub fn on_event(self, hook: PluginLifecycleEventHook) {
         self.reg.runtime_event_hooks.push(hook);
     }
 

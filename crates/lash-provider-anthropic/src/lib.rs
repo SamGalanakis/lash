@@ -1283,8 +1283,10 @@ mod tests {
 
     #[test]
     fn pause_turn_maps_to_stop() {
-        let mut state = StreamState::default();
-        state.stop_reason = Some("pause_turn".to_string());
+        let state = StreamState {
+            stop_reason: Some("pause_turn".to_string()),
+            ..StreamState::default()
+        };
 
         let (_, _, _, terminal_reason) = AnthropicProvider::finalize(state);
 
@@ -1293,8 +1295,10 @@ mod tests {
 
     #[test]
     fn unknown_stop_reason_maps_to_provider_error() {
-        let mut state = StreamState::default();
-        state.stop_reason = Some("new_provider_reason".to_string());
+        let state = StreamState {
+            stop_reason: Some("new_provider_reason".to_string()),
+            ..StreamState::default()
+        };
 
         let (_, _, _, terminal_reason) = AnthropicProvider::finalize(state);
 

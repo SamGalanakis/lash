@@ -25,7 +25,7 @@ struct BuildPluginSessionRequest<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct SessionAuthorityContext {
     pub tool_access: SessionToolAccess,
-    pub subagent: Option<SubagentSessionAuthority>,
+    pub subagent: Option<SubagentSessionContext>,
 }
 
 impl PluginHost {

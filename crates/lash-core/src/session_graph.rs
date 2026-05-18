@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use chrono::Utc;
 use sha2::Digest;
 
-use crate::session_model::{ConversationRecord, SessionEventRecord, ToolEvent};
+use crate::session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolEvent};
 use crate::{
     BaseRenderCache, ExecutionMode, Message, MessageRole, PromptUsage, StandardContextApproach,
     TokenUsage, ToolCallRecord,
@@ -254,7 +254,7 @@ impl SessionGraphAppendBuilder {
         let mut nodes = Vec::new();
         for record in records {
             let stable_key = stable_tool_call_key(&record);
-            let node_id = unique_plugin_node_id(&stable_key, &self.existing_ids);
+            let node_id = unique_tool_node_id(&stable_key, &self.existing_ids);
             self.existing_ids.insert(node_id.clone());
             let parent_node_id = self.leaf_node_id.clone();
             self.leaf_node_id = Some(node_id.clone());
@@ -270,20 +270,26 @@ impl SessionGraphAppendBuilder {
         nodes
     }
 
-    pub(crate) fn append_event_record(
-        &mut self,
-        event: SessionEventRecord,
-    ) -> Vec<SessionNodeRecord> {
-        let node_id = unique_plugin_node_id(&fresh_node_id("e"), &self.existing_ids);
-        self.existing_ids.insert(node_id.clone());
-        let parent_node_id = self.leaf_node_id.clone();
-        self.leaf_node_id = Some(node_id.clone());
-        vec![SessionNodeRecord {
-            node_id,
-            parent_node_id,
-            timestamp: Utc::now().to_rfc3339(),
-            payload: SessionNodePayload::Event { event },
-        }]
+    pub(crate) fn append_mode_events<I>(&mut self, events: I) -> Vec<SessionNodeRecord>
+    where
+        I: IntoIterator<Item = ModeEvent>,
+    {
+        let mut nodes = Vec::new();
+        for event in events {
+            let node_id = fresh_semantic_node_id("mode", &self.existing_ids);
+            self.existing_ids.insert(node_id.clone());
+            let parent_node_id = self.leaf_node_id.clone();
+            self.leaf_node_id = Some(node_id.clone());
+            nodes.push(SessionNodeRecord {
+                node_id,
+                parent_node_id,
+                timestamp: Utc::now().to_rfc3339(),
+                payload: SessionNodePayload::Event {
+                    event: SessionEventRecord::Mode(event),
+                },
+            });
+        }
+        nodes
     }
 }
 
@@ -490,7 +496,7 @@ impl SessionGraph {
                 let active_read_key = tool_call_active_read_key(&stable_key, record);
                 seen_tool_call_keys
                     .insert(active_read_key)
-                    .then_some((stable_key, record))
+                    .then_some(record.clone())
             })
             .collect::<Vec<_>>();
 
@@ -500,13 +506,7 @@ impl SessionGraph {
             appendable_tool_calls.len(),
         );
         self.append_message_batch(appendable_messages);
-
-        for (stable_key, record) in appendable_tool_calls {
-            self.append_event(SessionEventRecord::Tool(ToolEvent::Invocation {
-                stable_key,
-                record: record.clone(),
-            }));
-        }
+        self.append_tool_call_records(appendable_tool_calls);
     }
 
     pub(crate) fn append_active_conversation_messages(&mut self, messages: &[Message]) {
@@ -697,7 +697,12 @@ impl SessionGraph {
         plugin_type: impl Into<String>,
         body: serde_json::Value,
     ) -> String {
-        let node_id = fresh_node_id("x");
+        let existing_ids = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<HashSet<_>>();
+        let node_id = fresh_semantic_node_id("plugin", &existing_ids);
         let previous_leaf = self.leaf_node_id.clone();
         let parent_node_id = previous_leaf.clone();
         let node = SessionNodeRecord {
@@ -752,43 +757,30 @@ impl SessionGraph {
         self.replace_active_read_state(messages.as_slice(), tool_calls);
     }
 
-    pub fn append_event(&mut self, event: SessionEventRecord) -> String {
-        let node_id = fresh_node_id("e");
-        let previous_leaf = self.leaf_node_id.clone();
-        let node = SessionNodeRecord {
-            node_id: node_id.clone(),
-            parent_node_id: previous_leaf.clone(),
-            timestamp: Utc::now().to_rfc3339(),
-            payload: SessionNodePayload::Event { event },
-        };
-        self.detach_initialized_cache_for_append();
-        if let Some(cache_lock) = Arc::get_mut(&mut self.cache)
-            && let Some(cache) = cache_lock.get_mut()
-        {
-            let data = Arc::make_mut(&mut self.inner);
-            data.nodes.push(node);
-            cache.append_node(
-                data.nodes.len() - 1,
-                data.nodes.last().expect("just appended graph node"),
-                previous_leaf.as_deref(),
-            );
-            data.leaf_node_id = Some(node_id.clone());
-            return node_id;
-        }
-        let data = self.data_mut();
-        data.nodes.push(node);
-        data.leaf_node_id = Some(node_id.clone());
+    pub fn append_mode_event(&mut self, event: ModeEvent) -> String {
+        let mut builder = self.append_builder();
+        let nodes = builder.append_mode_events([event]);
+        let node_id = nodes
+            .first()
+            .expect("mode event append must create one node")
+            .node_id
+            .clone();
+        self.append_prebuilt_nodes(nodes);
         node_id
     }
 
-    pub fn append_events<I>(&mut self, events: I) -> Vec<String>
+    pub(crate) fn append_tool_call_records<I>(&mut self, records: I) -> Vec<String>
     where
-        I: IntoIterator<Item = SessionEventRecord>,
+        I: IntoIterator<Item = ToolCallRecord>,
     {
-        events
-            .into_iter()
-            .map(|event| self.append_event(event))
-            .collect()
+        let mut builder = self.append_builder();
+        let nodes = builder.append_tool_call_records(records);
+        let node_ids = nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>();
+        self.append_prebuilt_nodes(nodes);
+        node_ids
     }
 
     pub fn user_message_count(&self) -> usize {
@@ -831,7 +823,7 @@ impl SessionGraph {
     /// leaf to the last node and updating the cache incrementally
     /// instead of invalidating it. Use this when the appended nodes are
     /// genuinely new descendants of the current leaf — e.g. the
-    /// turn-driver merging `TurnGraphOverlay` deltas into the base graph.
+    /// turn-driver merging turn-local graph editor deltas into the base graph.
     /// Use `extend_node_records` + `set_leaf_node_id` for store-side
     /// replay paths that don't follow the active-path append shape.
     pub fn extend_active_path(&mut self, nodes: Vec<SessionNodeRecord>) {
@@ -1108,7 +1100,7 @@ pub(crate) fn build_active_read_replacement<'a>(
                 }
             }
             ActiveReadItem::ToolCall { stable_key, record } => {
-                let node_id = unique_plugin_node_id_for_replacement(
+                let node_id = unique_tool_node_id_for_replacement(
                     &stable_key,
                     existing_node_ids,
                     &new_node_ids,
@@ -1200,31 +1192,40 @@ pub(crate) fn tool_call_record_active_read_key(record: &ToolCallRecord) -> Strin
     tool_call_active_read_key(&stable_key, record)
 }
 
-fn unique_plugin_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {
-    let base = format!("plugin:{}", stable_key);
+fn unique_tool_node_id(stable_key: &str, existing_ids: &HashSet<String>) -> String {
+    let base = format!("tool:{}", stable_key);
     if !existing_ids.contains(&base) {
         return base;
     }
     loop {
-        let candidate = format!("plugin:{}:{}", stable_key, uuid::Uuid::new_v4());
+        let candidate = format!("tool:{}:{}", stable_key, uuid::Uuid::new_v4());
         if !existing_ids.contains(&candidate) {
             return candidate;
         }
     }
 }
 
-fn unique_plugin_node_id_for_replacement(
+fn unique_tool_node_id_for_replacement(
     stable_key: &str,
     existing_ids: &HashSet<String>,
     new_ids: &HashSet<String>,
 ) -> String {
-    let base = format!("plugin:{}", stable_key);
+    let base = format!("tool:{}", stable_key);
     if !existing_ids.contains(&base) && !new_ids.contains(&base) {
         return base;
     }
     loop {
-        let candidate = format!("plugin:{}:{}", stable_key, uuid::Uuid::new_v4());
+        let candidate = format!("tool:{}:{}", stable_key, uuid::Uuid::new_v4());
         if !existing_ids.contains(&candidate) && !new_ids.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+fn fresh_semantic_node_id(prefix: &str, existing_ids: &HashSet<String>) -> String {
+    loop {
+        let candidate = format!("{prefix}:{}", uuid::Uuid::new_v4().simple());
+        if !existing_ids.contains(&candidate) {
             return candidate;
         }
     }
@@ -1299,4 +1300,106 @@ fn first_message_search_text(message: &Message) -> String {
         .join("\n\n")
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExecutionMode, Part, PartKind, PruneState, ToolCallOutput, shared_parts};
+
+    fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role,
+            parts: shared_parts(vec![Part {
+                id: format!("{id}.p0"),
+                kind: PartKind::Text,
+                content: content.to_string(),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
+        }
+    }
+
+    fn tool_record(call_id: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            call_id: Some(call_id.to_string()),
+            tool: "lookup".to_string(),
+            args: serde_json::json!({"q": "x"}),
+            output: ToolCallOutput::success(serde_json::json!({"answer": "y"})),
+            duration_ms: 3,
+        }
+    }
+
+    fn mode_event() -> ModeEvent {
+        ModeEvent::typed(
+            ExecutionMode::new("rlm"),
+            serde_json::json!({"step": "started"}),
+        )
+        .expect("mode event serializes")
+    }
+
+    #[test]
+    fn typed_append_node_ids_use_semantic_prefixes() {
+        let mut graph = SessionGraph::default();
+
+        let message_id = graph.append_message(text_message("m1", MessageRole::User, "hello"));
+        graph.append_active_read_delta(&[], &[tool_record("call-1")]);
+        let mode_id = graph.append_mode_event(mode_event());
+        let plugin_id = graph.append_plugin("example", serde_json::json!({"ok": true}));
+
+        assert_eq!(message_id, "m1");
+        assert!(mode_id.starts_with("mode:"));
+        assert!(plugin_id.starts_with("plugin:"));
+
+        let tool_node = graph
+            .nodes
+            .iter()
+            .find(|node| matches!(node.event(), Some(SessionEventRecord::Tool(_))))
+            .expect("tool node");
+        assert_eq!(tool_node.node_id, "tool:call-1");
+    }
+
+    #[test]
+    fn active_read_replacement_uses_tool_prefix() {
+        let record = tool_record("call-replace");
+        let message = text_message("m1", MessageRole::User, "hello");
+        let graph = SessionGraph::from_active_read_state(&[message], std::slice::from_ref(&record));
+
+        let tool_node = graph
+            .nodes
+            .iter()
+            .find(|node| matches!(node.event(), Some(SessionEventRecord::Tool(_))))
+            .expect("tool node");
+        assert_eq!(tool_node.node_id, "tool:call-replace");
+    }
+
+    #[test]
+    fn graph_writers_do_not_put_active_read_events_under_plugin_ids() {
+        let mut graph = SessionGraph::default();
+        graph.append_message(text_message("m1", MessageRole::User, "hello"));
+        graph.append_active_read_delta(&[], &[tool_record("call-1")]);
+        graph.append_mode_event(mode_event());
+        graph.append_plugin("example", serde_json::json!({"ok": true}));
+
+        for node in &graph.nodes {
+            match node.event() {
+                Some(SessionEventRecord::Conversation(_) | SessionEventRecord::Tool(_)) => {
+                    assert!(!node.node_id.starts_with("plugin:"), "{:?}", node);
+                }
+                Some(SessionEventRecord::Mode(_)) => {
+                    assert!(node.node_id.starts_with("mode:"), "{:?}", node);
+                }
+                None => {
+                    assert!(node.node_id.starts_with("plugin:"), "{:?}", node);
+                }
+            }
+        }
+    }
 }

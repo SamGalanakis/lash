@@ -18,7 +18,6 @@ members = [
     "crates/lash-plugin-prompt-context",
     "crates/lash-plugin-rolling-history",
     "crates/lash-plugin-tool-discovery",
-    "crates/lash-plugin-ui-activity",
     "crates/lash-llm-tools",
     "crates/lash-tool-support",
     "crates/lash-tool-apply-patch",
@@ -81,7 +80,6 @@ default-members = [
     "crates/lash-plugin-prompt-context",
     "crates/lash-plugin-rolling-history",
     "crates/lash-plugin-tool-discovery",
-    "crates/lash-plugin-ui-activity",
     "crates/lash-subagents",
 ]
 resolver = "3"

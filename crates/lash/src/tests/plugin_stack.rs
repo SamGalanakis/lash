@@ -20,15 +20,15 @@ async fn plugin_surface_streams_as_semantic_turn_event() -> Result<()> {
         .snapshot()
         .await
         .into_iter()
-        .find(|event| matches!(&event.event, TurnEvent::PluginSurface { .. }))
+        .find(|event| matches!(&event.event, TurnEvent::PluginRuntime { .. }))
         .expect("plugin surface event");
-    let TurnEvent::PluginSurface { plugin_id, event } = surface.event else {
+    let TurnEvent::PluginRuntime { plugin_id, event } = surface.event else {
         unreachable!();
     };
     assert_eq!(plugin_id, "surface_test");
     assert!(matches!(
         event,
-        lash_core::PluginSurfaceEvent::Status { key, label, .. }
+        lash_core::PluginRuntimeEvent::Status { key, label, .. }
         if key == "surface" && label == "working"
     ));
     Ok(())

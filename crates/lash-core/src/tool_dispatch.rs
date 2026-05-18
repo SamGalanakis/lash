@@ -6,8 +6,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::plugin::{
-    PluginDirective, PluginSession, ToolCallHookContext, ToolHookHost, ToolResultHookContext,
-    emit_plugin_surface_events,
+    PluginDirective, PluginSession, RuntimeSessionHost, ToolCallHookContext, ToolResultHookContext,
+    emit_plugin_runtime_events,
 };
 use crate::tool_executor::execute_tool_call;
 use crate::tool_schema::validate_tool_input;
@@ -21,7 +21,7 @@ pub struct ToolDispatchContext {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
-    pub host: Arc<dyn ToolHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
@@ -91,6 +91,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             context.session_id.clone(),
             tool_name.clone(),
             args.clone(),
+            manifest.argument_projection.clone(),
             context.turn_context.clone(),
             Arc::clone(&context.host),
         ))
@@ -137,8 +138,8 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
             PluginDirective::AbortTurn { message, .. } => {
                 short_circuit = Some(ToolResult::err_fmt(message));
             }
-            PluginDirective::EmitEvents { events } => {
-                emit_plugin_surface_events(&context.event_tx, &plugin_id, events).await;
+            PluginDirective::EmitRuntimeEvents { events } => {
+                emit_plugin_runtime_events(&context.event_tx, &plugin_id, events).await;
             }
             PluginDirective::EmitTrace {
                 name,
@@ -250,8 +251,8 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
                     PluginDirective::AbortTurn { message, .. } => {
                         final_result = ToolResult::err_fmt(message);
                     }
-                    PluginDirective::EmitEvents { events } => {
-                        emit_plugin_surface_events(&context.event_tx, &plugin_id, events).await;
+                    PluginDirective::EmitRuntimeEvents { events } => {
+                        emit_plugin_runtime_events(&context.event_tx, &plugin_id, events).await;
                     }
                     PluginDirective::EmitTrace {
                         name,
@@ -365,6 +366,19 @@ pub(crate) fn resolve_tool_execution_mode(
         .iter()
         .find(|def| def.manifest.name == tool_name)
         .map(|def| def.manifest.execution_mode)
+        .unwrap_or_default()
+}
+
+pub(crate) fn resolve_tool_argument_projection_policy(
+    context: &ToolDispatchContext,
+    tool_name: &str,
+) -> crate::ToolArgumentProjectionPolicy {
+    context
+        .surface
+        .tools
+        .iter()
+        .find(|def| def.manifest.name == tool_name)
+        .map(|def| def.manifest.argument_projection.clone())
         .unwrap_or_default()
 }
 
@@ -723,6 +737,35 @@ mod tests {
         )
     }
 
+    struct ProjectionPolicyTools;
+
+    #[async_trait::async_trait]
+    impl ToolProvider for ProjectionPolicyTools {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            manifests(vec![projection_policy_tool_definition()])
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "seedy").then(|| Arc::new(projection_policy_tool_definition().contract()))
+        }
+
+        async fn execute(&self, _call: ToolCall<'_>) -> ToolResult {
+            ToolResult::ok(json!("ok"))
+        }
+    }
+
+    fn projection_policy_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "seedy",
+            "Seed-aware",
+            crate::ToolDefinition::default_input_schema(),
+            json!({ "type": "string" }),
+        )
+        .with_argument_projection(
+            crate::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
+        )
+    }
+
     fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
@@ -755,6 +798,43 @@ mod tests {
     fn dispatch_context() -> ToolDispatchContext {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
+        let tools = plugins.tools();
+        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        ToolDispatchContext {
+            plugins,
+            tools,
+            surface,
+            host: Arc::new(MockSessionManager::default()),
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        }
+    }
+
+    fn projection_policy_dispatch_context(
+        captured: Arc<std::sync::Mutex<Option<crate::ToolArgumentProjectionPolicy>>>,
+    ) -> ToolDispatchContext {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let provider: Arc<dyn ToolProvider> = Arc::new(ProjectionPolicyTools);
+        let hook_captured = Arc::clone(&captured);
+        let hook: crate::plugin::BeforeToolCallHook = Arc::new(move |ctx| {
+            let hook_captured = Arc::clone(&hook_captured);
+            Box::pin(async move {
+                *hook_captured.lock().expect("captured policy") =
+                    Some(ctx.argument_projection.clone());
+                Ok(Vec::new())
+            })
+        });
+        let plugins = PluginHost::new(vec![Arc::new(StaticPluginFactory::new(
+            "projection_policy_tools",
+            crate::PluginSpec::new()
+                .with_tool_provider(Arc::clone(&provider))
+                .with_before_tool_call(hook),
+        ))])
+        .build_standard_session("root", None)
+        .expect("plugin session");
         let tools = plugins.tools();
         let surface = plugins.tool_surface("session", ExecutionMode::standard());
         ToolDispatchContext {
@@ -1000,6 +1080,24 @@ mod tests {
         assert!(outcome.record.output.is_success());
         assert_eq!(contracts_resolved.load(Ordering::SeqCst), 1);
         assert_eq!(executed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn before_tool_hook_receives_resolved_argument_projection_policy() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let outcome = dispatch_tool_call(
+            &projection_policy_dispatch_context(Arc::clone(&captured)),
+            "seedy".to_string(),
+            json!({}),
+            None,
+        )
+        .await;
+
+        assert!(outcome.record.output.is_success());
+        assert_eq!(
+            captured.lock().expect("captured policy").clone(),
+            Some(crate::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"))
+        );
     }
 
     #[tokio::test]

@@ -3,23 +3,31 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[async_trait::async_trait]
-pub trait SessionSnapshotHost: Send + Sync {
-    async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError>;
-    async fn snapshot_session(&self, session_id: &str) -> Result<SessionSnapshot, PluginError>;
-}
+pub trait RuntimeSessionHost: Send + Sync {
+    async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "session snapshots are unavailable in this runtime".to_string(),
+        ))
+    }
 
-#[async_trait::async_trait]
-pub trait ToolCatalogHost: Send + Sync {
-    async fn tool_catalog(&self, session_id: &str) -> Result<Vec<serde_json::Value>, PluginError>;
-}
+    async fn snapshot_session(&self, _session_id: &str) -> Result<SessionSnapshot, PluginError> {
+        Err(PluginError::Session(
+            "session lookup is unavailable in this runtime".to_string(),
+        ))
+    }
 
-#[async_trait::async_trait]
-pub trait ToolStateHost: Send + Sync {
+    async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<serde_json::Value>, PluginError> {
+        Err(PluginError::Session(
+            "tool catalogs are unavailable in this runtime".to_string(),
+        ))
+    }
+
     async fn tool_state(&self, _session_id: &str) -> Result<crate::ToolState, PluginError> {
         Err(PluginError::Session(
             "tool state is unavailable in this session".to_string(),
         ))
     }
+
     async fn apply_tool_state(
         &self,
         _session_id: &str,
@@ -29,6 +37,7 @@ pub trait ToolStateHost: Send + Sync {
             "tool state mutation is unavailable in this session".to_string(),
         ))
     }
+
     async fn set_tools_availability(
         &self,
         session_id: &str,
@@ -43,6 +52,7 @@ pub trait ToolStateHost: Send + Sync {
         }
         self.apply_tool_state(session_id, snapshot).await
     }
+
     async fn set_tool_availability(
         &self,
         session_id: &str,
@@ -55,14 +65,16 @@ pub trait ToolStateHost: Send + Sync {
             .map_err(|err| PluginError::Session(err.to_string()))?;
         self.apply_tool_state(session_id, snapshot).await
     }
-}
 
-#[async_trait::async_trait]
-pub trait SessionLifecycleHost: Send + Sync {
     async fn create_session(
         &self,
-        request: SessionCreateRequest,
-    ) -> Result<SessionHandle, PluginError>;
+        _request: SessionCreateRequest,
+    ) -> Result<SessionHandle, PluginError> {
+        Err(PluginError::Session(
+            "session creation is unavailable in this runtime".to_string(),
+        ))
+    }
+
     /// Pop the seed message that was queued for `session_id` via
     /// `SessionCreateRequest::first_turn_input`. Returns `None` if no
     /// seed was queued, or after a previous caller has already taken
@@ -74,18 +86,35 @@ pub trait SessionLifecycleHost: Send + Sync {
     ) -> Result<Option<PluginMessage>, PluginError> {
         Ok(None)
     }
-    async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
-}
 
-#[async_trait::async_trait]
-pub trait TurnHost: Send + Sync {
+    async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "session closing is unavailable in this runtime".to_string(),
+        ))
+    }
+
     async fn start_turn_stream(
         &self,
-        session_id: &str,
-        input: TurnInput,
-    ) -> Result<SessionTurnHandle, PluginError>;
-    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
-    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
+        _session_id: &str,
+        _input: TurnInput,
+    ) -> Result<SessionTurnHandle, PluginError> {
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
+    }
+
     async fn start_turn(
         &self,
         session_id: &str,
@@ -95,16 +124,11 @@ pub trait TurnHost: Send + Sync {
         drop(handle.events);
         self.await_turn(&handle.turn_id).await
     }
-}
 
-#[async_trait::async_trait]
-pub trait TaskHost: Send + Sync {
     /// Push a user-visible message into the target session's turn-input
     /// injection bridge so it surfaces at the next iteration boundary of
     /// the current turn (or at the start of the next turn if the target
-    /// is idle). Used by monitor and other wake-up flows where a note
-    /// should land at the next available step rather than waiting for a
-    /// brand-new task.
+    /// is idle).
     async fn inject_turn_input(
         &self,
         _session_id: &str,
@@ -114,6 +138,7 @@ pub trait TaskHost: Send + Sync {
             "turn input injection is unavailable in this session".to_string(),
         ))
     }
+
     async fn spawn_hidden_task(
         &self,
         _session_id: &str,
@@ -124,9 +149,11 @@ pub trait TaskHost: Send + Sync {
             "background tasks are unavailable in this session".to_string(),
         ))
     }
+
     async fn await_hidden_tasks(&self, _session_id: &str) -> Result<(), PluginError> {
         Ok(())
     }
+
     async fn spawn_managed_task(
         &self,
         _session_id: &str,
@@ -137,6 +164,7 @@ pub trait TaskHost: Send + Sync {
             "managed background tasks are unavailable in this session".to_string(),
         ))
     }
+
     async fn cancel_managed_task(
         &self,
         _session_id: &str,
@@ -146,6 +174,7 @@ pub trait TaskHost: Send + Sync {
             "managed background tasks are unavailable in this session".to_string(),
         ))
     }
+
     async fn register_background_task(
         &self,
         _session_id: &str,
@@ -156,7 +185,9 @@ pub trait TaskHost: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
+
     async fn unregister_background_task(&self, _session_id: &str, _task_id: &str) {}
+
     async fn complete_background_task(
         &self,
         _session_id: &str,
@@ -164,10 +195,7 @@ pub trait TaskHost: Send + Sync {
         _state: crate::BackgroundTaskState,
     ) {
     }
-    /// Transition a still-live background task between the non-terminal
-    /// `Running` and `Idle` run states. Used by subagent hosts to
-    /// reflect whether the subagent is actively working or waiting for
-    /// a follow-up task.
+
     async fn transition_background_task_live_state(
         &self,
         _session_id: &str,
@@ -175,6 +203,7 @@ pub trait TaskHost: Send + Sync {
         _state: crate::BackgroundTaskState,
     ) {
     }
+
     async fn list_background_tasks(
         &self,
         _session_id: &str,
@@ -183,9 +212,7 @@ pub trait TaskHost: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
-    /// Dispatch a kind-aware cancel for any registered background task.
-    /// Monitor tasks terminate their process trees; subagent tasks close
-    /// the agent subtree; other managed tasks are aborted.
+
     async fn cancel_background_task(
         &self,
         _session_id: &str,
@@ -195,6 +222,7 @@ pub trait TaskHost: Send + Sync {
             "background task registry is unavailable in this session".to_string(),
         ))
     }
+
     async fn cancel_all_background_tasks(
         &self,
         session_id: &str,
@@ -209,6 +237,7 @@ pub trait TaskHost: Send + Sync {
         }
         Ok(cancelled)
     }
+
     async fn validate_async_handles_visible(
         &self,
         _session_id: &str,
@@ -216,6 +245,7 @@ pub trait TaskHost: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
+
     async fn transfer_async_handles(
         &self,
         _from_session_id: &str,
@@ -224,6 +254,7 @@ pub trait TaskHost: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
+
     async fn cancel_unreferenced_async_handles(
         &self,
         _session_id: &str,
@@ -231,15 +262,13 @@ pub trait TaskHost: Send + Sync {
     ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
         Ok(Vec::new())
     }
-}
 
-#[async_trait::async_trait]
-pub trait MonitorHost: Send + Sync {
     async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {
         Err(PluginError::Session(
             "monitors are unavailable in this session".to_string(),
         ))
     }
+
     async fn take_monitor_updates(
         &self,
         _session_id: &str,
@@ -248,6 +277,7 @@ pub trait MonitorHost: Send + Sync {
             "monitors are unavailable in this session".to_string(),
         ))
     }
+
     async fn start_monitor(
         &self,
         _session_id: &str,
@@ -257,6 +287,7 @@ pub trait MonitorHost: Send + Sync {
             "monitors are unavailable in this session".to_string(),
         ))
     }
+
     async fn stop_monitor(
         &self,
         _session_id: &str,
@@ -266,10 +297,7 @@ pub trait MonitorHost: Send + Sync {
             "monitors are unavailable in this session".to_string(),
         ))
     }
-}
 
-#[async_trait::async_trait]
-pub trait SessionGraphHost: Send + Sync {
     async fn append_session_nodes(
         &self,
         _session_id: &str,
@@ -279,10 +307,7 @@ pub trait SessionGraphHost: Send + Sync {
             "session graph mutation is unavailable in this session".to_string(),
         ))
     }
-}
 
-#[async_trait::async_trait]
-pub trait DirectCompletionHost: Send + Sync {
     /// Make a single LLM call without creating a full session. Used by
     /// plugins for structured extraction, summarization, observation,
     /// and other one-shot calls that don't need tools, turn loops, or
@@ -307,10 +332,7 @@ pub trait DirectCompletionHost: Send + Sync {
             "direct LLM completions are unavailable in this session".to_string(),
         ))
     }
-}
 
-#[async_trait::async_trait]
-pub trait TraceHost: Send + Sync {
     async fn emit_trace_event(
         &self,
         _context: lash_trace::TraceContext,
@@ -320,119 +342,8 @@ pub trait TraceHost: Send + Sync {
     }
 }
 
-pub trait PromptHookHost:
-    SessionSnapshotHost + ToolCatalogHost + TaskHost + DirectCompletionHost
-{
-}
-impl<T> PromptHookHost for T where
-    T: SessionSnapshotHost + ToolCatalogHost + TaskHost + DirectCompletionHost + ?Sized
-{
-}
-
-pub trait TurnHookHost:
-    SessionSnapshotHost + ToolStateHost + SessionLifecycleHost + TraceHost
-{
-}
-impl<T> TurnHookHost for T where
-    T: SessionSnapshotHost + ToolStateHost + SessionLifecycleHost + TraceHost + ?Sized
-{
-}
-
-pub trait ToolHookHost:
-    SessionSnapshotHost
-    + ToolCatalogHost
-    + ToolStateHost
-    + SessionLifecycleHost
-    + TurnHost
-    + TaskHost
-    + MonitorHost
-    + SessionGraphHost
-    + DirectCompletionHost
-    + TraceHost
-    + TurnResultHookHost
-    + CheckpointHookHost
-{
-}
-impl<T> ToolHookHost for T where
-    T: SessionSnapshotHost
-        + ToolCatalogHost
-        + ToolStateHost
-        + SessionLifecycleHost
-        + TurnHost
-        + TaskHost
-        + MonitorHost
-        + SessionGraphHost
-        + DirectCompletionHost
-        + TraceHost
-        + ?Sized
-{
-}
-
-pub trait TurnResultHookHost: SessionLifecycleHost + TraceHost {}
-impl<T> TurnResultHookHost for T where T: SessionLifecycleHost + TraceHost + ?Sized {}
-
-pub trait CheckpointHookHost: SessionLifecycleHost + TraceHost {}
-impl<T> CheckpointHookHost for T where T: SessionLifecycleHost + TraceHost + ?Sized {}
-
-pub trait HistoryHost:
-    SessionSnapshotHost
-    + SessionLifecycleHost
-    + TurnHost
-    + TaskHost
-    + SessionGraphHost
-    + DirectCompletionHost
-{
-}
-impl<T> HistoryHost for T where
-    T: SessionSnapshotHost
-        + SessionLifecycleHost
-        + TurnHost
-        + TaskHost
-        + SessionGraphHost
-        + DirectCompletionHost
-        + ?Sized
-{
-}
-
-pub trait PluginActionHost:
-    SessionSnapshotHost
-    + ToolCatalogHost
-    + ToolStateHost
-    + SessionLifecycleHost
-    + TurnHost
-    + TaskHost
-    + MonitorHost
-    + SessionGraphHost
-    + DirectCompletionHost
-    + TraceHost
-{
-}
-impl<T> PluginActionHost for T where
-    T: SessionSnapshotHost
-        + ToolCatalogHost
-        + ToolStateHost
-        + SessionLifecycleHost
-        + TurnHost
-        + TaskHost
-        + MonitorHost
-        + SessionGraphHost
-        + DirectCompletionHost
-        + TraceHost
-        + ?Sized
-{
-}
-
-pub trait RuntimeSessionHost:
-    PluginActionHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost
-{
-}
-impl<T> RuntimeSessionHost for T where
-    T: PluginActionHost + ToolHookHost + HistoryHost + TurnHookHost + PromptHookHost + ?Sized
-{
-}
-
 /// Result of a single-shot LLM call via
-/// [`DirectCompletionHost::direct_completion`].
+/// [`RuntimeSessionHost::direct_completion`].
 #[derive(Clone, Debug)]
 pub struct DirectCompletion {
     pub text: String,

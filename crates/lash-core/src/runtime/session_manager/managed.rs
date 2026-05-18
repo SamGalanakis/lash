@@ -91,6 +91,7 @@ impl ManagedSessionCapability {
                     .create_store(&SessionStoreCreateRequest {
                         session_id: session_id.clone(),
                         parent_session_id: parent_session_id.clone(),
+                        relation: request.relation.clone(),
                         policy: policy.clone(),
                     })
                     .map_err(|message| {

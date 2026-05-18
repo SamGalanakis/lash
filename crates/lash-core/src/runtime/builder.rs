@@ -5,8 +5,8 @@ use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
     BackgroundRuntimeHost, BackgroundTaskHost, EmbeddedRuntimeHost, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginStack, RuntimeCoreConfig,
-    RuntimePersistence, RuntimeServices, SessionError, SessionPolicy, SessionStoreFactory,
-    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
+    RuntimeEffectHost, RuntimePersistence, RuntimeServices, SessionError, SessionPolicy,
+    SessionStoreFactory, TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -174,6 +174,11 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.core = self.core.with_termination(termination);
+        self
+    }
+
+    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
+        self.core = self.core.with_effect_host(effect_host);
         self
     }
 

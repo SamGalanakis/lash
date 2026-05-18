@@ -22,6 +22,7 @@ mod paths;
 mod perf_support;
 mod persistence;
 mod plugin_surface;
+mod prompt_model;
 mod prompt_tool;
 mod provider_metadata;
 mod render;
@@ -52,8 +53,6 @@ mod util;
 use clap::{Parser, ValueEnum};
 #[cfg(feature = "dhat-heap")]
 use dhat::Alloc as DhatAlloc;
-#[cfg(test)]
-use lash::plugins::PluginSurfaceEvent;
 use lash::tracing::TraceLevel;
 #[cfg(test)]
 use lash::{InputItem, TurnActivity, TurnEvent};
@@ -637,24 +636,6 @@ mod tests {
         assert_eq!(
             renderer.stdout_text,
             "Inspected files.\nCompleted successfully."
-        );
-    }
-
-    #[test]
-    fn autonomous_renderer_collects_plugin_panel_output() {
-        let mut renderer = AutonomousRenderer::new();
-        let _ = renderer.handle(TurnActivity::independent(TurnEvent::PluginSurface {
-            plugin_id: "demo".to_string(),
-            event: PluginSurfaceEvent::PanelUpsert {
-                key: "panel:1".to_string(),
-                title: "TASK BOARD".to_string(),
-                content: "1. Inspect\n2. Patch".to_string(),
-            },
-        }));
-
-        assert_eq!(
-            renderer.rendered_plugin_output().as_deref(),
-            Some("TASK BOARD\n1. Inspect\n2. Patch")
         );
     }
 

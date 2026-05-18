@@ -271,7 +271,7 @@ pub(crate) async fn run_once(
         prepare_turn(&mut runtime, scenario, turn_index).await?;
 
         let phase_probe = Arc::new(RuntimePerfPhaseProbe::default());
-        runtime.set_turn_phase_probe(phase_probe.clone());
+        runtime.set_turn_phase_probe(phase_probe.clone()).await;
 
         let before_turn_usage = runtime.usage_report();
         let turn_before_alloc = allocator_stats();
@@ -292,7 +292,7 @@ pub(crate) async fn run_once(
                 turn_input.rlm_project(rlm_perf_projected_bindings(scenario, turn_index)?)?;
         }
         let turn = runtime
-            .run_turn_assembled(turn_input, CancellationToken::new())
+            .run_turn(turn_input, CancellationToken::new())
             .await
             .with_context(|| {
                 format!(
@@ -345,7 +345,7 @@ pub(crate) async fn run_once(
                 total: turn_total_alloc,
             },
             phase_profile: phase_probe.take_completed(),
-            turn_usage: turn.token_usage,
+            turn_usage: turn.usage,
             usage_delta: SessionUsageReport::from_entries(&usage_delta_entries),
             cumulative_usage,
         });
@@ -353,7 +353,7 @@ pub(crate) async fn run_once(
 
     let export_before_alloc = allocator_stats();
     let export_started = Instant::now();
-    let state = runtime.export_state();
+    let state = runtime.export_state().await;
     let cumulative_usage = runtime.usage_report();
     let export_state_ms = elapsed_ms(export_started);
     let export_state_alloc = alloc_delta(export_before_alloc, allocator_stats());

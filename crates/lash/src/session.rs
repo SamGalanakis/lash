@@ -224,6 +224,14 @@ impl SessionBuilder {
         let request = SessionStoreCreateRequest {
             session_id: self.session_id.clone(),
             parent_session_id: self.parent_session_id.clone(),
+            relation: self
+                .parent_session_id
+                .as_ref()
+                .map(|parent_session_id| lash_core::SessionRelation::Child {
+                    parent_session_id: parent_session_id.clone(),
+                    originating_tool_call_id: None,
+                })
+                .unwrap_or_default(),
             policy: policy.clone(),
         };
         factory
@@ -335,6 +343,16 @@ impl LashSession {
 
     pub fn usage_report(&self) -> SessionUsageReport {
         self.runtime.observe().usage_report.clone()
+    }
+
+    pub async fn set_turn_phase_probe(
+        &self,
+        probe: Arc<dyn lash_core::runtime::RuntimeTurnPhaseProbe>,
+    ) {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        runtime.set_turn_phase_probe(probe);
+        self.runtime.publish_from(&runtime);
     }
 }
 

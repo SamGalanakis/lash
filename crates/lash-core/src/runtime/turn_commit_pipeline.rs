@@ -8,10 +8,10 @@ use crate::{
     shared_parts,
 };
 
-use super::{PersistedSessionState, RuntimeError, TurnProgress, merge_ledger_entry};
+use super::{PersistedSessionState, RuntimeError, TurnCommitDraft, merge_ledger_entry};
 
 pub(super) struct ProgressBoundaryCommit {
-    pub(super) mirrored_events: Vec<SessionEventRecord>,
+    pub(super) mode_events: Vec<crate::ModeEvent>,
     pub(super) persisted: bool,
 }
 
@@ -19,14 +19,14 @@ struct ProgressBoundarySnapshot<'a> {
     policy: SessionPolicy,
     turn_index: usize,
     messages: MessageSequence,
-    events: Arc<Vec<SessionEventRecord>>,
+    event_delta: Vec<SessionEventRecord>,
     execution_state_snapshot: Option<Option<Vec<u8>>>,
     plugins: Option<&'a PluginSession>,
     store: Option<&'a (dyn RuntimePersistence + 'a)>,
 }
 
 pub(super) struct TurnCommitPipeline {
-    progress: Option<TurnProgress>,
+    draft: Option<TurnCommitDraft>,
     final_state: Option<PersistedSessionState>,
     final_graph_commit: Option<GraphCommitDelta>,
 }
@@ -58,15 +58,15 @@ impl PersistedGraphMark {
 impl TurnCommitPipeline {
     pub(super) fn from_state(state: PersistedSessionState) -> Self {
         Self {
-            progress: Some(TurnProgress::from_state(state)),
+            draft: Some(TurnCommitDraft::from_state(state)),
             final_state: None,
             final_graph_commit: None,
         }
     }
 
     pub(super) fn state_mut(&mut self) -> &mut PersistedSessionState {
-        match self.progress.as_mut() {
-            Some(progress) => progress.state_mut(),
+        match self.draft.as_mut() {
+            Some(draft) => draft.state_mut(),
             None => self
                 .final_state
                 .as_mut()
@@ -75,14 +75,14 @@ impl TurnCommitPipeline {
     }
 
     pub(super) fn apply_prepared_messages(&mut self, messages: &MessageSequence) {
-        self.progress_mut().apply_prepared_messages(messages);
+        self.draft_mut().apply_prepared_messages(messages);
     }
 
     pub(super) fn record_tool_calls<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = ToolCallRecord>,
     {
-        self.progress_mut().record_tool_calls(records);
+        self.draft_mut().record_tool_calls(records);
     }
 
     pub(super) fn read_view(
@@ -92,12 +92,12 @@ impl TurnCommitPipeline {
         mode_turn_options: crate::ModeTurnOptions,
         messages: MessageSequence,
     ) -> SessionReadView {
-        self.progress_ref()
+        self.draft_ref()
             .read_view(policy, turn_index, mode_turn_options, messages)
     }
 
     pub(super) fn active_events(&self) -> Arc<Vec<SessionEventRecord>> {
-        self.progress_ref().active_events()
+        self.draft_ref().active_events()
     }
 
     pub(super) fn finalize_turn_read_state(
@@ -106,7 +106,7 @@ impl TurnCommitPipeline {
         tool_calls: &[ToolCallRecord],
         cancelled: bool,
     ) {
-        self.progress_mut()
+        self.draft_mut()
             .finalize_turn_read_state(new_messages, tool_calls, cancelled);
     }
 
@@ -133,7 +133,7 @@ impl TurnCommitPipeline {
             Some(session) => Self::snapshot_dirty_execution_state(session).await,
             None => None,
         };
-        let state = self.progress_mut().state_mut();
+        let state = self.draft_mut().state_mut();
         state.policy = policy;
         state.turn_index = turn_index;
         if let Some(execution_state_snapshot) = execution_state_snapshot {
@@ -151,11 +151,11 @@ impl TurnCommitPipeline {
         policy: SessionPolicy,
         turn_index: usize,
         messages: MessageSequence,
-        events: Arc<Vec<SessionEventRecord>>,
+        event_delta: Vec<SessionEventRecord>,
     ) -> ProgressBoundaryCommit {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return ProgressBoundaryCommit {
-                mirrored_events: Vec::new(),
+                mode_events: Vec::new(),
                 persisted: false,
             };
         }
@@ -167,7 +167,7 @@ impl TurnCommitPipeline {
             policy,
             turn_index,
             messages,
-            events,
+            event_delta,
             execution_state_snapshot,
             plugins: Some(plugins.as_ref()),
             store: store.as_ref().map(|store| store.as_ref()),
@@ -183,23 +183,23 @@ impl TurnCommitPipeline {
             policy,
             turn_index,
             messages,
-            events,
+            event_delta,
             execution_state_snapshot,
             plugins,
             store,
         } = snapshot;
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
             return ProgressBoundaryCommit {
-                mirrored_events: Vec::new(),
+                mode_events: Vec::new(),
                 persisted: false,
             };
         }
 
-        let mirrored_events = self.progress_mut().mirror_sansio_progress(&events);
+        let mode_events = self.apply_event_delta(event_delta);
         {
-            let progress = self.progress_mut();
-            progress.apply_prepared_messages(&messages);
-            let state = progress.state_mut();
+            let draft = self.draft_mut();
+            draft.apply_prepared_messages(&messages);
+            let state = draft.state_mut();
             state.policy = policy;
             state.turn_index = turn_index;
             if let Some(execution_state_snapshot) = execution_state_snapshot {
@@ -212,19 +212,19 @@ impl TurnCommitPipeline {
 
         let Some(store) = store else {
             return ProgressBoundaryCommit {
-                mirrored_events,
+                mode_events,
                 persisted: false,
             };
         };
         match self.commit_progress_graph(store, &[]).await {
             Ok(()) => ProgressBoundaryCommit {
-                mirrored_events,
+                mode_events,
                 persisted: true,
             },
             Err(err) => {
                 tracing::warn!("failed to persist runtime progress boundary: {err}");
                 ProgressBoundaryCommit {
-                    mirrored_events,
+                    mode_events,
                     persisted: false,
                 }
             }
@@ -233,6 +233,22 @@ impl TurnCommitPipeline {
 
     pub(super) fn export_state_for_assembly(&mut self) -> crate::SessionStateEnvelope {
         self.final_state_mut().export_state()
+    }
+
+    pub(super) fn apply_event_delta(
+        &mut self,
+        event_delta: Vec<SessionEventRecord>,
+    ) -> Vec<crate::ModeEvent> {
+        let mode_events = event_delta
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionEventRecord::Mode(event) => Some(event),
+                SessionEventRecord::Conversation(_) | SessionEventRecord::Tool(_) => None,
+            })
+            .collect::<Vec<_>>();
+        self.draft_mut()
+            .append_mode_events(mode_events.iter().cloned());
+        mode_events
     }
 
     pub(super) async fn final_commit(
@@ -271,33 +287,33 @@ impl TurnCommitPipeline {
         if let Some(state) = self.final_state.take() {
             return state;
         }
-        self.progress
+        self.draft
             .take()
-            .expect("turn commit pipeline progress must be present")
+            .expect("turn commit pipeline draft must be present")
             .into_final_state()
     }
 
-    fn progress_ref(&self) -> &TurnProgress {
-        self.progress
+    fn draft_ref(&self) -> &TurnCommitDraft {
+        self.draft
             .as_ref()
-            .expect("turn progress is unavailable after final state materialization")
+            .expect("turn commit draft is unavailable after final state materialization")
     }
 
-    fn progress_mut(&mut self) -> &mut TurnProgress {
-        self.progress
+    fn draft_mut(&mut self) -> &mut TurnCommitDraft {
+        self.draft
             .as_mut()
-            .expect("turn progress is unavailable after final state materialization")
+            .expect("turn commit draft is unavailable after final state materialization")
     }
 
     fn final_state_mut(&mut self) -> &mut PersistedSessionState {
         if self.final_state.is_none() {
-            let progress = self
-                .progress
+            let draft = self
+                .draft
                 .take()
-                .expect("turn commit pipeline progress must be present");
+                .expect("turn commit pipeline draft must be present");
             self.final_graph_commit =
-                Some(progress.graph_commit(progress.state().graph_replace_required));
-            self.final_state = Some(progress.into_final_state());
+                Some(draft.graph_commit(draft.state().graph_replace_required));
+            self.final_state = Some(draft.into_final_state());
         }
         self.final_state
             .as_mut()
@@ -309,9 +325,9 @@ impl TurnCommitPipeline {
         store: &(dyn RuntimePersistence + '_),
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Result<(), StoreError> {
-        let progress = self.progress_mut();
-        let state = progress.state();
-        let graph = progress.graph_commit(state.graph_replace_required);
+        let draft = self.draft_mut();
+        let state = draft.state();
+        let graph = draft.graph_commit(state.graph_replace_required);
         self.apply_commit(store, graph, usage_deltas).await
     }
 
@@ -337,9 +353,9 @@ impl TurnCommitPipeline {
         }
         materialize_terminal_output(state, outcome);
         let progress_graph = self
-            .progress
+            .draft
             .as_ref()
-            .map(|progress| progress.graph_commit(progress.state().graph_replace_required))
+            .map(|draft| draft.graph_commit(draft.state().graph_replace_required))
             .or_else(|| self.final_graph_commit.clone());
         let state = self.final_state_mut();
 
@@ -387,14 +403,14 @@ impl TurnCommitPipeline {
         let commit = RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
         let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
-        if let Some(progress) = self.progress.as_mut() {
+        if let Some(draft) = self.draft.as_mut() {
             match mark {
                 PersistedGraphMark::Unchanged => {}
                 PersistedGraphMark::Append(node_ids) => {
-                    progress.mark_node_ids_persisted(node_ids);
+                    draft.mark_node_ids_persisted(node_ids);
                 }
                 PersistedGraphMark::ReplaceFull(node_ids) => {
-                    progress.replace_persisted_node_ids(node_ids);
+                    draft.replace_persisted_node_ids(node_ids);
                 }
             }
         }
@@ -707,7 +723,15 @@ mod tests {
             .await
             .expect("commit");
 
-        let stored_graph = store.session_graph.lock().expect("lock graph").clone();
+        let mut stored_graph = store.session_graph.lock().expect("lock graph").clone();
+        stored_graph.set_leaf_node_id(
+            store
+                .session_head_meta
+                .lock()
+                .expect("lock head meta")
+                .as_ref()
+                .and_then(|meta| meta.leaf_node_id.clone()),
+        );
         assert_eq!(stored_graph.nodes.len(), graph.nodes.len());
         assert_eq!(stored_graph.nodes[1].node_id, graph.nodes[1].node_id);
         assert!(pipeline.state_mut().head_revision.is_some());
@@ -752,25 +776,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn progress_boundary_mirrors_once_and_reports_successful_commit() {
+    async fn progress_boundary_uses_typed_messages_without_duplicate_conversation_nodes() {
         let user = text_message("u0", MessageRole::User, "hello");
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
+        let base_graph = graph.clone();
         let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
-        let events = Arc::new(vec![
+        let event_delta = vec![
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
             crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
                 assistant.clone(),
             )),
-        ]);
+        ];
         let store = RecordingStore::default();
+        store
+            .session_graph
+            .lock()
+            .expect("lock graph")
+            .extend_node_records(base_graph.nodes.iter().cloned());
 
         let boundary = pipeline
             .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
                 policy: SessionPolicy::default(),
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user.clone(), assistant.clone()].into()),
-                events: Arc::clone(&events),
+                event_delta,
                 execution_state_snapshot: None,
                 plugins: None,
                 store: Some(&store),
@@ -778,19 +808,35 @@ mod tests {
             .await;
 
         assert!(boundary.persisted);
-        assert_eq!(boundary.mirrored_events.len(), 1);
-        let second = pipeline
-            .progress_boundary_with_snapshot(ProgressBoundarySnapshot {
-                policy: SessionPolicy::default(),
-                turn_index: 1,
-                messages: MessageSequence::from_base(vec![user, assistant].into()),
-                events,
-                execution_state_snapshot: None,
-                plugins: None,
-                store: Some(&store),
+        assert!(boundary.mode_events.is_empty());
+
+        let stored_graph = store.session_graph.lock().expect("lock graph").clone();
+        let conversation_nodes = stored_graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.event(),
+                    Some(crate::SessionEventRecord::Conversation(_))
+                )
             })
-            .await;
-        assert!(second.mirrored_events.is_empty());
+            .collect::<Vec<_>>();
+        assert_eq!(conversation_nodes.len(), 2);
+        assert_eq!(conversation_nodes[0].node_id, "u0");
+        assert_eq!(conversation_nodes[1].node_id, "a0");
+        assert!(
+            stored_graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(
+                    node.event(),
+                    Some(
+                        crate::SessionEventRecord::Conversation(_)
+                            | crate::SessionEventRecord::Tool(_)
+                    )
+                ))
+                .all(|node| !node.node_id.starts_with("plugin:"))
+        );
     }
 
     #[tokio::test]
@@ -799,12 +845,12 @@ mod tests {
         let assistant = text_message("a0", MessageRole::Assistant, "hi");
         let graph = SessionGraph::from_active_read_state(std::slice::from_ref(&user), &[]);
         let mut pipeline = TurnCommitPipeline::from_state(state_with_graph(graph));
-        let events = Arc::new(vec![
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(user.clone())),
-            crate::SessionEventRecord::Conversation(ConversationRecord::from_message(
-                assistant.clone(),
-            )),
-        ]);
+        let mode_event = crate::ModeEvent::typed(
+            crate::ExecutionMode::new("rlm"),
+            serde_json::json!({"step": "started"}),
+        )
+        .expect("mode event serializes");
+        let event_delta = vec![crate::SessionEventRecord::Mode(mode_event)];
         let store = RecordingStore::default();
         store
             .save_session_head_meta(crate::SessionHeadMeta {
@@ -818,7 +864,7 @@ mod tests {
                 policy: SessionPolicy::default(),
                 turn_index: 1,
                 messages: MessageSequence::from_base(vec![user, assistant].into()),
-                events,
+                event_delta,
                 execution_state_snapshot: None,
                 plugins: None,
                 store: Some(&store),
@@ -826,7 +872,7 @@ mod tests {
             .await;
 
         assert!(!boundary.persisted);
-        assert_eq!(boundary.mirrored_events.len(), 1);
+        assert_eq!(boundary.mode_events.len(), 1);
         assert_eq!(
             *store
                 .runtime_commit_count

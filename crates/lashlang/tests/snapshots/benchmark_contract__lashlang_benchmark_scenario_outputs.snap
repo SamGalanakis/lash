@@ -1,6 +1,6 @@
 ---
 source: crates/lashlang/tests/benchmark_contract.rs
-assertion_line: 31
+assertion_line: 29
 expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs should serialize\")"
 ---
 {
@@ -226,13 +226,12 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "tags": "snapshot,projected,mixed"
   },
   "tool_control_surface": {
-    "first": "done:chunk_1",
+    "first": "done:inspect auth",
     "llm": "benchmark summary",
     "monitor": "app log",
-    "second": "done:chunk_2",
-    "stopped": "cancelled",
-    "subagents": 2,
-    "tasks": 2
+    "monitors": 0,
+    "second": "done:inspect api",
+    "tools": 2
   },
   "type_system_stress": {
     "count": 64,

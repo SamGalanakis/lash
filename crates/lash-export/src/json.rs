@@ -13,6 +13,7 @@ pub fn render(session: &LoadedSession) -> String {
             "model": meta.model,
             "cwd": meta.cwd,
             "parent_session_id": meta.parent_session_id,
+            "relation": meta.relation,
         })
     });
 

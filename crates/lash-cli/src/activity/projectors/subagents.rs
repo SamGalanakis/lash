@@ -24,24 +24,9 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     let task = tool_arg_str(&ctx.args, "task")
         .unwrap_or("spawn agent")
         .to_string();
-    let path = ctx
-        .result
-        .get("agent_name")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
     let capability_arg = tool_arg_str(&ctx.args, "capability").unwrap_or_default();
-    let name = subagent_name(
-        ctx.result
-            .get("agent_name")
-            .and_then(|value| value.as_str()),
-        Some(path),
-        "subagent",
-    );
     let mut detail_lines = Vec::new();
     detail_lines.push(format!("Task {}", inline_text(&task)));
-    if !path.is_empty() {
-        detail_lines.push(format!("Agent {}", inline_text(path)));
-    }
     if !capability_arg.is_empty() {
         detail_lines.push(format!(
             "Profile {} capability",
@@ -53,7 +38,7 @@ fn project_spawn_agent(ctx: &mut ProjectCtx<'_>) -> ActivityBlock {
     }
     block(
         ctx,
-        format!("spawn subagent · {}", inline_text(&name)),
+        format!("spawn subagent · {}", inline_text(&task)),
         detail_lines,
         None,
     )
@@ -78,14 +63,6 @@ fn summarize_seed_arg(seed: Option<&Value>) -> Option<String> {
         }
     }
     Some(format!("Seed {}", parts.join(", ")))
-}
-
-fn subagent_name(agent_name: Option<&str>, path: Option<&str>, fallback: &str) -> String {
-    agent_name
-        .filter(|value| !value.trim().is_empty())
-        .map(inline_text)
-        .or_else(|| path.map(inline_text))
-        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn block(

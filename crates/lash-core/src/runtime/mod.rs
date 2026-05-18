@@ -1,6 +1,7 @@
 mod assembly;
 mod builder;
 mod config_ops;
+mod effect_host;
 mod environment;
 mod host;
 mod io;
@@ -12,11 +13,11 @@ mod session_ops;
 mod state;
 #[cfg(test)]
 mod tests;
+mod turn_commit_draft;
 mod turn_commit_pipeline;
 mod turn_driver;
-mod turn_graph;
+mod turn_graph_editor;
 mod turn_loop;
-mod turn_progress;
 mod usage;
 
 use std::any::Any;
@@ -36,6 +37,7 @@ use crate::llm::types::{
 use crate::plugin::runtime_host::RuntimeSessionHost;
 use crate::plugin::{
     CheckpointHookContext, PluginMessage, PrepareTurnRequest, SessionConfigChangedContext,
+    SessionRelation,
 };
 use crate::sansio::{LlmCallError, Response};
 use crate::session_model::{
@@ -52,9 +54,9 @@ use crate::{Effect, TurnMachine};
 
 use host::*;
 use session_manager::*;
+use turn_commit_draft::*;
 use turn_commit_pipeline::*;
 use turn_driver::*;
-use turn_progress::*;
 
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
@@ -67,6 +69,10 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
+pub use effect_host::{
+    DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata, EffectOrigin,
+    LocalRuntimeEffectHost, RuntimeEffectHost, RuntimeEffectKind, TurnEffectLocalExecutor,
+};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
@@ -620,9 +626,9 @@ pub enum TurnEvent {
         max_attempts: usize,
         reason: String,
     },
-    PluginSurface {
+    PluginRuntime {
         plugin_id: String,
-        event: crate::PluginSurfaceEvent,
+        event: crate::PluginRuntimeEvent,
     },
     QueuedInputAccepted {
         checkpoint: crate::CheckpointKind,
@@ -666,6 +672,7 @@ enum RuntimeStreamEvent {
 pub struct SessionStoreCreateRequest {
     pub session_id: String,
     pub parent_session_id: Option<String>,
+    pub relation: SessionRelation,
     pub policy: SessionPolicy,
 }
 

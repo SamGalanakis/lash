@@ -542,13 +542,11 @@ submit {
         }
         Scenario::ToolControlSurface => {
             r#"
-first = start call spawn_agent { agent_name: "chunk_1", task: "inspect auth", capability: "explore" }
-second = start call spawn_agent { agent_name: "chunk_2", task: "inspect api", capability: "explore" }
+first = start call spawn_agent { task: "inspect auth", capability: "explore" }
+second = start call spawn_agent { task: "inspect api", capability: "explore" }
 llm = start call llm_query { prompt: "summarize benchmark", model: "gpt-5.4-mini" }
 monitor = start call monitor { command: "tail -f app.log", description: "app log", timeout_ms: 1000 }
 handles = (call list_async_handles {})?
-tasks = (call tasks_list {})?
-stopped = (call tasks_stop { task_id: "monitor:app-log" })?
 results = parallel {
   first: await first
   second: await second
@@ -561,9 +559,8 @@ submit {
   second: results.second.value.claim,
   llm: results.llm.value.text,
   monitor: results.monitor.value.description,
-  subagents: len(keys(handles.subagent)),
-  tasks: len(tasks.tasks),
-  stopped: stopped.run_state
+  tools: len(keys(handles.tool)),
+  monitors: len(keys(handles.monitor))
 }
 "#
         }
@@ -586,7 +583,7 @@ submit {
         }
         Scenario::ContinueAsSeedSurface => {
             r#"
-agent = start call spawn_agent { agent_name: "carry", task: "inspect carry-forward", capability: "explore" }
+agent = start call spawn_agent { task: "inspect carry-forward", capability: "explore" }
 handles = (call list_async_handles {})?
 handoff = (call continue_as {
   task: "continue from compact state",
@@ -594,7 +591,7 @@ handoff = (call continue_as {
     projected_problem: proj.text,
     nested_projected: { body: proj.json },
     computed_summary: format("{0}:{1}", ctx.user, len(history)),
-    live_agent: handles.subagent.chunk_1,
+    live_agent: handles.tool.spawn_one,
     started_agent: agent
   }
 })?
@@ -1143,8 +1140,8 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
             Ok(Value::Record(Arc::new(record)))
         }
         "spawn_agent" => {
-            let name = args
-                .get("agent_name")
+            let task = args
+                .get("task")
                 .and_then(|value| match value {
                     Value::String(text) => Some(text.as_str()),
                     _ => None,
@@ -1153,9 +1150,8 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
             let mut record = Record::default();
             record.insert(
                 "claim".to_string(),
-                Value::String(format!("done:{name}").into()),
+                Value::String(format!("done:{task}").into()),
             );
-            record.insert("agent_name".to_string(), Value::String(name.into()));
             Ok(Value::Record(Arc::new(record)))
         }
         "monitor" => {
@@ -1165,7 +1161,7 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
                 Value::String("monitor:app-log".into()),
             );
             record.insert("kind".to_string(), Value::String("monitor".into()));
-            record.insert("run_state".to_string(), Value::String("running".into()));
+            record.insert("state".to_string(), Value::String("running".into()));
             record.insert(
                 "description".to_string(),
                 args.get("description")
@@ -1175,19 +1171,6 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
             Ok(Value::Record(Arc::new(record)))
         }
         "list_async_handles" => Ok(async_handles_record()),
-        "tasks_list" => Ok(tasks_list_record()),
-        "tasks_stop" => {
-            let mut record = Record::default();
-            record.insert(
-                "task_id".to_string(),
-                args.get("task_id")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String("task".into())),
-            );
-            record.insert("kind".to_string(), Value::String("monitor".into()));
-            record.insert("run_state".to_string(), Value::String("cancelled".into()));
-            Ok(Value::Record(Arc::new(record)))
-        }
         "continue_as" => Ok(continue_as_record(args)),
         _ => Err(unknown_tool(name)),
     }
@@ -1259,63 +1242,26 @@ fn count_handles(value: &Value) -> usize {
 fn async_handles_record() -> Value {
     let mut chunk_1 = Record::default();
     chunk_1.insert("__handle__".to_string(), Value::String("task".into()));
-    chunk_1.insert("id".to_string(), Value::String("subagent:chunk_1".into()));
+    chunk_1.insert("id".to_string(), Value::String("spawn-one".into()));
     chunk_1.insert("tool".to_string(), Value::String("spawn_agent".into()));
-    chunk_1.insert("value".to_string(), spawn_agent_value("chunk_1"));
+    chunk_1.insert("value".to_string(), spawn_agent_value("inspect auth"));
 
     let mut chunk_2 = Record::default();
     chunk_2.insert("__handle__".to_string(), Value::String("task".into()));
-    chunk_2.insert("id".to_string(), Value::String("subagent:chunk_2".into()));
+    chunk_2.insert("id".to_string(), Value::String("spawn-two".into()));
     chunk_2.insert("tool".to_string(), Value::String("spawn_agent".into()));
-    chunk_2.insert("value".to_string(), spawn_agent_value("chunk_2"));
+    chunk_2.insert("value".to_string(), spawn_agent_value("inspect api"));
 
-    let mut subagent = Record::default();
-    subagent.insert("chunk_1".to_string(), Value::Record(Arc::new(chunk_1)));
-    subagent.insert("chunk_2".to_string(), Value::Record(Arc::new(chunk_2)));
+    let mut tool = Record::default();
+    tool.insert("spawn_one".to_string(), Value::Record(Arc::new(chunk_1)));
+    tool.insert("spawn_two".to_string(), Value::Record(Arc::new(chunk_2)));
 
     let mut out = Record::default();
     out.insert(
         "monitor".to_string(),
         Value::Record(Arc::new(Record::default())),
     );
-    out.insert("subagent".to_string(), Value::Record(Arc::new(subagent)));
-    out.insert(
-        "tool".to_string(),
-        Value::Record(Arc::new(Record::default())),
-    );
-    Value::Record(Arc::new(out))
-}
-
-fn tasks_list_record() -> Value {
-    let mut monitor = Record::default();
-    monitor.insert(
-        "task_id".to_string(),
-        Value::String("monitor:app-log".into()),
-    );
-    monitor.insert("kind".to_string(), Value::String("monitor".into()));
-    monitor.insert("label".to_string(), Value::String("app log".into()));
-    monitor.insert("run_state".to_string(), Value::String("running".into()));
-
-    let mut subagent = Record::default();
-    subagent.insert(
-        "task_id".to_string(),
-        Value::String("subagent:chunk_1".into()),
-    );
-    subagent.insert("kind".to_string(), Value::String("subagent".into()));
-    subagent.insert("label".to_string(), Value::String("chunk_1".into()));
-    subagent.insert("run_state".to_string(), Value::String("idle".into()));
-
-    let mut out = Record::default();
-    out.insert(
-        "tasks".to_string(),
-        Value::List(
-            vec![
-                Value::Record(Arc::new(monitor)),
-                Value::Record(Arc::new(subagent)),
-            ]
-            .into(),
-        ),
-    );
+    out.insert("tool".to_string(), Value::Record(Arc::new(tool)));
     Value::Record(Arc::new(out))
 }
 
@@ -1325,7 +1271,6 @@ fn spawn_agent_value(name: &str) -> Value {
         "claim".to_string(),
         Value::String(format!("done:{name}").into()),
     );
-    record.insert("agent_name".to_string(), Value::String(name.into()));
     Value::Record(Arc::new(record))
 }
 

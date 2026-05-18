@@ -143,6 +143,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
             session_id: Some("child-observation".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "child-observation-parent".to_string(),
+                originating_tool_call_id: None,
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,
@@ -184,6 +185,7 @@ async fn session_control_manages_child_session_turns() -> Result<()> {
             session_id: Some("child-control".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "parent-control".to_string(),
+                originating_tool_call_id: None,
             },
             start: lash_core::SessionStartPoint::Empty,
             policy: None,

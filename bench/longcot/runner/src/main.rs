@@ -13,9 +13,9 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::{
-    SessionSpec, TurnInput,
+    LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
-    plugins::{PluginFactory, PluginSession, PluginSpec, StaticPluginFactory},
+    plugins::{PluginSpec, StaticPluginFactory},
     prompt::{
         PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
     },
@@ -27,22 +27,13 @@ use lash::{
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
-use lash_core::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, LocalBackgroundTaskHost,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
-};
+use lash_core::{InputItem, SessionEvent};
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
-use lash_mode_rlm::{
-    BuiltinRlmModePluginFactory, RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt,
-};
+use lash_mode_rlm::{RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt};
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_sqlite_store::Store;
-use lash_subagents::{
-    CapabilityRegistry, LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
-};
+use lash_subagents::{CapabilityRegistry, StaticCapability, SubagentsPluginFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -585,7 +576,7 @@ async fn run_question(
     output_dir: &Path,
     provider: &ProviderHandle,
     args: &Args,
-    execution_mode: ExecutionMode,
+    _execution_mode: ExecutionMode,
     question: LongCoTQuestion,
 ) -> anyhow::Result<QuestionResult> {
     let question_dir = output_dir.join("questions").join(&question.question_id);
@@ -601,51 +592,31 @@ async fn run_question(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
 
-    let policy = SessionPolicy {
-        model: args.model.clone(),
-        provider: provider.clone(),
-        max_context_tokens: Some(args.max_context_tokens),
-        execution_mode: execution_mode.clone(),
-        standard_context_approach: None,
-        model_variant: Some(args.variant.clone()),
-        max_turns: Some(args.max_turns),
-        ..SessionPolicy::default()
-    };
+    let core = LashCore::builder()
+        .install_mode(ModePreset::rlm_with_config(longcot_rlm_config()))
+        .default_mode(ModeId::rlm())
+        .provider(provider.clone())
+        .model(args.model.clone(), Some(args.variant.clone()))
+        .max_context_tokens(args.max_context_tokens)
+        .max_turns(args.max_turns)
+        .prompt_template(longcot_prompt_template())
+        .trace_jsonl_path(Some(trace_path.clone()))
+        .plugins(build_plugin_stack())
+        .build()?;
+    let session = core
+        .session("root")
+        .rlm()
+        .store(store.clone())
+        .open()
+        .await?;
 
-    let plugin_session = build_plugin_session(execution_mode.clone(), &policy)?;
-    let services = PersistentRuntimeServices::new_with_bridges(
-        plugin_session,
-        TurnInjectionBridge::new(),
-        TurnInputInjectionBridge::new(),
-        store.clone() as Arc<dyn RuntimePersistence>,
-    );
-    let host = BackgroundRuntimeHost::new(
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default()
-                .with_trace_jsonl_path(Some(trace_path.clone()))
-                .with_prompt_template(longcot_prompt_template()),
-        ),
-        Arc::new(LocalBackgroundTaskHost::default()),
-    );
-    let mut runtime = LashRuntime::from_persistent_background_state(
-        policy.clone(),
-        host,
-        services,
-        PersistedSessionState {
-            session_id: "root".to_string(),
-            policy,
-            ..PersistedSessionState::default()
-        },
-    )
-    .await?;
-
-    let before_usage = runtime.usage_report();
+    let before_usage = session.usage_report();
     let started = std::time::Instant::now();
     let cancel = tokio_util::sync::CancellationToken::new();
     let sink = Arc::new(LongCoTEventSink::new(question_dir.join("events.jsonl"))?);
     let sink_trait: Arc<dyn EventSink> = sink.clone();
-    let turn = runtime
-        .stream_turn(
+    let turn = session
+        .turn(
             (TurnInput {
                 items: vec![InputItem::Text {
                     text: LONGCOT_USER_DIRECTIVE.to_string(),
@@ -657,16 +628,16 @@ async fn run_question(
                 turn_context: TurnContext::default(),
             })
             .rlm_project(build_projected_bindings(&question)?)?,
-            sink_trait.as_ref(),
-            cancel,
         )
+        .cancel(cancel)
+        .collect_session_events_with(sink_trait.as_ref())
         .await
         .context("run longcot question")?;
     if args.await_background_work {
-        runtime.await_background_work().await?;
+        session.background_tasks().await_all().await?;
     }
     let elapsed_seconds = started.elapsed().as_secs_f64();
-    let after_usage = runtime.usage_report();
+    let after_usage = session.usage_report();
     let usage = diff_usage_reports(&before_usage, &after_usage)
         .map(|rows| SessionUsageReport::from_entries(&rows))
         .map_err(anyhow::Error::msg)
@@ -814,46 +785,31 @@ fn extract_text(content: Option<&Value>) -> String {
 ///, so recursive descents stay inside
 /// the locked-down set instead of accidentally picking up whatever happens to
 /// be registered at the root.
-fn build_plugin_session(
-    execution_mode: ExecutionMode,
-    _policy: &SessionPolicy,
-) -> anyhow::Result<Arc<PluginSession>> {
+fn build_plugin_stack() -> PluginStack {
     let _longcot_tools = longcot_tool_definitions();
-    let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(ToolOutputBudgetPluginFactory::default()),
-        Arc::new(BuiltinRlmModePluginFactory::new(RlmModePluginConfig {
-            prompt_features: RlmPromptFeatures {
-                images: false,
-                ..RlmPromptFeatures::default()
-            },
-            ..RlmModePluginConfig::default()
-        })),
-        Arc::new(LlmToolsPluginFactory::default()),
-        Arc::new(StaticPluginFactory::new(
-            "longcot_async_handles",
-            PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),
-        )),
-        Arc::new(
-            SubagentsPluginFactory::new(
-                Arc::new(
-                    CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
-                        SUBAGENT_CAPABILITY,
-                        SessionSpec::inherit(),
-                    ))),
-                ),
-                Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
-            )
-            .with_session_spec(SessionSpec::inherit()),
-        ),
-    ];
-    PluginHost::new(factories)
-        .build_session(
-            "root",
-            execution_mode,
-            None::<StandardContextApproach>,
-            None,
-        )
-        .context("build plugin session")
+    let mut stack = PluginStack::runtime();
+    stack.push(Arc::new(LlmToolsPluginFactory::default()));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "longcot_async_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),
+    )));
+    stack.push(Arc::new(
+        SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
+            StaticCapability::new(SUBAGENT_CAPABILITY, SessionSpec::inherit()),
+        ))))
+        .with_session_spec(SessionSpec::inherit()),
+    ));
+    stack
+}
+
+fn longcot_rlm_config() -> RlmModePluginConfig {
+    RlmModePluginConfig {
+        prompt_features: RlmPromptFeatures {
+            images: false,
+            ..RlmPromptFeatures::default()
+        },
+        ..RlmModePluginConfig::default()
+    }
 }
 
 /// Locked-down tool surface visible to the model and inherited by every
@@ -895,16 +851,15 @@ impl ToolProvider for LongCoTAsyncHandlesTool {
 fn longcot_list_async_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
+        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
             "properties": {
                 "monitor": { "type": "object" },
-                "subagent": { "type": "object" },
                 "tool": { "type": "object" }
             },
-            "required": ["monitor", "subagent", "tool"]
+            "required": ["monitor", "tool"]
         }),
     )
     .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])

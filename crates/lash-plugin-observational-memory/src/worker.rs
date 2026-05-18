@@ -4,7 +4,7 @@ use lash_core::{
     ObservationalMemoryConfig,
 };
 
-use crate::host::OmHistoryHost;
+use crate::host::OmRuntimeHost;
 use crate::model::{ActiveMemoryState, ObservedMessageNode, ParsedMemoryOutput};
 use crate::prompts::{
     build_observer_prompt, build_reflector_prompt, observer_system_prompt, parse_memory_output,
@@ -13,7 +13,7 @@ use crate::prompts::{
 
 pub(crate) async fn run_observer_batch(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: lash_core::SessionPolicy,
     active: Option<&ActiveMemoryState>,
     batch: &[impl ObservedMessageNode],
@@ -42,7 +42,7 @@ pub(crate) async fn run_observer_batch(
 }
 
 pub(crate) async fn run_reflector(
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: lash_core::SessionPolicy,
     observations: &str,
 ) -> Result<ParsedMemoryOutput, PluginError> {
@@ -58,7 +58,7 @@ pub(crate) async fn run_reflector(
 }
 
 async fn run_worker_turn(
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: lash_core::SessionPolicy,
     worker_kind: &str,
     system_prompt: &str,

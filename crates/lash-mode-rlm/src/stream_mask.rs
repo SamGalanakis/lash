@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use lash_core::PluginSurfaceEvent;
+use lash_core::PluginRuntimeEvent;
 use lash_core::plugin::{
     AssistantStreamHookContext, AssistantStreamTransform, PluginError, PluginRegistrar,
 };
@@ -183,7 +183,7 @@ impl FenceDetector {
             let mut events = Vec::new();
             if !self.emitted_start {
                 self.emitted_start = true;
-                events.push(PluginSurfaceEvent::Custom {
+                events.push(PluginRuntimeEvent::Custom {
                     name: "rlm_fence_start".to_string(),
                     payload: serde_json::json!({}),
                 });
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(t.events.len(), 1);
         assert!(matches!(
             &t.events[0],
-            PluginSurfaceEvent::Custom { name, .. } if name == "rlm_fence_start"
+            PluginRuntimeEvent::Custom { name, .. } if name == "rlm_fence_start"
         ));
     }
 

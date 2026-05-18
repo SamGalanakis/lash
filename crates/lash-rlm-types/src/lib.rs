@@ -122,6 +122,7 @@ pub fn apply_globals_patch(
 pub enum RlmModeEvent {
     RlmTrajectoryEntry(RlmTrajectoryEntry),
     RlmGlobalsPatch(RlmGlobalsPatchPluginBody),
+    RlmSeed(RlmSeedPluginBody),
     RlmDiagnostic(RlmDiagnosticEvent),
 }
 
@@ -154,6 +155,14 @@ impl RlmProjection {
             }
             RlmModeEvent::RlmGlobalsPatch(patch) => {
                 apply_globals_patch(&mut self.globals, &patch);
+            }
+            RlmModeEvent::RlmSeed(seed) => {
+                apply_globals_patch(
+                    &mut self.globals,
+                    &RlmGlobalsPatchPluginBody {
+                        set_default: seed.globals,
+                    },
+                );
             }
             RlmModeEvent::RlmDiagnostic(_) => {}
         }
@@ -192,12 +201,6 @@ impl Default for RlmTermination {
 pub struct RlmCreateExtras {
     #[serde(default)]
     pub termination: RlmTermination,
-    /// Optional projected-binding seed for the new session. Each entry becomes
-    /// a host-projected (read-only) binding visible in the child's RLM
-    /// system-prompt under `Host Projected Variables`. Used by `spawn_agent`
-    /// and `continue_as` when the parent passes a projected source via `seed:`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projected_seed: Option<RlmProjectedSeedSnapshot>,
 }
 
 /// Wire-format snapshot of a set of projected bindings. Pairs of
@@ -205,7 +208,7 @@ pub struct RlmCreateExtras {
 /// session at creation time. This is the serializable form of
 /// `lash_mode_rlm::RlmProjectedBindings`; lash-rlm-types stays free of any
 /// runtime dependency on lashlang itself.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RlmProjectedSeedSnapshot {
     pub entries: Vec<(String, serde_json::Value)>,
 }
@@ -224,14 +227,18 @@ impl RlmProjectedSeedSnapshot {
     }
 }
 
-/// Classified `seed:` argument: each entry has been routed to either the
-/// projected-bindings snapshot (if its lashlang source was a projected
-/// binding, encoded as a single-key `{"__projected__": <inner>}` object) or
-/// the regular RLM-globals patch.
-#[derive(Default, Debug, Clone)]
-pub struct ClassifiedSeed {
-    pub projected: RlmProjectedSeedSnapshot,
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RlmSeedPluginBody {
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub globals: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "RlmProjectedSeedSnapshot::is_empty")]
+    pub projected: RlmProjectedSeedSnapshot,
+}
+
+impl RlmSeedPluginBody {
+    pub fn is_empty(&self) -> bool {
+        self.globals.is_empty() && self.projected.is_empty()
+    }
 }
 
 /// Reserved JSON key used as the canonical wire encoding for
@@ -239,6 +246,7 @@ pub struct ClassifiedSeed {
 /// model passes a projected source as a tool argument, lashlang serializes it
 /// as `{"__projected__": <inner>}`.
 pub const PROJECTED_JSON_TAG: &str = "__projected__";
+pub const PROJECTION_REF_JSON_TAG: &str = "__projection_ref__";
 
 /// Returns the inner JSON value if `value` is the canonical projection wrapper
 /// (a single-key object whose key is [`PROJECTED_JSON_TAG`]), else `None`.
@@ -250,25 +258,12 @@ pub fn projection_inner(value: &serde_json::Value) -> Option<&serde_json::Value>
     obj.get(PROJECTED_JSON_TAG)
 }
 
-/// Walk a `seed:` JSON object and split each entry by lashlang-source kind.
-/// Projected sources (encoded `{"__projected__": <inner>}`) land in the
-/// snapshot; everything else lands in the globals map. Returns an empty
-/// classification when no seed is provided. Errors on a non-object value.
-pub fn classify_seed(args: &serde_json::Value) -> Result<ClassifiedSeed, String> {
-    let raw = match args.get("seed") {
-        None | Some(serde_json::Value::Null) => return Ok(ClassifiedSeed::default()),
-        Some(serde_json::Value::Object(map)) => map,
-        Some(_) => return Err("`seed` must be a record/dict".to_string()),
-    };
-    let mut out = ClassifiedSeed::default();
-    for (name, value) in raw.iter() {
-        if let Some(inner) = projection_inner(value) {
-            out.projected.push(name.clone(), inner.clone());
-        } else {
-            out.globals.insert(name.clone(), value.clone());
-        }
+pub fn projection_ref_inner(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    let obj = value.as_object()?;
+    if obj.len() != 1 {
+        return None;
     }
-    Ok(out)
+    obj.get(PROJECTION_REF_JSON_TAG)
 }
 
 #[derive(Clone, Debug)]
@@ -307,9 +302,17 @@ mod tests {
             code: "submit 1".to_string(),
             ..Default::default()
         };
+        let seed = RlmSeedPluginBody {
+            globals: serde_json::Map::from_iter([(
+                "seeded".to_string(),
+                serde_json::json!("from seed event"),
+            )]),
+            projected: RlmProjectedSeedSnapshot::default(),
+        };
 
         let projection = RlmProjection::from_events([
             RlmModeEvent::RlmGlobalsPatch(first),
+            RlmModeEvent::RlmSeed(seed),
             RlmModeEvent::RlmTrajectoryEntry(entry.clone()),
             RlmModeEvent::RlmGlobalsPatch(second),
         ]);
@@ -321,6 +324,10 @@ mod tests {
         assert_eq!(
             projection.globals.get("diary"),
             Some(&serde_json::json!(["kept"]))
+        );
+        assert_eq!(
+            projection.globals.get("seeded"),
+            Some(&serde_json::json!("from seed event"))
         );
         assert_eq!(projection.trajectory, vec![entry]);
     }

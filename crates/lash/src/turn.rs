@@ -129,6 +129,22 @@ impl TurnBuilder {
         stream_prepared_turn(&runtime, input, Some(events), None, cancel).await
     }
 
+    /// Run the logical host turn through foreground handoffs while sending raw
+    /// session events to `events`.
+    ///
+    /// Most callers should use [`TurnBuilder::collect_session_events_with`].
+    /// Benchmarks that need continuation counts can use this without
+    /// constructing the lower-level runtime directly.
+    pub async fn collect_followed_session_events_with(
+        self,
+        events: &dyn EventSink,
+    ) -> Result<FollowedTurnResult> {
+        let (runtime, input, cancel) = self.prepare()?;
+        let followed =
+            stream_prepared_followed(&runtime, input, Some(events), None, cancel).await?;
+        Ok(FollowedTurnResult::from_followed(followed))
+    }
+
     pub(crate) fn prepare(mut self) -> Result<(RuntimeHandle, TurnInput, CancellationToken)> {
         if let Some(options) = self.mode_turn_options {
             self.input.mode_turn_options = Some(options);
@@ -227,6 +243,23 @@ pub(crate) async fn stream_prepared_assembled(
     turn_events: Option<&dyn TurnActivitySink>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
+    let turn =
+        stream_prepared_followed(runtime, input, session_events, turn_events, cancel).await?;
+    turn.into_final_turn().ok_or_else(|| {
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: "empty_followed_turn".to_string(),
+            message: "runtime completed without an assembled turn".to_string(),
+        })
+    })
+}
+
+pub(crate) async fn stream_prepared_followed(
+    runtime: &RuntimeHandle,
+    input: TurnInput,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    cancel: CancellationToken,
+) -> Result<lash_core::FollowedTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     if let Some(extension) = input.mode_extension.as_ref() {
@@ -267,12 +300,7 @@ pub(crate) async fn stream_prepared_assembled(
         }
     };
     runtime.publish_from(&writer);
-    turn.into_final_turn().ok_or_else(|| {
-        EmbedError::Runtime(lash_core::RuntimeError {
-            code: "empty_followed_turn".to_string(),
-            message: "runtime completed without an assembled turn".to_string(),
-        })
-    })
+    Ok(turn)
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -346,6 +374,38 @@ impl TurnResult {
             self.outcome,
             TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. }
         )
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FollowedTurnResult {
+    pub turns: Vec<TurnResult>,
+}
+
+impl FollowedTurnResult {
+    fn from_followed(followed: lash_core::FollowedTurn) -> Self {
+        Self {
+            turns: followed
+                .turns
+                .into_iter()
+                .map(TurnResult::from_assembled)
+                .collect(),
+        }
+    }
+
+    pub fn final_turn(&self) -> Option<&TurnResult> {
+        self.turns.last()
+    }
+
+    pub fn into_final_turn(mut self) -> Option<TurnResult> {
+        self.turns.pop()
+    }
+
+    pub fn handoff_count(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|turn| matches!(turn.outcome, lash_core::TurnOutcome::Handoff { .. }))
+            .count()
     }
 }
 

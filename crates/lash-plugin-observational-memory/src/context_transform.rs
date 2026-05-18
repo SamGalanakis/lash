@@ -12,7 +12,7 @@ use crate::graph_state::{
     active_unobserved_message_nodes, approx_message_nodes_tokens, approx_token_count,
     build_graph_state,
 };
-use crate::host::{OmHistoryHost, await_hidden_tasks_and_snapshot};
+use crate::host::{OmRuntimeHost, await_hidden_tasks_and_snapshot};
 use crate::model::ActiveMemoryState;
 use crate::transitions::maybe_advance_memory_state;
 
@@ -60,7 +60,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
 
         graph = maybe_advance_memory_state(
             &self.config,
-            &OmHistoryHost::new(&ctx.session_id, &ctx.host),
+            &OmRuntimeHost::new(&ctx.session_id, &ctx.host),
             ctx.state.policy(),
             graph,
         )
