@@ -47,7 +47,9 @@
 
     const btn = root.querySelector(".channel__btn");
     const menu = root.querySelector(".channel__menu");
+    const opts = root.querySelectorAll(".channel__opt");
     const close = () => {
+      if (menu.hidden) return;
       menu.hidden = true;
       btn.setAttribute("aria-expanded", "false");
     };
@@ -56,12 +58,24 @@
       btn.setAttribute("aria-expanded", "true");
     };
     btn.addEventListener("click", (e) => {
+      // toggle — and stop bubbling so the capture-phase outside-close
+      // below doesn't immediately fire on the same click sequence.
       e.stopPropagation();
       if (menu.hidden) open(); else close();
     });
-    document.addEventListener("click", (e) => {
+    // Picking an option: close the dropdown immediately, then let the
+    // <a href> navigation happen normally. Browsers sometimes show the
+    // open menu for a beat before navigating; without this the menu
+    // appears to "stick" open.
+    opts.forEach(opt => opt.addEventListener("click", () => close()));
+    // Outside dismissal — capture phase + pointerdown so cover-SVG
+    // sun handlers (which preventDefault on click) can't swallow it.
+    const outsideHandler = (e) => {
       if (!root.contains(e.target)) close();
-    });
+    };
+    document.addEventListener("pointerdown", outsideHandler, true);
+    document.addEventListener("click", outsideHandler, true);
+    // Escape always closes
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") close();
     });
