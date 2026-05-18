@@ -12,12 +12,11 @@ pub use prompt::{
     resolve_prompt_layers,
 };
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::ToolDefinition;
 use crate::llm::types::LlmToolSpec;
-use crate::plugin::{CheckpointKind, PluginMessage, PluginSurfaceEvent};
+use crate::plugin::{CheckpointKind, PluginMessage, PluginRuntimeEvent};
 use crate::{MessageOrigin, ToolCallRecord};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -26,7 +25,6 @@ pub enum SessionEventRecord<ME = ()> {
     Conversation(ConversationRecord),
     Tool(ToolEvent),
     Mode(ME),
-    StateSnapshot(StateSnapshotEvent),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -70,15 +68,6 @@ pub enum ToolEvent {
     Invocation {
         stable_key: String,
         record: ToolCallRecord,
-    },
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum StateSnapshotEvent {
-    Lashlang {
-        version: u32,
-        data: String,
-        files: HashMap<String, String>,
     },
 }
 
@@ -196,7 +185,7 @@ pub enum SessionEvent {
     #[serde(rename = "plugin_event")]
     PluginEvent {
         plugin_id: String,
-        event: PluginSurfaceEvent,
+        event: PluginRuntimeEvent,
     },
     /// Semantic result for a completed turn. `Done` remains the machine
     /// lifecycle marker emitted after this event.
@@ -255,127 +244,6 @@ pub enum TurnStop {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PromptRequest {
-    pub question: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub panel: Option<PromptPanel>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
-    #[serde(default)]
-    pub selection_mode: PromptSelectionMode,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_note: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PromptPanel {
-    pub title: String,
-    pub markdown: String,
-}
-
-impl PromptRequest {
-    pub fn freeform(question: impl Into<String>) -> Self {
-        Self {
-            question: question.into(),
-            panel: None,
-            options: Vec::new(),
-            selection_mode: PromptSelectionMode::Single,
-            allow_note: false,
-        }
-    }
-
-    pub fn single(question: impl Into<String>, options: Vec<String>) -> Self {
-        Self {
-            question: question.into(),
-            panel: None,
-            options,
-            selection_mode: PromptSelectionMode::Single,
-            allow_note: false,
-        }
-    }
-
-    pub fn multi(question: impl Into<String>, options: Vec<String>) -> Self {
-        Self {
-            question: question.into(),
-            panel: None,
-            options,
-            selection_mode: PromptSelectionMode::Multi,
-            allow_note: false,
-        }
-    }
-
-    pub fn with_optional_note(mut self) -> Self {
-        self.allow_note = !self.is_freeform();
-        self
-    }
-
-    pub fn with_markdown_panel(
-        mut self,
-        title: impl Into<String>,
-        markdown: impl Into<String>,
-    ) -> Self {
-        self.panel = Some(PromptPanel {
-            title: title.into(),
-            markdown: markdown.into(),
-        });
-        self
-    }
-
-    pub fn is_freeform(&self) -> bool {
-        self.options.is_empty()
-    }
-
-    pub fn allows_note(&self) -> bool {
-        self.allow_note && !self.is_freeform()
-    }
-
-    pub fn empty_response(&self) -> PromptResponse {
-        if self.is_freeform() {
-            PromptResponse::Text {
-                text: String::new(),
-            }
-        } else {
-            match self.selection_mode {
-                PromptSelectionMode::Single => PromptResponse::Single {
-                    selection: String::new(),
-                    note: None,
-                },
-                PromptSelectionMode::Multi => PromptResponse::Multi {
-                    selections: Vec::new(),
-                    note: None,
-                },
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptSelectionMode {
-    #[default]
-    Single,
-    Multi,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PromptResponse {
-    Text {
-        text: String,
-    },
-    Single {
-        selection: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        note: Option<String>,
-    },
-    Multi {
-        selections: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        note: Option<String>,
-    },
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnTerminationPolicyState {
     max_steps_final: bool,
@@ -398,26 +266,36 @@ impl TurnTerminationPolicyState {
         self.max_steps_final
     }
 
-    pub fn maybe_schedule_turn_limit_final(
-        &mut self,
+    pub fn turn_limit_final_to_schedule(
+        &self,
         mode_iteration: usize,
         mode_run_offset: usize,
         max_turns: Option<usize>,
-        msgs: &mut Vec<Message>,
-    ) {
-        let Some(max) = max_turns else { return };
-        if mode_iteration < mode_run_offset + max {
-            return;
+    ) -> Option<usize> {
+        if self.max_steps_final {
+            return None;
         }
-        let sys_id = fresh_message_id();
+        let max = max_turns?;
+        if mode_iteration < mode_run_offset + max {
+            return None;
+        }
+        Some(max)
+    }
+
+    pub fn schedule_turn_limit_final(
+        &mut self,
+        max_turns: usize,
+        msgs: &mut Vec<Message>,
+        message_id: String,
+    ) {
         msgs.push(Message {
-            id: sys_id.clone(),
+            id: message_id.clone(),
             role: MessageRole::System,
             parts: Arc::new(vec![Part {
-                id: format!("{}.p0", sys_id),
+                id: format!("{}.p0", message_id),
                 kind: PartKind::Text,
                 content: format!(
-                    "Turn limit reached ({max}). You MUST reply in plain prose now containing:\n\
+                    "Turn limit reached ({max_turns}). You MUST reply in plain prose now containing:\n\
                         1. Summary of what you accomplished\n\
                         2. List of remaining tasks not yet completed\n\
                         3. Recommended next steps\n\
@@ -528,10 +406,6 @@ pub fn format_tool_output_content(output: &crate::ToolCallOutput) -> String {
             }
         }
     }
-}
-
-pub fn fresh_message_id() -> String {
-    format!("m{}", uuid::Uuid::new_v4().simple())
 }
 
 pub fn reassign_part_ids(message_id: &str, parts: &mut [Part]) {

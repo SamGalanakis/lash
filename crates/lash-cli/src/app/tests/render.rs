@@ -391,10 +391,16 @@ fn update_plan_panel_lights_up_plan_dock() {
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "update_plan".into(),
-        event: lash_core::PluginSurfaceEvent::PanelUpsert {
-            key: "plan".into(),
-            title: "PLAN".into(),
-            content: "- [x] Inspect\n- [~] Patch layout\n- [ ] Run tests\n".into(),
+        event: lash_core::PluginRuntimeEvent::Custom {
+            name: "update_plan.snapshot".into(),
+            payload: serde_json::json!({
+                "generation": 1,
+                "plan": [
+                    {"step": "Inspect", "status": "completed"},
+                    {"step": "Patch layout", "status": "in_progress"},
+                    {"step": "Run tests", "status": "pending"}
+                ]
+            }),
         },
     });
 
@@ -420,11 +426,10 @@ fn rlm_budget_warning_uses_status_not_user_message() {
 
     app.handle_session_event(SessionEvent::PluginEvent {
         plugin_id: "mode_rlm".into(),
-        event: lash_core::PluginSurfaceEvent::Status {
+        event: lash_core::PluginRuntimeEvent::Status {
             key: "rlm_context_budget_warning".into(),
             label: "context budget".into(),
             detail: Some("120292 tokens used; warn at 100000; choose handoff path".into()),
-            transient_ms: Some(8_000),
         },
     });
 
@@ -444,20 +449,25 @@ fn rlm_budget_warning_uses_status_not_user_message() {
 }
 
 #[test]
-fn plugin_panel_events_upsert_and_clear_blocks() {
+fn plan_mode_state_events_upsert_and_clear_blocks() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.start_turn();
     app.handle_session_event(SessionEvent::PluginEvent {
-        plugin_id: "demo".into(),
-        event: lash_core::PluginSurfaceEvent::PanelUpsert {
-            key: "panel:1".into(),
-            title: "TASK BOARD".into(),
-            content: "1. Inspect\n2. Patch".into(),
+        plugin_id: "plan_mode".into(),
+        event: lash_core::PluginRuntimeEvent::Custom {
+            name: "plan_mode.state".into(),
+            payload: serde_json::json!({
+                "session_id": "test-session-id",
+                "enabled": true,
+                "plan_path": ".lash/plans/test-session-id.md"
+            }),
         },
     });
     assert!(matches!(
         app.timeline.last(),
-        Some(UiTimelineItem::PluginPanel(panel)) if panel.title == "TASK BOARD"
+        Some(UiTimelineItem::PluginPanel(panel))
+            if panel.title == "PLAN"
+                && panel.content.contains(".lash/plans/test-session-id.md")
     ));
     assert!(
         app.live_turn
@@ -466,9 +476,14 @@ fn plugin_panel_events_upsert_and_clear_blocks() {
     );
 
     app.handle_session_event(SessionEvent::PluginEvent {
-        plugin_id: "demo".into(),
-        event: lash_core::PluginSurfaceEvent::PanelClear {
-            key: "panel:1".into(),
+        plugin_id: "plan_mode".into(),
+        event: lash_core::PluginRuntimeEvent::Custom {
+            name: "plan_mode.state".into(),
+            payload: serde_json::json!({
+                "session_id": "test-session-id",
+                "enabled": false,
+                "plan_path": null
+            }),
         },
     });
     assert!(

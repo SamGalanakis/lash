@@ -186,10 +186,7 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::plugin::runtime_host::{
-        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
-        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
-    };
+    use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot, SessionTurnHandle};
     use lash_core::{
         AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolCall,
@@ -227,7 +224,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SessionSnapshotHost for FakeSessionManager {
+    impl RuntimeSessionHost for FakeSessionManager {
         async fn snapshot_current(&self) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
@@ -238,17 +235,9 @@ mod tests {
         ) -> Result<SessionSnapshot, PluginError> {
             Err(PluginError::Session("unused".to_string()))
         }
-    }
-
-    #[async_trait::async_trait]
-    impl ToolCatalogHost for FakeSessionManager {
         async fn tool_catalog(&self, _session_id: &str) -> Result<Vec<Value>, PluginError> {
             Ok(self.catalog.clone())
         }
-    }
-
-    #[async_trait::async_trait]
-    impl ToolStateHost for FakeSessionManager {
         async fn set_tools_availability(
             &self,
             _session_id: &str,
@@ -261,10 +250,6 @@ mod tests {
                 .extend(tool_names.iter().cloned());
             Ok(2)
         }
-    }
-
-    #[async_trait::async_trait]
-    impl DirectCompletionHost for FakeSessionManager {
         async fn direct_completion(
             &self,
             request: lash_core::DirectRequest,
@@ -285,10 +270,6 @@ mod tests {
                 usage: TokenUsage::default(),
             })
         }
-    }
-
-    #[async_trait::async_trait]
-    impl SessionLifecycleHost for FakeSessionManager {
         async fn create_session(
             &self,
             _request: lash_core::plugin::SessionCreateRequest,
@@ -299,10 +280,6 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
-    }
-
-    #[async_trait::async_trait]
-    impl TurnHost for FakeSessionManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -319,11 +296,6 @@ mod tests {
             Ok(())
         }
     }
-
-    impl TaskHost for FakeSessionManager {}
-    impl MonitorHost for FakeSessionManager {}
-    impl SessionGraphHost for FakeSessionManager {}
-    impl TraceHost for FakeSessionManager {}
 
     fn catalog_tool_with_metadata(
         name: &str,
@@ -1269,11 +1241,10 @@ mod tests {
             json!({
                 "type": "object",
                 "properties": {
-                    "agent_name": { "type": "string" },
                     "task": { "type": "string" },
                     "output": { "type": "object", "additionalProperties": true }
                 },
-                "required": ["agent_name", "task"]
+                "required": ["task"]
             }),
         );
         spawn_agent.as_object_mut().unwrap().insert(
@@ -1326,7 +1297,7 @@ mod tests {
         assert_eq!(
             results[0]["signature"],
             json!(
-                "spawn_agent<T = any>(agent_name: str, task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `agent_name: str`\n- `task: str`\n- `output?: TypeSpec<T>`"
+                "spawn_agent<T = any>(task: str, output?: TypeSpec<T>) -> T\nParameters:\n- `task: str`\n- `output?: TypeSpec<T>`"
             )
         );
         assert!(results[0].get("returns").is_none());

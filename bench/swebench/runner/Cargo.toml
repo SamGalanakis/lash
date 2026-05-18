@@ -11,16 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = "6"
-lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.1", default-features = false, features = ["full"] }
 lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.1" }
 lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.1" }
 lash-standard-plugins = { path = "../../../crates/lash-standard-plugins", version = "=0.1.0-alpha.1" }
 lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.1" }
 lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.1" }
-lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.1" }
-lash-mode-standard = { path = "../../../crates/lash-mode-standard", version = "=0.1.0-alpha.1" }
-lash-plugin-observational-memory = { path = "../../../crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.1" }
-lash-plugin-rolling-history = { path = "../../../crates/lash-plugin-rolling-history", version = "=0.1.0-alpha.1" }
 lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.1" }
 lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.1" }
 tokio = { workspace = true, features = ["full"] }

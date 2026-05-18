@@ -5,7 +5,8 @@ use std::sync::Arc;
 use super::*;
 
 pub type PluginFuture<T> = Pin<Box<dyn Future<Output = Result<T, PluginError>> + Send>>;
-pub type PluginRuntimeEventHook = Arc<dyn Fn(PluginRuntimeEvent) -> PluginFuture<()> + Send + Sync>;
+pub type PluginLifecycleEventHook =
+    Arc<dyn Fn(PluginLifecycleEvent) -> PluginFuture<()> + Send + Sync>;
 pub type PluginSessionTask = PluginFuture<()>;
 pub type SessionConfigMutator = Arc<
     dyn Fn(SessionConfigChangedContext, SessionPolicy) -> PluginFuture<SessionPolicy> + Send + Sync,
@@ -38,7 +39,7 @@ pub type AssistantResponseHook = Arc<
 #[derive(Clone)]
 pub struct PromptHookContext {
     pub session_id: String,
-    pub host: Arc<dyn PromptHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
     pub state: SessionReadView,
     pub mode_turn_options: ModeTurnOptions,
     pub turn_context: crate::TurnContext,
@@ -48,7 +49,7 @@ pub struct PromptHookContext {
 pub struct TurnHookContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn TurnHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
     pub turn_context: crate::TurnContext,
 }
 
@@ -57,18 +58,18 @@ pub struct SessionConfigChangedContext {
     pub session_id: String,
     pub previous: SessionPolicy,
     pub current: SessionPolicy,
-    pub host: Arc<dyn TaskHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone)]
 pub struct SessionStateChangedContext {
     pub session_id: String,
     pub state: SessionReadView,
-    pub host: Arc<dyn HistoryHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone)]
-pub enum PluginRuntimeEvent {
+pub enum PluginLifecycleEvent {
     TurnCommitted(Arc<AssembledTurn>),
     TurnPersisted(SessionStateChangedContext),
     SessionRestored(SessionReadView),
@@ -103,8 +104,9 @@ pub struct ToolCallHookContext {
     pub session_id: String,
     pub tool_name: String,
     pub args: serde_json::Value,
+    pub argument_projection: crate::ToolArgumentProjectionPolicy,
     pub turn_context: crate::TurnContext,
-    pub(crate) host: Arc<dyn ToolHookHost>,
+    pub(crate) host: Arc<dyn RuntimeSessionHost>,
 }
 
 impl ToolCallHookContext {
@@ -112,13 +114,15 @@ impl ToolCallHookContext {
         session_id: String,
         tool_name: String,
         args: serde_json::Value,
+        argument_projection: crate::ToolArgumentProjectionPolicy,
         turn_context: crate::TurnContext,
-        host: Arc<dyn ToolHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Self {
         Self {
             session_id,
             tool_name,
             args,
+            argument_projection,
             turn_context,
             host,
         }
@@ -147,7 +151,7 @@ pub struct ToolResultHookContext {
     pub result: ToolResult,
     pub duration_ms: u64,
     pub turn_context: crate::TurnContext,
-    pub(crate) host: Arc<dyn ToolHookHost>,
+    pub(crate) host: Arc<dyn RuntimeSessionHost>,
 }
 
 impl ToolResultHookContext {
@@ -158,7 +162,7 @@ impl ToolResultHookContext {
         result: ToolResult,
         duration_ms: u64,
         turn_context: crate::TurnContext,
-        host: Arc<dyn ToolHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Self {
         Self {
             session_id,
@@ -200,7 +204,7 @@ pub struct ToolResultProjectionContext {
 pub struct TurnResultHookContext {
     pub session_id: String,
     pub turn: Arc<TurnResultSummary>,
-    pub host: Arc<dyn TurnResultHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone)]
@@ -208,7 +212,7 @@ pub struct CheckpointHookContext {
     pub session_id: String,
     pub checkpoint: CheckpointKind,
     pub state: SessionReadView,
-    pub host: Arc<dyn CheckpointHookHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone)]
@@ -221,7 +225,7 @@ pub struct AssistantStreamHookContext {
 pub struct AssistantStreamTransform {
     pub chunk: String,
     pub reasoning_deltas: Vec<String>,
-    pub events: Vec<PluginSurfaceEvent>,
+    pub events: Vec<PluginRuntimeEvent>,
     /// When `true`, the runtime cancels the in-flight LLM call the
     /// moment this hook returns and finalizes the turn using whatever
     /// text has been streamed so far. Any plugin may set this — the
@@ -240,5 +244,5 @@ pub struct AssistantResponseHookContext {
 #[derive(Clone, Debug)]
 pub struct AssistantResponseTransform {
     pub response: crate::LlmResponse,
-    pub events: Vec<PluginSurfaceEvent>,
+    pub events: Vec<PluginRuntimeEvent>,
 }

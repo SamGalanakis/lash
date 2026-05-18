@@ -90,6 +90,41 @@ impl SessionControl {
         self.runtime.observe().read_view.to_owned_state()
     }
 
+    async fn append_messages(&self, messages: Vec<PluginMessage>) -> Result<()> {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let result = runtime
+            .append_session_nodes(lash_core::AppendSessionNodesRequest {
+                nodes: messages
+                    .into_iter()
+                    .map(lash_core::SessionAppendNode::message)
+                    .collect(),
+                requires_ancestor_node_id: None,
+            })
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        result.map(|_| ())
+    }
+
+    async fn append_plugin_body(
+        &self,
+        plugin_type: impl Into<String>,
+        body: serde_json::Value,
+    ) -> Result<()> {
+        let writer = self.runtime.writer();
+        let mut runtime = writer.lock().await;
+        let result = runtime
+            .append_session_nodes(lash_core::AppendSessionNodesRequest {
+                nodes: vec![lash_core::SessionAppendNode::plugin(plugin_type, body)],
+                requires_ancestor_node_id: None,
+            })
+            .await
+            .map_err(Into::into);
+        self.runtime.publish_from(&runtime);
+        result.map(|_| ())
+    }
+
     async fn set_persisted_state(&self, state: PersistedSessionState) {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
@@ -651,6 +686,18 @@ pub struct StateControl {
 impl StateControl {
     pub async fn export(&self) -> lash_core::SessionStateEnvelope {
         self.control.export_state().await
+    }
+
+    pub async fn append_messages(&self, messages: Vec<PluginMessage>) -> Result<()> {
+        self.control.append_messages(messages).await
+    }
+
+    pub async fn append_plugin_body(
+        &self,
+        plugin_type: impl Into<String>,
+        body: serde_json::Value,
+    ) -> Result<()> {
+        self.control.append_plugin_body(plugin_type, body).await
     }
 
     pub async fn set_persisted(&self, state: PersistedSessionState) {

@@ -34,7 +34,6 @@ pub(super) struct AsyncToolHandleMetadata {
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum AsyncToolHandleNamespace {
     Monitor,
-    Subagent,
     Tool,
 }
 
@@ -185,39 +184,11 @@ impl ModeExecutionContext {
         })
     }
 
-    pub(super) fn normalize_async_subagent_name(agent_name: &str) -> Option<String> {
-        let mut out = String::new();
-        let mut last_was_sep = false;
-        for ch in agent_name.chars().flat_map(char::to_lowercase) {
-            if ch.is_ascii_alphanumeric() {
-                out.push(ch);
-                last_was_sep = false;
-            } else if !last_was_sep && !out.is_empty() {
-                out.push('_');
-                last_was_sep = true;
-            }
-        }
-        while out.ends_with('_') {
-            out.pop();
-        }
-        (!out.is_empty()).then_some(out)
-    }
-
     pub(super) fn async_tool_handle_metadata(
         id: &str,
         tool_name: &str,
-        args: &serde_json::Value,
+        _args: &serde_json::Value,
     ) -> AsyncToolHandleMetadata {
-        if tool_name == "spawn_agent"
-            && let Some(agent_name) = args.get("agent_name").and_then(|value| value.as_str())
-            && let Some(normalized) = Self::normalize_async_subagent_name(agent_name)
-        {
-            return AsyncToolHandleMetadata {
-                tool_name: tool_name.to_string(),
-                namespace: AsyncToolHandleNamespace::Subagent,
-                identifier: normalized,
-            };
-        }
         AsyncToolHandleMetadata {
             tool_name: tool_name.to_string(),
             namespace: AsyncToolHandleNamespace::Tool,
@@ -312,7 +283,7 @@ impl ModeExecutionContext {
         let task_tool_name = tool_name.clone();
         let task_args = args.clone();
         let dispatch = Arc::clone(&self.dispatch);
-        let async_call_id = handle_id.clone();
+        let async_call_id = call_id.clone();
         let join_handle = tokio::spawn(async move {
             let tool_context = ToolContext::new(
                 dispatch.session_id.clone(),

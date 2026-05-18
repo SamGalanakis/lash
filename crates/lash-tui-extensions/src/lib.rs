@@ -654,8 +654,7 @@ fn surface_key(plugin_id: &str, key: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PlanModeStatus {
     enabled: bool,
-    panel_title: Option<String>,
-    panel_content: Option<String>,
+    plan_path: Option<String>,
 }
 
 async fn invoke_plan_mode_action(
@@ -688,8 +687,7 @@ async fn invoke_plan_mode_action(
     };
     Ok(PlanModeStatus {
         enabled: status.enabled,
-        panel_title: status.panel_title,
-        panel_content: status.panel_content,
+        plan_path: status.plan_path,
     })
 }
 
@@ -704,21 +702,25 @@ fn plan_mode_effects(status: &PlanModeStatus) -> Vec<TuiHostEffect> {
         vec![TuiHostEffect::ClearModeIndicator { key }]
     };
     let panel_key = "panel".to_string();
-    match (
-        status.enabled,
-        status.panel_title.as_deref(),
-        status.panel_content.as_deref(),
-    ) {
-        (true, Some(title), Some(content)) => effects.push(TuiHostEffect::UpsertPanel {
+    if status.enabled {
+        if let Some(path) = status.plan_path.as_deref() {
+            effects.push(TuiHostEffect::UpsertPanel {
+                plugin_id: "plan_mode".to_string(),
+                key: panel_key,
+                title: "PLAN".to_string(),
+                content: format!("Path: `{path}`"),
+            });
+        } else {
+            effects.push(TuiHostEffect::ClearPanel {
+                plugin_id: "plan_mode".to_string(),
+                key: panel_key,
+            });
+        }
+    } else {
+        effects.push(TuiHostEffect::ClearPanel {
             plugin_id: "plan_mode".to_string(),
             key: panel_key,
-            title: title.to_string(),
-            content: content.to_string(),
-        }),
-        _ => effects.push(TuiHostEffect::ClearPanel {
-            plugin_id: "plan_mode".to_string(),
-            key: panel_key,
-        }),
+        });
     }
     effects
 }
@@ -1187,8 +1189,7 @@ mod tests {
         assert_eq!(
             plan_mode_effects(&PlanModeStatus {
                 enabled: true,
-                panel_title: Some("PLAN".to_string()),
-                panel_content: Some("Path: `.lash/plans/root.md`".to_string()),
+                plan_path: Some(".lash/plans/root.md".to_string()),
             }),
             vec![
                 TuiHostEffect::UpsertModeIndicator {
@@ -1210,8 +1211,7 @@ mod tests {
         assert_eq!(
             plan_mode_effects(&PlanModeStatus {
                 enabled: false,
-                panel_title: Some("PLAN".to_string()),
-                panel_content: Some("stale".to_string()),
+                plan_path: Some(".lash/plans/root.md".to_string()),
             }),
             vec![
                 TuiHostEffect::ClearModeIndicator {

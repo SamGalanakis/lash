@@ -883,24 +883,23 @@ pub(crate) mod tests {
         let blocks = state.project_tool_call(
             "spawn_agent",
             json!({
-                "agent_name":"probe_repo_shape",
                 "task":"In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.",
                 "capability":"explore"
             }),
-            json!({
-                "agent_name":"probe_repo_shape",
-            }),
+            json!({ "summary": "ok" }),
             true,
             12,
         );
 
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].call.summary, "spawn subagent · probe_repo_shape");
+        assert_eq!(
+            blocks[0].call.summary,
+            "spawn subagent · In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary."
+        );
         assert_eq!(
             blocks[0].result.detail_lines,
             vec![
                 "Task In /home/sam/code/lash, inspect the repo shape only. Reply with the top-level summary.".to_string(),
-                "Agent probe_repo_shape".to_string(),
                 "Profile explore capability".to_string(),
             ]
         );

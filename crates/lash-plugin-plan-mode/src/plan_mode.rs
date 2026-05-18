@@ -11,16 +11,13 @@ use lash_core::plugin::{
     SessionPlugin, SnapshotReader, SnapshotWriter, ToolSurfaceContribution, ToolSurfaceOverride,
 };
 use lash_core::{
-    JsonSchema, PluginMessage, PromptRequest, PromptResponse, SessionCreateRequest,
-    SessionPluginMode, SessionStartPoint, ToolCall, ToolContext, ToolContract, ToolDefinition,
-    ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    JsonSchema, PluginMessage, SessionCreateRequest, SessionPluginMode, SessionStartPoint,
+    ToolCall, ToolContext, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest,
+    ToolProvider, ToolResult,
 };
 use lash_tool_apply_patch::{PatchAction, inspect_patch_ops};
 
-const PLAN_MODE_BADGE_KEY: &str = "mode";
-const PLAN_MODE_BADGE_LABEL: &str = "plan";
-const PLAN_MODE_PANEL_KEY: &str = "panel";
-const PLAN_MODE_PANEL_TITLE: &str = "PLAN";
+const PLAN_MODE_STATE_EVENT: &str = "plan_mode.state";
 const PLAN_TEMPLATE: &str = r#"# Plan
 
 ## Goal
@@ -176,18 +173,17 @@ fn read_plan_report(path: &Path) -> Result<PlanReport, String> {
     })
 }
 
-fn plan_panel_event(report: &PlanReport) -> lash_core::plugin::PluginSurfaceEvent {
-    lash_core::plugin::PluginSurfaceEvent::PanelUpsert {
-        key: PLAN_MODE_PANEL_KEY.to_string(),
-        title: PLAN_MODE_PANEL_TITLE.to_string(),
-        content: report.preview_content(),
-    }
-}
-
-fn clear_plan_panel_event() -> lash_core::plugin::PluginSurfaceEvent {
-    lash_core::plugin::PluginSurfaceEvent::PanelClear {
-        key: PLAN_MODE_PANEL_KEY.to_string(),
-    }
+fn plan_mode_state_event(
+    session_id: &str,
+    enabled: bool,
+    report: Option<&PlanReport>,
+) -> Result<lash_core::PluginRuntimeEvent, PluginError> {
+    Ok(lash_core::PluginRuntimeEvent::Custom {
+        name: PLAN_MODE_STATE_EVENT.to_string(),
+        payload: serde_json::to_value(plan_mode_payload(session_id, enabled, report)).map_err(
+            |err| PluginError::Session(format!("failed to encode plan mode state: {err}")),
+        )?,
+    })
 }
 
 fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
@@ -195,7 +191,7 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
     PluginMessage::text(
         lash_core::MessageRole::System,
         format!(
-            "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the panel only shows the file path while planning. When the plan is ready for review, call `plan_exit()`."
+            "Plan mode: use `{display}` as the single source of truth. Read/search/list, web, and `ask(...)` as needed, and update only that file with `apply_patch`. Do not present the plan with snippets, showcases, or prose checklists; the host can surface the file path while planning. When the plan is ready for review, call `plan_exit()`."
         ),
     )
 }
@@ -203,10 +199,10 @@ fn plan_mode_guidance_message(plan_path: &Path) -> PluginMessage {
 fn plan_mode_tool_note(plan_path: Option<&Path>) -> String {
     match plan_path {
         Some(path) => format!(
-            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`. The panel shows the plan file path; full review happens in `plan_exit()`.",
+            "Plan mode tools: read/search/list, web search/fetch, `ask`, `apply_patch` for `{}`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.",
             plan_display_path(path)
         ),
-        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`. The panel shows the plan file path; full review happens in `plan_exit()`.".to_string(),
+        None => "Plan mode tools: read/search/list, web search/fetch, `ask`, plan-file `apply_patch`, `plan_exit()`. The host can surface the plan file path; full review happens in `plan_exit()`.".to_string(),
     }
 }
 
@@ -215,9 +211,63 @@ pub struct PlanModePluginConfig {
     pub allowed_tools: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanModePromptRequest {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<PlanModePromptReview>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_note: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanModePromptReview {
+    pub title: String,
+    pub markdown: String,
+}
+
+impl PlanModePromptRequest {
+    pub fn single(question: impl Into<String>, options: Vec<String>) -> Self {
+        Self {
+            question: question.into(),
+            options,
+            review: None,
+            allow_note: false,
+        }
+    }
+
+    pub fn with_review(mut self, title: impl Into<String>, markdown: impl Into<String>) -> Self {
+        self.review = Some(PlanModePromptReview {
+            title: title.into(),
+            markdown: markdown.into(),
+        });
+        self
+    }
+
+    pub fn with_optional_note(mut self) -> Self {
+        self.allow_note = !self.options.is_empty();
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanModePromptResponse {
+    Single {
+        selection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+}
+
 #[async_trait::async_trait]
 pub trait PlanModePrompt: Send + Sync {
-    async fn prompt_user(&self, request: PromptRequest) -> Result<PromptResponse, PluginError>;
+    async fn prompt_user(
+        &self,
+        request: PlanModePromptRequest,
+    ) -> Result<PlanModePromptResponse, PluginError>;
 }
 
 impl Default for PlanModePluginConfig {
@@ -258,8 +308,6 @@ pub struct PlanModeExternalStatus {
     pub session_id: String,
     pub enabled: bool,
     pub plan_path: Option<String>,
-    pub panel_title: Option<String>,
-    pub panel_content: Option<String>,
 }
 
 pub struct PlanModeEnableOp;
@@ -343,19 +391,6 @@ impl PlanModeState {
 
     fn finish_turn(&mut self) {}
 
-    fn badge_event(&self) -> lash_core::plugin::PluginSurfaceEvent {
-        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorUpsert {
-            key: PLAN_MODE_BADGE_KEY.to_string(),
-            label: PLAN_MODE_BADGE_LABEL.to_string(),
-        }
-    }
-
-    fn clear_badge_event(&self) -> lash_core::plugin::PluginSurfaceEvent {
-        lash_core::plugin::PluginSurfaceEvent::ModeIndicatorClear {
-            key: PLAN_MODE_BADGE_KEY.to_string(),
-        }
-    }
-
     fn plan_path(&self) -> Option<PathBuf> {
         self.plan_path.clone()
     }
@@ -391,7 +426,7 @@ async fn ensure_plan_path<H>(
     host: &Arc<H>,
 ) -> Result<PathBuf, PluginError>
 where
-    H: lash_core::plugin::runtime_host::SessionSnapshotHost + ?Sized,
+    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
 {
     if let Some(path) = state
         .lock()
@@ -453,7 +488,7 @@ async fn ensure_plan_report<H>(
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError>
 where
-    H: lash_core::plugin::runtime_host::SessionSnapshotHost + ?Sized,
+    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
 {
     let path = ensure_plan_path(state, session_id, host).await?;
     if seed_if_missing {
@@ -472,7 +507,7 @@ async fn sync_plan_exit_tool_state<H>(
     enabled: bool,
 ) -> Result<(), PluginError>
 where
-    H: lash_core::plugin::runtime_host::ToolStateHost + ?Sized,
+    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
 {
     let availability = if enabled {
         Some(lash_core::ToolAvailability::Showcased)
@@ -496,7 +531,7 @@ async fn set_plan_mode_enabled_state<H>(
     enabled: bool,
 ) -> Result<bool, PluginError>
 where
-    H: lash_core::plugin::runtime_host::ToolStateHost + ?Sized,
+    H: lash_core::plugin::runtime_host::RuntimeSessionHost + ?Sized,
 {
     let previous = {
         let mut guard = state
@@ -564,12 +599,6 @@ fn plan_mode_payload(
         session_id: session_id.to_string(),
         enabled,
         plan_path: report.map(|value| value.display_path.clone()),
-        panel_title: enabled.then_some(PLAN_MODE_PANEL_TITLE.to_string()),
-        panel_content: if enabled {
-            report.map(|value| value.preview_content())
-        } else {
-            None
-        },
     }
 }
 
@@ -635,7 +664,7 @@ impl PlanModeTools {
         };
         let answer = match prompt
             .prompt_user(
-                PromptRequest::single(
+                PlanModePromptRequest::single(
                     format!("Review the plan in `{}`. What next?", report.display_path),
                     vec![
                         "Start implementing now".to_string(),
@@ -643,7 +672,7 @@ impl PlanModeTools {
                         "Start in fresh context".to_string(),
                     ],
                 )
-                .with_markdown_panel("PLAN", report.approval_content())
+                .with_review("PLAN", report.approval_content())
                 .with_optional_note(),
             )
             .await
@@ -653,8 +682,7 @@ impl PlanModeTools {
         };
 
         let selection = match &answer {
-            PromptResponse::Single { selection, .. } => selection.as_str(),
-            _ => "Keep planning",
+            PlanModePromptResponse::Single { selection, .. } => selection.as_str(),
         };
         if selection == "Keep planning" {
             return ToolResult::ok(json!({
@@ -665,8 +693,7 @@ impl PlanModeTools {
         }
 
         let note = match &answer {
-            PromptResponse::Single { note, .. } => note.clone(),
-            _ => None,
+            PlanModePromptResponse::Single { note, .. } => note.clone(),
         };
 
         if let Err(err) =
@@ -797,15 +824,11 @@ impl SessionPlugin for PlanModePlugin {
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_events(vec![
-                        state
-                            .lock()
-                            .map_err(|_| {
-                                PluginError::Session("plan mode state poisoned".to_string())
-                            })?
-                            .badge_event(),
-                        plan_panel_event(&report),
-                    ]),
+                    PluginDirective::emit_runtime_events(vec![plan_mode_state_event(
+                        &ctx.session_id,
+                        true,
+                        Some(&report),
+                    )?]),
                     PluginDirective::EnqueueMessages {
                         messages: vec![plan_mode_guidance_message(&plan_path)],
                     },
@@ -830,15 +853,11 @@ impl SessionPlugin for PlanModePlugin {
                 seed_plan_template(&plan_path).map_err(PluginError::Session)?;
                 let report = read_plan_report(&plan_path).map_err(PluginError::Session)?;
                 Ok(vec![
-                    PluginDirective::emit_events(vec![
-                        state
-                            .lock()
-                            .map_err(|_| {
-                                PluginError::Session("plan mode state poisoned".to_string())
-                            })?
-                            .badge_event(),
-                        plan_panel_event(&report),
-                    ]),
+                    PluginDirective::emit_runtime_events(vec![plan_mode_state_event(
+                        &ctx.session_id,
+                        true,
+                        Some(&report),
+                    )?]),
                     PluginDirective::EnqueueMessages {
                         messages: vec![plan_mode_guidance_message(&plan_path)],
                     },
@@ -910,13 +929,8 @@ impl SessionPlugin for PlanModePlugin {
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
                 if approved {
-                    let clear_badge = state
-                        .lock()
-                        .map_err(|_| PluginError::Session("plan mode state poisoned".to_string()))?
-                        .clear_badge_event();
-                    let mut directives = vec![PluginDirective::emit_events(vec![
-                        clear_badge,
-                        clear_plan_panel_event(),
+                    let mut directives = vec![PluginDirective::emit_runtime_events(vec![
+                        plan_mode_state_event(&ctx.session_id, false, None)?,
                     ])];
                     if ctx
                         .result
@@ -974,9 +988,9 @@ impl SessionPlugin for PlanModePlugin {
                 let snapshot = ctx.session_snapshot().await?;
                 let path = ensure_plan_path_from_snapshot(&state, &snapshot)?;
                 let report = read_plan_report(&path).map_err(PluginError::Session)?;
-                Ok(vec![PluginDirective::emit_events(vec![plan_panel_event(
-                    &report,
-                )])])
+                Ok(vec![PluginDirective::emit_runtime_events(vec![
+                    plan_mode_state_event(&ctx.session_id, true, Some(&report))?,
+                ])])
             })
         }));
 

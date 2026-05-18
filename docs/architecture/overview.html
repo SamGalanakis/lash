@@ -40,6 +40,7 @@ flowchart TD
 
   subgraph Runtime["Async host runtime"]
     L["lash-core<br/>LashRuntime, Session, Store, PluginHost"]
+    EffectHost["RuntimeEffectHost<br/>durable side-effect boundary"]
     Env["RuntimeEnvironment<br/>shared runtime infrastructure"]
     Graph["SessionGraph<br/>durable event graph"]
     Read["SessionReadView<br/>public read seam"]
@@ -69,6 +70,8 @@ flowchart TD
   TraceViewer --> Trace
   L --> Env
   L --> S
+  L --> EffectHost
+  EffectHost --> Env
   L --> LL
   L --> Graph
   L --> Sqlite

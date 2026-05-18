@@ -369,10 +369,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use lash_core::plugin::runtime_host::{
-        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
-        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
-    };
+    use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
     use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
 
@@ -384,7 +381,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SessionSnapshotHost for DirectCompletionManager {
+    impl RuntimeSessionHost for DirectCompletionManager {
         async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
@@ -395,22 +392,13 @@ mod tests {
         ) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
-    }
-
-    #[async_trait]
-    impl ToolCatalogHost for DirectCompletionManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Ok(Vec::new())
         }
-    }
 
-    impl ToolStateHost for DirectCompletionManager {}
-
-    #[async_trait]
-    impl SessionLifecycleHost for DirectCompletionManager {
         async fn create_session(
             &self,
             _request: SessionCreateRequest,
@@ -421,10 +409,6 @@ mod tests {
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
-    }
-
-    #[async_trait]
-    impl TurnHost for DirectCompletionManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -443,10 +427,6 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
-    }
-
-    #[async_trait]
-    impl DirectCompletionHost for DirectCompletionManager {
         async fn direct_completion(
             &self,
             request: lash_core::DirectRequest,
@@ -462,11 +442,6 @@ mod tests {
             })
         }
     }
-
-    impl TaskHost for DirectCompletionManager {}
-    impl MonitorHost for DirectCompletionManager {}
-    impl SessionGraphHost for DirectCompletionManager {}
-    impl TraceHost for DirectCompletionManager {}
 
     #[test]
     fn llm_definitions_include_llm_query_only() {

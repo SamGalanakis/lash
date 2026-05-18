@@ -28,7 +28,8 @@ pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
 pub use crate::turn::{
-    TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream, message_role, message_text,
+    FollowedTurnResult, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream,
+    message_role, message_text,
 };
 pub use lash_core::{
     InputItem, PluginStack, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
@@ -37,11 +38,11 @@ pub use lash_core::{
 
 pub mod prelude {
     pub use crate::{
-        AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError, Handoffs,
-        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
-        PluginActions, PluginBinding, PluginStack, Result, SessionBuilder, SessionSpec,
-        ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput, TurnOutput, TurnResult,
-        TurnStream,
+        AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError,
+        FollowedTurnResult, Handoffs, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId,
+        ModePreset, ObservableSession, PluginActions, PluginBinding, PluginStack, Result,
+        SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput,
+        TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -52,10 +53,10 @@ pub mod tools {
         AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState,
         MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
         MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
-        StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolAvailability,
-        ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
-        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
-        ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
+        StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolArgumentProjectionPolicy,
+        ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
+        ToolContext, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
+        ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
@@ -72,13 +73,13 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint,
+        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
         PersistedSessionConfig, PersistedSessionRead, PersistedSessionState, PersistedTurnState,
-        RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionGraph,
-        SessionHead, SessionHeadMeta, SessionMeta, SessionNodeRecord, SessionReadScope,
-        SessionReadView, SessionStoreCreateRequest, SessionStoreFactory, StoreError,
-        TokenLedgerEntry, VacuumReport, load_persisted_session_state,
-        load_persisted_session_state_active_path,
+        RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint,
+        SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta, SessionMeta,
+        SessionNodeRecord, SessionReadScope, SessionReadView, SessionStoreCreateRequest,
+        SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
+        load_persisted_session_state, load_persisted_session_state_active_path,
     };
 }
 
@@ -94,8 +95,8 @@ pub mod plugins {
     };
     pub use lash_core::{
         BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginError,
-        PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginSession,
-        PluginSessionContext, PluginSpec, PluginSpecFactory, PluginSurfaceEvent, PromptHookContext,
+        PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
+        PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
         SessionPlugin, ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
         ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext, TurnResultHookContext,
     };
@@ -111,17 +112,20 @@ pub mod messages {
 
 pub mod advanced {
     pub use crate::AdvancedLashCoreBuilder;
+    pub use lash_core::runtime::{RuntimeTurnPhase, RuntimeTurnPhaseProbe};
     // Benchmarks and diagnostics still need a semantic harness facade for
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, BackgroundTaskRecord, EmbeddedRuntimeHost, EventSink, ExecutionMode,
-        LashRuntime, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
-        NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency, RewriteTrigger,
-        RuntimeCoreConfig, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError,
-        RuntimeHandle, RuntimeObservation, SessionHandle, SessionPolicy, SessionStateEnvelope,
-        SessionTurnHandle, StandardContextApproach, TerminationPolicy, TurnContext, TurnFinish,
-        TurnOutcome, TurnStop,
+        AssembledTurn, BackgroundTaskRecord, DirectEffectLocalExecutor, EffectInvocation,
+        EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost, EventSink, ExecutionMode,
+        LashRuntime, LocalRuntimeEffectHost, ModeSessionExtensionHandle, ModeTurnOptions,
+        NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency,
+        RewriteTrigger, RuntimeCoreConfig, RuntimeEffectHost, RuntimeEffectKind,
+        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle,
+        RuntimeObservation, SessionEvent, SessionHandle, SessionPolicy, SessionStateEnvelope,
+        SessionTurnHandle, StandardContextApproach, TerminationPolicy, TurnContext,
+        TurnEffectLocalExecutor, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

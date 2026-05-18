@@ -528,7 +528,7 @@ async fn summarize_compaction_prefix(
     state: &SessionStateEnvelope,
     prefix_messages: Vec<Message>,
     instructions: Option<&str>,
-    host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost>,
+    host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
 ) -> Result<Option<String>, HistoryError> {
     if prefix_messages.is_empty() {
         return Ok(None);
@@ -646,7 +646,7 @@ async fn compact_messages_core(
     state: &SessionStateEnvelope,
     messages: &[Message],
     instructions: Option<&str>,
-    host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost>,
+    host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
 ) -> Result<Option<Vec<Message>>, HistoryError> {
     let prefix_len = leading_system_prefix_len(messages);
     let cut_point = find_compaction_cut_point(messages, prefix_len);
@@ -995,7 +995,7 @@ mod tests {
         state: SessionStateEnvelope,
         prompt_usage: Option<PromptUsage>,
         max_context_tokens: Option<usize>,
-        host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost>,
+        host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
     ) -> TurnTransformContext {
         TurnTransformContext {
             session_id: session_id.to_string(),
@@ -1057,7 +1057,8 @@ mod tests {
         };
         state.replace_active_read_state(&messages, &tool_calls);
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
-        let host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost> = Arc::new(mock_manager());
+        let host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost> =
+            Arc::new(mock_manager());
         let ctx = build_turn_ctx(
             "root",
             state,
@@ -1097,7 +1098,8 @@ mod tests {
         ];
 
         let state = SessionStateEnvelope::default();
-        let host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost> = Arc::new(mock_manager());
+        let host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost> =
+            Arc::new(mock_manager());
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let ctx = build_turn_ctx(
             "root",
@@ -1130,7 +1132,7 @@ mod tests {
     #[tokio::test]
     async fn rolling_turn_transform_replaces_prefix_with_summary() {
         let manager = Arc::new(mock_manager());
-        let host: Arc<dyn lash_core::plugin::runtime_host::HistoryHost> = manager.clone();
+        let host: Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost> = manager.clone();
         let transform = RollingTurnTransform::new(RollingHistoryConfig);
         let state = SessionStateEnvelope {
             session_id: "root".to_string(),

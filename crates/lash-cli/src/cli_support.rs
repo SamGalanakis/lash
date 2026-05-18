@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::advanced::ExecutionMode;
-use lash::plugins::PluginSurfaceEvent;
 use lash::provider::ProviderHandle;
-use lash::{TurnActivity, TurnEvent};
 use lash_core::{
     CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
 };
@@ -14,7 +12,7 @@ use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
 use sha2::{Digest, Sha256};
 
 use crate::SkillCatalog;
-use crate::app::{App, PreparedTurn, UiTimelineItem};
+use crate::app::{App, PluginPanelBlock, PreparedTurn, UiTimelineItem};
 use crate::command;
 
 #[derive(Debug, Clone)]
@@ -699,20 +697,44 @@ pub(crate) fn apply_ui_host_effects(app: &mut App, effects: Vec<TuiHostEffect>) 
                 title,
                 content,
             } => {
-                app.handle_turn_activity(TurnActivity::independent(TurnEvent::PluginSurface {
-                    plugin_id,
-                    event: PluginSurfaceEvent::PanelUpsert {
-                        key,
-                        title,
-                        content,
-                    },
-                }));
+                let target = crate::plugin_surface::surface_key(&plugin_id, &key);
+                if let Some(existing) = app.timeline.iter_mut().find_map(|block| match block {
+                    UiTimelineItem::PluginPanel(panel)
+                        if crate::plugin_surface::surface_key(&panel.plugin_id, &panel.key)
+                            == target =>
+                    {
+                        Some(panel)
+                    }
+                    _ => None,
+                }) {
+                    existing.title = title;
+                    existing.content = content;
+                } else {
+                    app.timeline
+                        .push(UiTimelineItem::PluginPanel(PluginPanelBlock {
+                            plugin_id,
+                            key,
+                            title,
+                            content,
+                        }));
+                }
+                app.invalidate_height_cache();
+                app.scroll_to_bottom();
+                app.dirty = true;
             }
             TuiHostEffect::ClearPanel { plugin_id, key } => {
-                app.handle_turn_activity(TurnActivity::independent(TurnEvent::PluginSurface {
-                    plugin_id,
-                    event: PluginSurfaceEvent::PanelClear { key },
-                }));
+                let target = crate::plugin_surface::surface_key(&plugin_id, &key);
+                let original_len = app.timeline.len();
+                app.timeline.retain(|block| match block {
+                    UiTimelineItem::PluginPanel(panel) => {
+                        crate::plugin_surface::surface_key(&panel.plugin_id, &panel.key) != target
+                    }
+                    _ => true,
+                });
+                if app.timeline.len() != original_len {
+                    app.invalidate_height_cache();
+                    app.dirty = true;
+                }
             }
             TuiHostEffect::QueueTurn { input } => {
                 app.queue_turn(PreparedTurn::prepare(input, Vec::new(), &app.skills));
@@ -827,6 +849,7 @@ mod tests {
             model: "gpt-5".to_string(),
             cwd: Some("/tmp/demo".to_string()),
             parent_session_id: None,
+            relation: lash_core::SessionRelation::Root,
         });
 
         assert!(db_path.with_extension("db-wal").exists());

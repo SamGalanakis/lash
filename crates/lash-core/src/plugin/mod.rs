@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub use lash_sansio::{
-    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, ToolSurfaceContribution,
+    CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, ToolSurfaceContribution,
     ToolSurfaceOverride,
 };
 
@@ -45,7 +45,7 @@ pub use hooks::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHook, AssistantStreamHookContext,
     AssistantStreamTransform, BeforeToolCallHook, BeforeTurnHook, CheckpointHook,
-    CheckpointHookContext, PluginFuture, PluginRuntimeEvent, PluginRuntimeEventHook,
+    CheckpointHookContext, PluginFuture, PluginLifecycleEvent, PluginLifecycleEventHook,
     PluginSessionTask, PromptContributor, PromptHookContext, SessionConfigChangedContext,
     SessionConfigMutator, SessionStateChangedContext, ToolCallHookContext,
     ToolDiscoveryContributor, ToolResultHookContext, ToolResultProjectionContext,
@@ -75,12 +75,7 @@ pub use registry::{
 };
 pub use runtime_host::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectLlmCompletion,
-};
-pub(crate) use runtime_host::{
-    CheckpointHookHost, DirectCompletionHost, HistoryHost, MonitorHost, PluginActionHost,
-    PromptHookHost, RuntimeSessionHost, SessionGraphHost, SessionLifecycleHost,
-    SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolHookHost, ToolStateHost, TraceHost,
-    TurnHookHost, TurnHost, TurnResultHookHost,
+    RuntimeSessionHost,
 };
 pub use runtime_impl::{PluginHost, SessionAuthorityContext};
 pub(crate) use services::NoopSessionManager;
@@ -89,7 +84,7 @@ pub use session_obj::PluginSession;
 pub use session_types::{
     PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionPluginMode, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
-    SessionTurnHandle, SubagentSessionAuthority,
+    SessionTurnHandle, SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
 pub use snapshot::{
@@ -101,7 +96,7 @@ pub use surface::{
     ToolDiscoveryContribution, ToolDiscoveryToolContribution, ToolSurfaceContext, TurnFinalization,
     TurnPreparation,
 };
-pub(crate) use surface::{emit_plugin_surface_events, plugin_surface_session_events};
+pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
 pub use tool_result_projection_builtin::{
     DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
     ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,

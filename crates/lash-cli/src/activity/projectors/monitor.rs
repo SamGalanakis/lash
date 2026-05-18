@@ -28,7 +28,7 @@ impl ToolProjector for MonitorProjector {
 }
 
 fn project_monitor(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
-    let status = if ctx.success && result_run_state(&ctx.result) == Some("running") {
+    let status = if ctx.success && result_state(&ctx.result) == Some("running") {
         ActivityStatus::Running
     } else if ctx.success {
         ActivityStatus::Completed
@@ -63,11 +63,11 @@ fn project_tasks_list(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         .unwrap_or_default();
     let running = tasks
         .iter()
-        .filter(|task| task.get("run_state").and_then(Value::as_str) == Some("running"))
+        .filter(|task| task.get("state").and_then(Value::as_str) == Some("running"))
         .count();
     let idle = tasks
         .iter()
-        .filter(|task| task.get("run_state").and_then(Value::as_str) == Some("idle"))
+        .filter(|task| task.get("state").and_then(Value::as_str) == Some("idle"))
         .count();
     let status = if !ctx.success {
         ActivityStatus::Failed
@@ -144,7 +144,7 @@ fn monitor_detail_lines(args: &Value, result: &Value, success: bool) -> Vec<Stri
         return monitor_error_lines(result);
     }
 
-    let Some(run_state) = result.get("run_state").and_then(Value::as_str) else {
+    let Some(state) = result.get("state").and_then(Value::as_str) else {
         return Vec::new();
     };
     let description = result
@@ -168,7 +168,7 @@ fn monitor_detail_lines(args: &Value, result: &Value, success: bool) -> Vec<Stri
         .or_else(|| tool_arg_str(args, "command"))
         .unwrap_or_default();
 
-    monitor_status_lines(run_state, description, command, persistent, timeout_ms)
+    monitor_status_lines(state, description, command, persistent, timeout_ms)
 }
 
 fn monitor_error_lines(result: &Value) -> Vec<String> {
@@ -188,7 +188,7 @@ fn monitor_error_lines(result: &Value) -> Vec<String> {
 }
 
 fn monitor_status_lines(
-    run_state: &str,
+    state: &str,
     description: &str,
     command: &str,
     persistent: bool,
@@ -196,7 +196,7 @@ fn monitor_status_lines(
 ) -> Vec<String> {
     let mut lines = vec![format!(
         "{} · {}",
-        inline_text(run_state),
+        inline_text(state),
         inline_text(description)
     )];
 
@@ -213,13 +213,13 @@ fn monitor_status_lines(
     lines
 }
 
-fn result_run_state(result: &Value) -> Option<&str> {
-    result.get("run_state").and_then(Value::as_str)
+fn result_state(result: &Value) -> Option<&str> {
+    result.get("state").and_then(Value::as_str)
 }
 
 fn task_list_detail_line(task: &Value) -> Option<String> {
     let state = task
-        .get("run_state")
+        .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let kind = task.get("kind").and_then(Value::as_str).unwrap_or("task");
@@ -241,8 +241,8 @@ fn task_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
         return monitor_error_lines(result);
     }
 
-    let run_state = result
-        .get("run_state")
+    let state = result
+        .get("state")
         .and_then(Value::as_str)
         .unwrap_or("stopped");
     let task_id = result
@@ -257,11 +257,7 @@ fn task_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
         format!("{kind} {task_id}")
     };
 
-    vec![format!(
-        "{} · {}",
-        inline_text(run_state),
-        inline_text(&label)
-    )]
+    vec![format!("{} · {}", inline_text(state), inline_text(&label))]
 }
 
 #[cfg(test)]
@@ -283,7 +279,7 @@ mod tests {
                 "command": "bash -lc 'echo started'",
                 "persistent": false,
                 "timeout_ms": 300000,
-                "run_state": "running"
+                "state": "running"
             }),
             true,
             24,
@@ -316,7 +312,7 @@ mod tests {
                 "command": "bash -lc 'tail -f /tmp/server.log'",
                 "persistent": true,
                 "timeout_ms": 300000,
-                "run_state": "running"
+                "state": "running"
             }),
             true,
             17,
@@ -370,7 +366,7 @@ mod tests {
             json!({
                 "task_id": "monitor:abc123",
                 "kind": "monitor",
-                "run_state": "cancelled",
+                "state": "cancelled",
             }),
             true,
             5,

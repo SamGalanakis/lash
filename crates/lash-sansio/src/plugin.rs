@@ -144,33 +144,12 @@ impl PromptContribution {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PluginSurfaceEvent {
-    ModeIndicatorUpsert {
-        key: String,
-        label: String,
-    },
-    ModeIndicatorClear {
-        key: String,
-    },
-    PanelUpsert {
-        key: String,
-        title: String,
-        content: String,
-    },
-    PanelAppend {
-        key: String,
-        content: String,
-    },
-    PanelClear {
-        key: String,
-    },
+pub enum PluginRuntimeEvent {
     Status {
         key: String,
         label: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        transient_ms: Option<u64>,
     },
     Custom {
         name: String,

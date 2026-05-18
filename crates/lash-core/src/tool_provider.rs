@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::plugin::{DirectCompletion, PluginError, SessionHandle, SessionSnapshot, ToolHookHost};
+use crate::plugin::{
+    DirectCompletion, PluginError, RuntimeSessionHost, SessionHandle, SessionSnapshot,
+};
 use crate::{
     AttachmentCreateMeta, AttachmentRef, AttachmentStore, AttachmentStoreError, ToolContract,
     ToolManifest, ToolResult,
@@ -23,7 +25,7 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 #[derive(Clone)]
 pub struct ToolContext {
     pub(crate) session_id: String,
-    pub(crate) host: Arc<dyn ToolHookHost>,
+    pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_task_id: Option<String>,
     pub(crate) turn_context: crate::TurnContext,
@@ -46,7 +48,7 @@ pub struct ToolSessionModel {
 
 #[derive(Clone)]
 pub struct ToolSessionControl {
-    host: Arc<dyn ToolHookHost>,
+    host: Arc<dyn RuntimeSessionHost>,
 }
 
 impl ToolSessionControl {
@@ -79,7 +81,7 @@ impl ToolSessionControl {
 }
 
 #[async_trait::async_trait]
-impl crate::plugin::SessionLifecycleHost for ToolSessionControl {
+impl RuntimeSessionHost for ToolSessionControl {
     async fn create_session(
         &self,
         request: crate::SessionCreateRequest,
@@ -90,12 +92,28 @@ impl crate::plugin::SessionLifecycleHost for ToolSessionControl {
     async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
         ToolSessionControl::close_session(self, session_id).await
     }
+
+    async fn start_turn_stream(
+        &self,
+        session_id: &str,
+        input: crate::TurnInput,
+    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
+        ToolSessionControl::start_turn_stream(self, session_id, input).await
+    }
+
+    async fn await_turn(&self, turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
+        ToolSessionControl::await_turn(self, turn_id).await
+    }
+
+    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
+        ToolSessionControl::cancel_turn(self, turn_id).await
+    }
 }
 
 #[derive(Clone)]
 pub struct ToolTaskControl {
     session_id: String,
-    host: Arc<dyn ToolHookHost>,
+    host: Arc<dyn RuntimeSessionHost>,
 }
 
 impl ToolTaskControl {
@@ -183,12 +201,19 @@ impl ToolTaskControl {
             .cancel_unreferenced_async_handles(&self.session_id, keep_handle_ids)
             .await
     }
+
+    pub async fn cancel_all_background_tasks_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+        self.host.cancel_all_background_tasks(session_id).await
+    }
 }
 
 impl ToolContext {
     pub(crate) fn new(
         session_id: String,
-        host: Arc<dyn ToolHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         tool_call_id: Option<String>,
@@ -347,7 +372,7 @@ impl ToolContext {
     #[doc(hidden)]
     pub fn __for_testing(
         session_id: String,
-        host: Arc<dyn ToolHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         tool_call_id: Option<String>,

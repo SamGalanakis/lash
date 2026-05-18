@@ -3,11 +3,9 @@
 //! (continue_as) or a `Subagent` (spawn_agent).
 //!
 //! The on-disk shape is one `.db` per session in `sessions_dir/`, each
-//! carrying its own `parent_session_id` in `session_meta`. The relation
-//! kind is *not* persisted — we recover it by inspecting the parent's
-//! chronological projection: if the parent has a `continue_as` tool call
-//! whose `result.session_id` matches the child, it's a handoff; otherwise
-//! it's a subagent.
+//! carrying its full session relation in `session_meta`. For subagents,
+//! `SessionRelation::Child.originating_tool_call_id` anchors the child to
+//! the parent `spawn_agent` call without relying on model-authored names.
 //!
 //! One provider trace JSONL covers the whole `lash` invocation. Each
 //! record carries `context.session_id`; we partition `LlmPromptSnapshot`s
@@ -50,7 +48,7 @@ pub enum NodeRelation {
     /// Parent called `spawn_agent` and waited for this session to submit.
     Subagent {
         parent_session_id: String,
-        agent_name: Option<String>,
+        task: Option<String>,
         capability: Option<String>,
         /// The parent's `spawn_agent` tool call_id, used to anchor the
         /// drill-in card to its position in the parent's transcript.
@@ -62,7 +60,7 @@ pub enum NodeRelation {
 #[derive(Clone, Debug)]
 pub struct SubagentEdge {
     pub child_session_id: String,
-    pub agent_name: Option<String>,
+    pub task: Option<String>,
     pub capability: Option<String>,
     pub call_id: Option<String>,
     pub status: ToolCallStatus,
@@ -74,6 +72,13 @@ pub struct LoadedSessionTree {
     pub root_id: String,
     pub trace_path: PathBuf,
     pub nodes: Vec<LoadedSessionNode>,
+}
+
+struct CandidateLoad {
+    db_path: PathBuf,
+    meta: SessionMeta,
+    chronological: Vec<ChronologicalEntry>,
+    context_window_tokens: Option<u64>,
 }
 
 impl LoadedSessionTree {
@@ -137,12 +142,6 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
 
     // First pass: load every .db in the directory. Sessions without a
     // session_meta row get skipped silently.
-    struct CandidateLoad {
-        db_path: PathBuf,
-        meta: SessionMeta,
-        chronological: Vec<ChronologicalEntry>,
-        context_window_tokens: Option<u64>,
-    }
     let mut candidates: Vec<CandidateLoad> = Vec::new();
     let entries = fs::read_dir(&root_dir)
         .with_context(|| format!("scanning sessions dir {}", root_dir.display()))?;
@@ -197,7 +196,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             if keep[i] {
                 continue;
             }
-            let Some(parent_id) = c.meta.parent_session_id.as_deref() else {
+            let Some(parent_id) = c.meta.relation_parent_session_id() else {
                 continue;
             };
             let Some(&parent_idx) = by_id.get(parent_id) else {
@@ -213,11 +212,46 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
         }
     }
 
-    // Build child-of-parent index by walking each parent's chronological
-    // for spawn_agent / continue_as tool calls.
+    // Build child-of-parent index from persisted relations, then use the
+    // parent's chronological projection only to recover display metadata and
+    // order edges at the exact parent call.
     let mut node_kinds: HashMap<String, NodeRelation> = HashMap::new();
     let mut subagent_edges: HashMap<String, Vec<SubagentEdge>> = HashMap::new();
     let mut handoff_targets: HashMap<String, String> = HashMap::new();
+
+    for (i, c) in candidates.iter().enumerate() {
+        if !keep[i] || c.meta.session_id == root_id {
+            continue;
+        }
+        match &c.meta.relation {
+            lash_core::SessionRelation::Root => {}
+            lash_core::SessionRelation::Child {
+                parent_session_id,
+                originating_tool_call_id,
+            } => {
+                node_kinds.insert(
+                    c.meta.session_id.clone(),
+                    NodeRelation::Subagent {
+                        parent_session_id: parent_session_id.clone(),
+                        task: None,
+                        capability: None,
+                        parent_call_id: originating_tool_call_id.clone(),
+                    },
+                );
+            }
+            lash_core::SessionRelation::Handoff {
+                parent_session_id, ..
+            } => {
+                handoff_targets.insert(parent_session_id.clone(), c.meta.session_id.clone());
+                node_kinds.insert(
+                    c.meta.session_id.clone(),
+                    NodeRelation::Handoff {
+                        parent_session_id: parent_session_id.clone(),
+                    },
+                );
+            }
+        }
+    }
 
     for (i, c) in candidates.iter().enumerate() {
         if !keep[i] {
@@ -232,11 +266,11 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             match record.tool.as_str() {
                 "spawn_agent" => {
                     if let Some(child_id) =
-                        extract_session_id(&record.output.value_for_projection())
+                        find_spawn_child_for_record(&candidates, &keep, &parent_sid, record)
                     {
                         edges.push(SubagentEdge {
                             child_session_id: child_id.clone(),
-                            agent_name: extract_str(&record.args, "agent_name"),
+                            task: extract_str(&record.args, "task"),
                             capability: extract_str(&record.args, "capability"),
                             call_id: record.call_id.clone(),
                             status: record.output.status(),
@@ -246,7 +280,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                             child_id,
                             NodeRelation::Subagent {
                                 parent_session_id: parent_sid.clone(),
-                                agent_name: extract_str(&record.args, "agent_name"),
+                                task: extract_str(&record.args, "task"),
                                 capability: extract_str(&record.args, "capability"),
                                 parent_call_id: record.call_id.clone(),
                             },
@@ -269,6 +303,35 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
                 _ => {}
             }
         }
+        for (child_idx, child) in candidates.iter().enumerate() {
+            if !keep[child_idx] {
+                continue;
+            }
+            let lash_core::SessionRelation::Child {
+                parent_session_id,
+                originating_tool_call_id,
+            } = &child.meta.relation
+            else {
+                continue;
+            };
+            if parent_session_id != &parent_sid {
+                continue;
+            }
+            if edges
+                .iter()
+                .any(|edge| edge.child_session_id == child.meta.session_id)
+            {
+                continue;
+            }
+            edges.push(SubagentEdge {
+                child_session_id: child.meta.session_id.clone(),
+                task: None,
+                capability: None,
+                call_id: originating_tool_call_id.clone(),
+                status: ToolCallStatus::Success,
+                duration_ms: 0,
+            });
+        }
         subagent_edges.insert(parent_sid, edges);
     }
 
@@ -290,10 +353,10 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             node_kinds.remove(&sid).unwrap_or(NodeRelation::Subagent {
                 parent_session_id: c
                     .meta
-                    .parent_session_id
-                    .clone()
+                    .relation_parent_session_id()
+                    .map(ToOwned::to_owned)
                     .unwrap_or_else(|| root_id.clone()),
-                agent_name: None,
+                task: None,
                 capability: None,
                 parent_call_id: None,
             })
@@ -343,10 +406,96 @@ fn extract_session_id(value: &serde_json::Value) -> Option<String> {
     extract_str(value, "session_id")
 }
 
+fn find_spawn_child_for_record(
+    candidates: &[CandidateLoad],
+    keep: &[bool],
+    parent_session_id: &str,
+    record: &lash_core::ToolCallRecord,
+) -> Option<String> {
+    if let Some(call_id) = &record.call_id {
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if !keep[idx] {
+                continue;
+            }
+            let lash_core::SessionRelation::Child {
+                parent_session_id: child_parent,
+                originating_tool_call_id,
+            } = &candidate.meta.relation
+            else {
+                continue;
+            };
+            if child_parent == parent_session_id
+                && originating_tool_call_id.as_ref() == Some(call_id)
+            {
+                return Some(candidate.meta.session_id.clone());
+            }
+        }
+    }
+    extract_session_id(&record.output.value_for_projection())
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     fs::canonicalize(a)
         .ok()
         .zip(fs::canonicalize(b).ok())
         .map(|(a, b)| a == b)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::{ToolCallOutput, ToolCallRecord};
+    use serde_json::json;
+
+    fn meta(session_id: &str, relation: lash_core::SessionRelation) -> SessionMeta {
+        SessionMeta {
+            session_id: session_id.to_string(),
+            session_name: session_id.to_string(),
+            created_at: "unix:0".to_string(),
+            model: "test-model".to_string(),
+            cwd: None,
+            parent_session_id: relation.parent_session_id().map(ToOwned::to_owned),
+            relation,
+        }
+    }
+
+    fn candidate(session_id: &str, relation: lash_core::SessionRelation) -> CandidateLoad {
+        CandidateLoad {
+            db_path: PathBuf::from(format!("{session_id}.db")),
+            meta: meta(session_id, relation),
+            chronological: Vec::new(),
+            context_window_tokens: None,
+        }
+    }
+
+    #[test]
+    fn spawn_child_lookup_uses_persisted_originating_call_id() {
+        let candidates = vec![
+            candidate("root", lash_core::SessionRelation::Root),
+            candidate(
+                "child-from-relation",
+                lash_core::SessionRelation::Child {
+                    parent_session_id: "root".to_string(),
+                    originating_tool_call_id: Some("call-7".to_string()),
+                },
+            ),
+        ];
+        let keep = vec![true, true];
+        let record = ToolCallRecord {
+            call_id: Some("call-7".to_string()),
+            tool: "spawn_agent".to_string(),
+            args: json!({
+                "task": "inspect relation anchoring",
+                "capability": "explore"
+            }),
+            output: ToolCallOutput::success(json!({ "result": "done" })),
+            duration_ms: 12,
+        };
+
+        assert_eq!(
+            find_spawn_child_for_record(&candidates, &keep, "root", &record),
+            Some("child-from-relation".to_string())
+        );
+    }
 }

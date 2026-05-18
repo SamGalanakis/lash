@@ -1,9 +1,7 @@
 use super::*;
 
 impl CurrentSessionCapability {
-    pub(in crate::runtime::session_manager) async fn current_snapshot_for_store_write(
-        &self,
-    ) -> SessionSnapshot {
+    pub(in crate::runtime) async fn current_snapshot_for_store_write(&self) -> SessionSnapshot {
         let mut state = self.snapshot.to_snapshot();
         if let Some(store) = &self.store
             && let Err(err) =

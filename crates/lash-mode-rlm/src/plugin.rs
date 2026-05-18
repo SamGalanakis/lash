@@ -15,12 +15,13 @@ use lash_core::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
     ToolOutputBudgetConfig,
 };
-use lash_rlm_types::RlmCreateExtras;
+use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent};
 
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
 use crate::projected_bindings::{
-    RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
+    ProjectionRegistry, ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings,
+    RlmProjectionExtension,
 };
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
@@ -84,11 +85,23 @@ impl RlmModePluginConfig {
 
 pub struct BuiltinRlmModePluginFactory {
     config: RlmModePluginConfig,
+    projection_resolver: Arc<dyn ProjectionResolver>,
 }
 
 impl BuiltinRlmModePluginFactory {
     pub fn new(config: RlmModePluginConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            projection_resolver: Arc::new(ProjectionRegistry::default()),
+        }
+    }
+
+    pub fn with_projection_resolver(
+        mut self,
+        projection_resolver: Arc<dyn ProjectionResolver>,
+    ) -> Self {
+        self.projection_resolver = projection_resolver;
+        self
     }
 }
 
@@ -107,6 +120,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
         Ok(Arc::new(RlmModePlugin {
             active: ctx.execution_mode == ExecutionMode::new("rlm"),
             config: self.config.clone(),
+            projection_resolver: Arc::clone(&self.projection_resolver),
             last_prompt_usage: Arc::new(RwLock::new(None)),
         }))
     }
@@ -115,6 +129,7 @@ impl PluginFactory for BuiltinRlmModePluginFactory {
 struct RlmModePlugin {
     active: bool,
     config: RlmModePluginConfig,
+    projection_resolver: Arc<dyn ProjectionResolver>,
     last_prompt_usage: SharedPromptUsage,
 }
 
@@ -128,7 +143,7 @@ impl SessionPlugin for RlmModePlugin {
             return Ok(());
         }
         let mode_session = Arc::new(
-            RlmModeSession::new(self.config.clone())
+            RlmModeSession::new(self.config.clone(), Arc::clone(&self.projection_resolver))
                 .map_err(|err| PluginError::Session(err.to_string()))?,
         );
         reg.mode().session(mode_session.clone())?;
@@ -215,74 +230,14 @@ fn normalize_projected_tool_args(
     ctx: ToolCallHookContext,
 ) -> Result<Vec<PluginDirective>, PluginError> {
     let original = ctx.args;
-    let normalized = normalize_tool_args_for_projection(&ctx.tool_name, original.clone());
+    let normalized = crate::projection_codec::normalize_tool_args_for_projection(
+        original.clone(),
+        &ctx.argument_projection,
+    );
     if normalized == original {
         Ok(Vec::new())
     } else {
         Ok(vec![PluginDirective::ReplaceToolArgs { args: normalized }])
-    }
-}
-
-fn normalize_tool_args_for_projection(
-    tool_name: &str,
-    args: serde_json::Value,
-) -> serde_json::Value {
-    match tool_name {
-        "continue_as" | "spawn_agent" => normalize_seed_preserving_tool_args(args),
-        _ => materialize_projected_json(args),
-    }
-}
-
-fn normalize_seed_preserving_tool_args(args: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(args) = args else {
-        return materialize_projected_json(args);
-    };
-    serde_json::Value::Object(
-        args.into_iter()
-            .map(|(key, value)| {
-                let value = if key == "seed" {
-                    normalize_projected_seed(value)
-                } else {
-                    materialize_projected_json(value)
-                };
-                (key, value)
-            })
-            .collect(),
-    )
-}
-
-fn normalize_projected_seed(seed: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(seed) = seed else {
-        return materialize_projected_json(seed);
-    };
-    serde_json::Value::Object(
-        seed.into_iter()
-            .map(|(key, value)| {
-                let value = if lash_rlm_types::projection_inner(&value).is_some() {
-                    value
-                } else {
-                    materialize_projected_json(value)
-                };
-                (key, value)
-            })
-            .collect(),
-    )
-}
-
-fn materialize_projected_json(value: serde_json::Value) -> serde_json::Value {
-    if let Some(inner) = lash_rlm_types::projection_inner(&value) {
-        return materialize_projected_json(inner.clone());
-    }
-    match value {
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(materialize_projected_json).collect())
-        }
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, materialize_projected_json(value)))
-                .collect(),
-        ),
-        value => value,
     }
 }
 
@@ -310,13 +265,17 @@ impl TurnContextTransform for BudgetUsageObserver {
 
 struct RlmModeSession {
     config: RlmModePluginConfig,
+    projection_resolver: Arc<dyn ProjectionResolver>,
     warned_at_threshold: Mutex<bool>,
     execution: tokio::sync::Mutex<Option<RlmExecutionState>>,
     session_projected_bindings: tokio::sync::Mutex<RlmProjectedBindings>,
 }
 
 impl RlmModeSession {
-    fn new(config: RlmModePluginConfig) -> Result<Self, SessionError> {
+    fn new(
+        config: RlmModePluginConfig,
+        projection_resolver: Arc<dyn ProjectionResolver>,
+    ) -> Result<Self, SessionError> {
         config
             .validate()
             .map_err(|err| SessionError::Protocol(err.to_string()))?;
@@ -324,6 +283,7 @@ impl RlmModeSession {
             execution: tokio::sync::Mutex::new(Some(RlmExecutionState::new(
                 config.observe_projection.clone(),
             )?)),
+            projection_resolver,
             config,
             warned_at_threshold: Mutex::new(false),
             session_projected_bindings: tokio::sync::Mutex::new(RlmProjectedBindings::new()),
@@ -368,14 +328,13 @@ impl RlmModeSession {
             return Ok(Vec::new());
         }
         *warned = true;
-        Ok(vec![PluginDirective::emit_events(vec![
-            lash_core::PluginSurfaceEvent::Status {
+        Ok(vec![PluginDirective::emit_runtime_events(vec![
+            lash_core::PluginRuntimeEvent::Status {
                 key: BUDGET_WARNING_STATUS.to_string(),
                 label: "context budget".to_string(),
                 detail: Some(format!(
                     "{used} tokens used; warn at {threshold}; choose handoff path"
                 )),
-                transient_ms: Some(8_000),
             },
         ])])
     }
@@ -403,10 +362,10 @@ impl ModeSessionPlugin for RlmModeSession {
         }
         for event in state.read_view().active_events() {
             if let lash_core::SessionEventRecord::Mode(event) = event
-                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    crate::decode_rlm_mode_event(event)
+                && let Some(event) = crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, &protected_names)?;
+                self.apply_seed_or_globals_event(execution, event, &protected_names)
+                    .await?;
             }
         }
         Ok(())
@@ -424,13 +383,11 @@ impl ModeSessionPlugin for RlmModeSession {
         let protected_names = self.protected_projected_binding_names().await;
         execution.prune_protected_globals(&protected_names);
         for node in nodes {
-            if let lash_core::SessionAppendNode::Event {
-                event: lash_core::SessionEventRecord::Mode(event),
-            } = node
-                && let Some(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(patch)) =
-                    crate::decode_rlm_mode_event(event)
+            if let lash_core::SessionAppendNode::ModeEvent { event } = node
+                && let Some(event) = crate::decode_rlm_mode_event(event)
             {
-                execution.patch_globals(&patch, &protected_names)?;
+                self.apply_seed_or_globals_event(execution, event, &protected_names)
+                    .await?;
             }
         }
         Ok(())
@@ -447,7 +404,14 @@ impl ModeSessionPlugin for RlmModeSession {
             .take()
             .ok_or_else(|| SessionError::Protocol("RLM execution state is busy".to_string()))?;
 
-        let result = execute_code(state, ctx, request, session_projected_bindings).await;
+        let result = execute_code(
+            state,
+            ctx,
+            request,
+            session_projected_bindings,
+            Arc::clone(&self.projection_resolver),
+        )
+        .await;
         match result {
             Ok((state, response)) => {
                 *guard = Some(state);
@@ -560,7 +524,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
         let observed_tokens = usage.context_budget_tokens;
         let args = forced_continue_as_args(&ctx, request, threshold, observed_tokens).await?;
-        let seed = lash_rlm_types::classify_seed(&args)
+        let seed = crate::RlmSeed::from_tool_args(&args)
             .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
         let referenced_handles =
             crate::control_tools::collect_seed_async_handle_ids(args.get("seed"));
@@ -657,16 +621,39 @@ impl ModeSessionPlugin for RlmModeSession {
             {
                 ctx.set_mode_turn_options(options);
             }
-            if let Some(snapshot) = extras.projected_seed
-                && !snapshot.is_empty()
-            {
-                self.install_initial_projected_seed(snapshot);
-            }
         }
     }
 }
 
 impl RlmModeSession {
+    async fn apply_seed_or_globals_event(
+        &self,
+        execution: &mut RlmExecutionState,
+        event: RlmModeEvent,
+        protected_names: &BTreeSet<String>,
+    ) -> Result<(), SessionError> {
+        match event {
+            RlmModeEvent::RlmGlobalsPatch(patch) => {
+                execution.patch_globals(&patch, protected_names)?;
+            }
+            RlmModeEvent::RlmSeed(seed) => {
+                if !seed.projected.is_empty() {
+                    self.install_initial_projected_seed(seed.projected)?;
+                }
+                if !seed.globals.is_empty() {
+                    execution.patch_globals(
+                        &RlmGlobalsPatchPluginBody {
+                            set_default: seed.globals,
+                        },
+                        protected_names,
+                    )?;
+                }
+            }
+            RlmModeEvent::RlmTrajectoryEntry(_) | RlmModeEvent::RlmDiagnostic(_) => {}
+        }
+        Ok(())
+    }
+
     /// Apply a projected-binding seed at session-creation time. Called from
     /// `configure_runtime_from_request` (sync); session_projected_bindings is
     /// guaranteed to be uncontended at this point because the session has just
@@ -674,44 +661,31 @@ impl RlmModeSession {
     /// `try_lock` is safe. We deliberately fail loudly on either an
     /// already-held lock or a duplicate-name merge so the bug shows up at the
     /// session boundary instead of silently producing a partial child.
-    fn install_initial_projected_seed(&self, snapshot: lash_rlm_types::RlmProjectedSeedSnapshot) {
+    fn install_initial_projected_seed(
+        &self,
+        snapshot: lash_rlm_types::RlmProjectedSeedSnapshot,
+    ) -> Result<(), SessionError> {
         let bindings = match RlmProjectedBindings::from_snapshot(&snapshot) {
             Ok(bindings) => bindings,
             Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "rlm projected seed snapshot rejected; child session will start without it",
-                );
-                return;
+                return Err(SessionError::Protocol(format!(
+                    "rlm projected seed snapshot rejected: {err}"
+                )));
             }
         };
-        if let Err(err) = reject_reserved_projected_binding_names(&bindings) {
-            tracing::error!(
-                error = %err,
-                "rlm projected seed snapshot used reserved name; ignoring",
-            );
-            return;
-        }
+        reject_reserved_projected_binding_names(&bindings)?;
         let mut guard = match self.session_projected_bindings.try_lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                tracing::error!(
-                    "rlm projected seed snapshot dropped: session bindings were unexpectedly contended at create time",
-                );
-                return;
-            }
+            Err(_) => return Err(SessionError::Protocol(
+                "rlm projected seed snapshot could not be installed because session bindings were contended".to_string(),
+            )),
         };
-        let merged = match guard.clone().merge(bindings) {
-            Ok(merged) => merged,
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "rlm projected seed snapshot collided with existing bindings; ignoring",
-                );
-                return;
-            }
-        };
+        let merged = guard
+            .clone()
+            .merge(bindings)
+            .map_err(|err| SessionError::Protocol(err.to_string()))?;
         *guard = merged;
+        Ok(())
     }
 }
 
@@ -798,7 +772,7 @@ mod tests {
     struct NoopPromptManager;
 
     #[async_trait::async_trait]
-    impl lash_core::plugin::runtime_host::SessionSnapshotHost for NoopPromptManager {
+    impl lash_core::plugin::runtime_host::RuntimeSessionHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
         ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
@@ -815,22 +789,29 @@ mod tests {
                 "not used".to_string(),
             ))
         }
-    }
-
-    #[async_trait::async_trait]
-    impl lash_core::plugin::runtime_host::ToolCatalogHost for NoopPromptManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, lash_core::plugin::PluginError> {
             Ok(Vec::new())
         }
+
+        async fn create_session(
+            &self,
+            _request: lash_core::SessionCreateRequest,
+        ) -> Result<lash_core::SessionHandle, lash_core::plugin::PluginError> {
+            Err(lash_core::plugin::PluginError::Session(
+                "not used".to_string(),
+            ))
+        }
+
+        async fn close_session(
+            &self,
+            _session_id: &str,
+        ) -> Result<(), lash_core::plugin::PluginError> {
+            Ok(())
+        }
     }
-
-    impl lash_core::plugin::runtime_host::TaskHost for NoopPromptManager {}
-    impl lash_core::plugin::runtime_host::DirectCompletionHost for NoopPromptManager {}
-    impl lash_core::plugin::runtime_host::TraceHost for NoopPromptManager {}
-
     fn prompt_usage(context_budget_tokens: usize) -> lash_core::PromptUsage {
         lash_core::PromptUsage {
             prompt_context_tokens: context_budget_tokens,
@@ -915,12 +896,29 @@ mod tests {
         serde_json::json!({ "__projected__": value })
     }
 
-    fn received_tool_args(tool_name: &str, args: serde_json::Value) -> serde_json::Value {
-        normalize_tool_args_for_projection(tool_name, args)
+    fn received_tool_args(
+        policy: lash_core::ToolArgumentProjectionPolicy,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        crate::projection_codec::normalize_tool_args_for_projection(args, &policy)
     }
 
-    fn classify_received_seed(received: &serde_json::Value) -> lash_rlm_types::ClassifiedSeed {
-        lash_rlm_types::classify_seed(received).expect("seed should classify")
+    fn materializing_args(args: serde_json::Value) -> serde_json::Value {
+        received_tool_args(
+            lash_core::ToolArgumentProjectionPolicy::MaterializeProjectedValues,
+            args,
+        )
+    }
+
+    fn seed_preserving_args(args: serde_json::Value) -> serde_json::Value {
+        received_tool_args(
+            lash_core::ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
+            args,
+        )
+    }
+
+    fn classify_received_seed(received: &serde_json::Value) -> crate::RlmSeed {
+        crate::RlmSeed::from_tool_args(received).expect("seed should classify")
     }
 
     #[test]
@@ -935,7 +933,7 @@ mod tests {
             }
         });
 
-        let normalized = received_tool_args("read_file", args);
+        let normalized = materializing_args(args);
 
         assert_eq!(
             normalized,
@@ -954,7 +952,6 @@ mod tests {
     #[test]
     fn projected_tool_arg_normalization_preserves_seed_roots_for_projection_aware_tools() {
         let args = serde_json::json!({
-            "agent_name": projected(serde_json::json!("worker")),
             "task": projected(serde_json::json!("inspect the file")),
             "capability": "explore",
             "seed": {
@@ -965,12 +962,11 @@ mod tests {
             }
         });
 
-        let normalized = received_tool_args("spawn_agent", args);
+        let normalized = seed_preserving_args(args);
 
         assert_eq!(
             normalized,
             serde_json::json!({
-                "agent_name": "worker",
                 "task": "inspect the file",
                 "capability": "explore",
                 "seed": {
@@ -992,7 +988,7 @@ mod tests {
             }
         });
 
-        let normalized = received_tool_args("continue_as", args);
+        let normalized = seed_preserving_args(args);
         let seed = classify_received_seed(&normalized);
 
         assert_eq!(
@@ -1016,26 +1012,23 @@ mod tests {
             "options": { "limit": 3, "exact": true }
         });
 
-        let received = received_tool_args("search", args.clone());
+        let received = materializing_args(args.clone());
 
         assert_eq!(received, args);
     }
 
     #[test]
     fn ordinary_tool_receives_projected_input_materialized_as_plain_json() {
-        let received = received_tool_args(
-            "search",
-            serde_json::json!({
-                "query": projected(serde_json::json!("lazy query")),
-                "options": {
-                    "limit": projected(serde_json::json!(3)),
-                    "filters": [
-                        projected(serde_json::json!("rust")),
-                        "tests"
-                    ]
-                }
-            }),
-        );
+        let received = materializing_args(serde_json::json!({
+            "query": projected(serde_json::json!("lazy query")),
+            "options": {
+                "limit": projected(serde_json::json!(3)),
+                "filters": [
+                    projected(serde_json::json!("rust")),
+                    "tests"
+                ]
+            }
+        }));
 
         assert_eq!(
             received,
@@ -1051,18 +1044,14 @@ mod tests {
 
     #[test]
     fn projection_aware_tool_receives_non_projected_seed_as_plain_input() {
-        let received = received_tool_args(
-            "spawn_agent",
-            serde_json::json!({
-                "agent_name": "worker",
-                "task": "continue from facts",
-                "capability": "explore",
-                "seed": {
-                    "facts": { "count": 2 },
-                    "label": "plain"
-                }
-            }),
-        );
+        let received = seed_preserving_args(serde_json::json!({
+            "task": "continue from facts",
+            "capability": "explore",
+            "seed": {
+                "facts": { "count": 2 },
+                "label": "plain"
+            }
+        }));
 
         let seed = classify_received_seed(&received);
 
@@ -1078,29 +1067,19 @@ mod tests {
 
     #[test]
     fn projection_aware_tool_receives_projected_seed_roots_without_materializing_them() {
-        let received = received_tool_args(
-            "spawn_agent",
-            serde_json::json!({
-                "agent_name": projected(serde_json::json!("worker")),
-                "task": projected(serde_json::json!("continue from projected context")),
-                "capability": "explore",
-                "seed": {
-                    "problem": projected(serde_json::json!("large parent context")),
-                    "computed": {
-                        "summary": projected(serde_json::json!("short summary"))
-                    }
+        let received = seed_preserving_args(serde_json::json!({
+            "task": projected(serde_json::json!("continue from projected context")),
+            "capability": "explore",
+            "seed": {
+                "problem": projected(serde_json::json!("large parent context")),
+                "computed": {
+                    "summary": projected(serde_json::json!("short summary"))
                 }
-            }),
-        );
+            }
+        }));
 
         let seed = classify_received_seed(&received);
 
-        assert_eq!(
-            received
-                .get("agent_name")
-                .and_then(serde_json::Value::as_str),
-            Some("worker")
-        );
         assert_eq!(
             received.get("task").and_then(serde_json::Value::as_str),
             Some("continue from projected context")
@@ -1121,23 +1100,37 @@ mod tests {
         );
     }
 
-    #[async_trait::async_trait]
-    impl lash_core::plugin::runtime_host::SessionLifecycleHost for NoopPromptManager {
-        async fn create_session(
-            &self,
-            _request: lash_core::SessionCreateRequest,
-        ) -> Result<lash_core::SessionHandle, lash_core::plugin::PluginError> {
-            Err(lash_core::plugin::PluginError::Session(
-                "not used".to_string(),
-            ))
-        }
+    #[test]
+    fn projection_policy_cutover_has_no_name_based_projection_checks() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let plugin_src = std::fs::read_to_string(manifest_dir.join("src/plugin.rs"))
+            .expect("read plugin source");
+        let executor_src = std::fs::read_to_string(manifest_dir.join("src/executor.rs"))
+            .expect("read executor source");
+        let host_bridge_src =
+            std::fs::read_to_string(manifest_dir.join("src/executor/host_bridge.rs"))
+                .expect("read host bridge source");
+        let projected_bindings_src =
+            std::fs::read_to_string(manifest_dir.join("src/projected_bindings.rs"))
+                .expect("read projected bindings source");
 
-        async fn close_session(
-            &self,
-            _session_id: &str,
-        ) -> Result<(), lash_core::plugin::PluginError> {
-            Ok(())
-        }
+        let old_hook_call = ["normalize_tool_args_for_projection", "(&ctx.tool_name"].concat();
+        let old_name_match = [
+            "matches!",
+            "(tool_name, ",
+            "\"continue_as\" | \"spawn_agent\")",
+        ]
+        .concat();
+        let old_invalid_ref = [
+            "ProjectedBindingError::duplicate(",
+            "\"invalid_projection_ref\")",
+        ]
+        .concat();
+
+        assert!(!plugin_src.contains(&old_hook_call));
+        assert!(!executor_src.contains(&old_name_match));
+        assert!(!host_bridge_src.contains(&old_name_match));
+        assert!(!projected_bindings_src.contains(&old_invalid_ref));
     }
 
     #[test]
@@ -1158,8 +1151,11 @@ mod tests {
 
     #[tokio::test]
     async fn session_projection_extension_rejects_duplicate_names() {
-        let session =
-            RlmModeSession::new(RlmModePluginConfig::default()).expect("session should build");
+        let session = RlmModeSession::new(
+            RlmModePluginConfig::default(),
+            Arc::new(ProjectionRegistry::default()),
+        )
+        .expect("session should build");
         session
             .apply_session_extension(crate::rlm_session_projection_extension(
                 RlmProjectedBindings::new()
@@ -1184,8 +1180,11 @@ mod tests {
 
     #[tokio::test]
     async fn session_projection_prompt_contribution_lists_names() {
-        let session =
-            RlmModeSession::new(RlmModePluginConfig::default()).expect("session should build");
+        let session = RlmModeSession::new(
+            RlmModePluginConfig::default(),
+            Arc::new(ProjectionRegistry::default()),
+        )
+        .expect("session should build");
         session
             .apply_session_extension(crate::rlm_session_projection_extension(
                 RlmProjectedBindings::new()
@@ -1243,10 +1242,13 @@ mod tests {
 
     #[test]
     fn soft_budget_warning_emits_surface_event_not_user_message() {
-        let session = RlmModeSession::new(RlmModePluginConfig {
-            continue_as_soft_warn_tokens: Some(100_000),
-            ..Default::default()
-        })
+        let session = RlmModeSession::new(
+            RlmModePluginConfig {
+                continue_as_soft_warn_tokens: Some(100_000),
+                ..Default::default()
+            },
+            Arc::new(ProjectionRegistry::default()),
+        )
         .expect("rlm mode session");
         let state = lash_core::SessionStateEnvelope {
             token_usage: lash_core::TokenUsage {
@@ -1265,25 +1267,19 @@ mod tests {
             .expect("warning directives");
 
         assert_eq!(directives.len(), 1);
-        let lash_core::plugin::PluginDirective::EmitEvents { events } = &directives[0] else {
-            panic!("budget warning must be a surface event, not an injected message");
+        let lash_core::plugin::PluginDirective::EmitRuntimeEvents { events } = &directives[0]
+        else {
+            panic!("budget warning must be a runtime event, not an injected message");
         };
         assert_eq!(events.len(), 1);
-        let lash_core::PluginSurfaceEvent::Status {
-            key,
-            label,
-            detail,
-            transient_ms,
-        } = &events[0]
-        else {
-            panic!("budget warning should use a typed status surface event");
+        let lash_core::PluginRuntimeEvent::Status { key, label, detail } = &events[0] else {
+            panic!("budget warning should use a typed status runtime event");
         };
         assert_eq!(key, BUDGET_WARNING_STATUS);
         assert_eq!(label, "context budget");
         assert!(detail.as_deref().is_some_and(|text| {
             text.contains("120292 tokens used") && text.contains("choose handoff path")
         }));
-        assert_eq!(*transient_ms, Some(8_000));
     }
 
     #[test]

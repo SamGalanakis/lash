@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::plugin::PluginError;
 
-use super::{SessionStoreFactory, TerminationPolicy};
+use super::{LocalRuntimeEffectHost, RuntimeEffectHost, SessionStoreFactory, TerminationPolicy};
 
 /// Category of a registered background task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -961,6 +961,7 @@ pub struct RuntimeCoreConfig {
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
     pub termination: TerminationPolicy,
+    pub effect_host: Arc<dyn RuntimeEffectHost>,
 }
 
 impl Default for RuntimeCoreConfig {
@@ -972,6 +973,7 @@ impl Default for RuntimeCoreConfig {
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             termination: TerminationPolicy::default(),
+            effect_host: Arc::new(LocalRuntimeEffectHost),
         }
     }
 }
@@ -1037,6 +1039,11 @@ impl RuntimeCoreConfig {
 
     pub fn with_termination(mut self, termination: TerminationPolicy) -> Self {
         self.termination = termination;
+        self
+    }
+
+    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
+        self.effect_host = effect_host;
         self
     }
 }

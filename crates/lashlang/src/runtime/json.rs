@@ -184,10 +184,18 @@ where
                 unreachable!("projected values require runtime or snapshot json conversion")
             }
             ProjectedMode::Snapshot => {
-                let mut map = serializer.serialize_map(Some(3))?;
+                let field_count = if projected.projection_ref().is_some() {
+                    4
+                } else {
+                    3
+                };
+                let mut map = serializer.serialize_map(Some(field_count))?;
                 map.serialize_entry("__lashlang_snapshot_projected__", &true)?;
                 map.serialize_entry("name", projected.name())?;
                 map.serialize_entry("type_name", projected.value_type_name())?;
+                if let Some(projection_ref) = projected.projection_ref() {
+                    map.serialize_entry("projection_ref", projection_ref)?;
+                }
                 map.end()
             }
         },

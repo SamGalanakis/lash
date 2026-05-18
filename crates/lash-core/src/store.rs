@@ -19,7 +19,7 @@ pub enum StoreError {
     Backend(String),
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SessionMeta {
     pub session_id: String,
     pub session_name: String,
@@ -27,6 +27,58 @@ pub struct SessionMeta {
     pub model: String,
     pub cwd: Option<String>,
     pub parent_session_id: Option<String>,
+    pub relation: crate::SessionRelation,
+}
+
+impl<'de> serde::Deserialize<'de> for SessionMeta {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawSessionMeta {
+            session_id: String,
+            session_name: String,
+            created_at: String,
+            model: String,
+            cwd: Option<String>,
+            #[serde(default)]
+            parent_session_id: Option<String>,
+            #[serde(default)]
+            relation: Option<crate::SessionRelation>,
+        }
+
+        let raw = RawSessionMeta::deserialize(deserializer)?;
+        let relation = raw.relation.unwrap_or_else(|| {
+            raw.parent_session_id
+                .as_ref()
+                .map(|parent_session_id| crate::SessionRelation::Child {
+                    parent_session_id: parent_session_id.clone(),
+                    originating_tool_call_id: None,
+                })
+                .unwrap_or_default()
+        });
+        let parent_session_id = raw
+            .parent_session_id
+            .or_else(|| relation.parent_session_id().map(ToOwned::to_owned));
+        Ok(Self {
+            session_id: raw.session_id,
+            session_name: raw.session_name,
+            created_at: raw.created_at,
+            model: raw.model,
+            cwd: raw.cwd,
+            parent_session_id,
+            relation,
+        })
+    }
+}
+
+impl SessionMeta {
+    pub fn relation_parent_session_id(&self) -> Option<&str> {
+        self.relation
+            .parent_session_id()
+            .or(self.parent_session_id.as_deref())
+    }
 }
 
 /// Lightweight session info for the resume picker.

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::TurnFinish;
@@ -9,6 +10,15 @@ use crate::session_model::{
     SessionEventRecord,
 };
 use crate::{ModelToolReturnPart, ToolCancellation, ToolFailure, ToolFailureClass};
+
+static NEXT_TEST_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_message_id() -> String {
+    format!(
+        "m_test_{}",
+        NEXT_TEST_MESSAGE_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 fn test_config(protocol_driver: Arc<dyn ProtocolDriverHandle>) -> TurnMachineConfig {
     TurnMachineConfig {
@@ -123,7 +133,7 @@ fn find_progress(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|effect| match effect {
         Effect::Progress {
             messages,
-            events: _,
+            event_delta: _,
             mode_iteration,
         } => Some((messages, *mode_iteration)),
         _ => None,
@@ -134,9 +144,23 @@ fn find_done(effects: &[Effect]) -> Option<(&MessageSequence, usize)> {
     effects.iter().find_map(|effect| match effect {
         Effect::Done {
             messages,
-            events: _,
+            event_delta: _,
             mode_iteration,
         } => Some((messages, *mode_iteration)),
+        _ => None,
+    })
+}
+
+fn progress_event_delta(effects: &[Effect]) -> Option<&[SessionEventRecord]> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Progress { event_delta, .. } => Some(event_delta.as_slice()),
+        _ => None,
+    })
+}
+
+fn done_event_delta(effects: &[Effect]) -> Option<&[SessionEventRecord]> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Done { event_delta, .. } => Some(event_delta.as_slice()),
         _ => None,
     })
 }
@@ -404,6 +428,80 @@ impl ProtocolDriverHandle for ToolBatchDriver {
     ) -> Vec<DriverAction> {
         Vec::new()
     }
+}
+
+#[test]
+fn progress_emits_only_new_event_delta() {
+    let initial = user_message("hello");
+    let mut machine = TurnMachine::new(
+        test_config(Arc::new(ProseDriver)),
+        vec![initial.clone()],
+        Arc::new(vec![conversation_event(initial)]),
+        0,
+    );
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call").0;
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse::default()),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let delta = progress_event_delta(&effects).expect("progress delta");
+    assert_eq!(delta.len(), 1);
+    assert!(matches!(
+        &delta[0],
+        SessionEventRecord::Conversation(record)
+            if record.role == MessageRole::Assistant
+    ));
+}
+
+#[test]
+fn progress_without_new_events_emits_empty_delta() {
+    let mut machine = TurnMachine::new(
+        test_config(Arc::new(SyncThenAdvanceDriver)),
+        vec![user_message("hello")],
+        Arc::new(Vec::new()),
+        0,
+    );
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call").0;
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse::default()),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let delta = progress_event_delta(&effects).expect("progress delta");
+    assert!(delta.is_empty());
+}
+
+#[test]
+fn done_carries_unreported_final_delta() {
+    let mut machine = TurnMachine::new(
+        test_config(Arc::new(ProseDriver)),
+        Vec::new(),
+        Arc::new(Vec::new()),
+        0,
+    );
+    machine.append_event(conversation_event(text_message(
+        MessageRole::Assistant,
+        "final",
+    )));
+    machine.finish_with_outcome(assistant_done("final"));
+
+    let effects = drain_effects(&mut machine);
+    let delta = done_event_delta(&effects).expect("done delta");
+    assert_eq!(delta.len(), 1);
+    assert!(matches!(
+        &delta[0],
+        SessionEventRecord::Conversation(record)
+            if record.role == MessageRole::Assistant
+    ));
 }
 
 #[test]

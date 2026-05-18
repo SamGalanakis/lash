@@ -53,17 +53,12 @@ pub struct LashCoreBuilder {
     session_spec: SessionSpec,
     pub(crate) store_factory: Option<Arc<dyn SessionStoreFactory>>,
     child_store_factory: Option<Arc<dyn SessionStoreFactory>>,
-    attachment_store: Option<Arc<dyn AttachmentStore>>,
+    core: RuntimeCoreConfig,
     tool_providers: Vec<Arc<dyn ToolProvider>>,
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
-    trace_sink: Option<Arc<dyn lash_trace::TraceSink>>,
-    trace_level: Option<lash_trace::TraceLevel>,
-    trace_context: Option<lash_trace::TraceContext>,
     residency: Option<Residency>,
     background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
-    termination: Option<TerminationPolicy>,
-    prompt: PromptLayer,
 }
 
 impl LashCoreBuilder {
@@ -92,12 +87,12 @@ impl LashCoreBuilder {
     }
 
     pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
-        self.prompt.template = Some(template);
+        self.core = self.core.with_prompt_template(template);
         self
     }
 
     pub fn prompt_contribution(mut self, contribution: PromptContribution) -> Self {
-        self.prompt.add_contribution(contribution);
+        self.core = self.core.with_prompt_contribution(contribution);
         self
     }
 
@@ -106,17 +101,17 @@ impl LashCoreBuilder {
         slot: PromptSlot,
         contributions: impl IntoIterator<Item = PromptContribution>,
     ) -> Self {
-        self.prompt.replace_slot(slot, contributions);
+        self.core = self.core.with_replaced_prompt_slot(slot, contributions);
         self
     }
 
     pub fn clear_prompt_slot(mut self, slot: PromptSlot) -> Self {
-        self.prompt.clear_slot(slot);
+        self.core = self.core.with_cleared_prompt_slot(slot);
         self
     }
 
     pub fn prompt_layer(mut self, layer: PromptLayer) -> Self {
-        self.prompt = layer;
+        self.core = self.core.with_prompt_layer(layer);
         self
     }
 
@@ -165,7 +160,7 @@ impl LashCoreBuilder {
     }
 
     pub fn attachment_store(mut self, attachment_store: Arc<dyn AttachmentStore>) -> Self {
-        self.attachment_store = Some(attachment_store);
+        self.core = self.core.with_attachment_store(attachment_store);
         self
     }
 
@@ -190,24 +185,22 @@ impl LashCoreBuilder {
     }
 
     pub fn trace_sink(mut self, trace_sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
-        self.trace_sink = trace_sink;
+        self.core = self.core.with_trace_sink(trace_sink);
         self
     }
 
     pub fn trace_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.trace_sink = path.map(|path| {
-            Arc::new(lash_core::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
-        });
+        self.core = self.core.with_trace_jsonl_path(path);
         self
     }
 
     pub fn trace_level(mut self, trace_level: lash_trace::TraceLevel) -> Self {
-        self.trace_level = Some(trace_level);
+        self.core = self.core.with_trace_level(trace_level);
         self
     }
 
     pub fn trace_context(mut self, trace_context: lash_trace::TraceContext) -> Self {
-        self.trace_context = Some(trace_context);
+        self.core = self.core.with_trace_context(trace_context);
         self
     }
 
@@ -289,24 +282,9 @@ impl LashCoreBuilder {
         let mut env_builder = RuntimeEnvironment::builder()
             .with_plugin_host(Arc::new(plugin_host.with_background_tasks()))
             .with_background_task_host(background_task_host)
-            .with_prompt_layer(self.prompt);
-        if let Some(attachment_store) = self.attachment_store {
-            env_builder = env_builder.with_attachment_store(attachment_store);
-        }
-        if let Some(trace_sink) = self.trace_sink {
-            env_builder = env_builder.with_trace_sink(Some(trace_sink));
-        }
-        if let Some(trace_level) = self.trace_level {
-            env_builder = env_builder.with_trace_level(trace_level);
-        }
-        if let Some(trace_context) = self.trace_context {
-            env_builder = env_builder.with_trace_context(trace_context);
-        }
+            .with_runtime_core_config(self.core);
         if let Some(residency) = self.residency {
             env_builder = env_builder.with_residency(residency);
-        }
-        if let Some(termination) = self.termination {
-            env_builder = env_builder.with_termination(termination);
         }
         if let Some(child_store_factory) = self
             .child_store_factory
@@ -345,12 +323,7 @@ pub struct AdvancedLashCoreBuilder {
 
 impl AdvancedLashCoreBuilder {
     pub fn runtime_core_config(mut self, core: lash_core::RuntimeCoreConfig) -> Self {
-        self.builder.attachment_store = Some(core.attachment_store);
-        self.builder.trace_sink = core.trace_sink;
-        self.builder.trace_level = Some(core.trace_level);
-        self.builder.trace_context = Some(core.trace_context);
-        self.builder.termination = Some(core.termination);
-        self.builder.prompt = core.prompt;
+        self.builder.core = core;
         self
     }
 
@@ -372,8 +345,13 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
+    pub fn effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
+        self.builder.core = self.builder.core.with_effect_host(effect_host);
+        self
+    }
+
     pub fn termination(mut self, termination: TerminationPolicy) -> Self {
-        self.builder.termination = Some(termination);
+        self.builder.core = self.builder.core.with_termination(termination);
         self
     }
 

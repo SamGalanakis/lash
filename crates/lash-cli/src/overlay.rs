@@ -1,10 +1,8 @@
 use std::collections::BTreeSet;
 
-use lash_core::{
-    Message, MessageRole, PartKind, PromptRequest, PromptResponse, PromptSelectionMode,
-    SessionMessageTreeNode,
-};
+use lash_core::{Message, MessageRole, PartKind, SessionMessageTreeNode};
 
+use crate::prompt_model::{PromptRequest, PromptResponse, PromptSelectionMode};
 use crate::session_log::SessionInfo;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -13,11 +13,11 @@ use chrono::Utc;
 use clap::{Parser, ValueEnum};
 use dataset::{OolongQuestion, OolongSuite, default_dataset_path, load_questions};
 use lash::{
-    LashCore, ModeId, ModePreset, SessionSpec, TurnInput,
+    LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
         EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     },
-    plugins::{PluginFactory, PluginHost, PluginSpec, StaticPluginFactory},
+    plugins::{PluginSpec, StaticPluginFactory},
     prompt::{
         PromptBuiltin, PromptLayer, PromptSlot, PromptTemplate, PromptTemplateEntry,
         PromptTemplateSection,
@@ -30,18 +30,14 @@ use lash::{
     usage::{SessionUsageReport, TokenLedgerEntry, TokenUsage, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
-use lash_core::{InputItem, SessionEvent, ToolOutputBudgetPluginFactory};
+use lash_core::{InputItem, SessionEvent};
 use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
-use lash_mode_rlm::{
-    BuiltinRlmModePluginFactory, RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt,
-};
+use lash_mode_rlm::{RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt};
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_rlm_types::RlmTermination;
 use lash_sqlite_store::Store;
-use lash_subagents::{
-    CapabilityRegistry, LocalSubagentHost, StaticCapability, SubagentHost, SubagentsPluginFactory,
-};
+use lash_subagents::{CapabilityRegistry, StaticCapability, SubagentsPluginFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
@@ -692,7 +688,7 @@ async fn run_question(
     );
     let execution_mode = ExecutionMode::new(EXECUTION_MODE_LABEL);
     let core = LashCore::builder()
-        .install_mode(ModePreset::rlm())
+        .install_mode(ModePreset::rlm_with_config(rlm_config(args)))
         .default_mode(ModeId::rlm())
         .provider(provider.clone())
         .model(args.model.clone(), Some(args.variant.clone()))
@@ -700,8 +696,7 @@ async fn run_question(
         .max_turns(args.max_turns)
         .prompt_template(oolong_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))
-        .advanced()
-        .plugin_host(build_plugin_host(execution_mode.clone(), args))
+        .plugins(build_plugin_stack(execution_mode.clone(), args))
         .build()?;
     let session = core
         .session("root")
@@ -1049,7 +1044,7 @@ fn extract_text(content: Option<&Value>) -> String {
     }
 }
 
-fn build_plugin_host(execution_mode: ExecutionMode, args: &Args) -> PluginHost {
+fn build_plugin_stack(execution_mode: ExecutionMode, args: &Args) -> PluginStack {
     let child_spec = child_session_spec(args, execution_mode.clone());
     let llm_tools = match (&args.child_model, &args.child_variant) {
         (Some(model), variant) => {
@@ -1060,28 +1055,19 @@ fn build_plugin_host(execution_mode: ExecutionMode, args: &Args) -> PluginHost {
         }
         (None, None) => LlmToolsPluginFactory::default(),
     };
-    let factories: Vec<Arc<dyn PluginFactory>> = vec![
-        Arc::new(ToolOutputBudgetPluginFactory::default()),
-        Arc::new(BuiltinRlmModePluginFactory::new(rlm_config(args))),
-        Arc::new(llm_tools),
-        Arc::new(StaticPluginFactory::new(
-            "oolong_async_handles",
-            PluginSpec::new().with_tool_provider(Arc::new(OolongAsyncHandlesTool)),
-        )),
-        Arc::new(
-            SubagentsPluginFactory::new(
-                Arc::new(
-                    CapabilityRegistry::new().with(Arc::new(StaticCapability::new(
-                        SUBAGENT_CAPABILITY,
-                        child_spec,
-                    ))),
-                ),
-                Arc::new(LocalSubagentHost::default()) as Arc<dyn SubagentHost>,
-            )
-            .with_session_spec(SessionSpec::inherit()),
-        ),
-    ];
-    PluginHost::new(factories)
+    let mut stack = PluginStack::runtime();
+    stack.push(Arc::new(llm_tools));
+    stack.push(Arc::new(StaticPluginFactory::new(
+        "oolong_async_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(OolongAsyncHandlesTool)),
+    )));
+    stack.push(Arc::new(
+        SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
+            StaticCapability::new(SUBAGENT_CAPABILITY, child_spec),
+        ))))
+        .with_session_spec(SessionSpec::inherit()),
+    ));
+    stack
 }
 
 fn child_session_spec(args: &Args, execution_mode: ExecutionMode) -> SessionSpec {
@@ -1183,16 +1169,15 @@ impl ToolProvider for OolongAsyncHandlesTool {
 fn oolong_list_async_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, subagent: { name: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this after fan-out via `spawn_agent`.",
+        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this after fan-out via `spawn_agent`.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
             "properties": {
                 "monitor": { "type": "object" },
-                "subagent": { "type": "object" },
                 "tool": { "type": "object" }
             },
-            "required": ["monitor", "subagent", "tool"]
+            "required": ["monitor", "tool"]
         }),
     )
     .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])

@@ -58,12 +58,41 @@ fn test_read_view(
     messages: &[Message],
     tool_calls: &[ToolCallRecord],
 ) -> lash_core::SessionReadView {
-    lash_core::SessionReadView::from_derived_message_view(
-        lash_core::SessionStateEnvelope::default(),
-        std::sync::Arc::new(events.to_vec()),
-        std::sync::Arc::new(messages.to_vec()),
-        std::sync::Arc::new(tool_calls.to_vec()),
-    )
+    let mut graph = lash_core::SessionGraph::default();
+    for event in events {
+        match event {
+            lash_core::SessionEventRecord::Conversation(record) => {
+                graph.append_message(record.to_message());
+            }
+            lash_core::SessionEventRecord::Tool(lash_core::ToolEvent::Invocation {
+                record,
+                ..
+            }) => {
+                graph.append_active_read_delta(&[], std::slice::from_ref(record));
+            }
+            lash_core::SessionEventRecord::Mode(event) => {
+                graph.append_mode_event(event.clone());
+            }
+        }
+    }
+    let event_message_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            lash_core::SessionEventRecord::Conversation(record) => Some(record.id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let missing_messages = messages
+        .iter()
+        .filter(|message| !event_message_ids.contains(message.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    graph.append_active_read_delta(&missing_messages, tool_calls);
+    let state = lash_core::SessionStateEnvelope {
+        session_graph: graph,
+        ..lash_core::SessionStateEnvelope::default()
+    };
+    lash_core::SessionReadView::from_exported_state(&state)
 }
 
 fn timeline_items_from_test_read_view(

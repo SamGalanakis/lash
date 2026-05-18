@@ -24,12 +24,9 @@ use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
 use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
-use lash_plugin_ui_activity::UiActivityPluginFactory;
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
-use lash_standard_plugins::{
-    DefaultPluginStackOptions, DefaultToolSurfaceProfile, default_plugin_stack,
-};
-use lash_subagents::{LocalSubagentHost, SubagentHost, SubagentsPluginFactory, default_registry};
+use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
+use lash_subagents::{SubagentsPluginFactory, default_registry};
 use lash_tui::Terminal;
 use serde_json::Value as JsonValue;
 
@@ -61,7 +58,6 @@ fn openai_shortcut_provider(api_key: String, base_url: &str) -> ProviderHandle {
 
 struct PluginFactorySurfaceInput<'a> {
     autonomous: bool,
-    execution_mode: ExecutionMode,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
@@ -73,7 +69,6 @@ struct PluginFactorySurfaceInput<'a> {
 fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginStack {
     let PluginFactorySurfaceInput {
         autonomous,
-        execution_mode,
         tavily_key,
         instruction_source,
         session_policy,
@@ -81,30 +76,22 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         host_docs_dir,
         prompt_bridge,
     } = input;
-    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-
     let capability_registry = Arc::new(default_registry(&lash_config.agent_models));
 
-    let profile = DefaultToolSurfaceProfile::for_runtime(
-        session_policy.standard_context_approach.as_ref(),
-        !autonomous,
-        !tavily_key.is_empty(),
-    );
-    let mut plugin_stack = default_plugin_stack(DefaultPluginStackOptions {
-        execution_mode,
+    let runtime_options = StandardToolStackOptions {
         standard_context_approach: session_policy.standard_context_approach.clone(),
-        bundles: profile.bundles.clone(),
         tavily_api_key: if tavily_key.is_empty() {
             None
         } else {
             Some(tavily_key)
         },
-    });
+    };
+    let mut plugin_stack = standard_tool_stack(runtime_options);
     plugin_stack.push(Arc::new(PromptContextPluginFactory::new(
         Arc::clone(&instruction_source),
         PromptContextPluginConfig::default(),
     )) as Arc<dyn PluginFactory>);
-    if profile.interactive_extras {
+    if !autonomous {
         if let Some(host_docs_dir) = host_docs_dir {
             plugin_stack.push(
                 Arc::new(crate::host_docs::HostDocsPluginFactory::new(host_docs_dir))
@@ -116,7 +103,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
                 .with_prompt(Arc::new(prompt_bridge.clone())),
         ));
         plugin_stack.push(cli_ask_plugin_factory(prompt_bridge));
-        plugin_stack.push(Arc::new(UiActivityPluginFactory));
         // `update_plan` drives the sticky plan dock at the bottom of
         // the TUI. Interactive-only here; root-only inside the plugin
         // itself (the factory returns an inert plugin for subagent
@@ -128,8 +114,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
     plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     plugin_stack.push(Arc::new(
-        SubagentsPluginFactory::new(capability_registry, Arc::clone(&subagent_host))
-            .with_session_spec(SessionSpec::inherit()),
+        SubagentsPluginFactory::new(capability_registry).with_session_spec(SessionSpec::inherit()),
     ));
     plugin_stack
 }
@@ -214,23 +199,12 @@ fn resolve_rlm_projected_bindings(
 
 fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> PromptLayer {
     let mut intro_entries = vec![PromptTemplateEntry::builtin(PromptBuiltin::MainAgentIntro)];
-    if autonomous {
-        intro_entries.push(PromptTemplateEntry::slot(PromptSlot::CliAutonomousIntro));
-    }
     intro_entries.push(PromptTemplateEntry::slot(PromptSlot::Intro));
 
-    let mut execution_entries = vec![
+    let execution_entries = vec![
         PromptTemplateEntry::builtin(PromptBuiltin::ExecutionInstructions),
         PromptTemplateEntry::slot(PromptSlot::Execution),
     ];
-    if autonomous {
-        execution_entries.push(PromptTemplateEntry::slot(
-            PromptSlot::CliAutonomousExecution,
-        ));
-    }
-    if *execution_mode == ExecutionMode::new("rlm") {
-        execution_entries.push(PromptTemplateEntry::slot(PromptSlot::CliRlmExecution));
-    }
 
     let template = PromptTemplate::new(vec![
         PromptTemplateSection::untitled(intro_entries),
@@ -254,23 +228,24 @@ fn cli_prompt_config(autonomous: bool, execution_mode: &ExecutionMode) -> Prompt
 
     let mut layer = PromptLayer::with_template(template);
     if autonomous {
-        layer.add_contribution(PromptContribution::new(
-            PromptSlot::CliAutonomousIntro,
-            "",
-            CLI_AUTONOMOUS_INTRO,
-        ));
-        layer.add_contribution(PromptContribution::new(
-            PromptSlot::CliAutonomousExecution,
-            "",
-            CLI_AUTONOMOUS_EXECUTION,
-        ));
+        layer.add_contribution(
+            PromptContribution::new(PromptSlot::Intro, "", CLI_AUTONOMOUS_INTRO)
+                .with_priority(-100),
+        );
+        layer.add_contribution(
+            PromptContribution::new(PromptSlot::Execution, "", CLI_AUTONOMOUS_EXECUTION)
+                .with_priority(100),
+        );
     }
     if *execution_mode == ExecutionMode::new("rlm") {
-        layer.add_contribution(PromptContribution::new(
-            PromptSlot::CliRlmExecution,
-            "RLM Submit Output",
-            CLI_RLM_SUBMISSION_GUIDANCE,
-        ));
+        layer.add_contribution(
+            PromptContribution::new(
+                PromptSlot::Execution,
+                "RLM Submit Output",
+                CLI_RLM_SUBMISSION_GUIDANCE,
+            )
+            .with_priority(200),
+        );
     }
     layer
 }
@@ -573,7 +548,6 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
 
     let mut plugin_stack = plugin_factories_for_surface(PluginFactorySurfaceInput {
         autonomous,
-        execution_mode: execution_mode.clone(),
         tavily_key,
         instruction_source: Arc::clone(&instruction_source),
         session_policy: session_policy.clone(),
@@ -745,7 +719,6 @@ mod tests {
         let lash_config = LashConfig::new(&provider);
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
-            execution_mode: ExecutionMode::standard(),
             tavily_key: String::new(),
             instruction_source: Arc::new(FsInstructionSource::default()),
             session_policy: SessionPolicy {
@@ -781,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn rlm_prompt_config_uses_cli_rlm_slot_and_contribution() {
+    fn rlm_prompt_config_uses_execution_slot_and_contribution() {
         let layer = cli_prompt_config(false, &ExecutionMode::new("rlm"));
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
@@ -799,45 +772,34 @@ mod tests {
             matches!(
                 entry,
                 PromptTemplateEntry::Slot {
-                    slot: PromptSlot::CliRlmExecution
+                    slot: PromptSlot::Execution
                 }
             )
         }));
         assert!(contributions.iter().any(|contribution| {
-            contribution.slot == PromptSlot::CliRlmExecution
+            contribution.slot == PromptSlot::Execution
                 && contribution.content.as_ref() == CLI_RLM_SUBMISSION_GUIDANCE
         }));
     }
 
     #[test]
-    fn standard_prompt_config_omits_cli_rlm_slot_and_contribution() {
+    fn standard_prompt_config_omits_rlm_contribution() {
         let layer = cli_prompt_config(false, &ExecutionMode::standard());
-        let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
             .slots
             .values()
             .flat_map(|slot| slot.contributions.iter())
             .collect::<Vec<_>>();
 
-        assert!(!template.sections.iter().any(|section| {
-            section.entries.iter().any(|entry| {
-                matches!(
-                    entry,
-                    PromptTemplateEntry::Slot {
-                        slot: PromptSlot::CliRlmExecution
-                    }
-                )
-            })
-        }));
         assert!(
             !contributions
                 .iter()
-                .any(|contribution| contribution.slot == PromptSlot::CliRlmExecution)
+                .any(|contribution| contribution.content.as_ref() == CLI_RLM_SUBMISSION_GUIDANCE)
         );
     }
 
     #[test]
-    fn autonomous_prompt_config_uses_autonomous_slots() {
+    fn autonomous_prompt_config_uses_neutral_slots() {
         let layer = cli_prompt_config(true, &ExecutionMode::standard());
         let template = layer.template.as_ref().expect("cli prompt template");
         let contributions = layer
@@ -851,7 +813,7 @@ mod tests {
                 matches!(
                     entry,
                     PromptTemplateEntry::Slot {
-                        slot: PromptSlot::CliAutonomousIntro
+                        slot: PromptSlot::Intro
                     }
                 )
             })
@@ -861,17 +823,17 @@ mod tests {
                 matches!(
                     entry,
                     PromptTemplateEntry::Slot {
-                        slot: PromptSlot::CliAutonomousExecution
+                        slot: PromptSlot::Execution
                     }
                 )
             })
         }));
         assert!(contributions.iter().any(|contribution| {
-            contribution.slot == PromptSlot::CliAutonomousIntro
+            contribution.slot == PromptSlot::Intro
                 && contribution.content.as_ref() == CLI_AUTONOMOUS_INTRO
         }));
         assert!(contributions.iter().any(|contribution| {
-            contribution.slot == PromptSlot::CliAutonomousExecution
+            contribution.slot == PromptSlot::Execution
                 && contribution.content.as_ref() == CLI_AUTONOMOUS_EXECUTION
         }));
     }

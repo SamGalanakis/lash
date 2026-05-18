@@ -292,7 +292,7 @@ impl MonitorPlugin {
     async fn ensure_running(
         &self,
         session_id: &str,
-        host: Arc<dyn crate::plugin::runtime_host::TaskHost>,
+        host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
     ) -> Result<(), PluginError> {
         let to_start = {
             let state = self.lock_state()?;
@@ -315,7 +315,7 @@ impl MonitorPlugin {
     async fn start_task(
         &self,
         session_id: &str,
-        host: Arc<dyn crate::plugin::runtime_host::TaskHost>,
+        host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
         spec: MonitorSpec,
     ) -> Result<(), PluginError> {
         let task_id = format!("monitor:{}", spec.id);
@@ -690,7 +690,7 @@ async fn run_monitor_task(
     state: Arc<Mutex<MonitorPluginState>>,
     _session_id: String,
     spec: MonitorSpec,
-    _host: Arc<dyn crate::plugin::runtime_host::TaskHost>,
+    _host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
 ) -> Result<(), PluginError> {
     let timeout_deadline = (!spec.persistent)
         .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(spec.timeout_ms));

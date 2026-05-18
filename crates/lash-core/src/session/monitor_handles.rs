@@ -132,16 +132,12 @@ impl ModeExecutionContext {
             .collect::<Vec<_>>();
 
         let mut monitor = serde_json::Map::new();
-        let mut subagent = serde_json::Map::new();
         let mut tool = serde_json::Map::new();
         for (id, metadata) in entries {
             let value = Self::async_tool_handle_value(&id, &metadata.tool_name);
             match metadata.namespace {
                 AsyncToolHandleNamespace::Monitor => {
                     monitor.insert(metadata.identifier, value);
-                }
-                AsyncToolHandleNamespace::Subagent => {
-                    subagent.insert(metadata.identifier, value);
                 }
                 AsyncToolHandleNamespace::Tool => {
                     tool.insert(metadata.identifier, value);
@@ -156,7 +152,6 @@ impl ModeExecutionContext {
         }
         ModeToolReply::success(json!({
             "monitor": monitor,
-            "subagent": subagent,
             "tool": tool,
         }))
     }

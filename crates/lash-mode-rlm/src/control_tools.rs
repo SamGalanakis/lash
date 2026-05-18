@@ -1,14 +1,15 @@
 use async_trait::async_trait;
-use lash_core::plugin::runtime_host::SessionLifecycleHost;
-use lash_core::session_model::SessionEventRecord;
+use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::{
-    MessageRole, ModeExtras, PluginMessage, SessionAppendNode, SessionCreateRequest,
-    SessionPluginMode, SessionSnapshot, ToolCall, ToolContext, ToolContract, ToolControl,
-    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    MessageRole, ModeExtras, PluginMessage, SessionCreateRequest, SessionPluginMode,
+    SessionSnapshot, ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract,
+    ToolControl, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use crate::RlmSeed;
 
 pub(crate) struct RlmControlToolsProvider;
 
@@ -19,11 +20,7 @@ impl RlmControlToolsProvider {
         context: &ToolContext,
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
-        // Projected entries (sourced from the parent's host bindings) get
-        // re-projected on the successor; global entries land as RLM globals
-        // via the existing `RlmGlobalsPatch` plumbing.
-        let seed =
-            lash_rlm_types::classify_seed(args).map_err(|err| format!("continue_as {err}"))?;
+        let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
         let referenced_handles = collect_seed_async_handle_ids(args.get("seed"));
         let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
         context
@@ -116,6 +113,9 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_examples(vec![
         r#"call continue_as { task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } }"#.into(),
     ])
+    .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
+        "seed",
+    ))
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -180,11 +180,11 @@ pub(crate) struct ContinueAsHandoff {
 }
 
 pub(crate) async fn create_continue_as_successor(
-    sessions: &dyn SessionLifecycleHost,
+    sessions: &dyn RuntimeSessionHost,
     parent_session_id: &str,
     current_snapshot: SessionSnapshot,
     task: String,
-    seed: lash_rlm_types::ClassifiedSeed,
+    seed: RlmSeed,
     handoff: ContinueAsHandoff,
 ) -> Result<String, String> {
     let termination = current_snapshot
@@ -198,10 +198,7 @@ pub(crate) async fn create_continue_as_successor(
 
     let mode_extras = ModeExtras::typed(
         lash_core::ExecutionMode::new("rlm"),
-        lash_rlm_types::RlmCreateExtras {
-            termination,
-            projected_seed: (!seed.projected.is_empty()).then(|| seed.projected.clone()),
-        },
+        lash_rlm_types::RlmCreateExtras { termination },
     )
     .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
     let request = SessionCreateRequest::handoff(
@@ -213,7 +210,7 @@ pub(crate) async fn create_continue_as_successor(
         handoff.usage_source,
     )
     .with_plugin_mode(SessionPluginMode::InheritCurrent)
-    .with_initial_nodes(rlm_seed_initial_nodes(seed.globals))
+    .with_initial_nodes(crate::rlm_seed_initial_nodes(seed))
     .with_first_turn_input(PluginMessage::text(MessageRole::User, task));
     let successor_session_id = request
         .session_id
@@ -224,23 +221,6 @@ pub(crate) async fn create_continue_as_successor(
         .await
         .map_err(|err| format!("failed to create continue_as successor: {err}"))?;
     Ok(successor_session_id)
-}
-
-/// Build the `initial_nodes` payload that seeds RLM globals on a new session.
-///
-/// Used by `continue_as` for its own seed split, and re-exported for
-/// `spawn_agent` (lash-subagents) so both tools share the same RLM-mode patch
-/// emission. Each entry of `seed` becomes a `let <name> = <value>` global on
-/// the child via `RlmGlobalsPatch`.
-pub fn rlm_seed_initial_nodes(seed: serde_json::Map<String, Value>) -> Vec<SessionAppendNode> {
-    if seed.is_empty() {
-        return Vec::new();
-    }
-    vec![SessionAppendNode::event(SessionEventRecord::Mode(
-        crate::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmGlobalsPatch(
-            lash_rlm_types::RlmGlobalsPatchPluginBody { set_default: seed },
-        )),
-    ))]
 }
 
 fn required_string(args: &Value, key: &str) -> Result<String, String> {
@@ -270,12 +250,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    use lash_core::plugin::runtime_host::{
-        DirectCompletionHost, MonitorHost, SessionGraphHost, SessionLifecycleHost,
-        SessionSnapshotHost, TaskHost, ToolCatalogHost, ToolStateHost, TraceHost, TurnHost,
-    };
+    use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
-    use lash_core::{PersistedSessionState, SessionPolicy, SessionStartPoint, TurnInput};
+    use lash_core::{
+        PersistedSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint, TurnInput,
+    };
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
     #[derive(Default)]
@@ -288,8 +267,16 @@ mod tests {
         cleanup_keep: Mutex<Vec<Vec<String>>>,
     }
 
+    #[test]
+    fn continue_as_tool_definition_preserves_projected_seed_refs_by_metadata() {
+        assert_eq!(
+            continue_as_tool_definition().argument_projection,
+            ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed")
+        );
+    }
+
     #[async_trait]
-    impl SessionSnapshotHost for BatonManager {
+    impl RuntimeSessionHost for BatonManager {
         async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
@@ -300,22 +287,13 @@ mod tests {
         ) -> Result<PersistedSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
-    }
-
-    #[async_trait]
-    impl ToolCatalogHost for BatonManager {
         async fn tool_catalog(
             &self,
             _session_id: &str,
         ) -> Result<Vec<serde_json::Value>, PluginError> {
             Ok(Vec::new())
         }
-    }
 
-    impl ToolStateHost for BatonManager {}
-
-    #[async_trait]
-    impl SessionLifecycleHost for BatonManager {
         async fn create_session(
             &self,
             request: SessionCreateRequest,
@@ -335,10 +313,6 @@ mod tests {
                 .push(session_id.to_string());
             Ok(())
         }
-    }
-
-    #[async_trait]
-    impl TurnHost for BatonManager {
         async fn start_turn_stream(
             &self,
             _session_id: &str,
@@ -357,10 +331,6 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
-    }
-
-    #[async_trait]
-    impl TaskHost for BatonManager {
         async fn validate_async_handles_visible(
             &self,
             _session_id: &str,
@@ -399,10 +369,6 @@ mod tests {
             Ok(Vec::new())
         }
     }
-    impl MonitorHost for BatonManager {}
-    impl SessionGraphHost for BatonManager {}
-    impl DirectCompletionHost for BatonManager {}
-    impl TraceHost for BatonManager {}
 
     #[test]
     fn rlm_control_definitions_include_continue_as_only() {
@@ -418,10 +384,10 @@ mod tests {
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
         let mut session_graph = lash_core::SessionGraph::default();
-        session_graph.append_event(SessionEventRecord::Mode(crate::rlm_mode_event(
-            RlmModeEvent::RlmGlobalsPatch(lash_rlm_types::RlmGlobalsPatchPluginBody {
+        session_graph.append_mode_event(crate::rlm_mode_event(RlmModeEvent::RlmGlobalsPatch(
+            lash_rlm_types::RlmGlobalsPatchPluginBody {
                 set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
-            }),
+            },
         )));
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
@@ -494,18 +460,15 @@ mod tests {
             Some("finish from here")
         );
         assert_eq!(request.initial_nodes.len(), 1);
-        let SessionAppendNode::Event {
-            event: SessionEventRecord::Mode(mode_event),
-        } = &request.initial_nodes[0]
-        else {
+        let SessionAppendNode::ModeEvent { event: mode_event } = &request.initial_nodes[0] else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = crate::decode_rlm_mode_event(mode_event)
-        else {
-            panic!("expected RlmGlobalsPatch");
+        let Some(RlmModeEvent::RlmSeed(seed)) = crate::decode_rlm_mode_event(mode_event) else {
+            panic!("expected RlmSeed");
         };
-        assert_eq!(seed.set_default["x"], json!(1));
-        assert_eq!(seed.set_default["query"], json!("original"));
+        assert_eq!(seed.globals["x"], json!(1));
+        assert_eq!(seed.globals["query"], json!("original"));
+        assert!(seed.projected.is_empty());
         let extras = request
             .mode_extras
             .decode::<RlmCreateExtras>(&lash_core::ExecutionMode::new("rlm"))
@@ -515,18 +478,13 @@ mod tests {
             extras.termination,
             RlmTermination::SubmitRequired { schema: Some(_) }
         ));
-        assert!(
-            extras.projected_seed.is_none(),
-            "no projected entries → projected_seed should be absent"
-        );
     }
 
     #[tokio::test]
-    async fn continue_as_routes_projected_entries_to_mode_extras_and_globals_to_initial_nodes() {
+    async fn continue_as_routes_projected_entries_and_globals_to_one_seed_event() {
         // Mixed seed: `proj` was a projected source on the parent (encoded with
         // the canonical `__projected__` JSON wrapper), `glob` was a regular
-        // global. The successor must receive `proj` as a projected binding via
-        // mode_extras.projected_seed and `glob` via the RlmGlobalsPatch event.
+        // global. The successor receives both through one durable RLM seed event.
         let manager = Arc::new(BatonManager {
             snapshot: PersistedSessionState {
                 policy: SessionPolicy {
@@ -563,39 +521,25 @@ mod tests {
         let created = manager.created.lock().expect("created");
         let request = &created[0];
 
-        // Globals: the regular entry lands as RlmGlobalsPatch; the projected
-        // entry must NOT appear here.
         assert_eq!(request.initial_nodes.len(), 1);
-        let SessionAppendNode::Event {
-            event: SessionEventRecord::Mode(mode_event),
-        } = &request.initial_nodes[0]
-        else {
+        let SessionAppendNode::ModeEvent { event: mode_event } = &request.initial_nodes[0] else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmGlobalsPatch(seed)) = crate::decode_rlm_mode_event(mode_event)
-        else {
-            panic!("expected RlmGlobalsPatch");
+        let Some(RlmModeEvent::RlmSeed(seed)) = crate::decode_rlm_mode_event(mode_event) else {
+            panic!("expected RlmSeed");
         };
-        assert_eq!(
-            seed.set_default.len(),
-            1,
-            "only `glob` should land as a global"
-        );
-        assert_eq!(seed.set_default["glob"], json!(7));
-        assert!(!seed.set_default.contains_key("proj"));
-
-        // Projected: rides on mode_extras as the snapshot.
+        assert_eq!(seed.globals.len(), 1, "only `glob` should land as a global");
+        assert_eq!(seed.globals["glob"], json!(7));
+        assert!(!seed.globals.contains_key("proj"));
+        assert_eq!(seed.projected.entries.len(), 1);
+        assert_eq!(seed.projected.entries[0].0, "proj");
+        assert_eq!(seed.projected.entries[0].1, json!("carry-over"));
         let extras = request
             .mode_extras
             .decode::<RlmCreateExtras>(&lash_core::ExecutionMode::new("rlm"))
             .expect("decode extras")
             .expect("rlm extras");
-        let snapshot = extras
-            .projected_seed
-            .expect("projected entries should ride on mode_extras");
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].0, "proj");
-        assert_eq!(snapshot.entries[0].1, json!("carry-over"));
+        assert_eq!(extras.termination, RlmTermination::default());
     }
 
     #[tokio::test]

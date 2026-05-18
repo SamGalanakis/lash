@@ -1292,7 +1292,8 @@ fn bg(color: lash_tui::Color) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{PromptRequest, PromptUsage};
+    use crate::prompt_model::PromptRequest;
+    use lash_core::PromptUsage;
     use lash_tui_extensions::{
         TuiExtension, TuiExtensions, TuiHostEffect, TuiRenderContext, TuiSurfaceSize,
         TuiSurfaceSlot, TuiSurfaceSpec,

@@ -1,18 +1,13 @@
-//! Shared helpers used by both `StandardSubagentToolsProvider` and
-//! `RlmSubagentToolsProvider`.
-//!
-//! Anything that is genuinely mode-agnostic — argument parsing, schema
-//! validation, child-session request shaping, capability lookup,
-//! tool-surface authority resolution, output-schema rendering — lives here.
-//! Per-mode prose, tool descriptions, and dispatch live in `standard.rs`
-//! and `rlm.rs`.
+//! Private helpers for the RLM subagent tool surface.
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSpec, SessionStartPoint,
-    ToolContext, ToolDefinition, ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnInput,
+    AssembledTurn, InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSpec,
+    SessionStartPoint, SessionToolAccess, SubagentSessionContext, ToolContext, ToolDefinition,
+    ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome,
+    TurnStop,
 };
-use lash_rlm_types::{ClassifiedSeed, RlmTermination};
+use lash_rlm_types::RlmTermination;
 use serde_json::{Value, json};
 
 use crate::capability::{CapabilityContext, CapabilityRegistry};
@@ -41,15 +36,32 @@ pub(crate) fn resolve_capability_spec(
     }))
 }
 
+pub(crate) struct SpawnCreateRequestInput<'a> {
+    pub(crate) registry: &'a CapabilityRegistry,
+    pub(crate) context: &'a ToolContext,
+    pub(crate) session_spec: &'a SessionSpec,
+    pub(crate) capability_name: &'a str,
+    pub(crate) output_schema: Option<Value>,
+    pub(crate) seed: lash_mode_rlm::RlmSeed,
+    pub(crate) parent_subagent: Option<&'a SubagentSessionContext>,
+    pub(crate) originating_tool_call_id: Option<&'a str>,
+    pub(crate) configurator: &'a dyn SubagentSessionConfigurator,
+}
+
 pub(crate) async fn build_spawn_create_request(
-    registry: &CapabilityRegistry,
-    context: &ToolContext,
-    session_spec: &SessionSpec,
-    capability_name: &str,
-    output_schema: Option<Value>,
-    seed: ClassifiedSeed,
-    configurator: &dyn SubagentSessionConfigurator,
+    input: SpawnCreateRequestInput<'_>,
 ) -> Result<SessionCreateRequest, String> {
+    let SpawnCreateRequestInput {
+        registry,
+        context,
+        session_spec,
+        capability_name,
+        output_schema,
+        seed,
+        parent_subagent,
+        originating_tool_call_id,
+        configurator,
+    } = input;
     let current_snapshot = context
         .session_snapshot()
         .await
@@ -78,23 +90,15 @@ pub(crate) async fn build_spawn_create_request(
             },
             None => RlmTermination::default(),
         };
-        let projected_seed = if seed.projected.is_empty() {
-            None
-        } else {
-            Some(seed.projected.clone())
-        };
         mode_extras = ModeExtras::typed(
             lash_core::ExecutionMode::new("rlm"),
-            lash_rlm_types::RlmCreateExtras {
-                termination,
-                projected_seed,
-            },
+            lash_rlm_types::RlmCreateExtras { termination },
         )
         .map_err(|err| format!("failed to encode rlm mode extras: {err}"))?;
     }
 
     let initial_nodes = if child_mode == lash_core::ExecutionMode::new("rlm") {
-        lash_mode_rlm::rlm_seed_initial_nodes(seed.globals)
+        lash_mode_rlm::rlm_seed_initial_nodes(seed)
     } else {
         Vec::new()
     };
@@ -116,7 +120,49 @@ pub(crate) async fn build_spawn_create_request(
         },
         &mut request,
     )?;
-    Ok(request)
+    finalize_subagent_create_request(
+        request,
+        context.session_id(),
+        capability_name,
+        parent_subagent,
+        originating_tool_call_id,
+    )
+}
+
+fn finalize_subagent_create_request(
+    mut request: SessionCreateRequest,
+    parent_session_id: &str,
+    capability_name: &str,
+    parent_subagent: Option<&SubagentSessionContext>,
+    originating_tool_call_id: Option<&str>,
+) -> Result<SessionCreateRequest, String> {
+    if let Some(tool_call_id) = originating_tool_call_id {
+        request = request.with_originating_tool_call_id(tool_call_id);
+    }
+    let child_depth = parent_subagent
+        .map(|parent| parent.depth.saturating_add(1))
+        .unwrap_or(1);
+    if child_depth > MAX_SUBAGENT_DEPTH {
+        return Err(format!(
+            "subagent recursion depth exceeded: max depth is {MAX_SUBAGENT_DEPTH}"
+        ));
+    }
+    let mut hidden_tools = request.tool_access.hidden_tools.clone();
+    if child_depth >= MAX_SUBAGENT_DEPTH {
+        hidden_tools.extend(SUBAGENT_SUITE_DENY.iter().map(|name| name.to_string()));
+    }
+    let tools = request.tool_access.tools.clone();
+    Ok(request
+        .with_tool_access(SessionToolAccess {
+            tools,
+            hidden_tools,
+        })
+        .with_subagent_context(SubagentSessionContext {
+            parent_session_id: parent_session_id.to_string(),
+            capability: capability_name.to_string(),
+            depth: child_depth,
+            max_depth: MAX_SUBAGENT_DEPTH,
+        }))
 }
 
 pub(crate) fn unknown_capability_message(name: &str, registry: &CapabilityRegistry) -> String {
@@ -217,14 +263,13 @@ pub(crate) fn spawn_agent_input_schema(capability_names: &[String]) -> Value {
         .iter()
         .map(|name| Value::String(name.clone()))
         .collect();
-    let mut required = vec!["agent_name", "task"];
+    let mut required = vec!["task"];
     if capability_names.len() != 1 {
         required.push("capability");
     }
     json!({
         "type": "object",
         "properties": {
-            "agent_name": { "type": "string" },
             "task": { "type": "string" },
             "capability": { "type": "string", "enum": enum_values },
             "output": { "type": "object", "additionalProperties": true },
@@ -288,11 +333,62 @@ pub(crate) fn subagent_surface_contribution(
     };
     Ok(ToolSurfaceContribution {
         tool_list_notes: vec![format!(
-            "Subagent agent_name: {}. Capability: {}.",
-            authority.agent_name, authority.capability
+            "Subagent capability: {}. Depth: {}/{}.",
+            authority.capability, authority.depth, authority.max_depth
         )],
         ..Default::default()
     })
+}
+
+pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
+    match &turn.outcome {
+        TurnOutcome::Finished(TurnFinish::SubmittedValue { value }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::ToolValue { value, .. }) => return value.clone(),
+        TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) => {
+            if !text.trim().is_empty() {
+                return json!(text.trim().to_string());
+            }
+        }
+        TurnOutcome::Stopped(TurnStop::SubmittedError { value }) => return value.clone(),
+        TurnOutcome::Stopped(TurnStop::ToolError { value, .. }) => return value.clone(),
+        TurnOutcome::Handoff { session_id } => return json!({ "session_id": session_id }),
+        TurnOutcome::Stopped(_) => {}
+    }
+    if !turn.assistant_output.safe_text.trim().is_empty() {
+        return json!(turn.assistant_output.safe_text.trim().to_string());
+    }
+    json!(turn.assistant_output.raw_text.trim().to_string())
+}
+
+pub(crate) fn task_terminal_state(
+    outcome: &Result<AssembledTurn, lash_core::PluginError>,
+) -> lash_core::BackgroundTaskState {
+    let Ok(turn) = outcome else {
+        return lash_core::BackgroundTaskState::Failed;
+    };
+    match &turn.outcome {
+        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => {
+            lash_core::BackgroundTaskState::Completed
+        }
+        TurnOutcome::Stopped(TurnStop::Cancelled) => lash_core::BackgroundTaskState::Cancelled,
+        TurnOutcome::Stopped(_) => lash_core::BackgroundTaskState::Failed,
+    }
+}
+
+pub(crate) fn terminal_error_message(outcome: &TurnOutcome) -> Option<String> {
+    if let TurnOutcome::Stopped(
+        TurnStop::SubmittedError { value } | TurnStop::ToolError { value, .. },
+    ) = outcome
+    {
+        return Some(
+            value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("Subagent reported an error.")
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// Wrap an `Ok`/`Err` result as a `ToolResult`. Used by both providers'

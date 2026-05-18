@@ -1,17 +1,15 @@
 //! `update_plan` tool + plugin.
 //!
 //! A root-only, interactive-only tool that lets the model publish a
-//! checklist to the TUI's sticky plan dock. Each call fully replaces
-//! the previously-published plan. The plugin:
+//! checklist. Each call fully replaces the previously-published plan.
+//! The plugin:
 //!
 //! * exposes one tool, `update_plan`, with status values `pending` /
 //!   `in_progress` / `completed` (at most one `in_progress` at a time)
 //! * stores the latest snapshot on the plugin so it survives resume /
-//!   snapshot (the runtime-side TUI reads it off the emitted surface
-//!   event)
-//! * emits a [`PluginSurfaceEvent::PanelUpsert`] after every successful
-//!   call, formatted as the checklist markdown the CLI's plan-dock
-//!   parser understands (`- [x]` / `- [~]` / `- [ ]`).
+//!   snapshot
+//! * emits a semantic `update_plan.snapshot` runtime event after every
+//!   successful call. CLI/TUI crates decide how to present that snapshot.
 //!
 //! Gating: the plugin's [`PluginFactory::build`] returns an inert
 //! `SessionPlugin` whenever the session has a parent (i.e. the session
@@ -25,7 +23,7 @@ use serde_json::json;
 
 use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
-    PluginSurfaceEvent, SessionPlugin,
+    SessionPlugin,
 };
 use lash_core::{
     PromptContribution, ToolCall, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest,
@@ -33,8 +31,7 @@ use lash_core::{
 };
 
 const PLUGIN_ID: &str = "update_plan";
-const PANEL_KEY: &str = "plan";
-const PANEL_TITLE: &str = "PLAN";
+const UPDATE_PLAN_SNAPSHOT_EVENT: &str = "update_plan.snapshot";
 const PLANNING_GUIDANCE: &str = concat!(
     "Use `update_plan` for substantial multi-step work and skip it for trivial or single-step asks. ",
     "Write short steps and keep exactly one step `in_progress` while work is underway. ",
@@ -211,32 +208,15 @@ fn execute_update_plan(state: &Arc<Mutex<PlanState>>, args: &serde_json::Value) 
     ToolResult::ok(json!("Plan updated"))
 }
 
-/// Format a [`PlanSnapshot`] as the checklist markdown the CLI's plan
-/// dock parser consumes (`- [x]` / `- [~]` / `- [ ]`). Matches the
-/// shape showcased in `crates/lash-cli/src/plugin_surface.rs::parse_plan_items`.
-fn format_plan_markdown(snapshot: &PlanSnapshot) -> String {
-    let mut out = String::new();
-    for item in &snapshot.plan {
-        let glyph = match item.status.as_str() {
-            "completed" => "[x]",
-            "in_progress" => "[~]",
-            _ => "[ ]",
-        };
-        out.push_str("- ");
-        out.push_str(glyph);
-        out.push(' ');
-        out.push_str(&item.step);
-        out.push('\n');
-    }
-    out
-}
-
-fn plan_panel_event(snapshot: &PlanSnapshot) -> PluginSurfaceEvent {
-    PluginSurfaceEvent::PanelUpsert {
-        key: PANEL_KEY.to_string(),
-        title: PANEL_TITLE.to_string(),
-        content: format_plan_markdown(snapshot),
-    }
+fn plan_snapshot_event(
+    snapshot: &PlanSnapshot,
+) -> Result<lash_core::PluginRuntimeEvent, PluginError> {
+    Ok(lash_core::PluginRuntimeEvent::Custom {
+        name: UPDATE_PLAN_SNAPSHOT_EVENT.to_string(),
+        payload: serde_json::to_value(snapshot).map_err(|err| {
+            PluginError::Session(format!("failed to encode plan snapshot: {err}"))
+        })?,
+    })
 }
 
 fn planning_prompt_contributions() -> Vec<PromptContribution> {
@@ -316,11 +296,11 @@ impl SessionPlugin for UpdatePlanPlugin {
                     target: "lash_core::update_plan",
                     items = snapshot.plan.len(),
                     generation = snapshot.generation,
-                    "emitting plan panel upsert",
+                    "emitting plan snapshot event",
                 );
-                Ok(vec![PluginDirective::emit_events(vec![plan_panel_event(
-                    &snapshot,
-                )])])
+                Ok(vec![PluginDirective::emit_runtime_events(vec![
+                    plan_snapshot_event(&snapshot)?,
+                ])])
             })
         }));
         Ok(())
@@ -389,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn format_plan_markdown_uses_parser_compatible_glyphs() {
+    fn plan_snapshot_event_encodes_snapshot() {
         let snapshot = PlanSnapshot {
             explanation: None,
             plan: vec![
@@ -408,11 +388,13 @@ mod tests {
             ],
             generation: 1,
         };
-        let md = format_plan_markdown(&snapshot);
-        assert_eq!(
-            md, "- [x] done work\n- [~] current\n- [ ] later\n",
-            "format must match lash-cli plan dock parser"
-        );
+        let event = plan_snapshot_event(&snapshot).expect("event");
+        let lash_core::PluginRuntimeEvent::Custom { name, payload } = event else {
+            panic!("expected custom event");
+        };
+        assert_eq!(name, UPDATE_PLAN_SNAPSHOT_EVENT);
+        let decoded: PlanSnapshot = serde_json::from_value(payload).expect("snapshot payload");
+        assert_eq!(decoded, snapshot);
     }
 
     #[test]

@@ -6,26 +6,20 @@ use crate::session_model::SessionEventRecord;
 use crate::{MessageSequence, SessionReadView, ToolCallRecord};
 
 use super::PersistedSessionState;
-use super::turn_graph::TurnGraphOverlay;
+use super::turn_graph_editor::TurnGraphEditor;
 
 #[derive(Debug)]
-pub(super) struct TurnProgress {
-    graph: TurnGraphOverlay,
+pub(super) struct TurnCommitDraft {
+    graph: TurnGraphEditor,
     state: PersistedSessionState,
-    sansio_events_synced: usize,
 }
 
-impl TurnProgress {
+impl TurnCommitDraft {
     pub(super) fn from_state(mut state: PersistedSessionState) -> Self {
         let base_graph = Arc::new(std::mem::take(&mut state.session_graph));
         let base_read_model = base_graph.read_model();
-        let sansio_events_synced = base_read_model.active_events.len();
-        let graph = TurnGraphOverlay::new(base_graph, base_read_model);
-        Self {
-            graph,
-            state,
-            sansio_events_synced,
-        }
+        let graph = TurnGraphEditor::new(base_graph, base_read_model);
+        Self { graph, state }
     }
 
     pub(super) fn state_mut(&mut self) -> &mut PersistedSessionState {
@@ -44,17 +38,11 @@ impl TurnProgress {
         self.apply_message_projection(messages);
     }
 
-    pub(super) fn mirror_sansio_progress(
-        &mut self,
-        events: &Arc<Vec<SessionEventRecord>>,
-    ) -> Vec<SessionEventRecord> {
-        if events.len() <= self.sansio_events_synced {
-            return Vec::new();
-        }
-        let mirrored = events[self.sansio_events_synced..].to_vec();
-        self.graph.append_events(mirrored.iter().cloned());
-        self.sansio_events_synced = events.len();
-        mirrored
+    pub(super) fn append_mode_events<I>(&mut self, events: I)
+    where
+        I: IntoIterator<Item = crate::ModeEvent>,
+    {
+        self.graph.append_mode_events(events);
     }
 
     pub(super) fn record_tool_calls<I>(&mut self, records: I)

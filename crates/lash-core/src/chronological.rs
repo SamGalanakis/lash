@@ -214,7 +214,6 @@ fn visit_active_read<'a>(
                 });
                 index += 1;
             }
-            SessionEventRecord::StateSnapshot(_) => {}
         }
     }
 

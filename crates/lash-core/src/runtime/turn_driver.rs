@@ -59,7 +59,7 @@ async fn send_session_event(event_tx: &mpsc::Sender<RuntimeStreamEvent>, event: 
             SessionEvent::PluginEvent { plugin_id, event } => {
                 send_independent_turn_event(
                     event_tx,
-                    TurnEvent::PluginSurface {
+                    TurnEvent::PluginRuntime {
                         plugin_id: plugin_id.clone(),
                         event: event.clone(),
                     },
@@ -324,6 +324,147 @@ impl PreparedExecutionSurface {
 }
 
 impl RuntimeTurnDriver {
+    fn turn_effect_invocation(
+        &self,
+        machine: &TurnMachine,
+        effect_id: crate::sansio::EffectId,
+        effect_kind: RuntimeEffectKind,
+        cancel: CancellationToken,
+    ) -> EffectInvocation {
+        let metadata = EffectInvocationMetadata {
+            session_id: self.session_id.clone(),
+            origin: EffectOrigin::Turn,
+            turn_id: Some(self.turn_id.clone()),
+            turn_index: Some(self.turn_index),
+            mode_iteration: Some(machine.mode_iteration()),
+            effect_id: effect_id.0.to_string(),
+            effect_kind,
+            idempotency_key: crate::runtime::effect_host::turn_idempotency_key(
+                &self.session_id,
+                &self.turn_id,
+                self.turn_index,
+                machine.mode_iteration(),
+                effect_kind,
+                effect_id,
+            ),
+            turn_checkpoint: serde_json::to_value(machine.checkpoint()).ok(),
+        };
+        EffectInvocation::new(metadata, cancel)
+    }
+
+    fn turn_effect_executor<'a>(
+        &'a mut self,
+        machine: &'a mut TurnMachine,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> TurnEffectLocalExecutor<'a> {
+        TurnEffectLocalExecutor::new(self, machine, event_tx.clone(), cancel.clone())
+    }
+
+    async fn invoke_turn_llm_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        request: Arc<LlmRequest>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> (Result<LlmResponse, LlmCallError>, bool) {
+        let invocation =
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::LlmCall, cancel.clone());
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        effect_host
+            .llm_call(
+                invocation,
+                request,
+                self.turn_effect_executor(machine, event_tx, cancel),
+            )
+            .await
+    }
+
+    async fn invoke_turn_checkpoint_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        checkpoint: CheckpointKind,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
+        let invocation =
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::Checkpoint, cancel.clone());
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        effect_host
+            .checkpoint(
+                invocation,
+                checkpoint,
+                self.turn_effect_executor(machine, event_tx, cancel),
+            )
+            .await
+    }
+
+    async fn invoke_turn_execution_surface_sync_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        update_machine_config: bool,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<crate::sansio::ExecutionSurfaceSync>, String> {
+        let invocation = self.turn_effect_invocation(
+            machine,
+            id,
+            RuntimeEffectKind::SyncExecutionSurface,
+            cancel.clone(),
+        );
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        effect_host
+            .sync_execution_surface(
+                invocation,
+                update_machine_config,
+                self.turn_effect_executor(machine, event_tx, cancel),
+            )
+            .await
+    }
+
+    async fn invoke_turn_tool_batch_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        calls: Vec<crate::sansio::PendingToolCall>,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Vec<crate::sansio::CompletedToolCall> {
+        let invocation =
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::ToolBatch, cancel.clone());
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        effect_host
+            .tool_batch(
+                invocation,
+                calls,
+                self.turn_effect_executor(machine, event_tx, cancel),
+            )
+            .await
+    }
+
+    async fn invoke_turn_exec_effect(
+        &mut self,
+        machine: &mut TurnMachine,
+        id: crate::sansio::EffectId,
+        code: String,
+        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::ExecResponse, String> {
+        let invocation =
+            self.turn_effect_invocation(machine, id, RuntimeEffectKind::ExecCode, cancel.clone());
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        effect_host
+            .exec_code(
+                invocation,
+                code,
+                self.turn_effect_executor(machine, event_tx, cancel),
+            )
+            .await
+    }
+
     fn trace_context(&self, mode_iteration: usize) -> lash_trace::TraceContext {
         lash_trace::TraceContext::default()
             .for_session(self.session_id.clone())
@@ -383,7 +524,7 @@ impl RuntimeTurnDriver {
     async fn persist_progress_boundary(
         &mut self,
         messages: crate::MessageSequence,
-        events: Arc<Vec<crate::SessionEventRecord>>,
+        event_delta: Vec<crate::SessionEventRecord>,
         mode_iteration: usize,
     ) {
         if !crate::messages_are_prompt_resume_safe(messages.iter()) {
@@ -396,12 +537,12 @@ impl RuntimeTurnDriver {
                 self.policy.clone(),
                 self.turn_index,
                 messages,
-                events,
+                event_delta,
             )
             .await;
         if boundary.persisted {
-            for event in &boundary.mirrored_events {
-                self.emit_mode_event_trace(mode_iteration, event);
+            for event in &boundary.mode_events {
+                self.emit_trace(mode_iteration, mode_step_trace_event(event));
             }
         }
     }
@@ -410,13 +551,6 @@ impl RuntimeTurnDriver {
         if let Some(probe) = self.turn_phase_probe.as_ref() {
             probe.begin(phase);
         }
-    }
-
-    fn emit_mode_event_trace(&self, mode_iteration: usize, event: &crate::SessionEventRecord) {
-        let crate::SessionEventRecord::Mode(mode_event) = event else {
-            return;
-        };
-        self.emit_trace(mode_iteration, mode_step_trace_event(mode_event));
     }
 
     fn emit_mode_diagnostic_trace(
@@ -482,23 +616,25 @@ impl RuntimeTurnDriver {
                     }
                     Effect::Progress {
                         messages,
-                        events,
+                        event_delta,
                         mode_iteration,
                     } => {
-                        self.persist_progress_boundary(messages, events, mode_iteration)
+                        self.persist_progress_boundary(messages, event_delta, mode_iteration)
                             .await
                     }
                     Effect::Done {
                         messages,
-                        events: _,
+                        event_delta,
                         mode_iteration,
-                    } => return (messages, mode_iteration),
+                    } => {
+                        self.turn_pipeline.apply_event_delta(event_delta);
+                        return (messages, mode_iteration);
+                    }
                     Effect::LlmCall { id, request } => {
                         if cancel.is_cancelled() {
                             emit!(SessionEvent::Done);
                             return (crate::MessageSequence::default(), run_offset);
                         }
-                        let iteration = machine.mode_iteration();
                         match self.before_llm_call(&machine, &request).await {
                             Ok(Some(crate::ModeLlmCallAction::Handoff { session_id })) => {
                                 machine.finish_with_outcome(crate::TurnOutcome::Handoff {
@@ -518,15 +654,11 @@ impl RuntimeTurnDriver {
                             }
                         }
                         let (result, text_streamed) = self
-                            .run_llm_call(&mut machine, id, request, iteration, &event_tx, &cancel)
+                            .invoke_turn_llm_effect(&mut machine, id, request, &event_tx, &cancel)
                             .await;
                         if let Ok(response) = &result {
-                            let usage = TokenUsage {
-                                input_tokens: response.usage.input_tokens,
-                                output_tokens: response.usage.output_tokens,
-                                cached_input_tokens: response.usage.cached_input_tokens,
-                                reasoning_tokens: response.usage.reasoning_tokens,
-                            };
+                            let usage =
+                                crate::runtime::effect_host::token_usage_from_llm(&response.usage);
                             self.turn_pipeline.state_mut().last_prompt_usage =
                                 normalize_prompt_usage(&self.policy.provider, &usage);
                             if !text_streamed {
@@ -545,10 +677,16 @@ impl RuntimeTurnDriver {
                         });
                     }
                     Effect::Checkpoint { id, checkpoint } => {
-                        match self
-                            .run_checkpoint(&mut machine, checkpoint, &event_tx)
-                            .await
-                        {
+                        let result = self
+                            .invoke_turn_checkpoint_effect(
+                                &mut machine,
+                                id,
+                                checkpoint,
+                                &event_tx,
+                                &cancel,
+                            )
+                            .await;
+                        match result {
                             Ok((messages, transient_messages)) => {
                                 machine.handle_response(Response::Checkpoint {
                                     id,
@@ -571,9 +709,14 @@ impl RuntimeTurnDriver {
                         update_machine_config,
                     } => {
                         let result = self
-                            .refresh_execution_surface(&machine, update_machine_config)
-                            .await
-                            .map_err(|err| err.to_string());
+                            .invoke_turn_execution_surface_sync_effect(
+                                &mut machine,
+                                id,
+                                update_machine_config,
+                                &event_tx,
+                                &cancel,
+                            )
+                            .await;
                         machine.handle_response(Response::ExecutionSurfaceSynced { id, result });
                     }
                     Effect::ToolCalls { id, calls } => {
@@ -587,7 +730,15 @@ impl RuntimeTurnDriver {
                                 );
                             }
                         }
-                        let results = self.run_tool_calls(calls, &event_tx, &cancel).await;
+                        let results = self
+                            .invoke_turn_tool_batch_effect(
+                                &mut machine,
+                                id,
+                                calls,
+                                &event_tx,
+                                &cancel,
+                            )
+                            .await;
                         if self.host.core.trace_sink.is_some() {
                             for outcome in &results {
                                 let record = ToolCallRecord {
@@ -609,10 +760,6 @@ impl RuntimeTurnDriver {
                                 duration_ms: outcome.duration_ms,
                             }));
                         machine.handle_response(Response::ToolResults { id, results });
-                    }
-                    Effect::Sleep { id, duration } => {
-                        tokio::time::sleep(duration).await;
-                        machine.handle_response(Response::Timeout { id });
                     }
                     Effect::Log { event } => self.handle_log_event(event),
                     Effect::CancelLlm { .. } => {}
@@ -640,7 +787,13 @@ impl RuntimeTurnDriver {
                         .await;
                         let exec_created_at = std::time::Instant::now();
                         let result = self
-                            .run_exec_code(&code, machine.message_sequence(), iteration, &event_tx)
+                            .invoke_turn_exec_effect(
+                                &mut machine,
+                                id,
+                                code.clone(),
+                                &event_tx,
+                                &cancel,
+                            )
                             .await;
                         match &result {
                             Ok(output) => {
@@ -827,7 +980,7 @@ impl RuntimeTurnDriver {
         Ok(prepared.machine)
     }
 
-    async fn refresh_execution_surface(
+    pub(super) async fn refresh_execution_surface(
         &mut self,
         machine: &crate::TurnMachine,
         update_machine_config: bool,
@@ -906,21 +1059,6 @@ impl RuntimeTurnDriver {
             mode_preamble,
             prompt,
         })
-    }
-
-    async fn run_llm_call(
-        &mut self,
-        machine: &mut TurnMachine,
-        effect_id: crate::sansio::EffectId,
-        request: Arc<LlmRequest>,
-        mode_iteration: usize,
-        event_tx: &mpsc::Sender<RuntimeStreamEvent>,
-        cancel: &CancellationToken,
-    ) -> (Result<LlmResponse, LlmCallError>, bool) {
-        let _ = machine;
-        let _ = effect_id;
-        self.run_standard_llm_call(request, mode_iteration, event_tx, cancel)
-            .await
     }
 
     async fn before_llm_call(

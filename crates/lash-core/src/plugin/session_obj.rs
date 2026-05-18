@@ -132,7 +132,7 @@ pub struct PluginSession {
     pub(super) tool_registry: Arc<crate::ToolRegistry>,
     pub(super) tool_surface_overlay: ToolSurfaceContribution,
     pub(super) tool_access: SessionToolAccess,
-    pub(super) subagent: Option<SubagentSessionAuthority>,
+    pub(super) subagent: Option<SubagentSessionContext>,
     pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(super) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
@@ -144,7 +144,7 @@ pub struct PluginSession {
     pub(super) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
     pub(super) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
     pub(super) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
-    pub(super) runtime_event_hooks: Vec<PluginRuntimeEventHook>,
+    pub(super) runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub(super) session_config_mutators: Vec<SessionConfigMutator>,
     pub(super) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
     pub(super) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
@@ -167,7 +167,7 @@ impl PluginSession {
         &self.tool_access
     }
 
-    pub fn subagent_authority(&self) -> Option<&SubagentSessionAuthority> {
+    pub fn subagent_context(&self) -> Option<&SubagentSessionContext> {
         self.subagent.as_ref()
     }
 
@@ -409,7 +409,7 @@ impl PluginSession {
         &self,
         directives: Vec<PluginOwned<PluginDirective>>,
         mut messages: crate::MessageSequence,
-        host: Arc<dyn TurnHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
         allow_abort: bool,
         invalid_context: &'static str,
     ) -> Result<TurnPreparation, PluginError> {
@@ -435,8 +435,8 @@ impl PluginSession {
                 PluginDirective::HandoffSession { .. } => {
                     return Err(PluginError::Session(invalid_context.to_string()));
                 }
-                PluginDirective::EmitEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_surface_session_events(
+                PluginDirective::EmitRuntimeEvents { events: surface } => {
+                    events.extend(crate::plugin::plugin_runtime_session_events(
                         &emitted.plugin_id,
                         surface,
                     ));
@@ -524,8 +524,8 @@ impl PluginSession {
                 PluginDirective::AbortTurn { code, message } => {
                     abort = Some(PluginAbort { code, message });
                 }
-                PluginDirective::EmitEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_surface_session_events(
+                PluginDirective::EmitRuntimeEvents { events: surface } => {
+                    events.extend(crate::plugin::plugin_runtime_session_events(
                         &emitted.plugin_id,
                         surface,
                     ));
@@ -655,7 +655,7 @@ impl PluginSession {
         (projector.hook)(ctx).await
     }
 
-    pub async fn emit_runtime_event(&self, event: PluginRuntimeEvent) {
+    pub async fn emit_runtime_event(&self, event: PluginLifecycleEvent) {
         let mut tasks = JoinSet::new();
         for hook in &self.runtime_event_hooks {
             let hook = Arc::clone(hook);
@@ -693,7 +693,7 @@ impl PluginSession {
     pub async fn finalize_turn(
         &self,
         mut turn: AssembledTurn,
-        host: Arc<dyn ToolHookHost>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
         let directives = if self.after_turn_hooks.is_empty() {
@@ -736,8 +736,8 @@ impl PluginSession {
                         "after_turn hooks do not support session handoff".to_string(),
                     ));
                 }
-                PluginDirective::EmitEvents { events: surface } => {
-                    events.extend(crate::plugin::plugin_surface_session_events(
+                PluginDirective::EmitRuntimeEvents { events: surface } => {
+                    events.extend(crate::plugin::plugin_runtime_session_events(
                         &emitted.plugin_id,
                         surface,
                     ));
@@ -772,7 +772,7 @@ impl PluginSession {
         }
 
         if self.has_runtime_event_hooks() {
-            self.emit_runtime_event(PluginRuntimeEvent::TurnCommitted(Arc::new(turn.clone())))
+            self.emit_runtime_event(PluginLifecycleEvent::TurnCommitted(Arc::new(turn.clone())))
                 .await;
         }
 
@@ -911,7 +911,7 @@ impl PluginSession {
         args: serde_json::Value,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn PluginActionHost>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Result<ToolResult, PluginActionInvokeError> {
         let Some(op) = self.plugin_actions.get(name).cloned() else {
             return Err(PluginActionInvokeError::Unknown(name.to_string()));
@@ -950,7 +950,7 @@ impl PluginSession {
         args: Op::Args,
         session_id: Option<String>,
         default_to_current_session: bool,
-        host: Arc<dyn PluginActionHost>,
+        host: Arc<dyn RuntimeSessionHost>,
     ) -> Result<Op::Output, PluginError> {
         let args = serde_json::to_value(args)
             .map_err(|err| PluginError::Invoke(format!("invalid {} args: {err}", Op::NAME)))?;

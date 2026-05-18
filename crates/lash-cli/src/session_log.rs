@@ -79,6 +79,7 @@ impl SessionLogger {
                 .ok()
                 .and_then(|path| path.to_str().map(str::to_string)),
             parent_session_id: None,
+            relation: lash_core::SessionRelation::Root,
         });
         Ok(Self {
             store,
@@ -144,6 +145,10 @@ impl SessionLogger {
             model: meta.model,
             cwd: meta.cwd,
             parent_session_id: Some(parent_session_id.to_string()),
+            relation: lash_core::SessionRelation::Child {
+                parent_session_id: parent_session_id.to_string(),
+                originating_tool_call_id: None,
+            },
         });
         Ok(())
     }
@@ -626,6 +631,10 @@ mod tests {
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string)),
                 parent_session_id: Some("parent".to_string()),
+                relation: lash_core::SessionRelation::Child {
+                    parent_session_id: "parent".to_string(),
+                    originating_tool_call_id: None,
+                },
             });
             persist_root_snapshot(
                 &child_store,
@@ -664,6 +673,10 @@ mod tests {
                 model: "gpt-test".to_string(),
                 cwd: None,
                 parent_session_id: Some("parent-id".to_string()),
+                relation: lash_core::SessionRelation::Child {
+                    parent_session_id: "parent-id".to_string(),
+                    originating_tool_call_id: None,
+                },
             });
 
             assert_eq!(

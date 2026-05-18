@@ -105,7 +105,7 @@ fn plan_exit_tool_call_consumes_pending_prompt_response() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single(
+        request: crate::prompt_model::PromptRequest::single(
             "Review the plan",
             vec!["Start implementing now".into(), "Keep planning".into()],
         )
@@ -693,7 +693,7 @@ fn take_prompt_response_renders_visible_user_block() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::freeform("Pick one"),
+        request: crate::prompt_model::PromptRequest::freeform("Pick one"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -708,7 +708,7 @@ fn take_prompt_response_renders_visible_user_block() {
     assert_eq!(response.as_deref(), Some("red"));
     assert_eq!(
         rx.recv().expect("response"),
-        lash_core::PromptResponse::Text {
+        crate::prompt_model::PromptResponse::Text {
             text: "red".to_string(),
         }
     );
@@ -725,7 +725,7 @@ fn dismiss_prompt_marks_ui_dirty() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single("Pick one", vec!["red".into()]),
+        request: crate::prompt_model::PromptRequest::single("Pick one", vec!["red".into()]),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
         scroll_offset: 0,
@@ -739,7 +739,7 @@ fn dismiss_prompt_marks_ui_dirty() {
 
     assert_eq!(
         rx.recv().expect("response"),
-        lash_core::PromptResponse::Single {
+        crate::prompt_model::PromptResponse::Single {
             selection: String::new(),
             note: None,
         }
@@ -871,7 +871,7 @@ fn prepared_turn_history_text_keeps_long_user_text_without_middle_truncation() {
 fn prompt_insert_text_inserts_literal_payload_at_cursor() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::freeform("Question?"),
+        request: crate::prompt_model::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -892,7 +892,7 @@ fn prompt_insert_text_inserts_literal_payload_at_cursor() {
 fn prompt_toggle_current_option_ignores_freeform_prompts() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::freeform("Question?"),
+        request: crate::prompt_model::PromptRequest::freeform("Question?"),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 0,
         scroll_offset: 0,
@@ -914,8 +914,11 @@ fn prompt_toggle_current_option_ignores_freeform_prompts() {
 fn prompt_toggle_note_focus_switches_between_choices_and_note() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
-            .with_optional_note(),
+        request: crate::prompt_model::PromptRequest::single(
+            "Pick one",
+            vec!["red".into(), "blue".into()],
+        )
+        .with_optional_note(),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
         scroll_offset: 0,
@@ -940,8 +943,11 @@ fn take_prompt_response_defers_option_prompt_display() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
-            .with_optional_note(),
+        request: crate::prompt_model::PromptRequest::single(
+            "Pick one",
+            vec!["red".into(), "blue".into()],
+        )
+        .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,
         scroll_offset: 0,
@@ -959,7 +965,7 @@ fn take_prompt_response_defers_option_prompt_display() {
     );
     assert_eq!(
         rx.recv().expect("response"),
-        lash_core::PromptResponse::Single {
+        crate::prompt_model::PromptResponse::Single {
             selection: "blue".to_string(),
             note: Some("ship the blue path".to_string()),
         }
@@ -976,7 +982,10 @@ fn option_prompt_response_falls_back_to_user_block_without_inline_panel() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()]),
+        request: crate::prompt_model::PromptRequest::single(
+            "Pick one",
+            vec!["red".into(), "blue".into()],
+        ),
         focus: crate::overlay::PromptFocus::Options,
         cursor: 0,
         scroll_offset: 0,
@@ -1009,8 +1018,11 @@ fn option_prompt_response_is_rendered_inline_by_question_panel_artifact() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let (tx, _rx) = std::sync::mpsc::channel();
     app.show_prompt(PromptState {
-        request: lash_core::PromptRequest::single("Pick one", vec!["red".into(), "blue".into()])
-            .with_optional_note(),
+        request: crate::prompt_model::PromptRequest::single(
+            "Pick one",
+            vec!["red".into(), "blue".into()],
+        )
+        .with_optional_note(),
         focus: crate::overlay::PromptFocus::Text,
         cursor: 1,
         scroll_offset: 0,

@@ -23,7 +23,7 @@ pub use mode::{
     normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
 };
 pub use plugin::{
-    CheckpointKind, PluginMessage, PluginSurfaceEvent, PromptContribution, PromptContributionGate,
+    CheckpointKind, PluginMessage, PluginRuntimeEvent, PromptContribution, PromptContributionGate,
 };
 pub use prompt::{
     PreparedPrompt, PromptBuildInput, PromptCache, PromptContributionSet, PromptFingerprint,
@@ -44,10 +44,9 @@ pub use session_model::message::MessageOrigin;
 pub use session_model::{
     AcceptedInjectedTurnInput, BaseRenderCache, ConversationRecord, ErrorEnvelope,
     MAIN_AGENT_INTRO, Message, MessageRole, MessageSequence, Part, PartAttachment, PartKind,
-    PromptBuiltin, PromptLayer, PromptPanel, PromptRequest, PromptResponse, PromptSelectionMode,
-    PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
-    PruneState, RenderedPrompt, ResolvedPromptLayer, SessionEvent, SessionEventRecord,
-    StateSnapshotEvent, TokenUsage, ToolEvent, TurnFinish, TurnOutcome, TurnStop,
+    PromptBuiltin, PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, PruneState, RenderedPrompt, ResolvedPromptLayer, SessionEvent,
+    SessionEventRecord, TokenUsage, ToolEvent, TurnFinish, TurnOutcome, TurnStop,
     default_prompt_template, messages_are_prompt_resume_safe, resolve_prompt_layers, shared_parts,
 };
 pub use tool_output::{
@@ -430,6 +429,32 @@ impl ToolOutputContract {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolArgumentProjectionPolicy {
+    #[default]
+    MaterializeProjectedValues,
+    PreserveProjectedRefsInField {
+        field: String,
+    },
+}
+
+impl ToolArgumentProjectionPolicy {
+    pub fn preserve_projected_refs_in_field(field: impl Into<String>) -> Self {
+        Self::PreserveProjectedRefsInField {
+            field: field.into(),
+        }
+    }
+
+    pub fn is_materialize_projected_values(&self) -> bool {
+        matches!(self, Self::MaterializeProjectedValues)
+    }
+}
+
+fn is_default_tool_argument_projection_policy(policy: &ToolArgumentProjectionPolicy) -> bool {
+    policy.is_materialize_projected_values()
+}
+
 /// Cheap tool metadata exposed to prompts, catalogs, UI, and availability checks.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
@@ -444,6 +469,11 @@ pub struct ToolManifest {
     pub availability_override: Option<ToolAvailability>,
     #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
     pub discovery: ToolDiscoveryMetadata,
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_tool_argument_projection_policy"
+    )]
+    pub argument_projection: ToolArgumentProjectionPolicy,
     #[serde(
         default = "default_tool_execution_mode",
         skip_serializing_if = "is_default_tool_execution_mode"
@@ -573,6 +603,11 @@ pub struct ToolDefinition {
     pub availability_override: Option<ToolAvailability>,
     #[serde(default, skip_serializing_if = "ToolDiscoveryMetadata::is_empty")]
     pub discovery: ToolDiscoveryMetadata,
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_tool_argument_projection_policy"
+    )]
+    pub argument_projection: ToolArgumentProjectionPolicy,
     /// How this tool should be scheduled relative to peers when the model
     /// emits a batch of tool calls. Defaults to [`ToolExecutionMode::Parallel`].
     #[serde(
@@ -714,6 +749,7 @@ impl ToolDefinition {
             activation: ToolActivation::Always,
             availability_override: None,
             discovery: ToolDiscoveryMetadata::default(),
+            argument_projection: ToolArgumentProjectionPolicy::default(),
             execution_mode: ToolExecutionMode::Parallel,
             retry_policy: ToolRetryPolicy::Never,
         }
@@ -749,6 +785,14 @@ impl ToolDefinition {
 
     pub fn with_discovery(mut self, discovery: ToolDiscoveryMetadata) -> Self {
         self.discovery = discovery;
+        self
+    }
+
+    pub fn with_argument_projection(
+        mut self,
+        argument_projection: ToolArgumentProjectionPolicy,
+    ) -> Self {
+        self.argument_projection = argument_projection;
         self
     }
 
@@ -862,6 +906,7 @@ impl ToolDefinition {
             activation: self.activation,
             availability_override: self.availability_override,
             discovery: self.discovery.clone(),
+            argument_projection: self.argument_projection.clone(),
             execution_mode: self.execution_mode,
             retry_policy: self.retry_policy,
         }
@@ -892,6 +937,7 @@ impl ToolDefinition {
             activation: manifest.activation,
             availability_override: manifest.availability_override,
             discovery: manifest.discovery,
+            argument_projection: manifest.argument_projection,
             execution_mode: manifest.execution_mode,
             retry_policy: manifest.retry_policy,
         }
@@ -1600,6 +1646,55 @@ mod tests {
         assert_eq!(roundtrip.retry_policy, tool.retry_policy);
         let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
         assert_eq!(encoded["retry_policy"]["type"], serde_json::json!("safe"));
+    }
+
+    #[test]
+    fn tool_argument_projection_defaults_to_materialize_and_is_omitted_from_manifest_json() {
+        let tool = ToolDefinition::raw(
+            "demo",
+            "Demo",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        );
+
+        assert_eq!(
+            tool.argument_projection,
+            ToolArgumentProjectionPolicy::MaterializeProjectedValues
+        );
+        let manifest = tool.manifest();
+        assert_eq!(
+            manifest.argument_projection,
+            ToolArgumentProjectionPolicy::MaterializeProjectedValues
+        );
+        let encoded = serde_json::to_value(&manifest).expect("manifest json");
+        assert!(encoded.get("argument_projection").is_none());
+    }
+
+    #[test]
+    fn tool_argument_projection_propagates_through_manifest_and_definition_roundtrip() {
+        let tool = ToolDefinition::raw(
+            "demo",
+            "Demo",
+            ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "string" }),
+        )
+        .with_argument_projection(
+            ToolArgumentProjectionPolicy::preserve_projected_refs_in_field("seed"),
+        );
+
+        let manifest = tool.manifest();
+        assert_eq!(manifest.argument_projection, tool.argument_projection);
+
+        let roundtrip = ToolDefinition::from_manifest_and_contract(manifest, tool.contract());
+        assert_eq!(roundtrip.argument_projection, tool.argument_projection);
+        let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
+        assert_eq!(
+            encoded["argument_projection"],
+            serde_json::json!({
+                "kind": "preserve_projected_refs_in_field",
+                "field": "seed"
+            })
+        );
     }
 
     #[test]
@@ -2617,7 +2712,7 @@ fn display_default_value(value: &serde_json::Value) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RlmPrintImage {
+pub struct ExecImage {
     pub mime: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<AttachmentRef>,

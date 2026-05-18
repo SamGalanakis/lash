@@ -149,8 +149,8 @@ fn view_chain<'a>(
 fn view_id_of(node: &LoadedSessionNode) -> String {
     match &node.kind {
         NodeRelation::Root => "root".to_string(),
-        NodeRelation::Subagent { agent_name, .. } => {
-            let base = agent_name
+        NodeRelation::Subagent { task, .. } => {
+            let base = task
                 .clone()
                 .unwrap_or_else(|| short_session_id(&node.meta.session_id));
             slug(&base)
@@ -234,9 +234,10 @@ fn write_view_hero(
         if meta.session_name.trim().is_empty() || meta.session_name == meta.session_id {
             match &head.kind {
                 NodeRelation::Root => "lash session".to_string(),
-                NodeRelation::Subagent { agent_name, .. } => {
-                    agent_name.clone().unwrap_or_else(|| "subagent".to_string())
-                }
+                NodeRelation::Subagent { task, .. } => task
+                    .as_deref()
+                    .map(|task| one_line_summary(task, 80))
+                    .unwrap_or_else(|| "subagent".to_string()),
                 NodeRelation::Handoff { .. } => "handoff".to_string(),
             }
         } else {
@@ -245,12 +246,13 @@ fn write_view_hero(
     let role_label = match &head.kind {
         NodeRelation::Root => "root session".to_string(),
         NodeRelation::Subagent {
-            capability,
-            agent_name,
-            ..
+            capability, task, ..
         } => {
             let cap = capability.as_deref().unwrap_or("");
-            let name = agent_name.as_deref().unwrap_or("subagent");
+            let name = task
+                .as_deref()
+                .map(|task| one_line_summary(task, 48))
+                .unwrap_or_else(|| "subagent".to_string());
             if cap.is_empty() {
                 format!("subagent · {name}")
             } else {
@@ -359,8 +361,9 @@ fn write_lineage(out: &mut String, tree: &LoadedSessionTree, current: &LoadedSes
         };
         let id_short = short_session_id(&node.meta.session_id);
         let label_text = match &node.kind {
-            NodeRelation::Subagent { agent_name, .. } => agent_name
-                .clone()
+            NodeRelation::Subagent { task, .. } => task
+                .as_deref()
+                .map(|task| one_line_summary(task, 56))
                 .unwrap_or_else(|| short_session_id(&node.meta.session_id)),
             NodeRelation::Root => "root".to_string(),
             NodeRelation::Handoff { .. } => "handoff".to_string(),
@@ -584,7 +587,11 @@ fn render_drill_card(
 ) {
     let id = ctx.next_id();
     let view_id = view_id_of(child);
-    let agent = edge.agent_name.as_deref().unwrap_or("subagent");
+    let label = edge
+        .task
+        .as_deref()
+        .map(|task| one_line_summary(task, 80))
+        .unwrap_or_else(|| "subagent".to_string());
     let cap = edge.capability.as_deref().unwrap_or("");
     let task = child
         .chronological
@@ -634,7 +641,7 @@ fn render_drill_card(
     let _ = writeln!(
         out,
         "          <span class=\"drill-title\">{}{}</span>",
-        escape(agent),
+        escape(&label),
         if cap.is_empty() {
             String::new()
         } else {
@@ -685,7 +692,7 @@ fn render_drill_card(
     let _ = writeln!(
         spine,
         "    <a class=\"spine-tick\" href=\"#{id}\" data-spine=\"child\" data-status=\"{status_class}\" title=\"spawn_agent · {}\"></a>",
-        escape_attr(agent)
+        escape_attr(&label)
     );
 }
 
@@ -836,8 +843,9 @@ pub fn render_tree_data_script(
         let view_id = view_id_of(head);
         let label = match &head.kind {
             NodeRelation::Root => "root".to_string(),
-            NodeRelation::Subagent { agent_name, .. } => agent_name
-                .clone()
+            NodeRelation::Subagent { task, .. } => task
+                .as_deref()
+                .map(|task| one_line_summary(task, 56))
                 .unwrap_or_else(|| short_session_id(&head.meta.session_id)),
             NodeRelation::Handoff { .. } => "handoff".to_string(),
         };

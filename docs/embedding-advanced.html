@@ -65,25 +65,24 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool batches, mid-turn worker migration — <code>lash-sansio</code> exposes the state machine as an effect / response protocol for an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>).</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool batches, mid-turn worker migration — install a custom <code>RuntimeEffectHost</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
-          <p>Shape: <code>TurnMachine::poll_effect()</code> yields the next side effect (<code>LlmCall</code>, <code>ToolCalls</code>, <code>ExecCode</code>, <code>Checkpoint</code>, …); the workflow runs it as a durable activity keyed by <code>EffectId</code>; <code>TurnMachine::handle_response(...)</code> feeds the result back. <code>checkpoint()</code> / <code>restore_from_checkpoint(...)</code> round-trip the whole machine. <code>EffectId</code> is deterministic across replays — the n-th effect of a fresh turn is always <code>EffectId(n)</code>.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code>, builds <code>EffectInvocation</code> metadata, invokes the host with a <code>RuntimeEffect</code>, and feeds the returned outcome back as the matching response. Turn invocations include a serialized <code>TurnCheckpoint</code> and stable idempotency key; direct/plugin LLM completions use the same host boundary after request normalization.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 
         <div class="section" id="subagents">
           <div class="section-header">
             <h2>Subagents</h2>
-            <p>Same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry and host; child policy resolves from the live parent snapshot.</p>
+            <p>Same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry; child policy resolves from the live parent snapshot.</p>
           </div>
           <pre><code>use std::sync::Arc;
 use lash::{plugins::PluginFactory, SessionSpec};
 use lash_subagents::{default_registry, SubagentsPluginFactory};
 
 let registry = Arc::new(default_registry(&amp;tier_models));
-let host = Arc::new(AppSubagentHost::new(child_store_factory));
 
-let subagents = SubagentsPluginFactory::new(registry, host)
+let subagents = SubagentsPluginFactory::new(registry)
     .with_session_spec(SessionSpec::inherit().max_turns(8));
 
 let core = LashCore::rlm()
@@ -155,7 +154,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared background task hosts, residency policy, imported <code>RuntimeCoreConfig</code>, termination policy.</p>
+            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared background task hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-host methods are thin core mutators.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
@@ -191,7 +190,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>lash-sansio</code>: state machine, deterministic <code>EffectId</code>, checkpoint / restore. Temporal, Restate.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectHost</code>, deterministic effect metadata, idempotency keys, checkpoint / restore, workflow adapter seam.</p></article>
           </div>
         </div>
   </main>

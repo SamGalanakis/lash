@@ -15,12 +15,12 @@ pub(super) struct StreamChunkOutcome {
     pub(super) abort_requested: bool,
 }
 
-async fn emit_plugin_surface_events_runtime(
+async fn emit_plugin_runtime_events_runtime(
     event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     plugin_id: &str,
-    events: Vec<crate::PluginSurfaceEvent>,
+    events: Vec<crate::PluginRuntimeEvent>,
 ) {
-    for event in crate::plugin::plugin_surface_session_events(plugin_id, events) {
+    for event in crate::plugin::plugin_runtime_session_events(plugin_id, events) {
         send_session_event(event_tx, event).await;
     }
 }
@@ -93,7 +93,7 @@ impl RuntimeTurnDriver {
             if emitted.value.abort_stream {
                 abort_requested = true;
             }
-            emit_plugin_surface_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
+            emit_plugin_runtime_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
                 .await;
         }
         let chunk = if first { original } else { current };
@@ -125,14 +125,14 @@ impl RuntimeTurnDriver {
             })?;
         let mut current: Option<LlmResponse> = None;
         for emitted in transforms {
-            emit_plugin_surface_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
+            emit_plugin_runtime_events_runtime(event_tx, &emitted.plugin_id, emitted.value.events)
                 .await;
             current = Some(emitted.value.response);
         }
         Ok(current.unwrap_or(original))
     }
 
-    pub(super) async fn run_standard_llm_call(
+    pub(in crate::runtime) async fn run_standard_llm_call(
         &mut self,
         request: Arc<LlmRequest>,
         mode_iteration: usize,
@@ -162,14 +162,12 @@ impl RuntimeTurnDriver {
         let trace_enabled = self.host.core.trace_sink.is_some();
         let llm_call_id = trace_enabled.then(|| self.llm_call_id(mode_iteration));
         if let Some(llm_call_id) = llm_call_id.as_ref() {
-            crate::trace::emit_trace(
+            crate::runtime::effect_host::emit_llm_trace_started(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
                 self.trace_context(mode_iteration)
                     .for_llm_call(llm_call_id.clone()),
-                TraceEvent::LlmCallStarted {
-                    request: crate::trace::trace_llm_request(&request),
-                },
+                &request,
             );
         }
         let (llm_stream_tx, mut llm_stream_rx) =
@@ -335,38 +333,22 @@ impl RuntimeTurnDriver {
             let stream_summary = debug.summary.to_json();
             match &result {
                 Ok(response) => {
-                    crate::trace::emit_trace(
+                    crate::runtime::effect_host::emit_llm_trace_completed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
                         self.trace_context(mode_iteration).for_llm_call(llm_call_id),
-                        TraceEvent::LlmCallCompleted {
-                            response: crate::trace::trace_llm_response(
-                                response.full_text.clone(),
-                                debug.elapsed_ms(),
-                                Some(response.terminal_reason),
-                                crate::trace::trace_output_parts(&response.parts),
-                            ),
-                            usage: Some(crate::trace::trace_usage_from_llm(&response.usage)),
-                            provider_usage: response.provider_usage.clone(),
-                            stream_summary: Some(stream_summary.clone()),
-                        },
+                        response,
+                        debug.elapsed_ms(),
+                        Some(stream_summary.clone()),
                     );
                 }
                 Err(error) => {
-                    crate::trace::emit_trace(
+                    crate::runtime::effect_host::emit_llm_trace_failed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
                         self.trace_context(mode_iteration).for_llm_call(llm_call_id),
-                        TraceEvent::LlmCallFailed {
-                            error: TraceError {
-                                message: error.message.clone(),
-                                retryable: error.retryable,
-                                terminal_reason: Some(error.terminal_reason.code().to_string()),
-                                code: error.code.clone(),
-                                raw: error.raw.clone(),
-                            },
-                            stream_summary: Some(stream_summary.clone()),
-                        },
+                        crate::runtime::effect_host::LlmTraceFailure::from(error),
+                        Some(stream_summary.clone()),
                     );
                 }
             }

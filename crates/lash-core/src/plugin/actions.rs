@@ -99,7 +99,7 @@ pub fn plugin_action_def<Op: PluginAction>() -> PluginActionDef {
 #[derive(Clone)]
 pub struct PluginActionContext {
     pub session_id: Option<String>,
-    pub host: Arc<dyn PluginActionHost>,
+    pub host: Arc<dyn RuntimeSessionHost>,
 }
 
 #[derive(Clone)]

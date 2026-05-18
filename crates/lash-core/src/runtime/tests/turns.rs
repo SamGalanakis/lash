@@ -14,7 +14,8 @@ async fn session_config_change_hook_receives_context_window_updates() {
                 runtime_event: Some(Arc::new(move |event| {
                     let observed = Arc::clone(&observed);
                     Box::pin(async move {
-                        if let crate::plugin::PluginRuntimeEvent::SessionConfigChanged(ctx) = event
+                        if let crate::plugin::PluginLifecycleEvent::SessionConfigChanged(ctx) =
+                            event
                         {
                             observed.lock().await.push((ctx.previous, ctx.current));
                         }
@@ -807,6 +808,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
             session_id: Some("child-store".to_string()),
             relation: crate::SessionRelation::Child {
                 parent_session_id: "root".to_string(),
+                originating_tool_call_id: None,
             },
             start: crate::SessionStartPoint::CurrentSession,
             policy: None,
@@ -857,6 +859,7 @@ async fn child_relation_does_not_replace_active_session() {
             session_id: Some("ordinary-child".to_string()),
             relation: crate::SessionRelation::Child {
                 parent_session_id: runtime.session_id().to_string(),
+                originating_tool_call_id: None,
             },
             start: crate::SessionStartPoint::Empty,
             policy: None,
@@ -1010,6 +1013,7 @@ async fn runtime_can_activate_managed_child_session() {
             session_id: Some("child".to_string()),
             relation: crate::SessionRelation::Child {
                 parent_session_id: runtime.session_id().to_string(),
+                originating_tool_call_id: None,
             },
             start: crate::SessionStartPoint::Empty,
             policy: None,

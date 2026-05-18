@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use lash_core::plugin::runtime_host::HistoryHost;
+use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::plugin::{HistoryError, PluginError};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectRequest,
     SessionAppendNode, SessionGraph,
 };
 
-pub(crate) struct OmHistoryHost<'a> {
+pub(crate) struct OmRuntimeHost<'a> {
     session_id: &'a str,
-    host: &'a Arc<dyn HistoryHost>,
+    host: &'a Arc<dyn RuntimeSessionHost>,
 }
 
-impl<'a> OmHistoryHost<'a> {
-    pub(crate) fn new(session_id: &'a str, host: &'a Arc<dyn HistoryHost>) -> Self {
+impl<'a> OmRuntimeHost<'a> {
+    pub(crate) fn new(session_id: &'a str, host: &'a Arc<dyn RuntimeSessionHost>) -> Self {
         Self { session_id, host }
     }
 
@@ -40,7 +40,7 @@ impl<'a> OmHistoryHost<'a> {
 
 pub(crate) async fn await_hidden_tasks_and_snapshot(
     session_id: &str,
-    host: &Arc<dyn HistoryHost>,
+    host: &Arc<dyn RuntimeSessionHost>,
 ) -> Result<SessionGraph, HistoryError> {
     host.await_hidden_tasks(session_id).await?;
     Ok(host.snapshot_current().await?.session_graph)
@@ -48,7 +48,7 @@ pub(crate) async fn await_hidden_tasks_and_snapshot(
 
 async fn append_plugin_nodes(
     session_id: &str,
-    host: &Arc<dyn lash_core::plugin::runtime_host::HistoryHost>,
+    host: &Arc<dyn lash_core::plugin::runtime_host::RuntimeSessionHost>,
     graph: &SessionGraph,
     nodes: Vec<(String, serde_json::Value)>,
 ) -> Result<Option<SessionGraph>, PluginError> {

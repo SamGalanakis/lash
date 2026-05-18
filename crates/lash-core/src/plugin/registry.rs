@@ -12,9 +12,9 @@ use std::sync::Arc;
 use super::{
     AfterToolCallHook, AfterTurnHook, AssistantResponseHook, AssistantStreamHook,
     BeforeToolCallHook, BeforeTurnHook, CheckpointHook, HistoryRewriter, PluginAction,
-    PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginRegistrar,
-    PluginRuntimeEventHook, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
-    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionAuthority,
+    PluginActionDef, PluginActionHandler, PluginError, PluginHost, PluginLifecycleEventHook,
+    PluginRegistrar, PluginSnapshotMeta, PromptContributor, SessionConfigMutator,
+    SessionToolAccess, SnapshotReader, SnapshotWriter, SubagentSessionContext,
     ToolDiscoveryContributor, ToolResultProjector, ToolSurfaceContributor, TurnContextTransform,
 };
 use crate::{ExecutionMode, StandardContextApproachKind, ToolProvider};
@@ -33,7 +33,7 @@ pub struct PluginSpec {
     pub assistant_stream_hooks: Vec<AssistantStreamHook>,
     pub assistant_response_hooks: Vec<AssistantResponseHook>,
     pub tool_result_projector: Option<ToolResultProjector>,
-    pub runtime_event_hooks: Vec<PluginRuntimeEventHook>,
+    pub runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub session_config_mutators: Vec<SessionConfigMutator>,
     pub plugin_actions: Vec<(PluginActionDef, PluginActionHandler)>,
     pub turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
@@ -108,7 +108,7 @@ impl PluginSpec {
         self
     }
 
-    pub fn with_runtime_event(mut self, hook: PluginRuntimeEventHook) -> Self {
+    pub fn with_runtime_event(mut self, hook: PluginLifecycleEventHook) -> Self {
         self.runtime_event_hooks.push(hook);
         self
     }
@@ -210,7 +210,7 @@ pub struct PluginSessionContext {
     pub execution_mode: ExecutionMode,
     pub standard_context_approach: Option<crate::StandardContextApproach>,
     pub tool_access: SessionToolAccess,
-    pub subagent: Option<SubagentSessionAuthority>,
+    pub subagent: Option<SubagentSessionContext>,
     /// True when the host has a background task host. Plugins that
     /// register background-managed tools should fail during plugin registration
     /// if this is false instead of surfacing tools that fail at call time.

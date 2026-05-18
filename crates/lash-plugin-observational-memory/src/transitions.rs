@@ -9,7 +9,7 @@ use crate::graph_state::{
     build_graph_state, prefix_len_covering_tokens, prefix_len_leaving_tail_budget,
     retained_message_tokens_by_message_id, split_message_batches,
 };
-use crate::host::OmHistoryHost;
+use crate::host::OmRuntimeHost;
 use crate::model::{
     ActiveMemoryNode, ActiveMemoryState, BufferedObservationNode, BufferedReflectionNode,
     ParsedMemoryOutput,
@@ -50,7 +50,7 @@ pub(crate) fn should_run_async_maintenance(
 
 pub(crate) async fn maybe_advance_memory_state(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: &lash_core::SessionPolicy,
     mut graph: SessionGraph,
 ) -> Result<SessionGraph, PluginError> {
@@ -105,7 +105,7 @@ pub(crate) async fn maybe_advance_memory_state(
 
 pub(crate) async fn maybe_buffer_observations(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
@@ -186,7 +186,7 @@ pub(crate) async fn maybe_buffer_observations(
 
 pub(crate) async fn maybe_buffer_reflection(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<(), PluginError> {
@@ -238,7 +238,7 @@ pub(crate) async fn maybe_buffer_reflection(
 
 async fn activate_buffered_observations(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -311,7 +311,7 @@ async fn activate_buffered_observations(
 }
 
 async fn activate_buffered_reflection(
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
     let om_state = build_graph_state(graph);
@@ -347,7 +347,7 @@ async fn activate_buffered_reflection(
 
 async fn sync_observe_pending_messages(
     config: &ObservationalMemoryConfig,
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {
@@ -418,7 +418,7 @@ async fn sync_observe_pending_messages(
 }
 
 async fn sync_reflect_active_memory(
-    om_host: &OmHistoryHost<'_>,
+    om_host: &OmRuntimeHost<'_>,
     policy: &lash_core::SessionPolicy,
     graph: &SessionGraph,
 ) -> Result<Option<SessionGraph>, PluginError> {

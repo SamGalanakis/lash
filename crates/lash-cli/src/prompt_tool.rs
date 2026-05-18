@@ -5,10 +5,10 @@ use lash_core::{
     PluginError, PluginFactory, PluginSpec, ToolCall, ToolContract, ToolDefinition,
     ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
 };
-use lash_core::{PromptRequest, PromptResponse, PromptSelectionMode};
 use serde_json::json;
 
 use crate::event::{AppEvent, AppEventTx};
+use crate::prompt_model::{PromptRequest, PromptResponse, PromptSelectionMode};
 
 #[derive(Clone, Default)]
 pub(crate) struct CliPromptBridge {
@@ -45,8 +45,24 @@ impl CliPromptBridge {
 
 #[async_trait::async_trait]
 impl lash_plugin_plan_mode::PlanModePrompt for CliPromptBridge {
-    async fn prompt_user(&self, request: PromptRequest) -> Result<PromptResponse, PluginError> {
-        self.prompt_user(request).await
+    async fn prompt_user(
+        &self,
+        request: lash_plugin_plan_mode::PlanModePromptRequest,
+    ) -> Result<lash_plugin_plan_mode::PlanModePromptResponse, PluginError> {
+        let mut cli_request = PromptRequest::single(request.question, request.options);
+        if let Some(review) = request.review {
+            cli_request = cli_request.with_markdown_panel(review.title, review.markdown);
+        }
+        if request.allow_note {
+            cli_request = cli_request.with_optional_note();
+        }
+        let response = self.prompt_user(cli_request).await?;
+        let (selection, note) = match response {
+            PromptResponse::Single { selection, note } => (selection, note),
+            PromptResponse::Multi { selections, note } => (selections.join(", "), note),
+            PromptResponse::Text { text } => (text, None),
+        };
+        Ok(lash_plugin_plan_mode::PlanModePromptResponse::Single { selection, note })
     }
 }
 

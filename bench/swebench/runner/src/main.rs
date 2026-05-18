@@ -14,30 +14,21 @@ use chrono::Utc;
 use clap::Parser;
 use dataset::{SweBenchInstance, load_instances};
 use lash::{
-    SessionSpec, TurnInput,
-    advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
-    plugins::{
-        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
-        PluginSession,
+    LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
+    advanced::{
+        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
     },
+    persistence::RuntimePersistence,
+    plugins::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory},
     provider::ProviderHandle,
     usage::{SessionUsageReport, diff_usage_reports},
 };
 use lash_cli::config::LashConfig;
-use lash_core::{
-    BackgroundRuntimeHost, EmbeddedRuntimeHost, InputItem, LashRuntime, LocalBackgroundTaskHost,
-    PersistedSessionState, PersistentRuntimeServices, PluginHost, RuntimeCoreConfig,
-    RuntimePersistence, SessionEvent, SessionPolicy, StandardContextApproach,
-    ToolOutputBudgetPluginFactory, TurnInjectionBridge, TurnInputInjectionBridge,
-};
 use lash_llm_tools::LlmToolsPluginFactory;
-use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
-use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_sqlite_store::Store;
-use lash_standard_plugins::{DefaultPluginStackOptions, DefaultToolBundle, default_plugin_stack};
+use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use lash_subagents::{
-    CapabilityRegistry, LocalSubagentHost, SubagentHost, SubagentsPluginFactory, TierCapability,
-    TierExecutionMode,
+    CapabilityRegistry, SubagentsPluginFactory, TierCapability, TierExecutionMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -567,7 +558,7 @@ struct RunInstanceContext<'a> {
     provider: &'a ProviderHandle,
     args: &'a Args,
     model: &'a str,
-    execution_mode: ExecutionMode,
+    execution_mode: ModeId,
     standard_context_approach: Option<&'a StandardContextApproach>,
 }
 
@@ -621,50 +612,31 @@ async fn run_instance(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
 
-    let policy = SessionPolicy {
-        model: model.to_string(),
-        provider: provider.clone(),
-        max_context_tokens: Some(args.max_context_tokens),
-        execution_mode: execution_mode.clone(),
-        standard_context_approach: standard_context_approach.cloned(),
-        model_variant: Some(args.variant.clone()),
-        max_turns: Some(args.max_turns),
-        ..SessionPolicy::default()
-    };
-    let plugin_session = build_plugin_session(
-        execution_mode.clone(),
-        standard_context_approach.cloned(),
-        &policy,
-    )?;
-    let services = PersistentRuntimeServices::new_with_bridges(
-        plugin_session,
-        TurnInjectionBridge::new(),
-        TurnInputInjectionBridge::new(),
-        store.clone() as Arc<dyn RuntimePersistence>,
-    );
-    let host = BackgroundRuntimeHost::new(
-        EmbeddedRuntimeHost::new(
-            RuntimeCoreConfig::default().with_trace_jsonl_path(Some(trace_path.clone())),
-        ),
-        Arc::new(LocalBackgroundTaskHost::default()),
-    );
-    let mut runtime = LashRuntime::from_persistent_background_state(
-        policy.clone(),
-        host,
-        services,
-        PersistedSessionState {
-            session_id: "root".to_string(),
-            policy,
-            ..PersistedSessionState::default()
-        },
-    )
-    .await?;
+    let core = LashCore::builder()
+        .install_mode(mode_preset(
+            &execution_mode,
+            standard_context_approach.cloned(),
+        )?)
+        .default_mode(execution_mode.clone())
+        .provider(provider.clone())
+        .model(model.to_string(), Some(args.variant.clone()))
+        .max_context_tokens(args.max_context_tokens)
+        .max_turns(args.max_turns)
+        .trace_jsonl_path(Some(trace_path.clone()))
+        .plugins(build_plugin_stack(standard_context_approach.cloned()))
+        .build()?;
+    let session = core
+        .session("root")
+        .mode(execution_mode.clone())
+        .store(store.clone() as Arc<dyn RuntimePersistence>)
+        .open()
+        .await?;
 
     let sink = Arc::new(InstanceEventSink::new(events_path.clone())?);
     let sink_trait: Arc<dyn EventSink> = sink.clone();
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let before_usage = runtime.usage_report();
+    let before_usage = session.usage_report();
     let turn_started = Instant::now();
     // Each instance runs in its own subprocess (see `spawn_child`), so we
     // own the process CWD for the duration of this turn. Lash core does not
@@ -672,25 +644,16 @@ async fn run_instance(
     // CWD, so this pins them to the instance's worktree.
     std::env::set_current_dir(&repo_dir)
         .with_context(|| format!("cd into {}", repo_dir.display()))?;
-    let turn = runtime
-        .stream_turn(
-            TurnInput {
-                items: vec![InputItem::Text { text: prompt }],
-                image_blobs: Default::default(),
-                mode_turn_options: None,
-                trace_turn_id: None,
-                mode_extension: None,
-                turn_context: TurnContext::default(),
-            },
-            sink_trait.as_ref(),
-            cancel,
-        )
+    let turn = session
+        .turn(TurnInput::text(prompt))
+        .cancel(cancel)
+        .collect_session_events_with(sink_trait.as_ref())
         .await
         .context("run swebench instance")?;
     let model_patch = capture_git_diff(&repo_dir)
         .with_context(|| format!("capture diff for {}", instance.instance_id))?;
     let turn_seconds = turn_started.elapsed().as_secs_f64();
-    let after_usage = runtime.usage_report();
+    let after_usage = session.usage_report();
     let usage = diff_usage_reports(&before_usage, &after_usage)
         .map(|rows| SessionUsageReport::from_entries(&rows))
         .map_err(anyhow::Error::msg)
@@ -945,66 +908,37 @@ fn capture_git_diff(repo_dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn build_plugin_session(
-    execution_mode: ExecutionMode,
+fn mode_preset(
+    execution_mode: &ModeId,
     standard_context_approach: Option<StandardContextApproach>,
-    _policy: &SessionPolicy,
-) -> Result<Arc<PluginSession>> {
-    let mut factories: Vec<Arc<dyn PluginFactory>> =
-        vec![Arc::new(ToolOutputBudgetPluginFactory::default())];
-    if let Some(standard_context_approach) = &standard_context_approach {
-        match standard_context_approach {
-            StandardContextApproach::RollingHistory(_) => {
-                factories.push(Arc::new(RollingHistoryPluginFactory::default()));
-            }
-            StandardContextApproach::ObservationalMemory(_) => {
-                factories.push(Arc::new(ObservationalMemoryPluginFactory));
-            }
+) -> Result<ModePreset> {
+    match execution_mode.as_str() {
+        "standard" => {
+            Ok(ModePreset::standard().with_standard_context_approach(standard_context_approach))
         }
+        "rlm" => Ok(ModePreset::rlm()),
+        other => bail!("unsupported execution mode `{other}`"),
     }
-    factories.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
-    factories.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
-    factories.push(Arc::new(
-        lash_mode_standard::BuiltinStandardModePluginFactory,
-    ));
-    factories.push(Arc::new(
-        lash_mode_rlm::BuiltinRlmModePluginFactory::default(),
-    ));
+}
 
-    // Tool bundles only — core/context/mode plugins are registered
-    // above, so we ask `default_plugin_stack` for just the tool
-    // surfaces (shell, apply_patch, read/ls/grep/glob). No `ask`
-    // (autonomous run) and no web tools.
-    let mut tool_factories = default_plugin_stack(DefaultPluginStackOptions {
-        execution_mode: execution_mode.clone(),
-        standard_context_approach: standard_context_approach.clone(),
-        bundles: vec![
-            DefaultToolBundle::Shell,
-            DefaultToolBundle::Editing,
-            DefaultToolBundle::Files,
-            DefaultToolBundle::Search,
-        ],
+fn build_plugin_stack(standard_context_approach: Option<StandardContextApproach>) -> PluginStack {
+    let mut stack = standard_tool_stack(StandardToolStackOptions {
+        standard_context_approach,
         tavily_api_key: None,
-    })
-    .into_factories();
-    factories.append(&mut tool_factories);
+    });
+    stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
 
     let registry = Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(
         "default",
         None,
         TierExecutionMode::Inherit,
     ))));
-    let subagent_host: Arc<dyn SubagentHost> = Arc::new(LocalSubagentHost::default());
-    factories.push(Arc::new(LlmToolsPluginFactory::default()));
-    factories.push(Arc::new(
-        SubagentsPluginFactory::new(registry, subagent_host)
-            .with_session_spec(SessionSpec::inherit()),
+    stack.push(Arc::new(LlmToolsPluginFactory::default()));
+    stack.push(Arc::new(
+        SubagentsPluginFactory::new(registry).with_session_spec(SessionSpec::inherit()),
     ));
-
-    let plugin_host = PluginHost::new(factories);
-    plugin_host
-        .build_session("root", execution_mode, standard_context_approach, None)
-        .context("build plugin session")
+    stack
 }
 
 fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
@@ -1033,10 +967,10 @@ fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
     Ok((provider, kind, model))
 }
 
-fn parse_execution_mode(raw: &str) -> Result<ExecutionMode> {
+fn parse_execution_mode(raw: &str) -> Result<ModeId> {
     match raw {
-        "rlm" => Ok(ExecutionMode::new("rlm")),
-        "standard" => Ok(ExecutionMode::standard()),
+        "rlm" => Ok(ModeId::rlm()),
+        "standard" => Ok(ModeId::standard()),
         other => bail!("unsupported execution mode `{other}`"),
     }
 }
@@ -1052,10 +986,10 @@ fn parse_standard_context_approach(raw: &str) -> Result<StandardContextApproach>
 }
 
 fn resolve_standard_context_approach(
-    execution_mode: &ExecutionMode,
+    execution_mode: &ModeId,
     raw: Option<&str>,
 ) -> Result<Option<StandardContextApproach>> {
-    if *execution_mode == ExecutionMode::standard() {
+    if *execution_mode == ModeId::standard() {
         return parse_standard_context_approach(raw.unwrap_or(DEFAULT_CONTEXT_APPROACH)).map(Some);
     }
     if raw.is_some() {
@@ -1064,8 +998,8 @@ fn resolve_standard_context_approach(
     Ok(None)
 }
 
-fn execution_mode_label(mode: &ExecutionMode) -> &str {
-    mode.plugin_id()
+fn execution_mode_label(mode: &ModeId) -> &str {
+    mode.as_str()
 }
 
 fn standard_context_approach_label(approach: &StandardContextApproach) -> &'static str {

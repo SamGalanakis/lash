@@ -11,10 +11,9 @@ readme.workspace = true
 rust-version.workspace = true
 description = "Sans-IO protocol kernel for the lash agent runtime. Pure types and state machine; no IO or async."
 keywords = ["lash", "agent", "sans-io", "protocol", "runtime"]
-categories = ["asynchronous", "api-bindings", "no-std"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 schemars = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }

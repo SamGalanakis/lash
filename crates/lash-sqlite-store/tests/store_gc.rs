@@ -182,6 +182,10 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
     let request = SessionStoreCreateRequest {
         session_id: "chat/alpha".to_string(),
         parent_session_id: Some("parent".to_string()),
+        relation: lash_core::SessionRelation::Child {
+            parent_session_id: "parent".to_string(),
+            originating_tool_call_id: None,
+        },
         policy: SessionPolicy {
             model: "first-model".to_string(),
             ..SessionPolicy::default()
@@ -205,6 +209,10 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
             model: "preserved-model".to_string(),
             cwd: Some("/tmp/original".to_string()),
             parent_session_id: Some("parent".to_string()),
+            relation: lash_core::SessionRelation::Child {
+                parent_session_id: "parent".to_string(),
+                originating_tool_call_id: None,
+            },
         })
         .await
         .expect("save meta");
@@ -236,6 +244,7 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
     let request = SessionStoreCreateRequest {
         session_id: "explicit".to_string(),
         parent_session_id: None,
+        relation: lash_core::SessionRelation::Root,
         policy: SessionPolicy {
             model: "model".to_string(),
             ..SessionPolicy::default()

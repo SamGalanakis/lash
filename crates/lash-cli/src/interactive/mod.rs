@@ -66,6 +66,14 @@ use self::helpers::{
 #[allow(unused_imports)]
 use self::input_handling::enqueue_pending_monitor_wakes;
 
+fn session_activity_is_current(
+    stream_id: u64,
+    active_stream_id: u64,
+    runtime_active: bool,
+) -> bool {
+    runtime_active && stream_id == active_stream_id
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_app(
     mut terminal: Terminal,
@@ -936,7 +944,17 @@ pub(crate) async fn run_app(
                 stream_id,
                 activity,
             } => {
-                if stream_id != active_stream_id {
+                if !session_activity_is_current(
+                    stream_id,
+                    active_stream_id,
+                    runtime_return_rx.is_some(),
+                ) {
+                    tracing::trace!(
+                        stream_id,
+                        active_stream_id,
+                        runtime_active = runtime_return_rx.is_some(),
+                        "dropping stale runtime activity"
+                    );
                     continue;
                 }
                 let activity = *activity;
@@ -953,12 +971,6 @@ pub(crate) async fn run_app(
                     recorder.record_turn_activity(&activity);
                 }
                 let ui_effects = ui_extensions.effects_for_turn_event(&activity.event);
-                let plugin_notification =
-                    if let TurnEvent::PluginSurface { event, .. } = &activity.event {
-                        crate::plugin_surface::desktop_notification_effect(event)
-                    } else {
-                        None
-                    };
                 if let TurnEvent::QueuedInputAccepted { inputs, .. } = &activity.event {
                     let messages = inputs
                         .iter()
@@ -968,9 +980,6 @@ pub(crate) async fn run_app(
                 }
                 app.handle_turn_activity(activity);
                 apply_ui_host_effects(&mut app, ui_effects);
-                if let Some(effect) = plugin_notification {
-                    apply_ui_host_effects(&mut app, vec![effect]);
-                }
             }
             AppEvent::Prompt {
                 request,

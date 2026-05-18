@@ -6,7 +6,8 @@ pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::{
     ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
-    PluginStack, RuntimeEnvironment, RuntimeHandle, RuntimeObservation, SessionPolicy, SessionSpec,
+    PluginStack, RuntimeCoreConfig, RuntimeEnvironment, RuntimeHandle, RuntimeObservation,
+    SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
@@ -16,11 +17,12 @@ pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, BackgroundTaskHost, BackgroundTaskRecord, EventSink,
     ExecutionSummary, LocalBackgroundTaskHost, Message, ModeTurnOptions, PluginFactory,
-    PluginMessage, ProviderHandle, Residency, RewriteTrigger, RuntimePersistence,
-    SessionCreateRequest, SessionError, SessionHandle, SessionReadView, SessionStateEnvelope,
-    SessionStoreCreateRequest, SessionStoreFactory, SessionTurnHandle, SessionUsageReport,
-    StandardContextApproach, TerminationPolicy, ToolAvailability, ToolCallRecord, ToolManifest,
-    ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink, TurnOutcome,
+    PluginMessage, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectHost,
+    RuntimePersistence, SessionCreateRequest, SessionError, SessionHandle, SessionReadView,
+    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTurnHandle,
+    SessionUsageReport, StandardContextApproach, TerminationPolicy, ToolAvailability,
+    ToolCallRecord, ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink,
+    TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

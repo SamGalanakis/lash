@@ -826,7 +826,7 @@ impl LashRuntime {
             {
                 session
                     .plugins()
-                    .emit_runtime_event(crate::PluginRuntimeEvent::TurnPersisted(
+                    .emit_runtime_event(crate::PluginLifecycleEvent::TurnPersisted(
                         crate::SessionStateChangedContext {
                             session_id: self.state.session_id.clone(),
                             state: crate::SessionReadView::from_exported_state(

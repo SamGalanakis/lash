@@ -1482,7 +1482,7 @@ mod tests {
     fn parses_async_tool_syntax() {
         let program = parse(
             r#"
-            handle = start call spawn_agent { agent_name: "worker", task: "check", capability: "explore" }
+            handle = start call spawn_agent { task: "check", capability: "explore" }
             result = await handle
             cancel handle
             submit result

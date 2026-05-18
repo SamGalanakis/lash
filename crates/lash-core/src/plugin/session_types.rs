@@ -83,6 +83,8 @@ pub enum SessionRelation {
     Root,
     Child {
         parent_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        originating_tool_call_id: Option<String>,
     },
     Handoff {
         parent_session_id: String,
@@ -96,7 +98,9 @@ impl SessionRelation {
     pub fn parent_session_id(&self) -> Option<&str> {
         match self {
             Self::Root => None,
-            Self::Child { parent_session_id }
+            Self::Child {
+                parent_session_id, ..
+            }
             | Self::Handoff {
                 parent_session_id, ..
             } => Some(parent_session_id),
@@ -126,7 +130,7 @@ pub struct SessionCreateRequest {
     #[serde(default)]
     pub tool_access: SessionToolAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent: Option<SubagentSessionAuthority>,
+    pub subagent: Option<SubagentSessionContext>,
     #[serde(skip)]
     pub context_surface: SessionContextSurface,
     /// Per-execution-mode "extras" that configure mode-specific
@@ -153,6 +157,7 @@ impl SessionCreateRequest {
         Self::related(
             SessionRelation::Child {
                 parent_session_id: parent_session_id.into(),
+                originating_tool_call_id: None,
             },
             start,
             Some(policy),
@@ -170,6 +175,7 @@ impl SessionCreateRequest {
         Self::related(
             SessionRelation::Child {
                 parent_session_id: parent_session_id.into(),
+                originating_tool_call_id: None,
             },
             start,
             None,
@@ -247,8 +253,19 @@ impl SessionCreateRequest {
         self
     }
 
-    pub fn with_subagent_authority(mut self, subagent: SubagentSessionAuthority) -> Self {
+    pub fn with_subagent_context(mut self, subagent: SubagentSessionContext) -> Self {
         self.subagent = Some(subagent);
+        self
+    }
+
+    pub fn with_originating_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        if let SessionRelation::Child {
+            originating_tool_call_id,
+            ..
+        } = &mut self.relation
+        {
+            *originating_tool_call_id = Some(tool_call_id.into());
+        }
         self
     }
 
@@ -273,8 +290,7 @@ impl SessionToolAccess {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubagentSessionAuthority {
-    pub agent_name: String,
+pub struct SubagentSessionContext {
     pub parent_session_id: String,
     pub capability: String,
     pub depth: u8,
@@ -289,8 +305,8 @@ pub enum SessionAppendNode {
     Message {
         message: PluginMessage,
     },
-    Event {
-        event: crate::SessionEventRecord,
+    ModeEvent {
+        event: crate::ModeEvent,
     },
     Plugin {
         plugin_type: String,
@@ -311,7 +327,7 @@ impl SessionAppendNode {
         }
     }
 
-    pub fn event(event: crate::SessionEventRecord) -> Self {
-        Self::Event { event }
+    pub fn mode_event(event: crate::ModeEvent) -> Self {
+        Self::ModeEvent { event }
     }
 }

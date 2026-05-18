@@ -28,15 +28,21 @@
           </div>
           <dl class="def-list">
             <dt><code>ProjectedBindings</code></dt>
-            <dd>Map of names to <code>ProjectedValue</code>s the host hands the executor at the start of each fenced block. RLM rebuilds it from <code>RlmGlobalsPatch</code> + the live <code>history</code> projection.</dd>
+            <dd>Low-level map of names to <code>ProjectedValue</code>s the Lashlang executor receives at the start of each fenced block. RLM builds it from public <code>RlmProjectedBindings</code>, restored projection refs, and the live <code>history</code> projection.</dd>
+            <dt><code>RlmProjectedBindings</code></dt>
+            <dd>RLM's public binding API. <code>bind_json</code> and <code>bind_value</code> store inline values; <code>bind_lazy</code> accepts a stable <code>ProjectionRef</code>, not a raw host object. Duplicate names are errors.</dd>
+            <dt><code>ProjectionRef</code>, <code>ProjectionResolver</code>, <code>ProjectionRegistry</code></dt>
+            <dd>Stable lookup path for lazy host values. A resolver turns a ref into an <code>Arc&lt;dyn ProjectedHostValue&gt;</code> immediately before execution. The default registry supports memory refs via <code>register_memory</code>; those refs are only valid while the registry instance lives, and missing refs fail clearly.</dd>
             <dt><code>ProjectedValue</code></dt>
-            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing).</dd>
+            <dd>Either a scalar <code>FlowValue</code> or a custom <code>Arc&lt;dyn ProjectedHostValue&gt;</code> for non-trivial shapes (lazy field access, length, indexing). Custom values may carry opaque projection-ref metadata so snapshots and seeds can rehydrate them without materializing the content.</dd>
             <dt><code>ProjectedHostValue</code></dt>
             <dd>Trait that lets the host serve <code>get_field</code>, <code>get_index</code>, <code>len</code>, <code>render</code>, and <code>materialize</code> queries on demand (returning a <code>ProjectedRead</code> for field/index reads) so large host-side structures need not be cloned into Lashlang values.</dd>
+            <dt>Snapshots</dt>
+            <dd>Lashlang snapshot JSON records projected globals as markers, optionally including <code>projection_ref</code>. Restore creates unresolved projected placeholders; RLM resolves ref-backed placeholders through its resolver before the next fenced block runs.</dd>
             <dt>Reserved names</dt>
             <dd><code>history</code> and any host-projected globals are reserved. Attempting <code>name = ...</code> over a projected name raises <code>`name` is a read-only projected binding</code>. The host-side seed channel (<code>continue_as</code> / <code>spawn_agent</code> <code>seed:</code>) can land projected entries that lashlang code then sees as read-only.</dd>
             <dt>Tool arguments</dt>
-            <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then its before-tool hook materializes those markers before ordinary tools validate or execute. Tool implementations should parse <code>ToolCall.args</code> as plain JSON. The only preserved markers are root entries under <code>seed:</code> for projection-aware RLM control tools such as <code>continue_as</code> and RLM <code>spawn_agent</code>, where the marker means "re-project this value in the successor".</dd>
+            <dd>RLM serializes projected values with an internal <code>{"__projected__": ...}</code> marker, then normalizes tool arguments through the tool manifest's <code>ToolArgumentProjectionPolicy</code>. Tool implementations should parse <code>ToolCall.args</code> as plain JSON. The default policy materializes projected values. <code>continue_as</code> and <code>spawn_agent</code> declare a seed-preserving policy, so only root <code>seed:</code> entries remain projected; ref-backed values carry <code>{"__projection_ref__": ...}</code> so successors and child sessions re-resolve the same lazy source, while value-backed projections serialize as JSON.</dd>
           </dl>
         </div>
 
@@ -77,12 +83,10 @@ submit { line_count: len(lines), notes: notes, items: items }</code></pre>
           <p>Background work uses <code>start call</code>; results come back as wrappers when you <code>await</code>. <code>await</code> over a list returns wrappers in order; over a record it returns wrappers keyed by name. The unwrap operator <code>?</code> applies to <code>(await h)</code> just like to <code>(call ...)</code>.</p>
           <pre><code>// Kick off two long-running subagents in the background.
 left = start call spawn_agent {
-  agent_name: "audit_a",
   task: "audit module a",
   capability: "explore"
 }
 right = start call spawn_agent {
-  agent_name: "audit_b",
   task: "audit module b",
   capability: "explore"
 }
@@ -109,8 +113,8 @@ submit {
             <dt>Positional branches</dt>
             <dd><code>parallel { call ..., call ... }</code> (or with newlines as separators) returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
           </dl>
-          <pre><code>a = start call spawn_agent { agent_name: "one", task: "Read file A", capability: "explore" }
-b = start call spawn_agent { agent_name: "two", task: "Read file B", capability: "explore" }
+          <pre><code>a = start call spawn_agent { task: "Read file A", capability: "explore" }
+b = start call spawn_agent { task: "Read file B", capability: "explore" }
 results = parallel { one: (await a)?, two: (await b)? }
 submit { a: results.one, b: results.two }</code></pre>
         </div>
@@ -183,7 +187,6 @@ package = validate(parsed, Package)
 
 // Constrain a subagent's output shape via the same Type literal.
 result = (call spawn_agent {
-  agent_name: "summarizer",
   task: format("summarize {} v{}", package.name, package.version),
   capability: "summarize",
   output: Type { headline: str, bullets: list[str] }

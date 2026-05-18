@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 const PROJECTED_SNAPSHOT_TAG: &str = "__lashlang_snapshot_projected__";
 const PROJECTED_SNAPSHOT_NAME: &str = "name";
 const PROJECTED_SNAPSHOT_TYPE_NAME: &str = "type_name";
+const PROJECTED_SNAPSHOT_PROJECTION_REF: &str = "projection_ref";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -95,10 +96,14 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
                 .into(),
         ),
         serde_json::Value::Object(map) => {
-            if let Some((name, type_name)) = projected_snapshot_marker(&map) {
-                return Value::Projected(ProjectedValue::unavailable_after_restore(
-                    name, type_name,
-                ));
+            if let Some((name, type_name, projection_ref)) = projected_snapshot_marker(&map) {
+                return Value::Projected(
+                    ProjectedValue::unavailable_after_restore_with_projection_ref(
+                        name,
+                        type_name,
+                        projection_ref,
+                    ),
+                );
             }
             image_from_json_map(&map)
                 .map(Value::Image)
@@ -109,8 +114,8 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
 
 fn projected_snapshot_marker(
     map: &serde_json::Map<String, serde_json::Value>,
-) -> Option<(String, String)> {
-    if map.len() != 3 {
+) -> Option<(String, String, Option<serde_json::Value>)> {
+    if map.len() != 3 && map.len() != 4 {
         return None;
     }
     if !map.get(PROJECTED_SNAPSHOT_TAG)?.as_bool()? {
@@ -118,5 +123,6 @@ fn projected_snapshot_marker(
     }
     let name = map.get(PROJECTED_SNAPSHOT_NAME)?.as_str()?.to_string();
     let type_name = map.get(PROJECTED_SNAPSHOT_TYPE_NAME)?.as_str()?.to_string();
-    Some((name, type_name))
+    let projection_ref = map.get(PROJECTED_SNAPSHOT_PROJECTION_REF).cloned();
+    Some((name, type_name, projection_ref))
 }

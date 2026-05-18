@@ -195,6 +195,7 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
             model: "mock-model".to_string(),
             cwd: None,
             parent_session_id: None,
+            relation: lash_core::SessionRelation::Root,
         }))
     }
 
@@ -369,11 +370,10 @@ impl lash_core::SessionPlugin for SurfacePlugin {
             Box::pin(async move {
                 Ok(lash_core::AssistantResponseTransform {
                     response: ctx.response,
-                    events: vec![lash_core::PluginSurfaceEvent::Status {
+                    events: vec![lash_core::PluginRuntimeEvent::Status {
                         key: "surface".to_string(),
                         label: "working".to_string(),
                         detail: Some("details".to_string()),
-                        transient_ms: None,
                     }],
                 })
             })

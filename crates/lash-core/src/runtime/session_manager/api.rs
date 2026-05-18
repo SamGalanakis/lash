@@ -1,7 +1,7 @@
 use super::*;
 
 #[async_trait::async_trait]
-impl crate::plugin::SessionSnapshotHost for RuntimeSessionManager {
+impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
     async fn snapshot_current(&self) -> Result<SessionSnapshot, crate::PluginError> {
         self.current.snapshot_current().await
     }
@@ -14,20 +14,12 @@ impl crate::plugin::SessionSnapshotHost for RuntimeSessionManager {
             .snapshot_session(&self.managed, session_id)
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::ToolCatalogHost for RuntimeSessionManager {
     async fn tool_catalog(
         &self,
         session_id: &str,
     ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
         self.current.tool_catalog(&self.managed, session_id).await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::ToolStateHost for RuntimeSessionManager {
     async fn tool_state(&self, session_id: &str) -> Result<crate::ToolState, crate::PluginError> {
         self.current.tool_state(&self.managed, session_id).await
     }
@@ -41,10 +33,6 @@ impl crate::plugin::ToolStateHost for RuntimeSessionManager {
             .apply_tool_state(&self.managed, session_id, snapshot)
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::SessionLifecycleHost for RuntimeSessionManager {
     async fn create_session(
         &self,
         request: SessionCreateRequest,
@@ -66,10 +54,6 @@ impl crate::plugin::SessionLifecycleHost for RuntimeSessionManager {
             .close_session(&self.current, &self.usage, session_id)
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::TurnHost for RuntimeSessionManager {
     async fn start_turn_stream(
         &self,
         session_id: &str,
@@ -89,10 +73,6 @@ impl crate::plugin::TurnHost for RuntimeSessionManager {
     async fn cancel_turn(&self, turn_id: &str) -> Result<(), crate::PluginError> {
         self.managed.cancel_turn(turn_id).await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::TaskHost for RuntimeSessionManager {
     async fn inject_turn_input(
         &self,
         session_id: &str,
@@ -248,10 +228,6 @@ impl crate::plugin::TaskHost for RuntimeSessionManager {
             )
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::MonitorHost for RuntimeSessionManager {
     async fn monitor_snapshot(
         &self,
         session_id: &str,
@@ -294,10 +270,6 @@ impl crate::plugin::MonitorHost for RuntimeSessionManager {
             )
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::SessionGraphHost for RuntimeSessionManager {
     async fn append_session_nodes(
         &self,
         session_id: &str,
@@ -313,10 +285,6 @@ impl crate::plugin::SessionGraphHost for RuntimeSessionManager {
             )
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::DirectCompletionHost for RuntimeSessionManager {
     async fn direct_completion(
         &self,
         request: crate::DirectRequest,
@@ -336,10 +304,6 @@ impl crate::plugin::DirectCompletionHost for RuntimeSessionManager {
             .direct_llm_completion(&self.current, &self.usage, request, usage_source)
             .await
     }
-}
-
-#[async_trait::async_trait]
-impl crate::plugin::TraceHost for RuntimeSessionManager {
     async fn emit_trace_event(
         &self,
         context: lash_trace::TraceContext,

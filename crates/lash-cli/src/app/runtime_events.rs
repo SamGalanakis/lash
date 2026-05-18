@@ -2,21 +2,16 @@ use super::*;
 use crate::assistant_text::push_assistant_text_block;
 #[cfg(test)]
 use lash_core::SessionEvent;
-use lash_core::{PluginSurfaceEvent, TurnActivity, TurnEvent};
+use lash_core::{PluginRuntimeEvent, TurnActivity, TurnEvent};
 
 fn runtime_status_from_plugin_event(
-    event: &PluginSurfaceEvent,
+    event: &PluginRuntimeEvent,
 ) -> Option<(String, Option<String>, std::time::Duration)> {
     match event {
-        PluginSurfaceEvent::Status {
-            label,
-            detail,
-            transient_ms,
-            ..
-        } => Some((
+        PluginRuntimeEvent::Status { label, detail, .. } => Some((
             label.clone(),
             detail.clone(),
-            std::time::Duration::from_millis(transient_ms.unwrap_or(8_000)),
+            std::time::Duration::from_millis(8_000),
         )),
         _ => None,
     }
@@ -339,7 +334,7 @@ impl App {
                     .insert(session_id, cumulative);
                 self.recompute_session_token_usage();
             }
-            TurnEvent::PluginSurface { plugin_id, event } => {
+            TurnEvent::PluginRuntime { plugin_id, event } => {
                 if let Some((status, detail, duration)) = runtime_status_from_plugin_event(&event) {
                     self.set_transient_status(status, detail, duration);
                     self.dirty = true;
@@ -469,7 +464,7 @@ fn test_session_event_to_turn_activity(event: SessionEvent) -> Option<TurnActivi
         },
         SessionEvent::Error { message, .. } => TurnEvent::Error { message },
         SessionEvent::PluginEvent { plugin_id, event } => {
-            TurnEvent::PluginSurface { plugin_id, event }
+            TurnEvent::PluginRuntime { plugin_id, event }
         }
         SessionEvent::InjectedTurnInputAccepted { inputs, checkpoint } => {
             TurnEvent::QueuedInputAccepted { checkpoint, inputs }

@@ -71,6 +71,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
             session_id: Some("dynamic-child".to_string()),
             relation: crate::SessionRelation::Child {
                 parent_session_id: "root".to_string(),
+                originating_tool_call_id: None,
             },
             start: crate::SessionStartPoint::Empty,
             policy: None,
