@@ -14,7 +14,7 @@ keywords = ["lash", "agent", "sqlite", "persistence", "store"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2" }
 async-trait = { workspace = true }
 flate2 = "1"
 rmp-serde = "1"

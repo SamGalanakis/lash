@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "llm", "transport", "http"]
 categories = ["asynchronous", "network-programming"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.1", default-features = false }
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.1" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", default-features = false }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.2" }
 tokio = { workspace = true, features = ["time"] }
 reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 bytes = { workspace = true }
