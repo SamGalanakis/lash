@@ -11,6 +11,7 @@ mod monitor;
 mod turns;
 mod usage;
 
+pub use direct::DirectCompletionClient;
 pub(in crate::runtime) use usage::ChildUsageEventRelay;
 pub(in crate::runtime::session_manager) use usage::{
     ChannelEventSink, LiveChildUsageForwarder, subtract_usage,
@@ -196,6 +197,14 @@ impl UsageCapability {
 }
 
 impl RuntimeSessionManager {
+    pub(super) fn direct_completion_client<'run>(
+        self: &Arc<Self>,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+        turn_id: Option<String>,
+    ) -> DirectCompletionClient<'run> {
+        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id)
+    }
+
     pub(super) fn new(
         runtime: &LashRuntime,
         persist_usage_to_store: bool,

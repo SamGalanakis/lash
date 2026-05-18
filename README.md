@@ -16,7 +16,7 @@ Every turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectHost` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata and idempotency keys. The default host runs in process; workflow adapters pass a scoped host with a stable turn id and can persist or schedule the same effect contract.
+`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata, idempotency keys, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id and can persist or schedule the same effect contract.
 
 ### Two execution modes, one commit unit
 

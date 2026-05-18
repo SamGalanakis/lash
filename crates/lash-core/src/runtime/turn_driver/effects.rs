@@ -153,18 +153,24 @@ impl RuntimeTurnDriver<'_> {
         let mode_session = Arc::clone(self.session.plugins().mode_session());
         let read_view = self.checkpoint_state_view(messages, mode_iteration);
         let chronological_projection = read_view.shared_chronological_projection();
+        let effect_controller =
+            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let direct_completions = manager
+            .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
         let context = self
             .session
             .mode_execution_context(
                 &self.session_id,
-                manager,
-                crate::runtime::RuntimeEffectHostHandle::borrowed(self.effect_scope.host()),
-                Arc::clone(&self.host.core.effect_host),
+                manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                effect_controller,
+                Arc::clone(&self.host.core.effect_controller),
+                direct_completions,
                 session_event_tx.clone(),
                 chronological_projection,
                 self.mode_extension.clone(),
                 self.turn_context.clone(),
             )
+            .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
         let result = mode_session
             .execute_code(

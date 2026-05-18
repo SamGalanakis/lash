@@ -342,7 +342,7 @@ impl MonitorPlugin {
             .start_background_task(
                 session_id,
                 managed_spec,
-                crate::BackgroundTaskExecutor::new(move |cancellation| async move {
+                crate::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
                     let result = run_monitor_task(
                         state,
                         session_id_owned,

@@ -325,7 +325,9 @@ pub(crate) fn build_benchmark_harness(
         }
         UiPerfScenario::StreamingReactor
         | UiPerfScenario::SlowSnapshot
-        | UiPerfScenario::FileIndexStorm => None,
+        | UiPerfScenario::FileIndexStorm
+        | UiPerfScenario::TimelineProjection
+        | UiPerfScenario::ActivityProjection => None,
     };
 
     UiPerfHarness {

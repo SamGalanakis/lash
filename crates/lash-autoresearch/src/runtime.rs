@@ -694,7 +694,7 @@ impl AutoresearchTools {
     async fn execute_run(
         &self,
         args: &Value,
-        context: Option<&ToolContext>,
+        context: Option<&ToolContext<'_>>,
         progress: Option<&lash_core::ProgressSender>,
     ) -> ToolResult {
         let command = match require_string(args, "command") {

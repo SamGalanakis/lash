@@ -78,7 +78,6 @@ impl ProviderTransport for MutatingProvider {
     async fn complete(&mut self, _request: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
         self.marker = "complete".to_string();
         Ok(LlmResponse {
-            deltas: vec!["ok".to_string()],
             full_text: "ok".to_string(),
             parts: Vec::new(),
             usage: LlmUsage::default(),
@@ -110,7 +109,6 @@ impl ProviderTransport for FailingProvider {
                 .retryable(self.retryable));
         }
         Ok(LlmResponse {
-            deltas: vec!["ok".to_string()],
             full_text: "ok".to_string(),
             parts: Vec::new(),
             usage: LlmUsage::default(),

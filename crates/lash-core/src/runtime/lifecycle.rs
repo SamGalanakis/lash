@@ -1,6 +1,16 @@
 use super::*;
 
 impl LashRuntime {
+    pub fn unregister_plugin_session(&self) -> Result<(), crate::PluginError> {
+        if let Some(session) = self.session.as_ref() {
+            session
+                .plugins()
+                .host()
+                .unregister_session(&self.state.session_id)?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn from_host_state(
         policy: SessionPolicy,
         host: RuntimeHost,

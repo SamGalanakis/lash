@@ -43,11 +43,11 @@ impl BackgroundTaskCapability {
         match current
             .host
             .core
-            .effect_host
+            .effect_controller
             .start_background_task(
                 Arc::clone(registry),
                 registration,
-                crate::BackgroundTaskExecutor::new(|_| async move {
+                crate::BackgroundTaskLocalExecutor::new(|_| async move {
                     match task.await {
                         Ok(()) => crate::BackgroundTaskCompletion {
                             state: crate::BackgroundTaskState::Completed,
@@ -142,7 +142,7 @@ impl BackgroundTaskCapability {
         managed: &ManagedSessionCapability,
         session_id: &str,
         mut registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskExecutor,
+        executor: crate::BackgroundTaskLocalExecutor,
     ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.ensure_known_background_session(current, managed, session_id)
             .await?;
@@ -160,7 +160,7 @@ impl BackgroundTaskCapability {
         match current
             .host
             .core
-            .effect_host
+            .effect_controller
             .start_background_task(Arc::clone(registry), registration, executor)
             .await
         {
@@ -255,7 +255,7 @@ impl BackgroundTaskCapability {
         current
             .host
             .core
-            .effect_host
+            .effect_controller
             .request_background_task_cancel(
                 Arc::clone(registry),
                 task_id,

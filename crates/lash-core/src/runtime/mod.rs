@@ -1,7 +1,7 @@
 mod assembly;
 mod builder;
 mod config_ops;
-mod effect_host;
+mod effect_controller;
 mod environment;
 mod host;
 mod io;
@@ -69,22 +69,25 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
-pub use effect_host::{
-    BackgroundTaskExecutor, DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata,
-    EffectOrigin, LocalRuntimeEffectHost, RuntimeEffectHost, RuntimeEffectKind, RuntimeEffectScope,
-    TurnEffectLocalExecutor,
+pub use effect_controller::{
+    BackgroundTaskLocalExecutor, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
+    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
 };
-pub(crate) use effect_host::{RuntimeEffectHostHandle, tool_retry_sleep_invocation};
+pub(crate) use effect_controller::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
-    BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskFilter, BackgroundTaskId,
-    BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskOutcome, BackgroundTaskRecord,
-    BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope, BackgroundTaskState,
-    EmbeddedRuntimeHost, LocalBackgroundTaskRegistry, RuntimeCoreConfig,
+    BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskExternalRef, BackgroundTaskFilter,
+    BackgroundTaskId, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskOutcome,
+    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope,
+    BackgroundTaskStartReceipt, BackgroundTaskState, BackgroundTaskUpdate, EmbeddedRuntimeHost,
+    LocalBackgroundTaskRegistry, RuntimeCoreConfig,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
+pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,

@@ -23,13 +23,14 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 /// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
 /// the runtime can add capabilities without breaking tool authors.
 #[derive(Clone)]
-pub struct ToolContext {
+pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_task_id: Option<String>,
     pub(crate) turn_context: crate::TurnContext,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
+    pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
     /// `DirectRequest::originating_tool_call_id` they issue so the trace
@@ -121,7 +122,7 @@ impl ToolTaskControl {
     pub async fn start_background_task(
         &self,
         registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskExecutor,
+        executor: crate::BackgroundTaskLocalExecutor,
     ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         self.host
             .start_background_task(&self.session_id, registration, executor)
@@ -197,12 +198,13 @@ impl ToolTaskControl {
     }
 }
 
-impl ToolContext {
+impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
+        direct_completions: crate::DirectCompletionClient<'run>,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
@@ -212,6 +214,7 @@ impl ToolContext {
             async_task_id: None,
             turn_context,
             attachment_store,
+            direct_completions,
             tool_call_id,
             attempt_number: 1,
             max_attempts: 1,
@@ -285,7 +288,9 @@ impl ToolContext {
         if request.originating_tool_call_id.is_none() {
             request.originating_tool_call_id = self.tool_call_id.clone();
         }
-        self.host.direct_completion(request, usage_source).await
+        self.direct_completions
+            .direct_completion(request, usage_source)
+            .await
     }
 
     pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
@@ -371,13 +376,15 @@ impl ToolContext {
         host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
+        direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
-    ) -> ToolContext {
+    ) -> ToolContext<'static> {
         ToolContext::new(
             session_id,
             host,
             turn_context,
             attachment_store,
+            direct_completions,
             tool_call_id,
         )
     }
@@ -392,7 +399,7 @@ impl ToolContext {
 pub struct ToolCall<'a> {
     pub name: &'a str,
     pub args: &'a serde_json::Value,
-    pub context: &'a ToolContext,
+    pub context: &'a ToolContext<'a>,
     pub progress: Option<&'a ProgressSender>,
 }
 

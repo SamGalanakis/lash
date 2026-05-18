@@ -61,7 +61,7 @@ impl ToolDiscoveryToolsProvider {
         &self,
         args: &Value,
         catalog: Vec<Value>,
-        context: &ToolContext,
+        context: &ToolContext<'_>,
     ) -> ToolResult {
         let index = self.index_for_catalog(catalog);
         let limit = limit_from_args(args);

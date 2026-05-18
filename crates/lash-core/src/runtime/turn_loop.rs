@@ -75,7 +75,7 @@ impl LashRuntime {
         &mut self,
         input: TurnInput,
         events: &dyn EventSink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.stream_turn_with_semantic_events_with_effect_scope(
@@ -95,12 +95,12 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        let effect_host = Arc::clone(&self.host.core.effect_host);
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let turn_id = input
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let effect_scope = RuntimeEffectScope::new(effect_host.as_ref(), &turn_id)?;
+        let effect_scope = RuntimeEffectControllerScope::new(effect_controller.as_ref(), &turn_id)?;
         self.stream_turn_with_semantic_events_with_effect_scope(
             input,
             events,
@@ -116,18 +116,15 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        crate::runtime::effect_host::scope_active_effect_host(
+        self.stream_turn_with_semantic_events_with_effect_scope_inner(
+            input,
+            events,
+            turn_events,
             effect_scope,
-            self.stream_turn_with_semantic_events_with_effect_scope_inner(
-                input,
-                events,
-                turn_events,
-                effect_scope,
-                cancel,
-            ),
+            cancel,
         )
         .await
     }
@@ -137,7 +134,7 @@ impl LashRuntime {
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
@@ -149,6 +146,18 @@ impl LashRuntime {
                     "input trace_turn_id `{input_turn_id}` does not match effect scope turn_id `{}`",
                     effect_scope.turn_id()
                 ),
+            });
+        }
+        if effect_scope
+            .controller()
+            .requires_durable_attachment_store()
+            && self.host.core.attachment_store.persistence()
+                != crate::AttachmentStorePersistence::Durable
+        {
+            return Err(RuntimeError {
+                code: "durable_attachment_store_required".to_string(),
+                message: "durable effect controllers require a durable attachment store"
+                    .to_string(),
             });
         }
         input.trace_turn_id = Some(effect_scope.turn_id().to_string());
@@ -197,7 +206,7 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let runtime_handle = {
@@ -272,7 +281,7 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
@@ -292,12 +301,13 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
-        let effect_host = Arc::clone(&self.host.core.effect_host);
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let effect_scope = RuntimeEffectScope::new(effect_host.as_ref(), &follow_trace_turn_id)?;
+        let effect_scope =
+            RuntimeEffectControllerScope::new(effect_controller.as_ref(), &follow_trace_turn_id)?;
         self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
             input,
             events,
@@ -313,7 +323,7 @@ impl LashRuntime {
         mut input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
@@ -385,7 +395,7 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
@@ -548,7 +558,13 @@ impl LashRuntime {
             state: self.read_view(),
             prompt_usage: previous_prompt_usage.clone(),
             max_context_tokens: Some(LashRuntime::max_context_tokens(self)),
-            host: manager.clone(),
+            host: manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+            direct_completions: manager.direct_completion_client(
+                crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                    &self.host.core.effect_controller,
+                )),
+                None,
+            ),
         };
         self.mark_phase_begin(RuntimeTurnPhase::ContextTransform);
         let prepared_context = plugin_session
@@ -623,7 +639,7 @@ impl LashRuntime {
         turn_index: usize,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
@@ -656,9 +672,7 @@ impl LashRuntime {
                 .expect("lash runtime session must be available");
             Arc::clone(session.plugins())
         };
-        let capture_text_deltas =
-            turn_policy.provider.requires_streaming() || plugins.has_assistant_stream_hooks();
-        let mut assembler = TurnAssembler::new(capture_text_deltas);
+        let mut assembler = TurnAssembler::new();
         self.mark_phase_begin(RuntimeTurnPhase::BeforeTurnHooks);
         // Block-scope the pinned future so it (and its captured
         // `SessionReadView` clone of the session graph) drops before the
@@ -953,6 +967,21 @@ impl LashRuntime {
                                 &returned_turn.state,
                             ),
                             host,
+                            direct_completions: self
+                                .runtime_session_manager()
+                                .map(|manager| {
+                                    manager.direct_completion_client(
+                                        crate::runtime::RuntimeEffectControllerHandle::shared(
+                                            Arc::clone(&self.host.core.effect_controller),
+                                        ),
+                                        None,
+                                    )
+                                })
+                                .unwrap_or_else(|_| {
+                                    crate::DirectCompletionClient::unavailable(
+                                        "direct completions are unavailable while emitting persisted turn events",
+                                    )
+                                }),
                         },
                     ))
                     .await;

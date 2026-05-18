@@ -480,8 +480,6 @@ fn append_stream_piece(full: &mut String, piece: &str) {
 pub(super) struct TurnAssembler {
     pub(super) current_assistant_prose_id: Option<TurnActivityId>,
     pub(super) current_assistant_prose: Option<String>,
-    pub(super) text_deltas: String,
-    pub(super) capture_text_deltas: bool,
     pub(super) tool_calls: Vec<ToolCallRecord>,
     pub(super) token_usage: TokenUsage,
     pub(super) last_llm_usage: Option<TokenUsage>,
@@ -499,17 +497,15 @@ pub(super) struct TurnAssembler {
 
 impl Default for TurnAssembler {
     fn default() -> Self {
-        Self::new(true)
+        Self::new()
     }
 }
 
 impl TurnAssembler {
-    pub(super) fn new(capture_text_deltas: bool) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             current_assistant_prose_id: None,
             current_assistant_prose: None,
-            text_deltas: String::new(),
-            capture_text_deltas,
             tool_calls: Vec::new(),
             token_usage: TokenUsage::default(),
             last_llm_usage: None,
@@ -537,9 +533,6 @@ impl TurnAssembler {
 
     pub(super) fn push(&mut self, event: &SessionEvent) {
         match event {
-            SessionEvent::TextDelta { content } if self.capture_text_deltas => {
-                self.text_deltas.push_str(content);
-            }
             SessionEvent::ToolCall {
                 call_id,
                 name,
@@ -631,21 +624,24 @@ impl TurnAssembler {
             render_submitted_value_for_output(value)
         } else if let Some(assistant_prose) = self.current_assistant_prose {
             assistant_prose
+        } else if let Some(TurnOutcome::Finished(TurnFinish::AssistantMessage { text })) =
+            self.outcome.as_ref()
+        {
+            text.clone()
         } else {
-            let streamed = self.text_deltas.trim().to_string();
-            let state_output = fallback_assistant_output_from_state(&state);
-            if streamed.is_empty()
-                || (!state_output.is_empty()
-                    && state_output.len() >= streamed.len()
-                    && state_output.starts_with(&streamed))
-            {
-                state_output
-            } else {
-                streamed
+            let recovered = recovered_assistant_output_from_state(&state);
+            if !recovered.is_empty() {
+                issues.push(TurnIssue {
+                    kind: "runtime".to_string(),
+                    code: Some(ASSISTANT_OUTPUT_RECOVERED_FROM_STATE_CODE.to_string()),
+                    terminal_reason: None,
+                    message: "assistant output was recovered from persisted messages because no explicit assistant output was assembled".to_string(),
+                    raw: None,
+                });
             }
+            recovered
         };
         let safe_output = sanitize_assistant_output(raw_output.clone());
-        let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
         let outcome = if interrupted {
             TurnOutcome::Stopped(TurnStop::Cancelled)
@@ -659,8 +655,15 @@ impl TurnAssembler {
                 outcome => outcome,
             }
         } else if !self.saw_done && termination.treat_missing_done_as_failure {
+            issues.push(TurnIssue {
+                kind: "runtime".to_string(),
+                code: Some("missing_done".to_string()),
+                terminal_reason: None,
+                message: "turn stream ended without a Done event".to_string(),
+                raw: None,
+            });
             TurnOutcome::Stopped(TurnStop::RuntimeError)
-        } else if !issues.is_empty() {
+        } else if has_blocking_turn_issue(&issues) {
             if self.saw_tool_failure {
                 TurnOutcome::Stopped(TurnStop::ToolFailure)
             } else {
@@ -673,6 +676,7 @@ impl TurnAssembler {
                 text: safe_output.clone(),
             })
         };
+        let output_state = classify_output_state(&raw_output, &safe_output, &issues);
 
         let children_usage = aggregate_child_cumulatives(self.child_cumulatives);
 
@@ -731,7 +735,7 @@ fn render_submitted_value_for_output(value: &serde_json::Value) -> String {
     }
 }
 
-pub(super) fn fallback_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
+pub(super) fn recovered_assistant_output_from_state(state: &SessionStateEnvelope) -> String {
     let read_model = state.read_model();
     let messages = read_model.messages.as_slice();
     let latest_user_message_idx = messages
@@ -783,10 +787,20 @@ pub(super) fn classify_output_state(
     if safe_text.is_empty() && contains_traceback_only(raw_text) {
         return OutputState::TracebackOnly;
     }
-    if !issues.is_empty() && !safe_text.is_empty() {
+    if has_blocking_turn_issue(issues) && !safe_text.is_empty() {
         return OutputState::RecoveredFromError;
     }
     OutputState::Usable
+}
+
+const ASSISTANT_OUTPUT_RECOVERED_FROM_STATE_CODE: &str = "assistant_output_recovered_from_state";
+
+fn has_blocking_turn_issue(issues: &[TurnIssue]) -> bool {
+    issues.iter().any(turn_issue_blocks_completion)
+}
+
+fn turn_issue_blocks_completion(issue: &TurnIssue) -> bool {
+    issue.code.as_deref() != Some(ASSISTANT_OUTPUT_RECOVERED_FROM_STATE_CODE)
 }
 
 fn contains_traceback_only(raw_text: &str) -> bool {

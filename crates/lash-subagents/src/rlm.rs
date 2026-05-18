@@ -31,7 +31,7 @@ pub(crate) struct RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
-    async fn spawn_agent(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
+    async fn spawn_agent(&self, args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
         let task = required_string(args, "task")?;
         let capability_name = capability_name_from_args(args, &self.registry)?;
         if self.registry.get(&capability_name).is_none() {
@@ -57,7 +57,7 @@ impl RlmSubagentToolsProvider {
 }
 
 async fn run_child_session(
-    context: &ToolContext,
+    context: &ToolContext<'_>,
     create_request: lash_core::SessionCreateRequest,
     turn_input: lash_core::TurnInput,
 ) -> Result<Value, String> {
@@ -94,18 +94,18 @@ async fn run_child_session(
         output_contract: lash_core::ToolOutputContract::from_input_schema("output", None),
     };
 
-    let task_context = context.clone();
+    let task_sessions = context.sessions();
     let executor_child_session_id = child_session_id.clone();
     let executor_turn_input = turn_input.clone();
-    let executor = lash_core::BackgroundTaskExecutor::new(move |cancellation| async move {
-        let sessions = task_context.sessions();
+    let executor = lash_core::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
+        let sessions = task_sessions.clone();
         let turn = match sessions
             .start_turn_stream(&executor_child_session_id, executor_turn_input)
             .await
         {
             Ok(turn) => turn,
             Err(err) => {
-                close_child_session(&task_context, &executor_child_session_id, None).await;
+                close_child_session(&sessions, &executor_child_session_id, None).await;
                 return lash_core::BackgroundTaskCompletion {
                     state: BackgroundTaskState::Failed,
                     summary: Some(format!("failed to start child turn: {err}")),
@@ -122,7 +122,6 @@ async fn run_child_session(
         let turn_id = turn.turn_id.clone();
         drop(turn.events);
 
-        let sessions = task_context.sessions();
         let outcome = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
@@ -141,7 +140,7 @@ async fn run_child_session(
         } else {
             task_terminal_state(&outcome)
         };
-        close_child_session(&task_context, &executor_child_session_id, None).await;
+        close_child_session(&sessions, &executor_child_session_id, None).await;
         lash_core::BackgroundTaskCompletion {
             state: terminal_state,
             summary: completion_summary(&outcome, terminal_state),
@@ -190,12 +189,16 @@ async fn run_child_session(
     completion_value(completion)
 }
 
-async fn close_child_session(context: &ToolContext, child_session_id: &str, turn_id: Option<&str>) {
+async fn close_child_session(
+    sessions: &lash_core::ToolSessionControl,
+    child_session_id: &str,
+    turn_id: Option<&str>,
+) {
     if let Some(turn_id) = turn_id {
-        let _ = context.sessions().cancel_turn(turn_id).await;
-        let _ = context.sessions().await_turn(turn_id).await;
+        let _ = sessions.cancel_turn(turn_id).await;
+        let _ = sessions.await_turn(turn_id).await;
     }
-    let _ = context.sessions().close_session(child_session_id).await;
+    let _ = sessions.close_session(child_session_id).await;
 }
 
 fn completion_summary(

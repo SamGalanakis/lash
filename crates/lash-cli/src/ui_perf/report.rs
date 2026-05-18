@@ -326,6 +326,24 @@ fn evaluate_budgets(
             );
         }
         UiPerfScenario::StreamingReactor => {}
+        UiPerfScenario::TimelineProjection => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "timeline_from_read_view_ms",
+                "p95",
+                50.0,
+            );
+        }
+        UiPerfScenario::ActivityProjection => {
+            push_budget(
+                &mut budgets,
+                summary,
+                "turn_activity_handle_ms",
+                "p95",
+                16.0,
+            );
+        }
     }
     budgets
 }

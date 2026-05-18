@@ -104,7 +104,7 @@ pub trait ModeSessionPlugin: Send + Sync {
 
     async fn before_llm_call(
         &self,
-        _ctx: ModeBeforeLlmCallContext,
+        _ctx: ModeBeforeLlmCallContext<'_>,
         _request: &LlmRequest,
     ) -> Result<Option<ModeLlmCallAction>, crate::PluginError> {
         Ok(None)
@@ -135,11 +135,24 @@ impl<'a> ModeSessionContext<'a> {
     }
 }
 
-pub struct ModeBeforeLlmCallContext {
+pub struct ModeBeforeLlmCallContext<'run> {
     pub session_id: String,
     pub host: Arc<dyn crate::plugin::RuntimeSessionHost>,
     pub state: SessionReadView,
     pub latest_prompt_usage: Option<PromptUsage>,
+    pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
+}
+
+impl ModeBeforeLlmCallContext<'_> {
+    pub async fn direct_llm_completion(
+        &self,
+        request: crate::LlmRequest,
+        usage_source: &str,
+    ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
+        self.direct_completions
+            .direct_llm_completion(request, usage_source)
+            .await
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

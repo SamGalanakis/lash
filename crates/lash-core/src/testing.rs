@@ -18,7 +18,7 @@ use crate::provider::{
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, BackgroundTaskRegistry, ExecutionMode, ExecutionSummary,
-    OutputState, PersistedSessionState, ProviderOptions, RuntimeEffectHost, SessionPolicy,
+    OutputState, PersistedSessionState, ProviderOptions, RuntimeEffectController, SessionPolicy,
     SessionStateEnvelope, TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
@@ -293,7 +293,7 @@ pub fn mock_session_policy() -> SessionPolicy {
 /// unit-testing a `ToolProvider` in isolation. Use [`mock_tool_context_with_host`]
 /// when the tool under test interacts with host state and needs a configured
 /// `MockSessionManager` (or another `RuntimeSessionHost` implementation).
-pub fn mock_tool_context() -> crate::ToolContext {
+pub fn mock_tool_context() -> crate::ToolContext<'static> {
     mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
 }
 
@@ -302,12 +302,25 @@ pub fn mock_tool_context() -> crate::ToolContext {
 /// and the test wants to assert against captured interactions.
 pub fn mock_tool_context_with_host(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-) -> crate::ToolContext {
+) -> crate::ToolContext<'static> {
+    mock_tool_context_with_host_and_direct_completions(
+        host,
+        crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+    )
+}
+
+pub fn mock_tool_context_with_host_and_direct_completions(
+    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    direct_completions: crate::DirectCompletionClient<'static>,
+) -> crate::ToolContext<'static> {
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
         host,
         crate::TurnContext::new(),
         Arc::new(crate::InMemoryAttachmentStore::new()),
+        direct_completions,
         None,
     )
 }
@@ -512,10 +525,10 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         &self,
         _session_id: &str,
         registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskExecutor,
+        executor: crate::BackgroundTaskLocalExecutor,
     ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         self.background.register(registration.clone()).await?;
-        crate::LocalRuntimeEffectHost::default()
+        crate::InlineRuntimeEffectController::default()
             .start_background_task(self.background.clone(), registration, executor)
             .await
     }
@@ -554,7 +567,7 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         _session_id: &str,
         task_id: &str,
     ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        crate::LocalRuntimeEffectHost::default()
+        crate::InlineRuntimeEffectController::default()
             .request_background_task_cancel(
                 self.background.clone(),
                 task_id,

@@ -15,7 +15,7 @@ use bytes::Bytes;
 use lash::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
     TurnBuilder, TurnEvent, TurnInput, TurnOutput,
-    advanced::{LocalBackgroundTaskRegistry, LocalRuntimeEffectHost},
+    advanced::{InlineRuntimeEffectController, LocalBackgroundTaskRegistry},
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
@@ -306,13 +306,13 @@ async fn main() -> anyhow_like::Result<()> {
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
-            .effect_host(Arc::new(LocalRuntimeEffectHost::default()))
+            .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
             .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
             return Err(
-                "AGENT_SERVICE_DURABILITY=restate requires a Restate RuntimeEffectHost adapter"
+                "AGENT_SERVICE_DURABILITY=restate requires a Restate RuntimeEffectController adapter"
                     .to_string(),
             );
         }

@@ -60,7 +60,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
 
         graph = maybe_advance_memory_state(
             &self.config,
-            &OmRuntimeHost::new(&ctx.session_id, &ctx.host),
+            &OmRuntimeHost::new(&ctx.session_id, &ctx.host, ctx.direct_completions.clone()),
             ctx.state.policy(),
             graph,
         )

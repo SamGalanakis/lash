@@ -10,7 +10,9 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::plugin::PluginError;
 
-use super::{LocalRuntimeEffectHost, RuntimeEffectHost, SessionStoreFactory, TerminationPolicy};
+use super::{
+    InlineRuntimeEffectController, RuntimeEffectController, SessionStoreFactory, TerminationPolicy,
+};
 
 /// Category of a registered background task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ pub type BackgroundTaskId = String;
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskState {
     Pending,
+    Scheduled,
     Running,
     Waiting,
     Completed,
@@ -203,6 +206,10 @@ pub struct BackgroundTaskRecord {
     pub cancel_policy: BackgroundCancelPolicy,
     pub close_policy: BackgroundClosePolicy,
     pub attempt: BackgroundTaskAttempt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<BackgroundTaskExternalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
     pub result: Option<BackgroundTaskOutcome>,
     pub failure: Option<BackgroundTaskOutcome>,
     pub created_at: SystemTime,
@@ -235,6 +242,8 @@ impl BackgroundTaskRecord {
             cancel_policy: BackgroundCancelPolicy::Cooperative,
             close_policy: BackgroundClosePolicy::Keep,
             attempt: BackgroundTaskAttempt::default(),
+            external_ref: None,
+            progress: None,
             result: None,
             failure: None,
             created_at: now,
@@ -242,6 +251,26 @@ impl BackgroundTaskRecord {
             completed_at: state.is_terminal().then_some(now),
         }
     }
+}
+
+/// Durable backend reference for background work accepted outside the local process.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct BackgroundTaskExternalRef {
+    pub backend: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Serializable receipt returned by a durable background-task scheduler.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BackgroundTaskStartReceipt {
+    pub task_id: BackgroundTaskId,
+    pub state: BackgroundTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<BackgroundTaskExternalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -321,6 +350,11 @@ pub trait BackgroundTaskRegistry: Send + Sync {
         )
         .await
     }
+
+    async fn mark_scheduled(
+        &self,
+        receipt: BackgroundTaskStartReceipt,
+    ) -> Result<BackgroundTaskRecord, PluginError>;
 
     async fn update(
         &self,
@@ -541,23 +575,72 @@ impl BackgroundTaskRegistry for LocalBackgroundTaskRegistry {
                     record.status.state = state;
                     record.status.updated_at = SystemTime::now();
                 }
-                let status = record.status.clone();
-                drop(managed);
                 if let Some(message) = update.progress {
+                    record.status.progress = Some(message.clone());
+                    record.status.updated_at = SystemTime::now();
+                    let status = record.status.clone();
+                    drop(managed);
                     self.publish(BackgroundTaskEvent::Progress {
                         task_id: task_id.to_string(),
                         message,
                     });
+                    self.publish(BackgroundTaskEvent::StateChanged {
+                        task_id: task_id.to_string(),
+                        state: status.state,
+                    });
+                    return Ok(status);
+                } else {
+                    let status = record.status.clone();
+                    drop(managed);
+                    self.publish(BackgroundTaskEvent::StateChanged {
+                        task_id: task_id.to_string(),
+                        state: status.state,
+                    });
+                    return Ok(status);
+                }
+            }
+        }
+        Err(PluginError::Session(format!(
+            "unknown background task `{task_id}`"
+        )))
+    }
+
+    async fn mark_scheduled(
+        &self,
+        receipt: BackgroundTaskStartReceipt,
+    ) -> Result<BackgroundTaskRecord, PluginError> {
+        let state = if receipt.state == BackgroundTaskState::Pending {
+            BackgroundTaskState::Scheduled
+        } else {
+            receipt.state
+        };
+        let mut managed = self.managed.lock().await;
+        for tasks in managed.values_mut() {
+            if let Some(record) = tasks.get_mut(&receipt.task_id) {
+                record.status.state = state;
+                record.status.external_ref = receipt.external_ref;
+                record.status.updated_at = SystemTime::now();
+                if let Some(message) = receipt.message.clone() {
+                    record.status.progress = Some(message);
+                }
+                let status = record.status.clone();
+                drop(managed);
+                if let Some(message) = receipt.message {
+                    self.publish(BackgroundTaskEvent::Progress {
+                        task_id: status.id.clone(),
+                        message,
+                    });
                 }
                 self.publish(BackgroundTaskEvent::StateChanged {
-                    task_id: task_id.to_string(),
-                    state: status.state,
+                    task_id: status.id.clone(),
+                    state,
                 });
                 return Ok(status);
             }
         }
         Err(PluginError::Session(format!(
-            "unknown background task `{task_id}`"
+            "unknown background task `{}`",
+            receipt.task_id
         )))
     }
 
@@ -712,7 +795,7 @@ pub struct RuntimeCoreConfig {
     pub trace_level: TraceLevel,
     pub trace_context: TraceContext,
     pub termination: TerminationPolicy,
-    pub effect_host: Arc<dyn RuntimeEffectHost>,
+    pub effect_controller: Arc<dyn RuntimeEffectController>,
 }
 
 impl Default for RuntimeCoreConfig {
@@ -724,7 +807,7 @@ impl Default for RuntimeCoreConfig {
             trace_level: TraceLevel::Standard,
             trace_context: TraceContext::default(),
             termination: TerminationPolicy::default(),
-            effect_host: Arc::new(LocalRuntimeEffectHost::default()),
+            effect_controller: Arc::new(InlineRuntimeEffectController::default()),
         }
     }
 }
@@ -793,8 +876,11 @@ impl RuntimeCoreConfig {
         self
     }
 
-    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
-        self.effect_host = effect_host;
+    pub fn with_effect_controller(
+        mut self,
+        effect_controller: Arc<dyn RuntimeEffectController>,
+    ) -> Self {
+        self.effect_controller = effect_controller;
         self
     }
 }
@@ -872,7 +958,7 @@ impl From<BackgroundRuntimeHost> for RuntimeHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::BackgroundTaskExecutor;
+    use crate::runtime::BackgroundTaskLocalExecutor;
 
     fn spec(id: &str, kind: BackgroundTaskKind) -> BackgroundTaskRegistration {
         BackgroundTaskRegistration {
@@ -1036,20 +1122,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_effect_host_runs_background_task_and_completes_registry() {
+    async fn local_effect_controller_runs_background_task_and_completes_registry() {
         let registry = Arc::new(LocalBackgroundTaskRegistry::default());
-        let effect_host = LocalRuntimeEffectHost::default();
+        let effect_controller = InlineRuntimeEffectController::default();
         let registration = spec("task:one", BackgroundTaskKind::Tool);
         registry
             .register(registration.clone())
             .await
             .expect("register");
 
-        effect_host
+        effect_controller
             .start_background_task(
                 registry.clone(),
                 registration,
-                BackgroundTaskExecutor::new(|_| async {
+                BackgroundTaskLocalExecutor::new(|_| async {
                     BackgroundTaskCompletion {
                         state: BackgroundTaskState::Completed,
                         summary: Some("done".to_string()),
@@ -1070,20 +1156,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_effect_host_cancel_requests_reach_background_executor() {
+    async fn local_effect_controller_cancel_requests_reach_background_executor() {
         let registry = Arc::new(LocalBackgroundTaskRegistry::default());
-        let effect_host = LocalRuntimeEffectHost::default();
+        let effect_controller = InlineRuntimeEffectController::default();
         let registration = spec("task:cancel", BackgroundTaskKind::Tool);
         registry
             .register(registration.clone())
             .await
             .expect("register");
 
-        effect_host
+        effect_controller
             .start_background_task(
                 registry.clone(),
                 registration,
-                BackgroundTaskExecutor::new(|cancellation| async move {
+                BackgroundTaskLocalExecutor::new(|cancellation| async move {
                     cancellation.cancelled().await;
                     BackgroundTaskCompletion {
                         state: BackgroundTaskState::Cancelled,
@@ -1096,7 +1182,7 @@ mod tests {
             )
             .await
             .expect("start");
-        effect_host
+        effect_controller
             .request_background_task_cancel(registry.clone(), "task:cancel", Some("stop".into()))
             .await
             .expect("request cancel");
@@ -1108,41 +1194,104 @@ mod tests {
         assert_eq!(completion.state, BackgroundTaskState::Cancelled);
     }
 
-    struct FakeDurableEffectHost;
+    struct FakeDurableEffectController;
 
     #[async_trait::async_trait]
-    impl RuntimeEffectHost for FakeDurableEffectHost {
+    impl RuntimeEffectController for FakeDurableEffectController {
+        async fn execute_effect(
+            &self,
+            envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
+            Err(crate::RuntimeEffectControllerError::new(
+                "fake_durable_effect_controller_unsupported",
+                format!(
+                    "fake durable effect controller cannot execute {}",
+                    envelope.command.kind().as_str()
+                ),
+            ))
+        }
+
         async fn start_background_task(
             &self,
             registry: Arc<dyn BackgroundTaskRegistry>,
             registration: BackgroundTaskRegistration,
-            _executor: BackgroundTaskExecutor,
+            _local_executor: BackgroundTaskLocalExecutor,
         ) -> Result<BackgroundTaskRecord, PluginError> {
-            registry.mark_running(&registration.id).await
+            registry
+                .mark_scheduled(BackgroundTaskStartReceipt {
+                    task_id: registration.id,
+                    state: BackgroundTaskState::Scheduled,
+                    external_ref: Some(BackgroundTaskExternalRef {
+                        backend: "durable-test".to_string(),
+                        id: "external/durable".to_string(),
+                        metadata: None,
+                    }),
+                    message: Some("accepted by durable controller".to_string()),
+                })
+                .await
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<BackgroundTaskRecord, PluginError> {
+            registry.request_cancel(task_id, reason).await
         }
     }
 
     #[tokio::test]
-    async fn durable_effect_host_can_schedule_without_tokio_executor() {
+    async fn durable_effect_controller_can_schedule_without_running_local_executor() {
         let registry = Arc::new(LocalBackgroundTaskRegistry::default());
-        let effect_host = FakeDurableEffectHost;
+        let effect_controller = FakeDurableEffectController;
         let registration = spec("durable", BackgroundTaskKind::External);
         registry
             .register(registration.clone())
             .await
             .expect("register");
 
-        let scheduled = effect_host
+        let scheduled = effect_controller
             .start_background_task(
                 registry.clone(),
                 registration,
-                BackgroundTaskExecutor::new(|_| async {
-                    panic!("durable host should not run the local executor")
+                BackgroundTaskLocalExecutor::new(|_| async {
+                    panic!("durable controller should not run the local executor")
                 }),
             )
             .await
             .expect("schedule");
-        assert_eq!(scheduled.state, BackgroundTaskState::Running);
+        assert_eq!(scheduled.state, BackgroundTaskState::Scheduled);
+        assert_eq!(
+            scheduled.progress.as_deref(),
+            Some("accepted by durable controller")
+        );
+        assert_eq!(
+            scheduled
+                .external_ref
+                .as_ref()
+                .map(|external| external.id.as_str()),
+            Some("external/durable")
+        );
+        assert_eq!(
+            registry
+                .get("durable")
+                .await
+                .expect("get scheduled")
+                .progress
+                .as_deref(),
+            Some("accepted by durable controller")
+        );
+        assert_eq!(
+            registry
+                .list(Default::default())
+                .await
+                .into_iter()
+                .next()
+                .and_then(|record| record.external_ref.map(|external| external.backend)),
+            Some("durable-test".to_string())
+        );
 
         let output = crate::ToolCallOutput::success(serde_json::json!({"cached": true}));
         registry

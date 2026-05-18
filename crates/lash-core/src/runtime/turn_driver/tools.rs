@@ -61,7 +61,7 @@ impl RuntimeTurnDriver<'_> {
         )>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> Vec<crate::sansio::CompletedToolCall> {
+    ) -> Result<Vec<crate::sansio::CompletedToolCall>, crate::RuntimeEffectControllerError> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
         let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
@@ -77,19 +77,33 @@ impl RuntimeTurnDriver<'_> {
             }
         });
         let manager = self.session_manager.clone();
-        let context = self
-            .session
-            .mode_execution_context(
-                &self.session_id,
-                manager,
-                crate::runtime::RuntimeEffectHostHandle::borrowed(self.effect_scope.host()),
-                Arc::clone(&self.host.core.effect_host),
-                tool_event_tx,
-                Arc::new(crate::ChronologicalProjection::default()),
-                self.mode_extension.clone(),
-                self.turn_context.clone(),
-            )
-            .with_turn_event_sender(turn_event_tx);
+        let effect_controller =
+            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let direct_completions = manager
+            .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
+        let context = match self.session.mode_execution_context(
+            &self.session_id,
+            manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+            effect_controller,
+            Arc::clone(&self.host.core.effect_controller),
+            direct_completions,
+            tool_event_tx.clone(),
+            Arc::new(crate::ChronologicalProjection::default()),
+            self.mode_extension.clone(),
+            self.turn_context.clone(),
+        ) {
+            Ok(context) => context.with_turn_event_sender(turn_event_tx),
+            Err(err) => {
+                drop(tool_event_tx);
+                drop(turn_event_tx);
+                let _ = tool_event_forwarder.await;
+                let _ = turn_event_forwarder.await;
+                return Err(crate::RuntimeEffectControllerError::new(
+                    "tool_surface_resolution_failed",
+                    err.to_string(),
+                ));
+            }
+        };
         let indexed_tools = pending_tools.into_iter().enumerate().collect::<Vec<_>>();
         let tool_cancel = cancel.child_token();
         let outcomes = schedule_tool_batch(
@@ -135,8 +149,9 @@ impl RuntimeTurnDriver<'_> {
         .await;
 
         drop(context);
+        drop(tool_event_tx);
         let _ = tool_event_forwarder.await;
         let _ = turn_event_forwarder.await;
-        outcomes
+        Ok(outcomes)
     }
 }

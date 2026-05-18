@@ -158,7 +158,7 @@ pub trait RuntimeSessionHost: Send + Sync {
         &self,
         _session_id: &str,
         _registration: crate::BackgroundTaskRegistration,
-        _executor: crate::BackgroundTaskExecutor,
+        _executor: crate::BackgroundTaskLocalExecutor,
     ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         Err(PluginError::Session(
             "background tasks are unavailable in this session".to_string(),
@@ -288,31 +288,6 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    /// Make a single LLM call without creating a full session. Used by
-    /// plugins for structured extraction, summarization, observation,
-    /// and other one-shot calls that don't need tools, turn loops, or
-    /// session state. The `usage_source` label tags the resulting
-    /// token cost in the parent session's ledger.
-    async fn direct_completion(
-        &self,
-        _request: crate::DirectRequest,
-        _usage_source: &str,
-    ) -> Result<DirectCompletion, PluginError> {
-        Err(PluginError::Session(
-            "direct completions are unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn direct_llm_completion(
-        &self,
-        _request: crate::LlmRequest,
-        _usage_source: &str,
-    ) -> Result<DirectLlmCompletion, PluginError> {
-        Err(PluginError::Session(
-            "direct LLM completions are unavailable in this session".to_string(),
-        ))
-    }
-
     async fn emit_trace_event(
         &self,
         _context: lash_trace::TraceContext,
@@ -322,8 +297,7 @@ pub trait RuntimeSessionHost: Send + Sync {
     }
 }
 
-/// Result of a single-shot LLM call via
-/// [`RuntimeSessionHost::direct_completion`].
+/// Result of a single-shot direct LLM call.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectCompletion {
     pub text: String,

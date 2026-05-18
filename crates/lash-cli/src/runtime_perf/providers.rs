@@ -1,8 +1,18 @@
-use lash_core::llm::types::{LlmOutputPart, LlmResponse, LlmStreamEvent, LlmUsage};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use lash_core::llm::types::{
+    LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage,
+};
 use lash_core::testing::TestProvider;
 use lash_core::{
     ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolManifest, ToolOutputContract, ToolProvider, ToolResult,
+    ToolFailureClass, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolRetryPolicy,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -13,6 +23,7 @@ const OPENAI_COMPAT_STREAM_CHUNK_BYTES: usize = 96;
 pub(crate) struct BenchmarkStreamProfile {
     pub(crate) full_text: String,
     pub(crate) deltas: Vec<String>,
+    pub(crate) parts: Vec<LlmOutputPart>,
 }
 
 pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
@@ -21,7 +32,7 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
         .default_model("mock-model")
         .requires_streaming(true)
         .complete(move |req| async move {
-            let profile = benchmark_stream_profile(scenario);
+            let profile = benchmark_stream_profile_for_request(scenario, &req);
             let usage = LlmUsage {
                 input_tokens: 1_024,
                 output_tokens: 64,
@@ -29,18 +40,28 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
                 reasoning_tokens: 48,
             };
             if let Some(tx) = req.stream_events.as_ref() {
-                for delta in &profile.deltas {
-                    tx.send(LlmStreamEvent::Delta(delta.clone()));
+                if profile.deltas.is_empty() {
+                    for part in &profile.parts {
+                        tx.send(LlmStreamEvent::Part(part.clone()));
+                    }
+                } else {
+                    for delta in &profile.deltas {
+                        tx.send(LlmStreamEvent::Delta(delta.clone()));
+                    }
                 }
                 tx.send(LlmStreamEvent::Usage(usage.clone()));
             }
+            let parts = if profile.parts.is_empty() {
+                vec![LlmOutputPart::Text {
+                    text: profile.full_text.clone(),
+                    response_meta: None,
+                }]
+            } else {
+                profile.parts
+            };
             Ok(LlmResponse {
                 full_text: profile.full_text.clone(),
-                deltas: profile.deltas.clone(),
-                parts: vec![LlmOutputPart::Text {
-                    text: profile.full_text,
-                    response_meta: None,
-                }],
+                parts,
                 usage,
                 terminal_reason: lash_core::LlmTerminalReason::Stop,
                 terminal_diagnostic: None,
@@ -52,28 +73,138 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
         .build()
 }
 
-pub(crate) struct BenchmarkEchoTool;
-pub(crate) struct BenchmarkLargeToolSurface;
+pub(crate) struct BenchmarkEchoTool {
+    retry_attempts: AtomicUsize,
+}
+
+#[derive(Clone)]
+pub(crate) struct BenchmarkLargeToolSurface {
+    cache: Arc<BenchmarkLargeToolSurfaceCache>,
+}
+
+struct BenchmarkLargeToolSurfaceCache {
+    manifests: Vec<ToolManifest>,
+    contracts: HashMap<String, Arc<ToolContract>>,
+}
+
+impl Default for BenchmarkEchoTool {
+    fn default() -> Self {
+        Self {
+            retry_attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for BenchmarkLargeToolSurface {
+    fn default() -> Self {
+        Self {
+            cache: Arc::clone(large_tool_surface_cache()),
+        }
+    }
+}
+
+fn large_tool_surface_cache() -> &'static Arc<BenchmarkLargeToolSurfaceCache> {
+    static CACHE: OnceLock<Arc<BenchmarkLargeToolSurfaceCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let definitions = BenchmarkLargeToolSurface::build_tool_definitions();
+        let manifests = definitions
+            .iter()
+            .map(ToolDefinition::manifest)
+            .collect::<Vec<_>>();
+        let contracts = definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition.name.clone(),
+                    Arc::new(definition.contract()) as Arc<ToolContract>,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Arc::new(BenchmarkLargeToolSurfaceCache {
+            manifests,
+            contracts,
+        })
+    })
+}
 
 #[async_trait::async_trait]
 impl ToolProvider for BenchmarkEchoTool {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![benchmark_echo_tool_definition().manifest()]
+        vec![
+            benchmark_echo_tool_definition().manifest(),
+            benchmark_slow_tool_definition().manifest(),
+            benchmark_retry_tool_definition().manifest(),
+        ]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        (name == "benchmark_echo")
-            .then(|| std::sync::Arc::new(benchmark_echo_tool_definition().contract()))
+        match name {
+            "benchmark_echo" => Some(std::sync::Arc::new(
+                benchmark_echo_tool_definition().contract(),
+            )),
+            "benchmark_slow" => Some(std::sync::Arc::new(
+                benchmark_slow_tool_definition().contract(),
+            )),
+            "benchmark_retry" => Some(std::sync::Arc::new(
+                benchmark_retry_tool_definition().contract(),
+            )),
+            _ => None,
+        }
     }
 
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
-        if call.name != "benchmark_echo" {
-            return ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name));
+        match call.name {
+            "benchmark_echo" => execute_benchmark_echo(call).await,
+            "benchmark_slow" => execute_benchmark_slow(call).await,
+            "benchmark_retry" => self.execute_benchmark_retry(call).await,
+            _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
+    }
+}
+
+async fn execute_benchmark_echo(call: lash_core::ToolCall<'_>) -> ToolResult {
+    tokio::task::yield_now().await;
+    ToolResult::ok(serde_json::json!({
+        "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
+        "ordinal": call.args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+async fn execute_benchmark_slow(call: lash_core::ToolCall<'_>) -> ToolResult {
+    let delay_ms = call
+        .args
+        .get("delay_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(25);
+    if let Some(cancel) = call.context.cancellation_token().cloned() {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+            _ = cancel.cancelled() => return ToolResult::cancelled("benchmark_slow cancelled"),
+        }
+    } else {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+    ToolResult::ok(serde_json::json!({
+        "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
+        "delay_ms": delay_ms,
+    }))
+}
+
+impl BenchmarkEchoTool {
+    async fn execute_benchmark_retry(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
         tokio::task::yield_now().await;
+        let attempt = self.retry_attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt % 2 == 0 {
+            return ToolResult::retryable_failure(
+                ToolFailureClass::External,
+                "benchmark_retry_transient",
+                "synthetic retryable benchmark failure",
+                Some(1),
+            );
+        }
         ToolResult::ok(serde_json::json!({
             "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
-            "ordinal": call.args.get("ordinal").cloned().unwrap_or(serde_json::Value::Null),
+            "attempt": call.context.attempt_number(),
         }))
     }
 }
@@ -95,20 +226,48 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
+fn benchmark_slow_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "benchmark_slow",
+        "Sleep briefly before returning; used to profile async handle cancellation and await paths.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] },
+                "delay_ms": { "type": "integer", "minimum": 0, "maximum": 1000 }
+            },
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
+fn benchmark_retry_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "benchmark_retry",
+        "Fail once with a safe retry disposition, then return the input payload.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] }
+            },
+            "additionalProperties": false
+        }),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_retry_policy(ToolRetryPolicy::safe(2, 1, 1))
+    .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
 #[async_trait::async_trait]
 impl ToolProvider for BenchmarkLargeToolSurface {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        self.tool_definitions()
-            .into_iter()
-            .map(|tool| tool.manifest())
-            .collect()
+        self.cache.manifests.clone()
     }
 
-    fn resolve_contract(&self, name: &str) -> Option<std::sync::Arc<ToolContract>> {
-        self.tool_definitions()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .map(|tool| std::sync::Arc::new(tool.contract()))
+    fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
+        self.cache.contracts.get(name).cloned()
     }
 
     async fn execute(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
@@ -125,7 +284,7 @@ impl ToolProvider for BenchmarkLargeToolSurface {
 }
 
 impl BenchmarkLargeToolSurface {
-    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+    fn build_tool_definitions() -> Vec<ToolDefinition> {
         GMAIL_LIKE_TOOL_NAMES
             .iter()
             .enumerate()
@@ -509,6 +668,29 @@ const GMAIL_LIKE_TOOL_NAMES: &[&str] = &[
 ];
 
 pub(crate) fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> BenchmarkStreamProfile {
+    benchmark_stream_profile_for_request(scenario, &empty_request())
+}
+
+fn benchmark_stream_profile_for_request(
+    scenario: RuntimePerfScenario,
+    request: &LlmRequest,
+) -> BenchmarkStreamProfile {
+    if request.output_spec.is_some()
+        || request
+            .session_id
+            .as_deref()
+            .is_some_and(|id| id.ends_with("-llm-query"))
+    {
+        return text_profile(
+            serde_json::json!({
+                "kind": "value",
+                "value": "runtime perf benchmark ok",
+                "error": null,
+            })
+            .to_string(),
+        );
+    }
+
     match scenario {
         RuntimePerfScenario::OpenAiCompatStream => {
             let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -528,6 +710,42 @@ pub(crate) fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> Benchma
             BenchmarkStreamProfile {
                 full_text: deltas.concat(),
                 deltas,
+                parts: Vec::new(),
+            }
+        }
+        RuntimePerfScenario::StandardToolCalls => {
+            if request_has_tool_result(request) {
+                text_profile("runtime perf benchmark ok")
+            } else {
+                tool_call_profile(
+                    "standard-batch-call",
+                    "batch",
+                    serde_json::json!({
+                        "tool_calls": [
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 1,
+                                }
+                            },
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 2,
+                                }
+                            },
+                            {
+                                "tool": "benchmark_echo",
+                                "parameters": {
+                                    "value": "runtime perf benchmark ok",
+                                    "ordinal": 3,
+                                }
+                            }
+                        ]
+                    }),
+                )
             }
         }
         RuntimePerfScenario::Rlm
@@ -535,10 +753,7 @@ pub(crate) fn benchmark_stream_profile(scenario: RuntimePerfScenario) -> Benchma
         | RuntimePerfScenario::RlmLargeToolSurface
         | RuntimePerfScenario::EmbedRlm => {
             let text = "```lashlang\nsubmit \"runtime perf benchmark ok\"\n```".to_string();
-            BenchmarkStreamProfile {
-                full_text: text.clone(),
-                deltas: vec![text],
-            }
+            text_profile(text)
         }
         RuntimePerfScenario::RlmToolCalls => {
             let text = r#"```lashlang
@@ -552,18 +767,92 @@ first = fanout.a?
 submit first.value
 ```"#
                 .to_string();
-            BenchmarkStreamProfile {
-                full_text: text.clone(),
-                deltas: vec![text],
-            }
+            text_profile(text)
         }
-        _ => {
-            let text = "runtime perf benchmark ok".to_string();
-            BenchmarkStreamProfile {
-                full_text: text.clone(),
-                deltas: vec![text],
-            }
+        RuntimePerfScenario::RlmAsyncHandles => {
+            let text = r#"```lashlang
+first = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
+second = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
+slow = start call benchmark_slow { value: "cancelled", delay_ms: 50 }
+live = (call list_async_handles {})?
+cancel slow
+first_result = (await first)?
+second_result = (await second)?
+submit first_result.value
+```"#
+                .to_string();
+            text_profile(text)
         }
+        RuntimePerfScenario::RlmLlmQuery => {
+            let text = r#"```lashlang
+result = (call llm_query {
+  task: "Return the exact benchmark marker.",
+  inputs: { marker: "runtime perf benchmark ok" }
+})?
+submit result
+```"#
+                .to_string();
+            text_profile(text)
+        }
+        RuntimePerfScenario::RlmToolRetry => {
+            let text = r#"```lashlang
+result = (call benchmark_retry { value: "runtime perf benchmark ok" })?
+submit result.value
+```"#
+                .to_string();
+            text_profile(text)
+        }
+        _ => text_profile("runtime perf benchmark ok"),
+    }
+}
+
+fn text_profile(text: impl Into<String>) -> BenchmarkStreamProfile {
+    let text = text.into();
+    BenchmarkStreamProfile {
+        full_text: text.clone(),
+        deltas: vec![text],
+        parts: Vec::new(),
+    }
+}
+
+fn tool_call_profile(
+    call_id: impl Into<String>,
+    tool_name: impl Into<String>,
+    args: serde_json::Value,
+) -> BenchmarkStreamProfile {
+    BenchmarkStreamProfile {
+        full_text: String::new(),
+        deltas: Vec::new(),
+        parts: vec![LlmOutputPart::ToolCall {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            input_json: args.to_string(),
+            replay: None,
+        }],
+    }
+}
+
+fn request_has_tool_result(request: &LlmRequest) -> bool {
+    request.messages.iter().any(|message| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, LlmContentBlock::ToolResult { .. }))
+    })
+}
+
+fn empty_request() -> LlmRequest {
+    LlmRequest {
+        model: "mock-model".to_string(),
+        messages: Vec::new(),
+        attachments: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
+        tool_choice: Default::default(),
+        model_variant: None,
+        session_id: None,
+        output_spec: None,
+        stream_events: None,
+        provider_trace: None,
     }
 }
 
@@ -576,7 +865,7 @@ mod tests {
 
     #[test]
     fn large_tool_surface_fixture_matches_gmail_sized_callable_catalog() {
-        let defs = BenchmarkLargeToolSurface.tool_definitions();
+        let defs = BenchmarkLargeToolSurface::build_tool_definitions();
         assert_eq!(defs.len(), 63);
         assert!(defs.iter().all(|def| {
             def.availability.standard == ToolAvailability::Callable
@@ -613,8 +902,7 @@ mod tests {
 
     #[test]
     fn rlm_large_tool_surface_does_not_resolve_nested_schema_contracts_without_tool_calls() {
-        let provider = BenchmarkLargeToolSurface;
-        let definitions = provider.tool_definitions();
+        let definitions = BenchmarkLargeToolSurface::build_tool_definitions();
         let manifests = definitions
             .iter()
             .map(|definition| definition.manifest())

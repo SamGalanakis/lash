@@ -5,7 +5,7 @@ use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
     BackgroundRuntimeHost, BackgroundTaskRegistry, EmbeddedRuntimeHost, LashRuntime,
     PersistedSessionState, PersistentRuntimeServices, PluginStack, RuntimeCoreConfig,
-    RuntimeEffectHost, RuntimePersistence, RuntimeServices, SessionError, SessionPolicy,
+    RuntimeEffectController, RuntimePersistence, RuntimeServices, SessionError, SessionPolicy,
     SessionStoreFactory, TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
@@ -177,8 +177,11 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
-        self.core = self.core.with_effect_host(effect_host);
+    pub fn with_effect_controller(
+        mut self,
+        effect_controller: Arc<dyn RuntimeEffectController>,
+    ) -> Self {
+        self.core = self.core.with_effect_controller(effect_controller);
         self
     }
 

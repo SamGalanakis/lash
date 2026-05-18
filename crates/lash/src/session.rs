@@ -148,11 +148,7 @@ impl SessionBuilder {
     ) -> Result<PersistedSessionState> {
         let state = match store {
             Some(store) => {
-                let loaded = lash_core::load_persisted_session_state(store)
-                    .await
-                    .map_err(|err| {
-                        SessionError::Protocol(format!("failed to load store: {err}"))
-                    })?;
+                let loaded = self.load_persisted_state_for_residency(store).await?;
                 let mut state = loaded.unwrap_or_else(|| PersistedSessionState {
                     session_id: self.session_id.clone(),
                     policy: policy.clone(),
@@ -175,6 +171,46 @@ impl SessionBuilder {
             },
         };
         Ok(state)
+    }
+
+    async fn load_persisted_state_for_residency(
+        &self,
+        store: &dyn RuntimePersistence,
+    ) -> Result<Option<PersistedSessionState>> {
+        match self.core.env.residency {
+            Residency::KeepAll => {
+                let loaded = lash_core::load_persisted_session_state(store)
+                    .await
+                    .map_err(|err| {
+                        SessionError::Protocol(format!("failed to load store: {err}"))
+                    })?;
+                Ok(loaded)
+            }
+            Residency::ActivePathOnly => {
+                let active = lash_core::load_persisted_session_state_active_path(store, None)
+                    .await
+                    .map_err(|err| {
+                        SessionError::Protocol(format!("failed to load active-path store: {err}"))
+                    })?;
+                if active
+                    .as_ref()
+                    .is_some_and(|state| state.session_graph.nodes.is_empty())
+                {
+                    let mut full = lash_core::load_persisted_session_state(store)
+                        .await
+                        .map_err(|err| {
+                            SessionError::Protocol(format!(
+                                "failed to heal active-path store from full graph: {err}"
+                            ))
+                        })?;
+                    if let Some(state) = full.as_mut() {
+                        state.graph_replace_required = true;
+                    }
+                    return Ok(full);
+                }
+                Ok(active)
+            }
+        }
     }
 
     fn normalize_tool_state(state: &mut PersistedSessionState) {
@@ -262,6 +298,13 @@ pub struct SessionConfigPatch {
 }
 
 impl LashSession {
+    pub async fn close(self) -> Result<()> {
+        let runtime = self.runtime.writer();
+        let runtime = runtime.lock().await;
+        runtime.unregister_plugin_session()?;
+        Ok(())
+    }
+
     pub fn session_id(&self) -> String {
         self.runtime.observe().session_id().to_string()
     }

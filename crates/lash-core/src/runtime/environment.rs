@@ -28,7 +28,7 @@ use std::sync::Arc;
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::host::BackgroundTaskRegistry;
-use super::{RuntimeCoreConfig, RuntimeEffectHost, TerminationPolicy};
+use super::{RuntimeCoreConfig, RuntimeEffectController, TerminationPolicy};
 
 /// Where session nodes live at runtime.
 ///
@@ -207,8 +207,11 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
-        self.env.core = self.env.core.with_effect_host(effect_host);
+    pub fn with_effect_controller(
+        mut self,
+        effect_controller: Arc<dyn RuntimeEffectController>,
+    ) -> Self {
+        self.env.core = self.env.core.with_effect_controller(effect_controller);
         self
     }
 
@@ -225,8 +228,8 @@ mod tests {
     fn builder_methods_configure_runtime_core() {
         let attachment_store: Arc<dyn crate::AttachmentStore> =
             Arc::new(crate::InMemoryAttachmentStore::new());
-        let effect_host: Arc<dyn RuntimeEffectHost> =
-            Arc::new(crate::runtime::LocalRuntimeEffectHost::default());
+        let effect_controller: Arc<dyn RuntimeEffectController> =
+            Arc::new(crate::runtime::InlineRuntimeEffectController::default());
         let trace_context = TraceContext::default().for_session("session-1");
         let termination = TerminationPolicy {
             treat_missing_done_as_failure: false,
@@ -241,7 +244,7 @@ mod tests {
             .with_trace_level(TraceLevel::Extended)
             .with_trace_context(trace_context.clone())
             .with_termination(termination.clone())
-            .with_effect_host(Arc::clone(&effect_host))
+            .with_effect_controller(Arc::clone(&effect_controller))
             .build();
 
         assert!(Arc::ptr_eq(&env.core.attachment_store, &attachment_store));
@@ -253,7 +256,7 @@ mod tests {
             env.core.termination.treat_missing_done_as_failure,
             termination.treat_missing_done_as_failure
         );
-        assert!(Arc::ptr_eq(&env.core.effect_host, &effect_host));
+        assert!(Arc::ptr_eq(&env.core.effect_controller, &effect_controller));
     }
 
     #[test]
@@ -286,7 +289,7 @@ mod tests {
             ["pub ", "trace_level:"].concat(),
             ["pub ", "trace_context:"].concat(),
             ["pub ", "termination:"].concat(),
-            ["pub ", "effect_host:"].concat(),
+            ["pub ", "effect_controller:"].concat(),
             ["mirror ", "`RuntimeCoreConfig`"].concat(),
         ] {
             assert!(

@@ -24,6 +24,7 @@ impl ModeExecutionContext<'_> {
             "producer": status.producer,
             "state": match status.state {
                 crate::BackgroundTaskState::Pending => "pending",
+                crate::BackgroundTaskState::Scheduled => "scheduled",
                 crate::BackgroundTaskState::Running => "running",
                 crate::BackgroundTaskState::Waiting => "idle",
                 crate::BackgroundTaskState::Completed => "completed",

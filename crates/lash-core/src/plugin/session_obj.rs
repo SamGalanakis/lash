@@ -205,7 +205,11 @@ impl PluginSession {
         self.mode_protocol_driver.clone()
     }
 
-    pub fn tool_surface(&self, session_id: &str, mode: ExecutionMode) -> Arc<crate::ToolSurface> {
+    pub fn tool_surface(
+        &self,
+        session_id: &str,
+        mode: ExecutionMode,
+    ) -> Result<Arc<crate::ToolSurface>, PluginError> {
         let mut tools = self.tools.tool_manifests();
         let contract_provider = Arc::clone(&self.tools);
         let native_contract_providers = self.mode_native_tools.to_vec();
@@ -220,34 +224,22 @@ impl PluginSession {
             let native_tools = self.mode_native_tool_manifests();
             tools.extend(native_tools);
         }
-        match self.resolve_tool_surface(ToolSurfaceContext {
+        Ok(Arc::new(self.resolve_tool_surface(ToolSurfaceContext {
             session_id: session_id.to_string(),
             mode: mode.clone(),
             tools,
             resolve_contract: Some(Arc::clone(&resolve_contract)),
             tool_access: self.tool_access.clone(),
             subagent: self.subagent.clone(),
-        }) {
-            Ok(surface) => Arc::new(surface),
-            Err(err) => {
-                tracing::warn!("failed to resolve tool surface: {err}");
-                let mut fallback_tools = self.tools.tool_manifests();
-                if mode == self.execution_mode {
-                    let native_tools = self.mode_native_tool_manifests();
-                    fallback_tools.extend(native_tools);
-                }
-                Arc::new(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
-                    tools: fallback_tools,
-                    mode,
-                    resolve_contract: Some(resolve_contract),
-                    contributions: Vec::new(),
-                }))
-            }
-        }
+        })?))
     }
 
-    pub fn tool_catalog(&self, session_id: &str, mode: ExecutionMode) -> Vec<serde_json::Value> {
-        let surface = self.tool_surface(session_id, mode.clone());
+    pub fn tool_catalog(
+        &self,
+        session_id: &str,
+        mode: ExecutionMode,
+    ) -> Result<Vec<serde_json::Value>, PluginError> {
+        let surface = self.tool_surface(session_id, mode.clone())?;
         let mut catalog =
             crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
         let contributions = collect_owned_sync(
@@ -267,7 +259,7 @@ impl PluginSession {
             &mut catalog,
             contributions.into_iter().map(|owned| owned.value),
         );
-        catalog
+        Ok(catalog)
     }
 
     pub fn resolve_tool_surface(

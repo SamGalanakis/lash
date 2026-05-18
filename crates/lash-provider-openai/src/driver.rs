@@ -241,10 +241,6 @@ fn complete_buffered_responses(
         .map(|value| terminal_reason_from_responses_value(value, &parts))
         .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
-        deltas: (!state.full_text.is_empty())
-            .then_some(state.full_text.clone())
-            .into_iter()
-            .collect(),
         full_text: state.full_text,
         parts,
         usage: state.usage,
@@ -318,10 +314,6 @@ fn complete_buffered_chat(
         state.terminal_reason
     };
     Ok(LlmResponse {
-        deltas: (!state.full_text.is_empty())
-            .then_some(state.full_text.clone())
-            .into_iter()
-            .collect(),
         full_text: state.full_text,
         parts,
         usage: state.usage,
@@ -385,13 +377,11 @@ async fn drive_streaming_responses(
         CompletionEndpoint::Responses.stream_chunk_timeout_error(),
         |raw| {
             emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
-            let prev_len = state.deltas.len();
             let prev_usage = state.usage.clone();
             OpenAiCompatibleProvider::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
-            emit_progress(
+            emit_stream_progress(
                 stream_events.as_ref(),
-                &state.deltas,
-                prev_len,
+                state.take_text_deltas(),
                 &state.usage,
                 &prev_usage,
             );
@@ -432,7 +422,6 @@ async fn drive_streaming_responses(
         .map(|value| terminal_reason_from_responses_value(value, &parts))
         .unwrap_or_else(|| terminal_reason_from_parts(&parts));
     Ok(LlmResponse {
-        deltas: state.deltas,
         full_text: state.full_text,
         parts,
         usage: state.usage,
@@ -460,13 +449,11 @@ async fn drive_streaming_chat(
         CompletionEndpoint::ChatCompletions.stream_chunk_timeout_error(),
         |raw| {
             emit_provider_trace(provider_trace.as_ref(), "openai_compatible", raw);
-            let prev_len = state.deltas.len();
             let prev_usage = state.usage.clone();
             OpenAiCompatibleProvider::process_chat_sse_event(raw, &mut state)?;
-            emit_progress(
+            emit_stream_progress(
                 stream_events.as_ref(),
-                &state.deltas,
-                prev_len,
+                state.take_text_deltas(),
                 &state.usage,
                 &prev_usage,
             );
@@ -504,7 +491,6 @@ async fn drive_streaming_chat(
         state.terminal_reason
     };
     Ok(LlmResponse {
-        deltas: state.deltas,
         full_text: state.full_text,
         parts,
         usage: state.usage,

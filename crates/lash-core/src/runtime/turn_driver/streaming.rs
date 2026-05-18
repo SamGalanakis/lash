@@ -162,7 +162,7 @@ impl RuntimeTurnDriver<'_> {
         let trace_enabled = self.host.core.trace_sink.is_some();
         let llm_call_id = trace_enabled.then(|| self.llm_call_id(mode_iteration));
         if let Some(llm_call_id) = llm_call_id.as_ref() {
-            crate::runtime::effect_host::emit_llm_trace_started(
+            crate::runtime::effect_controller::emit_llm_trace_started(
                 &self.host.core.trace_sink,
                 &self.host.core.trace_context,
                 self.trace_context(mode_iteration)
@@ -246,7 +246,6 @@ impl RuntimeTurnDriver<'_> {
                         .await;
 
                         let mut resp = LlmResponse {
-                            deltas: Vec::new(),
                             full_text: stream_accumulator.full_text(),
                             parts: Vec::new(),
                             usage: streamed_usage.clone(),
@@ -333,7 +332,7 @@ impl RuntimeTurnDriver<'_> {
             let stream_summary = debug.summary.to_json();
             match &result {
                 Ok(response) => {
-                    crate::runtime::effect_host::emit_llm_trace_completed(
+                    crate::runtime::effect_controller::emit_llm_trace_completed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
                         self.trace_context(mode_iteration).for_llm_call(llm_call_id),
@@ -343,11 +342,11 @@ impl RuntimeTurnDriver<'_> {
                     );
                 }
                 Err(error) => {
-                    crate::runtime::effect_host::emit_llm_trace_failed(
+                    crate::runtime::effect_controller::emit_llm_trace_failed(
                         &self.host.core.trace_sink,
                         &self.host.core.trace_context,
                         self.trace_context(mode_iteration).for_llm_call(llm_call_id),
-                        crate::runtime::effect_host::LlmTraceFailure::from(error),
+                        crate::runtime::effect_controller::LlmTraceFailure::from(error),
                         Some(stream_summary.clone()),
                     );
                 }

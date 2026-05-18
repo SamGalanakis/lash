@@ -15,7 +15,7 @@ pub(crate) use lash_core::provider::{
     AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
     ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
 };
-pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
+pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::{
     build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
     send_request,

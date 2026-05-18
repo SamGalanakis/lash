@@ -1271,7 +1271,6 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
             "root",
             lash_core::llm::types::LlmResponse {
                 full_text: "Keep this text exactly.".into(),
-                deltas: Vec::new(),
                 parts: vec![lash_core::llm::types::LlmOutputPart::Text {
                     text: "Keep this text exactly.".into(),
                     response_meta: None,

@@ -17,7 +17,7 @@ impl RlmControlToolsProvider {
     async fn continue_as(
         &self,
         args: &Value,
-        context: &ToolContext,
+        context: &ToolContext<'_>,
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;

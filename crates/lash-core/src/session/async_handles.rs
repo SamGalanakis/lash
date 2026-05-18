@@ -6,9 +6,10 @@ use super::execution_context::ModeExecutionContext;
 use super::tool_execution::ModeToolReply;
 use crate::tool_dispatch::dispatch_tool_call_with_execution_context;
 use crate::{
-    BackgroundClosePolicy, BackgroundTaskCompletion, BackgroundTaskExecutor, BackgroundTaskInput,
-    BackgroundTaskKind, BackgroundTaskRegistration, BackgroundTaskScope, BackgroundTaskState,
-    SandboxMessage, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolContext,
+    BackgroundClosePolicy, BackgroundTaskCompletion, BackgroundTaskInput, BackgroundTaskKind,
+    BackgroundTaskLocalExecutor, BackgroundTaskRegistration, BackgroundTaskScope,
+    BackgroundTaskState, SandboxMessage, ToolCallOutput, ToolCallRecord, ToolCallStatus,
+    ToolContext,
 };
 
 const ASYNC_TOOL_HANDLE_KIND: &str = "task";
@@ -55,6 +56,7 @@ fn tool_output_from_completion(completion: BackgroundTaskCompletion) -> ToolCall
             ))
         }
         BackgroundTaskState::Pending
+        | BackgroundTaskState::Scheduled
         | BackgroundTaskState::Running
         | BackgroundTaskState::Waiting
         | BackgroundTaskState::CancelRequested => {
@@ -141,9 +143,12 @@ impl ModeExecutionContext<'_> {
             tools: Arc::clone(&self.dispatch.tools),
             surface: Arc::clone(&self.dispatch.surface),
             host: Arc::clone(&self.dispatch.host),
-            effect_host: crate::runtime::RuntimeEffectHostHandle::shared(Arc::clone(
-                &self.detached_effect_host,
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.detached_effect_controller,
             )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable from detached async tool execution",
+            ),
             session_id: self.dispatch.session_id.clone(),
             event_tx: self.dispatch.event_tx.clone(),
             turn_injection_bridge: self.dispatch.turn_injection_bridge.clone(),
@@ -160,12 +165,13 @@ impl ModeExecutionContext<'_> {
             .start_background_task(
                 &self.session_id,
                 registration,
-                BackgroundTaskExecutor::new(move |cancellation| async move {
+                BackgroundTaskLocalExecutor::new(move |cancellation| async move {
                     let tool_context = ToolContext::new(
                         dispatch.session_id.clone(),
                         Arc::clone(&dispatch.host),
                         dispatch.turn_context.clone(),
                         Arc::clone(&dispatch.attachment_store),
+                        dispatch.direct_completions.clone(),
                         Some(async_call_id),
                     )
                     .with_async_task(task_handle_id.clone(), cancellation);
@@ -232,7 +238,7 @@ impl ModeExecutionContext<'_> {
 mod tests {
     use super::*;
     use crate::plugin::{PluginHost, StaticPluginFactory};
-    use crate::runtime::RuntimeEffectHostHandle;
+    use crate::runtime::RuntimeEffectControllerHandle;
     use crate::tool_dispatch::ToolDispatchContext;
     use crate::{
         ExecutionMode, ToolCall, ToolDefinition, ToolFailureClass, ToolProvider, ToolResult,
@@ -242,24 +248,46 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[derive(Default)]
-    struct SleepRecordingEffectHost {
+    struct SleepRecordingEffectController {
         sleeps: Arc<StdMutex<usize>>,
     }
 
-    impl SleepRecordingEffectHost {
+    impl SleepRecordingEffectController {
         fn sleep_count(&self) -> usize {
             *self.sleeps.lock().expect("sleep count")
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::RuntimeEffectHost for SleepRecordingEffectHost {
-        async fn sleep(
+    impl crate::RuntimeEffectController for SleepRecordingEffectController {
+        async fn execute_effect(
             &self,
-            _invocation: crate::EffectInvocation,
-            _duration: std::time::Duration,
-        ) {
+            _envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
             *self.sleeps.lock().expect("sleep count") += 1;
+            Ok(crate::RuntimeEffectOutcome::Sleep)
+        }
+
+        async fn start_background_task(
+            &self,
+            _registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            registration: crate::BackgroundTaskRegistration,
+            _local_executor: crate::BackgroundTaskLocalExecutor,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            Err(crate::PluginError::Session(format!(
+                "sleep recording controller cannot start background task `{}`",
+                registration.id
+            )))
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            registry.request_cancel(task_id, reason).await
         }
     }
 
@@ -306,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_handle_detached_tool_retry_sleep_uses_owned_detached_effect_host() {
+    async fn async_handle_detached_tool_retry_sleep_uses_owned_detached_effect_controller() {
         let provider: Arc<dyn ToolProvider> = Arc::new(RetryAsyncTool {
             attempts: Arc::new(AtomicUsize::new(0)),
         });
@@ -317,16 +345,21 @@ mod tests {
         .build_standard_session("root", None)
         .expect("plugin session");
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
-        let scoped_recorder = Arc::new(SleepRecordingEffectHost::default());
-        let detached_recorder = Arc::new(SleepRecordingEffectHost::default());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
+        let scoped_recorder = Arc::new(SleepRecordingEffectController::default());
+        let detached_recorder = Arc::new(SleepRecordingEffectController::default());
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
         let dispatch = Arc::new(ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(crate::testing::MockSessionManager::default()),
-            effect_host: RuntimeEffectHostHandle::shared(scoped_recorder.clone()),
+            effect_controller: RuntimeEffectControllerHandle::shared(scoped_recorder.clone()),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),

@@ -196,6 +196,47 @@ struct RuntimePerfPhaseProbe {
     state: Mutex<RuntimePerfPhaseProbeState>,
 }
 
+struct ScopedPerfEffectController;
+
+#[async_trait::async_trait]
+impl lash::advanced::RuntimeEffectController for ScopedPerfEffectController {
+    async fn execute_effect(
+        &self,
+        envelope: lash::advanced::RuntimeEffectEnvelope,
+        _local_executor: lash::advanced::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<lash::advanced::RuntimeEffectOutcome, lash::advanced::RuntimeEffectControllerError>
+    {
+        Err(lash::advanced::RuntimeEffectControllerError::new(
+            "runtime_perf_effect_controller_unsupported",
+            format!(
+                "runtime perf scoped controller cannot execute {}",
+                envelope.command.kind().as_str()
+            ),
+        ))
+    }
+
+    async fn start_background_task(
+        &self,
+        _registry: Arc<dyn lash_core::BackgroundTaskRegistry>,
+        registration: lash_core::BackgroundTaskRegistration,
+        _local_executor: lash_core::BackgroundTaskLocalExecutor,
+    ) -> Result<lash::advanced::BackgroundTaskRecord, lash_core::PluginError> {
+        Err(lash_core::PluginError::Session(format!(
+            "runtime perf scoped controller cannot start background task `{}`",
+            registration.id
+        )))
+    }
+
+    async fn request_background_task_cancel(
+        &self,
+        registry: Arc<dyn lash_core::BackgroundTaskRegistry>,
+        task_id: &str,
+        reason: Option<String>,
+    ) -> Result<lash::advanced::BackgroundTaskRecord, lash_core::PluginError> {
+        registry.request_cancel(task_id, reason).await
+    }
+}
+
 impl RuntimePerfPhaseProbe {
     fn take_completed(&self) -> BTreeMap<String, RuntimePerfPhaseRunResult> {
         let mut state = self.state.lock().expect("phase probe lock");
@@ -268,6 +309,62 @@ pub(crate) async fn run_once(
 
     let mut turns = Vec::with_capacity(chat_turns);
     for turn_index in 0..chat_turns {
+        let mut extra_phase_profile = BTreeMap::new();
+        if matches!(scenario, RuntimePerfScenario::StoreReopen) && turn_index > 0 {
+            let store = runtime.store();
+            let store_factory_before_alloc = allocator_stats();
+            let store_factory_before_memory = process_memory_sample();
+            let store_factory_started = Instant::now();
+            let _core = runtime.core();
+            extra_phase_profile.insert(
+                "store_reopen.store_factory_create".to_string(),
+                RuntimePerfPhaseRunResult {
+                    duration_ms: elapsed_ms(store_factory_started),
+                    allocations: alloc_delta(store_factory_before_alloc, allocator_stats()),
+                    rss_growth_kb: diff_opt_i64(
+                        store_factory_before_memory.rss_kb,
+                        process_memory_sample().rss_kb,
+                    ),
+                },
+            );
+
+            let load_before_alloc = allocator_stats();
+            let load_before_memory = process_memory_sample();
+            let load_started = Instant::now();
+            let state =
+                lash::persistence::load_persisted_session_state_active_path(store.as_ref(), None)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("store_reopen expected persisted session state")
+                    })?;
+            extra_phase_profile.insert(
+                "store_reopen.persisted_load".to_string(),
+                RuntimePerfPhaseRunResult {
+                    duration_ms: elapsed_ms(load_started),
+                    allocations: alloc_delta(load_before_alloc, allocator_stats()),
+                    rss_growth_kb: diff_opt_i64(
+                        load_before_memory.rss_kb,
+                        process_memory_sample().rss_kb,
+                    ),
+                },
+            );
+
+            let hydrate_before_alloc = allocator_stats();
+            let hydrate_before_memory = process_memory_sample();
+            let hydrate_started = Instant::now();
+            runtime.reopen_with_state(scenario, state).await?;
+            extra_phase_profile.insert(
+                "store_reopen.runtime_hydration".to_string(),
+                RuntimePerfPhaseRunResult {
+                    duration_ms: elapsed_ms(hydrate_started),
+                    allocations: alloc_delta(hydrate_before_alloc, allocator_stats()),
+                    rss_growth_kb: diff_opt_i64(
+                        hydrate_before_memory.rss_kb,
+                        process_memory_sample().rss_kb,
+                    ),
+                },
+            );
+        }
         prepare_turn(&mut runtime, scenario, turn_index).await?;
 
         let phase_probe = Arc::new(RuntimePerfPhaseProbe::default());
@@ -291,16 +388,26 @@ pub(crate) async fn run_once(
             turn_input =
                 turn_input.rlm_project(rlm_perf_projected_bindings(scenario, turn_index)?)?;
         }
-        let turn = runtime
-            .run_turn(turn_input, CancellationToken::new())
-            .await
-            .with_context(|| {
-                format!(
-                    "run runtime perf scenario {} turn {}",
-                    scenario.name(),
-                    turn_index + 1
-                )
-            })?;
+        let cancel = CancellationToken::new();
+        let turn = if matches!(scenario, RuntimePerfScenario::ScopedEffectController) {
+            let effect_controller = ScopedPerfEffectController;
+            let turn_id = format!("runtime-perf-scoped-{}", turn_index + 1);
+            let effect_scope =
+                lash::advanced::RuntimeEffectControllerScope::new(&effect_controller, &turn_id)
+                    .map_err(anyhow::Error::from)?;
+            runtime
+                .run_turn_with_effect_scope(turn_input, cancel, effect_scope)
+                .await
+        } else {
+            runtime.run_turn(turn_input, cancel).await
+        }
+        .with_context(|| {
+            format!(
+                "run runtime perf scenario {} turn {}",
+                scenario.name(),
+                turn_index + 1
+            )
+        })?;
         validate_runtime_perf_turn(scenario, turn_index, &turn.outcome, &turn.assistant_output)?;
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
@@ -325,6 +432,8 @@ pub(crate) async fn run_once(
         let usage_delta_entries =
             lash_core::diff_usage_reports(&before_turn_usage, &cumulative_usage)
                 .map_err(anyhow::Error::msg)?;
+        let mut phase_profile = phase_probe.take_completed();
+        phase_profile.extend(extra_phase_profile);
         turns.push(RuntimePerfTurnResult {
             turn_index,
             run_turn_ms,
@@ -344,7 +453,7 @@ pub(crate) async fn run_once(
                 await_background_work: await_background_work_alloc,
                 total: turn_total_alloc,
             },
-            phase_profile: phase_probe.take_completed(),
+            phase_profile,
             turn_usage: turn.usage,
             usage_delta: SessionUsageReport::from_entries(&usage_delta_entries),
             cumulative_usage,

@@ -24,7 +24,7 @@
 <div class="section">
           <div class="section-header">
             <h2>Turn Lifecycle</h2>
-            <p>The runtime handles host effects; <code>TurnMachine</code> holds protocol state. Reply-producing nondeterministic work crosses <code>RuntimeEffectHost</code> with invocation metadata before the response returns to the machine. Hosts can seed read-only host values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: inline bindings store values, lazy bindings store <code>ProjectionRef</code>s resolved by RLM immediately before execution.</p>
+            <p>The runtime handles runtime effects; <code>TurnMachine</code> holds protocol state. Reply-producing nondeterministic work crosses <code>RuntimeEffectController</code> with invocation metadata before the response returns to the machine. Hosts can seed read-only projected values into a turn's lashlang scope through <code>RlmProjectedBindings</code>: inline bindings store values, lazy bindings store <code>ProjectionRef</code>s resolved by RLM immediately before execution.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Turn effect loop</div>
@@ -32,7 +32,7 @@
 sequenceDiagram
   participant Host as CLI / app host
   participant Runtime as LashRuntime
-  participant EffectHost as RuntimeEffectHost
+  participant EffectController as RuntimeEffectController
   participant Plugins as PluginSession
   participant Machine as TurnMachine
   participant Provider as ProviderHandle
@@ -47,25 +47,25 @@ sequenceDiagram
   loop poll effect
     Machine-->>Runtime: Effect
     alt LlmCall
-      Runtime->>EffectHost: llm_call(invocation, request)
-      EffectHost->>Provider: complete(LlmRequest)
-      Provider-->>EffectHost: stream events + LlmResponse
-      EffectHost-->>Runtime: Result<LlmResponse, LlmCallError>
+      Runtime->>EffectController: llm_call(invocation, request)
+      EffectController->>Provider: complete(LlmRequest)
+      Provider-->>EffectController: stream events + LlmResponse
+      EffectController-->>Runtime: Result<LlmResponse, LlmCallError>
       Runtime->>Machine: Response::LlmComplete
     else ToolCalls
       loop each PendingToolCall
-        Runtime->>EffectHost: tool_call(invocation, call)
-        EffectHost->>Tools: native/mode/provider tool
-        Tools-->>EffectHost: ToolResult converted to ToolCallOutput + ModelToolReturn
-        EffectHost-->>Runtime: CompletedToolCall
+        Runtime->>EffectController: tool_call(invocation, call)
+        EffectController->>Tools: native/mode/provider tool
+        Tools-->>EffectController: ToolResult converted to ToolCallOutput + ModelToolReturn
+        EffectController-->>Runtime: CompletedToolCall
       end
       Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
       Runtime->>Machine: Response::ToolResults
     else ExecCode
-      Runtime->>EffectHost: exec_code(invocation, code)
-      EffectHost->>Lang: execute lashlang (with resolved ProjectedBindings)
-      Lang-->>EffectHost: ExecResponse + observations
-      EffectHost-->>Runtime: Result<ExecResponse, String>
+      Runtime->>EffectController: exec_code(invocation, code)
+      EffectController->>Lang: execute lashlang (with resolved ProjectedBindings)
+      Lang-->>EffectController: ExecResponse + observations
+      EffectController-->>Runtime: Result<ExecResponse, String>
       Runtime->>Machine: Response::ExecResult
     else Progress / Done
       Runtime->>Store: graph delta + checkpoint + usage
@@ -174,7 +174,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Runtime satisfies effects; sans-IO applies responses.</h3>
-                <p>Provider calls, direct completions, tools, checkpoints, sleeps, execution-surface sync, and code execution cross <code>RuntimeEffectHost</code> before responses return to <code>TurnMachine</code>.</p>
+                <p>Provider calls, direct completions, tools, checkpoints, sleeps, execution-surface sync, and code execution cross <code>RuntimeEffectController</code> before responses return to <code>TurnMachine</code>.</p>
               </div>
             </li>
             <li>

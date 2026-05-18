@@ -387,6 +387,7 @@ pub async fn execute_tasks_stop_tool_call(
 fn state_label(state: BackgroundTaskState) -> &'static str {
     match state {
         BackgroundTaskState::Pending => "pending",
+        BackgroundTaskState::Scheduled => "scheduled",
         BackgroundTaskState::Running => "running",
         BackgroundTaskState::Waiting => "idle",
         BackgroundTaskState::Completed => "completed",

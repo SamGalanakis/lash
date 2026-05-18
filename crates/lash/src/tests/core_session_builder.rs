@@ -337,6 +337,87 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
 }
 
 #[tokio::test]
+async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
+    let mut state = PersistedSessionState {
+        session_id: "active-path".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider: mock_provider(),
+            model: "mock-model".to_string(),
+            max_context_tokens: Some(200_000),
+            execution_mode: lash_core::ExecutionMode::standard(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut root_message = text_message(lash_core::MessageRole::User, "root");
+    root_message.id = "root-message".to_string();
+    state.append_active_conversation_messages(&[root_message]);
+    let root = state.session_graph.leaf_node_id.clone();
+    let mut inactive_message = text_message(lash_core::MessageRole::User, "inactive branch");
+    inactive_message.id = "inactive-message".to_string();
+    state.append_active_conversation_messages(&[inactive_message]);
+    state.session_graph.branch_to(root);
+    let mut active_message = text_message(lash_core::MessageRole::User, "active branch");
+    active_message.id = "active-message".to_string();
+    state.append_active_conversation_messages(&[active_message]);
+
+    let store = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model("mock-model", None)
+        .max_context_tokens(200_000)
+        .store_factory(Arc::new(ReusableStoreFactory {
+            store: store.clone(),
+        }))
+        .advanced()
+        .residency(lash_core::Residency::ActivePathOnly)
+        .build()?;
+
+    let reopened = core.session("active-path").open().await?;
+    let messages = reopened.read_view().messages().to_vec();
+    let texts = messages.iter().map(message_text).collect::<Vec<_>>();
+    assert_eq!(texts, vec!["root", "active branch"]);
+    assert_eq!(
+        store.scopes(),
+        vec![lash_core::SessionReadScope::ActivePath { leaf_node_id: None }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
+    let mut state = PersistedSessionState {
+        session_id: "keep-all".to_string(),
+        policy: lash_core::SessionPolicy {
+            provider: mock_provider(),
+            model: "mock-model".to_string(),
+            max_context_tokens: Some(200_000),
+            execution_mode: lash_core::ExecutionMode::standard(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    state.append_active_conversation_messages(&[text_message(
+        lash_core::MessageRole::User,
+        "already stored",
+    )]);
+    let store = Arc::new(SnapshotStore::with_state(state));
+    let core = LashCore::standard()
+        .provider(mock_provider())
+        .model("mock-model", None)
+        .max_context_tokens(200_000)
+        .store_factory(Arc::new(ReusableStoreFactory {
+            store: store.clone(),
+        }))
+        .build()?;
+
+    let reopened = core.session("keep-all").open().await?;
+    assert_eq!(reopened.read_view().messages().len(), 1);
+    assert_eq!(store.scopes(), vec![lash_core::SessionReadScope::FullGraph]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn store_session_id_mismatch_is_rejected() -> Result<()> {
     let state = PersistedSessionState {
         session_id: "actual-session".to_string(),

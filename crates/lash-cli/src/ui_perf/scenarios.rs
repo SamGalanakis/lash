@@ -16,19 +16,23 @@ pub(crate) enum UiPerfScenario {
     StreamingReactor,
     SlowSnapshot,
     FileIndexStorm,
+    TimelineProjection,
+    ActivityProjection,
 }
 
 impl UiPerfScenario {
-    pub(crate) const DEFAULTS: [Self; 6] = [
+    pub(crate) const DEFAULTS: [Self; 8] = [
         Self::HistoryRender,
         Self::WorkspaceSurface,
         Self::WorkspaceOverlay,
         Self::StreamingReactor,
         Self::SlowSnapshot,
         Self::FileIndexStorm,
+        Self::TimelineProjection,
+        Self::ActivityProjection,
     ];
 
-    pub(crate) const KNOWN: [Self; 6] = Self::DEFAULTS;
+    pub(crate) const KNOWN: [Self; 8] = Self::DEFAULTS;
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
@@ -38,6 +42,8 @@ impl UiPerfScenario {
             "streaming_reactor" => Some(Self::StreamingReactor),
             "slow_snapshot" => Some(Self::SlowSnapshot),
             "file_index_storm" | "file-index-storm" => Some(Self::FileIndexStorm),
+            "timeline_projection" | "projection" => Some(Self::TimelineProjection),
+            "activity_projection" | "activity" => Some(Self::ActivityProjection),
             _ => None,
         }
     }
@@ -50,6 +56,8 @@ impl UiPerfScenario {
             Self::StreamingReactor => "streaming_reactor",
             Self::SlowSnapshot => "slow_snapshot",
             Self::FileIndexStorm => "file_index_storm",
+            Self::TimelineProjection => "timeline_projection",
+            Self::ActivityProjection => "activity_projection",
         }
     }
 }

@@ -1,8 +1,8 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-    ProjectedReadResponse, ProjectedValue, Record, State, ToolHost, ToolHostCall, ToolHostError,
-    Value, from_json,
+    ImageValue, ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, State, ToolHost,
+    ToolHostCall, ToolHostError, Value, from_json,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -25,6 +25,10 @@ pub enum Scenario {
     ToolControlSurface,
     SnapshotProjectedState,
     ContinueAsSeedSurface,
+    SyntaxTextSurface,
+    IntegerRangeSurface,
+    ParallelStatementSurface,
+    ImageSurface,
 }
 
 impl Scenario {
@@ -45,6 +49,10 @@ impl Scenario {
         Self::ToolControlSurface,
         Self::SnapshotProjectedState,
         Self::ContinueAsSeedSurface,
+        Self::SyntaxTextSurface,
+        Self::IntegerRangeSurface,
+        Self::ParallelStatementSurface,
+        Self::ImageSurface,
     ];
 
     #[allow(dead_code)]
@@ -66,13 +74,17 @@ impl Scenario {
             "tool_control_surface" => Self::ToolControlSurface,
             "snapshot_projected_state" => Self::SnapshotProjectedState,
             "continue_as_seed_surface" => Self::ContinueAsSeedSurface,
+            "syntax_text_surface" => Self::SyntaxTextSurface,
+            "integer_range_surface" => Self::IntegerRangeSurface,
+            "parallel_statement_surface" => Self::ParallelStatementSurface,
+            "image_surface" => Self::ImageSurface,
             _ => return None,
         })
     }
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, or all"
+        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, syntax_text_surface, integer_range_surface, parallel_statement_surface, image_surface, or all"
     }
 }
 
@@ -95,6 +107,10 @@ impl fmt::Display for Scenario {
             Self::ToolControlSurface => "tool_control_surface",
             Self::SnapshotProjectedState => "snapshot_projected_state",
             Self::ContinueAsSeedSurface => "continue_as_seed_surface",
+            Self::SyntaxTextSurface => "syntax_text_surface",
+            Self::IntegerRangeSurface => "integer_range_surface",
+            Self::ParallelStatementSurface => "parallel_statement_surface",
+            Self::ImageSurface => "image_surface",
         })
     }
 }
@@ -128,6 +144,18 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
     );
     if matches!(scenario, Scenario::SnapshotProjectedState) {
         globals.insert("snap".to_string(), snapshot_projected_record());
+    }
+    if matches!(scenario, Scenario::ImageSurface) {
+        globals.insert(
+            "img".to_string(),
+            Value::Image(ImageValue::new(
+                "img-1",
+                "chart.png",
+                1234,
+                Some(640),
+                Some(480),
+            )),
+        );
     }
     State::from_snapshot(lashlang::Snapshot { globals })
 }
@@ -602,6 +630,123 @@ submit {
   projected_count: handoff.projected_count,
   global_count: handoff.global_count,
   handle_count: handoff.handle_count
+}
+"#
+        }
+        Scenario::SyntaxTextSurface => {
+            r####"
+// Exercise parser-heavy string forms, comments, semicolon recovery, and text builtins.
+patch = r"""*** Begin Patch
+*** Update File: crates/lashlang/src/lib.rs
+@@
+-old
++new
+\n { braces stay raw }
+*** End Patch""";
+script = r'''python3 - <<'PY'
+print("""double quotes are preserved""")
+\n { braces stay raw }
+PY''';
+plain = """first
+"quoted"
+second""";
+"bare expression branch"
+pieces = [
+  len(patch),
+  contains(patch, "*** Begin Patch"),
+  starts_with(script, "python3"),
+  ends_with(trim(script), "PY"),
+  len(split(plain, "\n")),
+  slice(plain, 0, 5)
+]
+submit {
+  patch_head: slice(patch, 0, 15),
+  script_head: slice(script, 0, 7),
+  plain_lines: len(split(plain, "\n")),
+  pieces: pieces
+}
+"####
+        }
+        Scenario::IntegerRangeSurface => {
+            r#"
+items = range(-8, 9)
+forward = range(0, 10, 3)
+backward = range(7, -3, -2)
+stride = ceil_div(len(items), 4)
+starts = []
+windows = []
+for i in range(0, len(items), stride) {
+  starts = push(starts, i)
+  windows = push(windows, slice(items, i, i + stride))
+}
+text = "alpha beta gamma beta delta"
+first_beta = find(text, "beta")
+second_beta = find(text, "beta", first_beta + 1)
+submit {
+  count: len(items),
+  first: items[0],
+  last: items[-1],
+  forward: forward,
+  backward: backward,
+  stride: stride,
+  starts: starts,
+  windows: windows,
+  mid: slice(items, 2, -2),
+  head: slice(text, null, 5),
+  tail: slice(text, -5, null),
+  first_beta: first_beta,
+  second_beta: second_beta,
+  ceil_neg: ceil_div(-10, 3),
+  floor_neg: floor_div(-10, 3)
+}
+"#
+        }
+        Scenario::ParallelStatementSurface => {
+            r#"
+parallel {
+  left = call echo { value: "left" }
+  right = call echo { value: "right" }
+  computed = len(history) + 39
+}
+discarded = parallel {
+  "branch_a"
+  40 + 2
+  len(history)
+}
+batched = parallel {
+  first: call echo { value: left.value }
+  second: call echo { value: right.value }
+  computed: computed
+}
+submit {
+  left: left.value,
+  right: right.value,
+  computed: computed,
+  discarded: discarded,
+  first: batched.first?,
+  second: batched.second?,
+  batched_computed: batched.computed
+}
+"#
+        }
+        Scenario::ImageSurface => {
+            r#"
+descriptor = to_string(img)
+metadata = {
+  id: img.id,
+  label: img.label,
+  size: img.size,
+  width: img.width,
+  height: img.height,
+  missing: img.missing
+}
+print img
+submit {
+  metadata: metadata,
+  descriptor_has_type: contains(descriptor, "\"type\":\"image\""),
+  descriptor_has_id: contains(descriptor, "\"id\":\"img-1\""),
+  dims: format("{0}x{1}", img.width, img.height),
+  size_bucket: floor_div(img.size, 100)
 }
 "#
         }

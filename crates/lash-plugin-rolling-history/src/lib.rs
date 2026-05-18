@@ -1003,6 +1003,11 @@ mod tests {
             prompt_usage,
             max_context_tokens,
             host,
+            direct_completions: lash_core::DirectCompletionClient::from_fn(|_, _| {
+                Err(lash_core::PluginError::Session(
+                    "direct completions are unavailable in rolling history tests".to_string(),
+                ))
+            }),
         }
     }
 

@@ -247,7 +247,7 @@ pub enum Response {
     },
 }
 
-#[derive(Clone, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub struct ExecutionSurfaceSync {
     pub system_prompt: Arc<str>,
     pub tool_specs: Arc<Vec<LlmToolSpec>>,

@@ -345,8 +345,11 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
-    pub fn effect_host(mut self, effect_host: Arc<dyn RuntimeEffectHost>) -> Self {
-        self.builder.core = self.builder.core.with_effect_host(effect_host);
+    pub fn effect_controller(
+        mut self,
+        effect_controller: Arc<dyn RuntimeEffectController>,
+    ) -> Self {
+        self.builder.core = self.builder.core.with_effect_controller(effect_controller);
         self
     }
 

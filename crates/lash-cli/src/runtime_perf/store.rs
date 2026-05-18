@@ -56,16 +56,27 @@ impl RuntimePersistence for RuntimePerfStore {
         else {
             return Ok(None);
         };
-        let mut graph = self.session_graph.lock().expect("lock perf graph").clone();
-        match scope {
-            SessionReadScope::FullGraph => {}
-            SessionReadScope::ActivePath { leaf_node_id } => {
-                if let Some(leaf_node_id) = leaf_node_id.or_else(|| meta.leaf_node_id.clone()) {
-                    graph.set_leaf_node_id(Some(leaf_node_id));
+        let graph = {
+            let stored_graph = self.session_graph.lock().expect("lock perf graph");
+            match scope {
+                SessionReadScope::FullGraph => stored_graph.clone(),
+                SessionReadScope::ActivePath { leaf_node_id } => {
+                    if leaf_node_id.is_none() || leaf_node_id == stored_graph.leaf_node_id {
+                        let nodes = stored_graph
+                            .active_path_nodes()
+                            .into_iter()
+                            .cloned()
+                            .collect();
+                        SessionGraph::from_nodes(nodes, stored_graph.leaf_node_id.clone())
+                    } else {
+                        let mut scoped = stored_graph.clone();
+                        scoped.set_leaf_node_id(leaf_node_id);
+                        let nodes = scoped.active_path_nodes().into_iter().cloned().collect();
+                        SessionGraph::from_nodes(nodes, scoped.leaf_node_id.clone())
+                    }
                 }
-                graph = graph.fork_current_path();
             }
-        }
+        };
         Ok(Some(PersistedSessionRead {
             session_id: meta.session_id,
             head_revision: meta.head_revision,

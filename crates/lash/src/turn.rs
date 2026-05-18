@@ -108,7 +108,7 @@ impl TurnBuilder {
 
     pub async fn run_with_effect_scope(
         self,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnOutput> {
         let collector = RunActivityCollector::default();
         let result = self
@@ -183,7 +183,7 @@ impl TurnBuilder {
     pub async fn stream_with_effect_scope(
         self,
         events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectScope<'_>,
+        effect_scope: RuntimeEffectControllerScope<'_>,
     ) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
         stream_prepared_turn_with_effect_scope(
@@ -278,7 +278,7 @@ pub(crate) async fn stream_prepared_turn_with_effect_scope(
     input: TurnInput,
     session_events: Option<&dyn EventSink>,
     turn_events: Option<&dyn TurnActivitySink>,
-    effect_scope: RuntimeEffectScope<'_>,
+    effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
     let turn = Box::pin(stream_prepared_assembled_with_effect_scope(
@@ -321,7 +321,7 @@ pub(crate) async fn stream_prepared_assembled_with_effect_scope(
     input: TurnInput,
     session_events: Option<&dyn EventSink>,
     turn_events: Option<&dyn TurnActivitySink>,
-    effect_scope: RuntimeEffectScope<'_>,
+    effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
     let turn = Box::pin(stream_prepared_followed_with_effect_scope(
@@ -391,7 +391,7 @@ pub(crate) async fn stream_prepared_followed_with_effect_scope(
     input: TurnInput,
     session_events: Option<&dyn EventSink>,
     turn_events: Option<&dyn TurnActivitySink>,
-    effect_scope: RuntimeEffectScope<'_>,
+    effect_scope: RuntimeEffectControllerScope<'_>,
     cancel: CancellationToken,
 ) -> Result<lash_core::FollowedTurn> {
     let writer_handle = runtime.writer();

@@ -117,16 +117,17 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, BackgroundTaskRecord, BackgroundTaskRegistry, DirectEffectLocalExecutor,
-        EffectInvocation, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost, EventSink,
-        ExecutionMode, LashRuntime, LocalBackgroundTaskRegistry, LocalRuntimeEffectHost,
-        ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink, NoopTurnActivitySink,
-        PersistentRuntimeServices, PluginMessage, Residency, RewriteTrigger, RuntimeCoreConfig,
-        RuntimeEffectHost, RuntimeEffectKind, RuntimeEffectScope, RuntimeEnvironment,
+        AssembledTurn, BackgroundTaskRecord, BackgroundTaskRegistry, DirectCompletionClient,
+        DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost, EventSink,
+        ExecutionMode, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
+        LlmRequestSpec, LocalBackgroundTaskRegistry, ModeSessionExtensionHandle, ModeTurnOptions,
+        NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency,
+        RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
+        RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation, SessionEvent,
         SessionHandle, SessionPolicy, SessionStateEnvelope, SessionTurnHandle,
-        StandardContextApproach, TerminationPolicy, TurnContext, TurnEffectLocalExecutor,
-        TurnFinish, TurnOutcome, TurnStop,
+        StandardContextApproach, TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

@@ -26,7 +26,17 @@ pub struct StoredAttachment {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachmentStorePersistence {
+    Ephemeral,
+    Durable,
+}
+
 pub trait AttachmentStore: Send + Sync {
+    fn persistence(&self) -> AttachmentStorePersistence {
+        AttachmentStorePersistence::Ephemeral
+    }
+
     fn put(
         &self,
         bytes: Vec<u8>,
@@ -102,6 +112,10 @@ impl FileAttachmentStore {
 }
 
 impl AttachmentStore for FileAttachmentStore {
+    fn persistence(&self) -> AttachmentStorePersistence {
+        AttachmentStorePersistence::Durable
+    }
+
     fn put(
         &self,
         bytes: Vec<u8>,

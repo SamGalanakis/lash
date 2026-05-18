@@ -11,6 +11,7 @@ use tokio::sync::{Mutex as TokioMutex, oneshot};
 #[derive(Default)]
 struct SnapshotStore {
     read: std::sync::Mutex<Option<lash_core::PersistedSessionRead>>,
+    scopes: std::sync::Mutex<Vec<lash_core::SessionReadScope>>,
 }
 
 impl SnapshotStore {
@@ -38,7 +39,12 @@ impl SnapshotStore {
                 }),
                 token_ledger: Vec::new(),
             })),
+            scopes: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn scopes(&self) -> Vec<lash_core::SessionReadScope> {
+        self.scopes.lock().expect("snapshot scopes lock").clone()
     }
 }
 
@@ -46,10 +52,23 @@ impl SnapshotStore {
 impl lash_core::RuntimePersistence for SnapshotStore {
     async fn load_session(
         &self,
-        _scope: lash_core::SessionReadScope,
+        scope: lash_core::SessionReadScope,
     ) -> std::result::Result<Option<lash_core::PersistedSessionRead>, lash_core::store::StoreError>
     {
-        Ok(self.read.lock().expect("snapshot store lock").clone())
+        self.scopes
+            .lock()
+            .expect("snapshot scopes lock")
+            .push(scope.clone());
+        let mut read = self.read.lock().expect("snapshot store lock").clone();
+        if let Some(read) = read.as_mut()
+            && let lash_core::SessionReadScope::ActivePath { leaf_node_id } = scope
+        {
+            if let Some(leaf_node_id) = leaf_node_id {
+                read.graph.set_leaf_node_id(Some(leaf_node_id));
+            }
+            read.graph = read.graph.fork_current_path();
+        }
+        Ok(read)
     }
 
     async fn load_node(

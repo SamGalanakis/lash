@@ -102,7 +102,7 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskExecutor,
+        executor: crate::BackgroundTaskLocalExecutor,
     ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.background
             .start_background_task(
@@ -272,26 +272,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             )
             .await
     }
-    async fn direct_completion(
-        &self,
-        request: crate::DirectRequest,
-        usage_source: &str,
-    ) -> Result<crate::DirectCompletion, crate::PluginError> {
-        self.direct
-            .direct_completion(&self.current, &self.usage, request, usage_source)
-            .await
-    }
-
-    async fn direct_llm_completion(
-        &self,
-        request: crate::LlmRequest,
-        usage_source: &str,
-    ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
-        self.direct
-            .direct_llm_completion(&self.current, &self.usage, request, usage_source)
-            .await
-    }
-
     async fn emit_trace_event(
         &self,
         context: lash_trace::TraceContext,

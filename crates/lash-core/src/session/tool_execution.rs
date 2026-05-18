@@ -121,6 +121,7 @@ impl ModeExecutionContext<'_> {
             Arc::clone(&self.dispatch.host),
             self.dispatch.turn_context.clone(),
             Arc::clone(&self.dispatch.attachment_store),
+            self.dispatch.direct_completions.clone(),
             Some(call_id.clone()),
         )
         .with_tool_effect_metadata(effect_metadata);
