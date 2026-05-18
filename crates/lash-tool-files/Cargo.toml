@@ -14,14 +14,14 @@ keywords = ["lash", "agent", "tools", "files", "llm"]
 categories = ["asynchronous", "filesystem"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.2" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.3" }
 async-trait = { workspace = true }
 globset = "0.4"
 pdf-extract = "0.7"
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

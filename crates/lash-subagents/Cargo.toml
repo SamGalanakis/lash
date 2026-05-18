@@ -14,15 +14,15 @@ keywords = ["lash", "agent", "subagent", "spawn", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", default-features = false }
-lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.2" }
-lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.2" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.2" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3", default-features = false }
+lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.3" }
+lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.3" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.3" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3", default-features = false, features = ["testing"] }
 jsonschema = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }

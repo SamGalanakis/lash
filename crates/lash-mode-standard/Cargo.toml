@@ -14,10 +14,10 @@ keywords = ["lash", "agent", "mode", "tools", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.2" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.3" }
 tokio = { workspace = true, features = ["full"] }

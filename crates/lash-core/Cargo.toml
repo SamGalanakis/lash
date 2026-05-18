@@ -24,8 +24,8 @@ testing = []
 full = []
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.2" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.2" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.3" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.3" }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
