@@ -265,7 +265,7 @@ impl SessionControl {
                 result.value_for_projection()
             ))));
         }
-        serde_json::from_value(result.into_value_for_projection()).map_err(|err| {
+        serde_json::from_value(result.into_output().value_for_projection()).map_err(|err| {
             EmbedError::Plugin(lash_core::PluginError::Invoke(format!(
                 "invalid {} output: {err}",
                 Op::NAME

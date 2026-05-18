@@ -246,7 +246,7 @@ pub enum TurnStop {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnTerminationPolicyState {
-    max_steps_final: bool,
+    turn_limit_final_scheduled: bool,
 }
 
 impl Default for TurnTerminationPolicyState {
@@ -258,12 +258,12 @@ impl Default for TurnTerminationPolicyState {
 impl TurnTerminationPolicyState {
     pub fn new() -> Self {
         Self {
-            max_steps_final: false,
+            turn_limit_final_scheduled: false,
         }
     }
 
     pub fn should_force_exit_after_grace_turn(&self) -> bool {
-        self.max_steps_final
+        self.turn_limit_final_scheduled
     }
 
     pub fn turn_limit_final_to_schedule(
@@ -272,7 +272,7 @@ impl TurnTerminationPolicyState {
         mode_run_offset: usize,
         max_turns: Option<usize>,
     ) -> Option<usize> {
-        if self.max_steps_final {
+        if self.turn_limit_final_scheduled {
             return None;
         }
         let max = max_turns?;
@@ -282,36 +282,8 @@ impl TurnTerminationPolicyState {
         Some(max)
     }
 
-    pub fn schedule_turn_limit_final(
-        &mut self,
-        max_turns: usize,
-        msgs: &mut Vec<Message>,
-        message_id: String,
-    ) {
-        msgs.push(Message {
-            id: message_id.clone(),
-            role: MessageRole::System,
-            parts: Arc::new(vec![Part {
-                id: format!("{}.p0", message_id),
-                kind: PartKind::Text,
-                content: format!(
-                    "Turn limit reached ({max_turns}). You MUST reply in plain prose now containing:\n\
-                        1. Summary of what you accomplished\n\
-                        2. List of remaining tasks not yet completed\n\
-                        3. Recommended next steps\n\
-                        Do NOT make any more tool calls and do NOT emit a mode-specific tag."
-                ),
-                attachment: None,
-                tool_call_id: None,
-                tool_name: None,
-                tool_replay: None,
-                prune_state: PruneState::Intact,
-                reasoning_meta: None,
-                response_meta: None,
-            }]),
-            origin: None,
-        });
-        self.max_steps_final = true;
+    pub fn mark_turn_limit_final_scheduled(&mut self) {
+        self.turn_limit_final_scheduled = true;
     }
 }
 
@@ -347,65 +319,22 @@ pub fn make_error_event(
 
 pub fn truncate_raw_error(s: &str) -> String {
     const MAX_RAW: usize = 4000;
-    if s.len() <= MAX_RAW {
+    let raw_len = s.chars().count();
+    if raw_len <= MAX_RAW {
         return s.to_string();
     }
     let keep = MAX_RAW / 2;
-    let omitted = s.len() - MAX_RAW;
-    format!(
-        "{}\n\n... ({omitted} chars omitted) ...\n\n{}",
-        &s[..keep],
-        &s[s.len() - keep..]
-    )
-}
-
-pub fn format_tool_result_content(success: bool, result: &serde_json::Value) -> String {
-    if success {
-        match result {
-            serde_json::Value::String(text) => text.clone(),
-            other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
-        }
-    } else {
-        match result {
-            serde_json::Value::String(text) => {
-                if text.is_empty() {
-                    "[Tool execution failed]".to_string()
-                } else if text.starts_with("[Tool execution failed]") {
-                    text.clone()
-                } else {
-                    format!("[Tool execution failed]\n{text}")
-                }
-            }
-            other => serde_json::to_string(&serde_json::json!({ "error": other }))
-                .unwrap_or_else(|_| "{\"error\":\"tool execution failed\"}".to_string()),
-        }
-    }
-}
-
-pub fn format_tool_output_content(output: &crate::ToolCallOutput) -> String {
-    match &output.outcome {
-        crate::ToolCallOutcome::Success(value) => {
-            let value = value.to_json_value();
-            match value {
-                serde_json::Value::String(text) => text,
-                other => serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string()),
-            }
-        }
-        crate::ToolCallOutcome::Failure(failure) => {
-            if failure.message.is_empty() {
-                "[Tool execution failed]".to_string()
-            } else {
-                format!("[Tool execution failed]\n{}", failure.message)
-            }
-        }
-        crate::ToolCallOutcome::Cancelled(cancellation) => {
-            if cancellation.message.is_empty() {
-                "[Tool execution cancelled]".to_string()
-            } else {
-                format!("[Tool execution cancelled]\n{}", cancellation.message)
-            }
-        }
-    }
+    let head = s.chars().take(keep).collect::<String>();
+    let tail = s
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let omitted = raw_len.saturating_sub(keep * 2);
+    format!("{head}\n\n... ({omitted} chars omitted) ...\n\n{tail}")
 }
 
 pub fn reassign_part_ids(message_id: &str, parts: &mut [Part]) {

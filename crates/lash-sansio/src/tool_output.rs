@@ -20,6 +20,16 @@ pub struct ToolCallOutput {
     pub control: Option<ToolControl>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    pub tool: String,
+    pub args: Value,
+    pub output: ToolCallOutput,
+    pub duration_ms: u64,
+}
+
 impl ToolCallOutput {
     pub fn success(value: impl Into<ToolValue>) -> Self {
         Self {
@@ -81,6 +91,20 @@ impl ToolCallOutput {
                 .map(ToolValue::attachments)
                 .unwrap_or_default(),
         }
+    }
+}
+
+pub fn format_tool_output_content(output: &ToolCallOutput) -> String {
+    match &output.outcome {
+        ToolCallOutcome::Success(value) => {
+            let value = value.to_json_value();
+            match value {
+                Value::String(text) => text,
+                other => serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string()),
+            }
+        }
+        ToolCallOutcome::Failure(failure) => format_failure_message(failure),
+        ToolCallOutcome::Cancelled(cancellation) => format_cancellation_message(cancellation),
     }
 }
 

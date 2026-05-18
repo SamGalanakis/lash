@@ -273,14 +273,14 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
         .await
         .expect("enable");
-    assert!(enabled.success);
+    assert!(enabled.is_success());
+    let enabled_value = enabled.value_for_projection();
     assert_eq!(
-        enabled.result.get("enabled").and_then(|v| v.as_bool()),
+        enabled_value.get("enabled").and_then(|v| v.as_bool()),
         Some(true)
     );
     assert_eq!(
-        enabled
-            .result
+        enabled_value
             .get("plan_path")
             .and_then(|value| value.as_str()),
         Some(".lash/plans/run-session.md")
@@ -295,9 +295,9 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .invoke_plugin_action("plan_mode.toggle", json!({}), None, true, manager)
         .await
         .expect("toggle restored");
+    let restored_toggle_value = restored_toggle.value_for_projection();
     assert_eq!(
-        restored_toggle
-            .result
+        restored_toggle_value
             .get("enabled")
             .and_then(|v| v.as_bool()),
         Some(false)
@@ -316,8 +316,9 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         )
         .await
         .expect("toggle reset");
+    let reset_toggle_value = reset_toggle.value_for_projection();
     assert_eq!(
-        reset_toggle.result.get("enabled").and_then(|v| v.as_bool()),
+        reset_toggle_value.get("enabled").and_then(|v| v.as_bool()),
         Some(true)
     );
 }
@@ -845,17 +846,16 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             progress: None,
         })
         .await;
-    assert!(result.success);
+    assert!(result.is_success());
+    let result_value = result.value_for_projection();
     assert_eq!(
-        result
-            .result
+        result_value
             .get("approved")
             .and_then(|value| value.as_bool()),
         Some(true)
     );
     assert!(
-        result
-            .result
+        result_value
             .get("next_turn_input")
             .and_then(|value| value.as_str())
             .is_some_and(|value| {
@@ -986,17 +986,16 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             progress: None,
         })
         .await;
-    assert!(result.success);
+    assert!(result.is_success());
+    let result_value = result.value_for_projection();
     assert!(
-        result
-            .result
+        result_value
             .get("approved")
             .and_then(|value| value.as_bool())
             == Some(true)
     );
     assert_eq!(
-        result
-            .result
+        result_value
             .get("execution_mode")
             .and_then(|value| value.as_str()),
         Some("current_session")
@@ -1105,16 +1104,16 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             progress: None,
         })
         .await;
-    assert!(result.success);
+    assert!(result.is_success());
+    let result_value = result.value_for_projection();
     assert_eq!(
-        result
-            .result
+        result_value
             .get("execution_mode")
             .and_then(|value| value.as_str()),
         Some("fresh_context")
     );
     assert!(
-        result.result.get("fresh_context_input").is_none(),
+        result_value.get("fresh_context_input").is_none(),
         "seed prompt is now carried by SessionCreateRequest::first_turn_input, not the tool result"
     );
 }

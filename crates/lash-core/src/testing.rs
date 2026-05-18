@@ -862,7 +862,11 @@ mod test_mode_fakes {
             let tool_names = input.tool_surface.tool_names();
             let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
             ModePreamble {
-                config: ModeConfig::chat(Arc::new(TestDriver), false),
+                config: ModeConfig::chat(
+                    Arc::new(TestDriver),
+                    false,
+                    Arc::new(test_turn_limit_final_message),
+                ),
                 tool_specs: input.tool_surface.model_tool_specs(),
                 tool_names,
                 tool_names_fingerprint,
@@ -870,6 +874,26 @@ mod test_mode_fakes {
                 execution_prompt: Arc::from(""),
                 prompt_contributions: input.extra_prompt_contributions,
             }
+        }
+    }
+
+    fn test_turn_limit_final_message(message_id: String, max_turns: usize) -> crate::Message {
+        crate::Message {
+            id: message_id.clone(),
+            role: crate::MessageRole::System,
+            parts: crate::shared_parts(vec![crate::Part {
+                id: format!("{message_id}.p0"),
+                kind: crate::PartKind::Error,
+                content: format!("Turn limit reached ({max_turns}) before a final test response."),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: crate::PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
         }
     }
 
@@ -1144,7 +1168,7 @@ mod test_mode_fakes {
                 let message_id = fresh_message_id();
                 actions.push(DriverAction::AppendEvents(vec![
                     SessionEventRecord::Conversation(ConversationRecord::from_message(
-                        crate::turn_limit_exhausted_message(message_id, max_turns),
+                        test_turn_limit_final_message(message_id, max_turns),
                     )),
                 ]));
                 actions.push(DriverAction::Finish(TurnOutcome::Stopped(

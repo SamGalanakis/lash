@@ -174,8 +174,8 @@
 
   function makeSun(parent, x, y, r) {
     // wrap in a group so the whole sun is one click target — clicking
-    // a sun regenerates the scene (delight). aria-label + tabindex
-    // make it keyboard-accessible too.
+    // a sun bursts in place, then triggers a parallax regen of the
+    // scene. aria-label + tabindex make it keyboard-accessible too.
     const g = el("g", {
       class: "sun",
       tabindex: 0,
@@ -185,15 +185,35 @@
     g.appendChild(el("circle", { class: "sun__glow",   cx: x, cy: y, r: r * 2.0, fill: PALETTE.sodium, opacity: 0.10 }));
     g.appendChild(el("circle", { class: "sun__corona", cx: x, cy: y, r: r * 1.30, fill: PALETTE.sodium, opacity: 0.22 }));
     g.appendChild(el("circle", { class: "sun__disc",   cx: x, cy: y, r: r, fill: PALETTE.sodium, opacity: 0.92 }));
-    g.addEventListener("click", (ev) => {
+    const burst = (ev) => {
       ev.preventDefault();
-      generate();
-    });
-    g.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") {
-        ev.preventDefault();
-        generate();
+      // already mid-burst — let it finish, don't stack regens
+      if (g.classList.contains("sun--burst")) return;
+      g.classList.add("sun--burst");
+      // ── BEAT 1 / inhale ────────────────────────────────────
+      // Recede every visible lash back into its own sun. Each
+      // ray's transform-origin is pinned to its source sun, so
+      // scale(0) collapses it cleanly at the source. We override
+      // the CSS ray transition with a snappier inline duration
+      // so the inhale ends visibly before the mountains move.
+      const svgRoot = document.getElementById("range");
+      if (svgRoot) {
+        svgRoot.querySelectorAll(".ray-emit").forEach(r => {
+          r.style.transition =
+            "transform 280ms cubic-bezier(0.4, 0, 0.2, 1), " +
+            "opacity 200ms cubic-bezier(0.4, 0, 0.2, 1)";
+          r.style.transform = "scale(0.001)";
+          r.style.opacity = "0";
+        });
       }
+      // ── still pause ────────────────────────────────────────
+      // 480ms (≈280 recede + 200 of stillness) — long enough that
+      // the eye registers beat 1 as fully over before beat 2 begins.
+      setTimeout(() => generate({ trigger: "sun", fromX: x }), 480);
+    };
+    g.addEventListener("click", burst);
+    g.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") burst(ev);
     });
     parent.appendChild(g);
   }
@@ -231,6 +251,65 @@
     while (g.firstChild) g.removeChild(g.firstChild);
   }
 
+  // ─── parallax swap helpers ─────────────────────────────────
+  // Each layer group keeps a single `.scene-enter` wrapper as its
+  // child. On regenerate, that wrapper is reclassed to `.scene-exit`
+  // (it slides off + fades), and a new `.scene-enter` is appended
+  // pre-translated so CSS transitions can ease it home. Far ranges
+  // move less than near ranges → parallax depth.
+  //
+  // Transforms are set as inline styles rather than via CSS classes
+  // because SVG <g> ignores `!important` on transform reliably, so
+  // the cleanest precedence is inline-wins.
+  const ENTER_OFFSET = { back: 60, mid: 120, near: 220, figures: 220, ground: 40 };
+  const EXIT_OFFSET  = { back: 90, mid: 170, near: 280, figures: 280, ground: 60 };
+  function offsetCSS(depth, dir, table) {
+    const off = table[depth] || 0;
+    const sign = dir === "right" ? 1 : -1;
+    return depth === "ground"
+      ? `translateY(${sign * off}px)`
+      : `translateX(${sign * off}px)`;
+  }
+
+  function reclassExit(parentId, depth, dir) {
+    const parent = document.getElementById(parentId);
+    if (!parent) return null;
+    // collapse any older exits — they're already animating, we don't
+    // want them stacking on top of each other if the user mashes suns.
+    parent.querySelectorAll(":scope > .scene-exit").forEach(n => n.remove());
+    const current = parent.querySelector(":scope > .scene-enter");
+    if (!current) return null;
+    current.classList.remove("scene-enter", "scene-enter--settled",
+      "scene-enter--depth-back", "scene-enter--depth-mid",
+      "scene-enter--depth-near", "scene-enter--depth-figures",
+      "scene-enter--depth-ground");
+    current.classList.add("scene-exit", `scene-exit--depth-${depth}`);
+    current.style.transform = offsetCSS(depth, dir, EXIT_OFFSET);
+    current.style.opacity = "0";
+    setTimeout(() => { if (current && current.parentNode) current.remove(); }, 1100);
+    return current;
+  }
+  function makeEnter(parentId, depth, dir) {
+    const parent = document.getElementById(parentId);
+    if (!parent) return null;
+    const g = el("g", {
+      class: `scene-enter scene-enter--depth-${depth}`,
+    });
+    g.style.transform = offsetCSS(depth, dir, ENTER_OFFSET);
+    g.style.opacity = "0";
+    parent.appendChild(g);
+    return g;
+  }
+  function settleEnter(g) {
+    // Stale guard — by the time this fires, a later generate() may
+    // have reclassed this wrapper to .scene-exit (it is sliding away).
+    // We don't want to yank it back to (0,0) in that case.
+    if (!g || !g.classList.contains("scene-enter")) return;
+    g.style.transform = "translate(0,0)";
+    g.style.opacity = "1";
+    g.classList.add("scene-enter--settled");
+  }
+
   function rayToNun(parent, from, to, w0, w1) {
     const start = { x: from.x, y: from.y };
     const c1    = { x: jitter(from.x + (to.x - from.x) * 0.25, 40),
@@ -238,13 +317,22 @@
     const c2    = { x: jitter(to.x + Math.sign(from.x - to.x) * 25, 25),
                     y: jitter(to.y - 70, 25) };
     const end   = to;
-    parent.appendChild(el("path", {
+    const path = el("path", {
+      class: "ray-emit",
       d: taperedPath(start, c1, c2, end, w0 || 5.5, w1 || 1.0),
       fill: PALETTE.sodium,
-    }));
+    });
+    // Anchor scale at the sun → on grow, the ray extrudes toward the
+    // nun; on recede (sun click), it collapses back into the sun.
+    path.style.transformBox = "view-box";
+    path.style.transformOrigin = `${from.x}px ${from.y}px`;
+    path.style.transform = "scale(0.001)";
+    path.style.opacity = "0";
+    parent.appendChild(path);
   }
 
-  function generate() {
+  function generate(runOpts) {
+    runOpts = runOpts || {};
     readPalette();
 
     const svgEl = document.getElementById("range");
@@ -261,14 +349,43 @@
     }
 
     refreshSkyGradient();
-    ["g-back", "g-mid", "g-lash-behind", "g-near", "g-lash-front", "g-ground"].forEach(clearGroup);
 
-    const back   = document.getElementById("g-back");
-    const mid    = document.getElementById("g-mid");
-    const lashB  = document.getElementById("g-lash-behind");
-    const near   = document.getElementById("g-near");
-    const lashF  = document.getElementById("g-lash-front");
-    const ground = document.getElementById("g-ground");
+    // Decide slide directions. We want mountains to "slide past each
+    // other": alternate by depth, with a random global flip so it never
+    // feels mechanical. If a sun was clicked we bias the cross so the
+    // motion radiates away from the click point (left-clicked sun =
+    // far layers slide right, near layers slide left → distance opens
+    // around the impact).
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const flip = (typeof runOpts.fromX === "number")
+      ? (runOpts.fromX < W * 0.5 ? 1 : -1)
+      : (Math.random() < 0.5 ? 1 : -1);
+    const sideOf = (s) => s > 0 ? "right" : "left";
+    const dirs = {
+      back:   sideOf( flip),
+      mid:    sideOf(-flip),
+      lashB:  sideOf( flip),
+      near:   sideOf(-flip),
+      lashF:  sideOf(-flip),
+      ground: sideOf( flip),
+    };
+    // Reclass existing enter wrappers as exits (they slide opposite
+    // to the new enter direction, so the new content visibly passes
+    // through where the old content was).
+    const exitDirOf = (d) => d === "right" ? "left" : "right";
+    reclassExit("g-back",        "back",    exitDirOf(dirs.back));
+    reclassExit("g-mid",         "mid",     exitDirOf(dirs.mid));
+    reclassExit("g-lash-behind", "figures", exitDirOf(dirs.lashB));
+    reclassExit("g-near",        "near",    exitDirOf(dirs.near));
+    reclassExit("g-lash-front",  "figures", exitDirOf(dirs.lashF));
+    reclassExit("g-ground",      "ground",  exitDirOf(dirs.ground));
+
+    const back   = makeEnter("g-back",        "back",    dirs.back);
+    const mid    = makeEnter("g-mid",         "mid",     dirs.mid);
+    const lashB  = makeEnter("g-lash-behind", "figures", dirs.lashB);
+    const near   = makeEnter("g-near",        "near",    dirs.near);
+    const lashF  = makeEnter("g-lash-front",  "figures", dirs.lashF);
+    const ground = makeEnter("g-ground",      "ground",  dirs.ground);
 
     const backCount = Math.max(5, Math.round(W / 220));
     const midCount  = Math.max(4, Math.round(W / 280));
@@ -404,7 +521,8 @@
         const c1y = brazierFocal.y + dy * 0.35 + perpY * fanOffset;
         const c2x = convergence.x;
         const c2y = convergence.y + verticalRunIn;
-        lashF.appendChild(el("path", {
+        const strand = el("path", {
+          class: "ray-emit ray-emit--strand",
           d: `M ${brazierFocal.x} ${brazierFocal.y} `
            + `C ${c1x} ${c1y}, ${c2x} ${c2y}, ${convergence.x} ${convergence.y}`,
           fill: "none",
@@ -412,20 +530,70 @@
           "stroke-width": 1,
           "stroke-linecap": "round",
           "vector-effect": "non-scaling-stroke",
-        }));
+        });
+        strand.style.transformBox = "view-box";
+        strand.style.transformOrigin = `${brazierFocal.x}px ${brazierFocal.y}px`;
+        strand.style.transform = "scale(0.001)";
+        strand.style.opacity = "0";
+        lashF.appendChild(strand);
       }
     }
 
     makeGround(ground);
 
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const revisit = document.documentElement.classList.contains("lash-revisit");
-    if (!reduced && !revisit) {
-      svgEl.style.opacity = "0";
-      requestAnimationFrame(() => {
-        svgEl.style.transition = "opacity 320ms cubic-bezier(0.2, 0.6, 0.2, 1)";
-        svgEl.style.opacity = "1";
+    // kick the enter wrappers into their settled positions on the
+    // next paint — the wrappers were just appended with a CSS-driven
+    // translateX/translateY; adding `--settled` runs the transition.
+    // Two RAFs because some browsers coalesce style flushes inside a
+    // single frame and we want the initial transform to actually be
+    // observed before we flip the class.
+    const enters = [back, mid, lashB, near, lashF, ground].filter(Boolean);
+    // Rays inside this generate's wrappers — we'll bloom them after
+    // the deepest mountain has had a moment to settle, so the lashes
+    // appear to grow out of (the new) suns toward the nun's collector.
+    const rays = [];
+    [lashB, lashF].forEach(w => {
+      if (w) w.querySelectorAll(".ray-emit").forEach(r => rays.push(r));
+    });
+    const bloomRays = () => {
+      rays.forEach(r => {
+        // stale guard — if a later regen has already started, the ray
+        // belongs to an exiting wrapper; leave it collapsed at its sun.
+        const wrapper = r.parentNode;
+        if (!wrapper || !wrapper.classList.contains("scene-enter")) return;
+        // Clear any inline transition left over from a recede so the
+        // bloom uses the slower, more elegant CSS default (560ms).
+        r.style.transition = "";
+        r.style.transform = "scale(1)";
+        r.style.opacity = "1";
       });
+    };
+    if (reduced) {
+      enters.forEach(e => {
+        e.style.transition = "none";
+        settleEnter(e);
+      });
+      rays.forEach(r => {
+        r.style.transition = "none";
+        r.style.transform = "scale(1)";
+        r.style.opacity = "1";
+      });
+    } else {
+      // Two RAFs because some browsers coalesce style flushes within a
+      // single frame and we want the initial transform to actually be
+      // observed before we change it. Also force a reflow to be safe.
+      requestAnimationFrame(() => {
+        void svgEl.getBoundingClientRect();
+        requestAnimationFrame(() => {
+          enters.forEach(settleEnter);
+        });
+      });
+      // ── BEAT 2 / regen tail ────────────────────────────────
+      // The slowest layer (figures) is depth-260ms-delay + 760ms
+      // transit = ~1020ms. Hold the bloom until that has fully
+      // landed so beat 2 reads as "mountains finish, THEN rays
+      // grow", without overlap.
+      setTimeout(bloomRays, 1100);
     }
   }
 

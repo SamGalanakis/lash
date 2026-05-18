@@ -62,6 +62,7 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
                 last_prompt_usage: config.last_prompt_usage,
             }),
             sync_execution_surface: true,
+            turn_limit_final_message: Arc::new(crate::protocol::turn_limit_final_message),
         },
         tool_specs: Arc::new(Vec::new()),
         tool_names,

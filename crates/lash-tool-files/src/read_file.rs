@@ -157,14 +157,14 @@ fn execute_read_file_sync(
 
     // Directory — still works but nudges toward ls
     if path.is_dir() {
-        let mut result = list_directory(path, offset, limit);
-        if result.is_success()
+        let mut output = list_directory(path, offset, limit).into_output();
+        if output.is_success()
             && let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::String(s)) =
-                &mut result.output.outcome
+                &mut output.outcome
         {
             s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
         }
-        return result;
+        return ToolResult::from_output(output);
     }
 
     // Image files — return as visual attachment
@@ -561,8 +561,8 @@ mod tests {
             &json!({"path": path.to_str().unwrap()}),
         )
         .await;
-        assert!(result.output.is_success());
-        let value = result.output.value_for_projection();
+        assert!(result.is_success());
+        let value = result.value_for_projection();
         let text = value.as_str().unwrap();
         assert!(text.contains("1: line1"));
         assert!(text.contains("2: line2"));
@@ -581,8 +581,8 @@ mod tests {
             &json!({"path": path.to_str().unwrap(), "offset": 2, "limit": 2}),
         )
         .await;
-        assert!(result.output.is_success());
-        let value = result.output.value_for_projection();
+        assert!(result.is_success());
+        let value = result.value_for_projection();
         let text = value.as_str().unwrap();
         assert!(text.contains("2: line2"));
         assert!(text.contains("3: line3"));
@@ -607,8 +607,8 @@ mod tests {
             &json!({"path": path.to_str().unwrap(), "limit": 200}),
         )
         .await;
-        assert!(result.output.is_success());
-        let value = result.output.value_for_projection();
+        assert!(result.is_success());
+        let value = result.value_for_projection();
         let text = value.as_str().unwrap();
         assert!(text.contains("output capped at 50 KB"));
         assert!(text.contains("Use offset="));
@@ -622,7 +622,7 @@ mod tests {
             &json!({"path": "/nonexistent/path/to/file.txt"}),
         )
         .await;
-        assert!(!result.output.is_success());
+        assert!(!result.is_success());
     }
 
     // ── PNG dimensions ──
@@ -752,7 +752,7 @@ mod tests {
             .await;
 
         let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::Attachment(reference)) =
-            result.output.outcome
+            result.into_output().outcome
         else {
             panic!("expected attachment result");
         };

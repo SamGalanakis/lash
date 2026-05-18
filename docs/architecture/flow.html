@@ -55,7 +55,7 @@ sequenceDiagram
     else ToolCalls
       Runtime->>EffectHost: invoke(RuntimeEffect::ToolBatch)
       EffectHost->>Tools: native/mode/provider tools
-      Tools-->>EffectHost: ToolResult + ToolImage[]
+      Tools-->>EffectHost: ToolResult converted to ToolCallOutput + ModelToolReturn
       EffectHost-->>Runtime: RuntimeEffectOutcome::ToolResults
       Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
       Runtime->>Machine: Response::ToolResults

@@ -318,7 +318,9 @@ pub enum DriverAction<M: ModeProtocol = UnitModeProtocol> {
         on_empty: CheckpointResumeAction,
     },
     AdvanceModeIteration,
-    ScheduleTurnLimitFinal,
+    ScheduleTurnLimitFinal {
+        message: Message,
+    },
     Finish(TurnOutcome),
 }
 
@@ -364,6 +366,14 @@ impl<'a, M: ModeProtocol> DriverContextView<'a, M> {
 
     pub fn should_force_exit_after_grace_turn(&self) -> bool {
         self.termination.should_force_exit_after_grace_turn()
+    }
+
+    pub fn turn_limit_final_to_schedule(&self) -> Option<usize> {
+        self.termination.turn_limit_final_to_schedule(
+            self.mode_iteration,
+            self.mode_run_offset,
+            self.config.max_turns,
+        )
     }
 
     pub fn messages(&self) -> &MessageSequence {
@@ -465,6 +475,7 @@ pub struct TurnMachineConfig<M: ModeProtocol = UnitModeProtocol> {
     pub session_id: String,
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
+    pub turn_limit_final_message: crate::TurnLimitFinalMessage,
 }
 
 // ─── Internal state ───
@@ -1036,6 +1047,34 @@ impl<M: ModeProtocol> TurnMachine<M> {
         });
     }
 
+    fn schedule_turn_limit_final(&mut self, message: Message) -> bool {
+        let Some(_max_turns) = self.termination.turn_limit_final_to_schedule(
+            self.mode_iteration,
+            self.mode_run_offset,
+            self.config.max_turns,
+        ) else {
+            return false;
+        };
+        self.termination.mark_turn_limit_final_scheduled();
+        self.messages.push(message);
+        true
+    }
+
+    fn schedule_configured_turn_limit_final(&mut self) -> bool {
+        let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
+            self.mode_iteration,
+            self.mode_run_offset,
+            self.config.max_turns,
+        ) else {
+            return false;
+        };
+        let message_id = self.next_synthetic_message_id("turn_limit");
+        let message = (self.config.turn_limit_final_message)(message_id, max_turns);
+        self.termination.mark_turn_limit_final_scheduled();
+        self.messages.push(message);
+        true
+    }
+
     fn append_event(&mut self, event: SessionEventRecord<M::Event>) {
         match event {
             SessionEventRecord::Conversation(record) => {
@@ -1084,18 +1123,8 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     self.synced_mode_iteration = None;
                     progress_dirty = true;
                 }
-                DriverAction::ScheduleTurnLimitFinal => {
-                    if let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
-                        self.mode_iteration,
-                        self.mode_run_offset,
-                        self.config.max_turns,
-                    ) {
-                        let message_id = self.next_synthetic_message_id("turn_limit");
-                        self.termination.schedule_turn_limit_final(
-                            max_turns,
-                            self.messages.make_mut(),
-                            message_id,
-                        );
+                DriverAction::ScheduleTurnLimitFinal { message } => {
+                    if self.schedule_turn_limit_final(message) {
                         progress_dirty = true;
                     }
                 }
@@ -1267,18 +1296,7 @@ impl<M: ModeProtocol> TurnMachine<M> {
                     self.finish(TurnOutcome::Stopped(TurnStop::MaxTurns));
                     return;
                 }
-                if let Some(max_turns) = self.termination.turn_limit_final_to_schedule(
-                    self.mode_iteration,
-                    self.mode_run_offset,
-                    self.config.max_turns,
-                ) {
-                    let message_id = self.next_synthetic_message_id("turn_limit");
-                    self.termination.schedule_turn_limit_final(
-                        max_turns,
-                        self.messages.make_mut(),
-                        message_id,
-                    );
-                }
+                self.schedule_configured_turn_limit_final();
             }
             self.state = MachineState::PrepareIteration;
             self.emit_progress();

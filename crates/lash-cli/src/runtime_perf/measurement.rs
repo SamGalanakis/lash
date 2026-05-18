@@ -654,6 +654,27 @@ fn checkpoint_config(
         session_id: "runtime-perf-turn-checkpoint".to_string(),
         emit_llm_trace: false,
         termination: ModeTurnOptions::default(),
+        turn_limit_final_message: Arc::new(runtime_perf_turn_limit_final_message),
+    }
+}
+
+fn runtime_perf_turn_limit_final_message(message_id: String, max_turns: usize) -> Message {
+    Message {
+        id: message_id.clone(),
+        role: MessageRole::System,
+        parts: shared_parts(vec![Part {
+            id: format!("{message_id}.p0"),
+            kind: PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before runtime perf completion."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
     }
 }
 

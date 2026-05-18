@@ -200,7 +200,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn items(result: &ToolResult) -> Vec<serde_json::Value> {
-        let value = result.output.value_for_projection();
+        let value = result.value_for_projection();
         value
             .get("items")
             .and_then(|v| v.as_array())
@@ -217,7 +217,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
             .iter()
@@ -234,7 +234,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         assert!(items(&result).is_empty());
     }
 
@@ -245,7 +245,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": path.to_str().unwrap()})).await;
-        assert!(!result.output.is_success());
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -259,7 +259,7 @@ mod tests {
             &json!({"path": dir.path().to_str().unwrap(), "depth": 1}),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let arr = items(&result);
         let paths: Vec<&str> = arr
             .iter()
@@ -282,9 +282,9 @@ mod tests {
             &json!({"path": dir.path().to_str().unwrap(), "limit": 2}),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         assert_eq!(items(&result).len(), 2);
-        let value = result.output.value_for_projection();
+        let value = result.value_for_projection();
         let truncated = value.get("truncated").and_then(|v| v.as_object()).unwrap();
         assert_eq!(truncated.get("shown").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(truncated.get("total").and_then(|v| v.as_u64()), Some(3));
@@ -301,7 +301,7 @@ mod tests {
             &json!({"path": dir.path().to_str().unwrap(), "with_lines": true}),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let arr = items(&result);
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("lines").and_then(|v| v.as_u64()), Some(2));
@@ -314,7 +314,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -330,7 +330,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -357,7 +357,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -383,7 +383,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -402,7 +402,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -419,7 +419,7 @@ mod tests {
         let result =
             lash_core::testing::run_tool(&Ls, "ls", &json!({"path": dir.path().to_str().unwrap()}))
                 .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))
@@ -441,7 +441,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.output.is_success());
+        assert!(result.is_success());
         let paths: Vec<String> = items(&result)
             .iter()
             .filter_map(|v| v.get("path").and_then(|x| x.as_str()).map(str::to_string))

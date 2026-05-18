@@ -1,8 +1,13 @@
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use crate::{ExecutionMode, PromptContext, PromptContribution, PromptTemplate};
+use crate::{ExecutionMode, PromptContribution, PromptTemplate};
 
+/// Process-local cache identity for prompt inputs.
+///
+/// This intentionally uses Rust's default hasher because it only keys in-memory
+/// prompt caches inside one process. Do not persist or compare it across
+/// processes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PromptFingerprint(u64);
 
@@ -68,6 +73,22 @@ pub struct PromptBuildInput {
     pub tool_names_fingerprint: PromptFingerprint,
     pub omitted_tool_count: usize,
     pub contributions: PromptContributionSet,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PromptContext {
+    pub mode: ExecutionMode,
+    #[serde(default)]
+    pub execution_prompt: Arc<str>,
+    pub tool_names: Arc<Vec<String>>,
+    pub omitted_tool_count: usize,
+    pub contributions: Arc<Vec<PromptContribution>>,
+}
+
+impl PromptContext {
+    pub fn has_tool(&self, tool_name: &str) -> bool {
+        self.tool_names.iter().any(|name| name == tool_name)
+    }
 }
 
 #[derive(Clone, Debug)]

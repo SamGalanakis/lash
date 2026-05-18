@@ -21,6 +21,7 @@ pub mod tool_dispatch;
 mod tool_executor;
 mod tool_provider;
 pub mod tool_registry;
+mod tool_result;
 mod tool_schema;
 mod trace;
 
@@ -56,14 +57,14 @@ pub use lash_sansio::{
     ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
     ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
     ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolFailure, ToolFailureClass, ToolFailureSource, ToolManifest, ToolOutputContract, ToolResult,
+    ToolFailure, ToolFailureClass, ToolFailureSource, ToolManifest, ToolOutputContract,
     ToolRetryDisposition, ToolRetryPolicy, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
-    ToolSurfaceOverride, ToolValue, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
-    build_prompt, build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
-    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
-    turn_limit_exhausted_message,
+    ToolSurfaceOverride, ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
+    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, prompt_template_fingerprint,
+    prompt_text_fingerprint, prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers,
+    shared_parts,
 };
 pub use standard_context_approach::{
     ObservationalMemoryConfig, RollingHistoryConfig, StandardContextApproach,
@@ -72,6 +73,7 @@ pub use standard_context_approach::{
 pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
+pub use tool_result::ToolResult;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModeTurnOptions {
     pub mode_id: ExecutionMode,
