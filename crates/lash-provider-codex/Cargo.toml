@@ -14,10 +14,10 @@ keywords = ["lash", "agent", "llm", "openai", "codex"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.2" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.2" }
-lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.2" }
-lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.2" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.3" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.3" }
+lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.3" }
+lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.3" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }

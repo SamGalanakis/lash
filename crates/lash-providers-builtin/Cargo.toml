@@ -14,7 +14,7 @@ keywords = ["lash", "agent", "llm", "openai", "anthropic"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-provider-anthropic = { path = "../lash-provider-anthropic", version = "=0.1.0-alpha.2" }
-lash-provider-codex = { path = "../lash-provider-codex", version = "=0.1.0-alpha.2" }
-lash-provider-google = { path = "../lash-provider-google", version = "=0.1.0-alpha.2" }
-lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.2" }
+lash-provider-anthropic = { path = "../lash-provider-anthropic", version = "=0.1.0-alpha.3" }
+lash-provider-codex = { path = "../lash-provider-codex", version = "=0.1.0-alpha.3" }
+lash-provider-google = { path = "../lash-provider-google", version = "=0.1.0-alpha.3" }
+lash-provider-openai = { path = "../lash-provider-openai", version = "=0.1.0-alpha.3" }
