@@ -108,27 +108,20 @@ jobs:
           copy_branch_docs main
           copy_branch_docs staging
 
+          # Root redirects to /main/ — channel switching now lives in
+          # the docs themselves (top-right dropdown), not on a chooser
+          # page. Anyone hitting bare lash.run lands on main; the
+          # dropdown takes them to staging if they want it.
           cat > "${site_dir}/index.html" <<'HTML'
           <!doctype html>
           <html lang="en">
           <head>
             <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>lash Docs</title>
-            <style>
-              body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0e0d0b; color: #e8e4d0; font: 16px/1.6 monospace; }
-              main { width: min(680px, calc(100% - 32px)); border: 1px solid rgba(232,228,208,.16); padding: 28px; background: rgba(20,20,18,.82); }
-              h1 { margin: 0 0 16px; color: #e8a33c; }
-              a { color: #e8e4d0; display: inline-block; margin-right: 16px; }
-            </style>
+            <meta http-equiv="refresh" content="0; url=./main/">
+            <link rel="canonical" href="./main/">
+            <title>lash docs</title>
           </head>
-          <body>
-            <main>
-              <h1>lash docs</h1>
-              <p>Branch-published documentation.</p>
-              <p><a href="./main/">main</a><a href="./staging/">staging</a></p>
-            </main>
-          </body>
+          <body><a href="./main/">lash docs · main</a></body>
           </html>
           HTML
 
