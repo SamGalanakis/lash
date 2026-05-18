@@ -1478,6 +1478,96 @@ body.docs-page .cover__top { display: none; }
 .sun:hover .sun__corona { opacity: 0.40; }
 .sun:hover .sun__disc   { opacity: 1.00; }
 
+/* sun click → ignition burst. Scale-pulse the whole sun while
+   flaring its glow/corona, so the inhale beat reads as a single
+   bright pop that ends BEFORE the mountains begin to slide. */
+.sun--burst {
+  animation: sun-burst 300ms cubic-bezier(0.18, 0.7, 0.22, 1.05);
+}
+.sun--burst .sun__glow   { animation: sun-burst-glow   300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.sun--burst .sun__corona { animation: sun-burst-corona 300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.sun--burst .sun__disc   { animation: sun-burst-disc   300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+@keyframes sun-burst {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.6); }
+  100% { transform: scale(1); }
+}
+@keyframes sun-burst-glow   { 0%, 100% { opacity: 0.10; } 40% { opacity: 0.85; } }
+@keyframes sun-burst-corona { 0%, 100% { opacity: 0.22; } 40% { opacity: 0.95; } }
+@keyframes sun-burst-disc {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); opacity: 0.92; }
+  40%      { filter: drop-shadow(0 0 20px var(--sodium)); opacity: 1; }
+}
+
+/* ── parallax swap — mountain ranges slide past each other on
+   regenerate. Each layer group has a single .scene-enter wrapper
+   that starts pre-translated and eases to (0,0); on regen it is
+   reclassed to .scene-exit and translates away in the opposite
+   direction. Far layers move less than near layers → depth. */
+.scene-enter,
+.scene-exit {
+  /* keep transform fast on the compositor */
+  will-change: transform, opacity;
+  /* honor SVG transform box so % units / origin behave consistently */
+  transform-box: fill-box;
+  transform-origin: center;
+}
+/* Transforms themselves are set as inline styles by scene.js (SVG
+   <g> ignores !important on transform unreliably; inline-wins is
+   simpler). CSS owns transition timing, easing, and per-depth
+   staggering only. */
+.scene-enter {
+  transition:
+    transform 760ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity  520ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+/* Staggered arrival — deeper layers land first, near + figures
+   chase, so the eye reads "far set the stage, near steps onto it". */
+.scene-enter--depth-back    { transition-delay: 0ms; }
+.scene-enter--depth-ground  { transition-delay: 40ms; }
+.scene-enter--depth-mid     { transition-delay: 90ms; }
+.scene-enter--depth-near    { transition-delay: 170ms; }
+.scene-enter--depth-figures { transition-delay: 260ms; }
+
+.scene-exit {
+  transition:
+    transform 620ms cubic-bezier(0.42, 0, 0.30, 1),
+    opacity  520ms cubic-bezier(0.42, 0, 0.30, 1);
+}
+/* Far layers exit shorter than near layers — same parallax in
+   reverse, so old-and-new read as one continuous slide. */
+.scene-exit--depth-back    { transition-delay: 60ms; }
+.scene-exit--depth-ground  { transition-delay: 20ms; }
+.scene-exit--depth-mid     { transition-delay: 30ms; }
+.scene-exit--depth-near    { transition-delay: 0ms; }
+.scene-exit--depth-figures { transition-delay: 0ms; }
+
+/* Lash rays — anchored at their source sun via inline transform-
+   origin (set in JS). They grow from scale(0) at the sun toward the
+   nun's collector when the scene settles, and recede back to the
+   sun when a sun is clicked. ray-emit--strand is the brazier output
+   strand, which grows from the brazier instead. */
+.ray-emit {
+  transition:
+    transform 560ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   360ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+.ray-emit--strand {
+  transition:
+    transform 680ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   420ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-enter,
+  .scene-exit,
+  .ray-emit { transition: opacity 160ms linear !important; }
+  .sun--burst { animation: none !important; }
+  .sun--burst .sun__glow,
+  .sun--burst .sun__corona,
+  .sun--burst .sun__disc { animation: none !important; }
+}
+
 /* knot bead — gentle pulse on hover when clickable (links nearby) */
 .knot__bead {
   transition: transform 220ms cubic-bezier(0.2, 0.6, 0.2, 1),

@@ -234,7 +234,7 @@ bottom-aligned.
   <small>Pure protocol</small>
   <h3>lash-sansio</h3>
   <p>Owns <code>TurnMachine</code>, <code>Effect</code>, <code>Response</code>.</p>
-  <code class="path">crates/lash-sansio/src/sansio.rs</code>
+  <code class="path">crates/lash-sansio/src/sansio/mod.rs</code>
 </article>
 ```
 

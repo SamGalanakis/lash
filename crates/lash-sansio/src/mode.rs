@@ -1,14 +1,13 @@
 //! Mode-agnostic types and helpers used by protocol drivers. The
 //! concrete mode drivers and their prompts live in
-//! the mode crates crates; this module only
+//! the mode crates; this module only
 //! exposes the shared surface:
 //!
 //! - [`ModeConfig`], [`ModePreamble`], [`ModeBuildInput`] — the
 //!   per-turn configuration driver-plugins populate.
 //! - A small helper layer (`normalized_response_parts`, `reasoning_part`,
-//!   `append_assistant_text_part`, `turn_limit_exhausted_message`) that
-//!   mode drivers reuse for building assistant
-//!   messages.
+//!   `append_assistant_text_part`) that mode drivers reuse for building
+//!   assistant messages.
 
 use std::sync::Arc;
 
@@ -17,22 +16,31 @@ use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoni
 use crate::sansio::{
     ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
 };
-use crate::session_model::{Message, MessageRole, Part, PartKind, PruneState, shared_parts};
+use crate::session_model::{Part, PartKind, PruneState};
 use crate::{ExecutionMode, PromptContribution, ToolSurface};
+
+pub type TurnLimitFinalMessage =
+    Arc<dyn Fn(String, usize) -> crate::Message + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub struct ModeConfig<M: ModeProtocol = UnitModeProtocol> {
     pub protocol: Arc<dyn ProtocolDriverHandle<M>>,
     pub projector: Arc<dyn ContextProjector<M>>,
     pub sync_execution_surface: bool,
+    pub turn_limit_final_message: TurnLimitFinalMessage,
 }
 
 impl<M: ModeProtocol> ModeConfig<M> {
-    pub fn chat(protocol: Arc<dyn ProtocolDriverHandle<M>>, sync_execution_surface: bool) -> Self {
+    pub fn chat(
+        protocol: Arc<dyn ProtocolDriverHandle<M>>,
+        sync_execution_surface: bool,
+        turn_limit_final_message: TurnLimitFinalMessage,
+    ) -> Self {
         Self {
             protocol,
             projector: Arc::new(ChatContextProjector),
             sync_execution_surface,
+            turn_limit_final_message,
         }
     }
 }
@@ -110,27 +118,4 @@ pub fn append_assistant_text_part(out: &mut String, next: &str) {
     }
 
     out.push_str(next);
-}
-
-/// System-level "turn limit reached" message that both protocol
-/// drivers append when their mode_iteration count exceeds `max_turns`.
-pub fn turn_limit_exhausted_message(message_id: impl Into<String>, max_turns: usize) -> Message {
-    let id = message_id.into();
-    Message {
-        id: id.clone(),
-        role: MessageRole::System,
-        parts: shared_parts(vec![Part {
-            id: format!("{id}.p0"),
-            kind: PartKind::Error,
-            content: format!("Turn limit reached ({max_turns}) before a final assistant response."),
-            attachment: None,
-            tool_call_id: None,
-            tool_name: None,
-            tool_replay: None,
-            prune_state: PruneState::Intact,
-            reasoning_meta: None,
-            response_meta: None,
-        }]),
-        origin: None,
-    }
 }

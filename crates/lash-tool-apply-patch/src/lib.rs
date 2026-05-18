@@ -993,7 +993,7 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch",
         );
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hello\n"
@@ -1008,7 +1008,7 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n-    old();\n+    new();\n*** End Patch",
         );
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
             "fn main() {\n    new();\n}\n"
@@ -1023,7 +1023,7 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
         );
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(!dir.path().join("old.txt").exists());
     }
 
@@ -1035,7 +1035,7 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n line\n*** End Patch",
         );
-        assert!(result.success);
+        assert!(result.is_success());
         assert!(!dir.path().join("old.txt").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
@@ -1052,16 +1052,17 @@ mod tests {
             "*** Begin Patch\n*** Update File: base.txt\n@@\n-old\n+new\n*** End Patch",
         );
 
-        assert!(result.success);
-        let diff = result.result["diff"].as_str().expect("diff");
+        assert!(result.is_success());
+        let result_value = result.value_for_projection();
+        let diff = result_value["diff"].as_str().expect("diff");
         assert!(diff.contains("--- a/base.txt"));
         assert!(diff.contains("+++ b/base.txt"));
         assert!(!diff.contains("/tmp/"));
-        assert_eq!(result.result["files"][0]["path"], "base.txt");
-        assert_eq!(result.result["files"][0]["added"], 1);
-        assert_eq!(result.result["files"][0]["removed"], 1);
-        assert_eq!(result.result["added"], 1);
-        assert_eq!(result.result["removed"], 1);
+        assert_eq!(result_value["files"][0]["path"], "base.txt");
+        assert_eq!(result_value["files"][0]["added"], 1);
+        assert_eq!(result_value["files"][0]["removed"], 1);
+        assert_eq!(result_value["added"], 1);
+        assert_eq!(result_value["removed"], 1);
     }
 
     #[test]
@@ -1071,12 +1072,12 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Add File: hello.txt\nhello\n*** End Patch",
         );
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("must start with '+'"))
+                .value_for_projection()
+                .to_string()
+                .contains("must start with '+'")
         );
     }
 
@@ -1087,12 +1088,15 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Add File: empty.txt\n*** End Patch",
         );
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("empty.txt")).unwrap(),
             ""
         );
-        assert_eq!(result.result["files"][0]["path"], "empty.txt");
+        assert_eq!(
+            result.value_for_projection()["files"][0]["path"],
+            "empty.txt"
+        );
     }
 
     #[test]
@@ -1105,7 +1109,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: module.py\n import alpha\n+import beta\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("module.py")).unwrap(),
             "import alpha\nimport beta\n"
@@ -1122,7 +1126,7 @@ mod tests {
             " *** Begin Patch\n  *** Update File: pad.txt\n@@\n-one\n+two\n *** End Patch ",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("pad.txt")).unwrap(),
             "two\n"
@@ -1139,7 +1143,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: notes.txt\n@@\n+gamma\n+delta\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
             "alpha\nbeta\ngamma\ndelta\n"
@@ -1156,7 +1160,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: lines.txt\n@@\n line1\n-line2\n line3\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("lines.txt")).unwrap(),
             "line1\nline3\nline4\n"
@@ -1173,7 +1177,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: tail.txt\n@@\n first\n-second\n+second updated\n*** End of File\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("tail.txt")).unwrap(),
             "first\nsecond updated\n"
@@ -1190,7 +1194,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: plain.txt\n@@\n-just one line\n+first row\n+second row\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("plain.txt")).unwrap(),
             "first row\nsecond row\n"
@@ -1202,8 +1206,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = run_patch(&dir, "*** Begin Patch\n*** End Patch");
 
-        assert!(!result.success);
-        assert_eq!(result.result.as_str(), Some("No files were modified."));
+        assert!(!result.is_success());
+        assert!(
+            result
+                .value_for_projection()
+                .to_string()
+                .contains("No files were modified.")
+        );
     }
 
     #[test]
@@ -1214,12 +1223,12 @@ mod tests {
             "*** Begin Patch\n*** Rename File: nope.txt\n*** End Patch",
         );
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("is not a valid hunk header"))
+                .value_for_projection()
+                .to_string()
+                .contains("is not a valid hunk header")
         );
     }
 
@@ -1231,7 +1240,7 @@ mod tests {
             "<<EOF\n*** Begin Patch\n*** Add File: tiny.txt\n+ok\n*** End Patch\nEOF",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("tiny.txt")).unwrap(),
             "ok\n"
@@ -1247,9 +1256,12 @@ mod tests {
             abs.display()
         );
         let result = run_patch(&dir, input);
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(std::fs::read_to_string(&abs).unwrap(), "hello\n");
-        assert_eq!(result.result["files"][0]["path"], "hello.txt");
+        assert_eq!(
+            result.value_for_projection()["files"][0]["path"],
+            "hello.txt"
+        );
     }
 
     #[test]
@@ -1263,12 +1275,12 @@ mod tests {
         );
         let result = run_patch(&dir, input);
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(&abs).unwrap(),
             "fn main() {\n    new();\n}\n"
         );
-        assert_eq!(result.result["files"][0]["path"], "main.rs");
+        assert_eq!(result.value_for_projection()["files"][0]["path"], "main.rs");
     }
 
     #[test]
@@ -1282,9 +1294,9 @@ mod tests {
         );
         let result = run_patch(&dir, input);
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert!(!abs.exists());
-        assert_eq!(result.result["files"][0]["path"], "old.txt");
+        assert_eq!(result.value_for_projection()["files"][0]["path"], "old.txt");
     }
 
     #[test]
@@ -1300,10 +1312,13 @@ mod tests {
         );
         let result = run_patch(&dir, input);
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert!(!source.exists());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "line\n");
-        assert_eq!(result.result["files"][0]["path"], "nested/new.txt");
+        assert_eq!(
+            result.value_for_projection()["files"][0]["path"],
+            "nested/new.txt"
+        );
     }
 
     #[test]
@@ -1313,7 +1328,7 @@ mod tests {
             &dir,
             "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\nPATCH",
         );
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hello\n"
@@ -1328,12 +1343,12 @@ mod tests {
             &dir,
             "*** Begin Patch\n*** Update File: main.rs\n@@ -1,3 +1,3 @@\n-    old();\n+    new();\n*** End Patch",
         );
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("Failed to find context '-1,3 +1,3 @@'"))
+                .value_for_projection()
+                .to_string()
+                .contains("Failed to find context '-1,3 +1,3 @@'")
         );
     }
 
@@ -1350,7 +1365,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: main.rs\n@@ fn main() {\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
             "fn main() {\n    println!(\"new\");\n}\n"
@@ -1370,7 +1385,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: hello.txt\n@@ \n Hello from apply_patch!\n-Line two.\n+Line two updated by patch.\n+Line three added.\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "Hello from apply_patch!\nLine two updated by patch.\nLine three added.\n"
@@ -1391,7 +1406,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: unicode.txt\n@@\n-note - uses an en dash - and a nonbreaking hyphen in top-level text\n+normalized replacement\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("unicode.txt")).unwrap(),
             "normalized replacement\n"
@@ -1408,7 +1423,7 @@ mod tests {
             "*** Begin Patch\n*** Add File: dupe.txt\n+replacement\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dupe.txt")).unwrap(),
             "replacement\n"
@@ -1425,13 +1440,13 @@ mod tests {
             "*** Begin Patch\n*** Delete File: folder\n*** End Patch",
         );
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(dir.path().join("folder").is_dir());
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("Failed to delete"))
+                .value_for_projection()
+                .to_string()
+                .contains("Failed to delete")
         );
     }
 
@@ -1444,12 +1459,12 @@ mod tests {
             "*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch",
         );
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("Failed to delete"))
+                .value_for_projection()
+                .to_string()
+                .contains("Failed to delete")
         );
     }
 
@@ -1469,7 +1484,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: old.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert!(!dir.path().join("old.txt").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("renamed").join("dir").join("name.txt"))
@@ -1488,7 +1503,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: chain.txt\n@@\n-old\n+mid\n*** Update File: chain.txt\n@@\n-mid\n+new\n*** End Patch",
         );
 
-        assert!(result.success, "{}", result.result);
+        assert!(result.is_success(), "{}", result.value_for_projection());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("chain.txt")).unwrap(),
             "new\n"
@@ -1504,16 +1519,16 @@ mod tests {
             "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch",
         );
 
-        assert!(!result.success);
+        assert!(!result.is_success());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
             "hello\n"
         );
         assert!(
             result
-                .result
-                .as_str()
-                .is_some_and(|value| value.contains("Failed to read file to update"))
+                .value_for_projection()
+                .to_string()
+                .contains("Failed to read file to update")
         );
     }
 }

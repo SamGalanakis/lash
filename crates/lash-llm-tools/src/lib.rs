@@ -650,6 +650,9 @@ mod tests {
             .await;
 
         assert!(!result.is_success());
-        assert_eq!(result.result, json!("missing required evidence"));
+        assert_eq!(
+            result.value_for_projection(),
+            json!("missing required evidence")
+        );
     }
 }

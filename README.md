@@ -40,7 +40,7 @@ JSONL by default with a self-contained HTML viewer; optional OpenTelemetry expor
 
 ## Workspace layout
 
-- `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoint / restore.
+- `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output.
 - `lash-core` — async runtime internals, plugin host, providers, persistence, session graph, child-session orchestration, built-in tools.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
 - `lash-mode-standard` / `lash-mode-rlm` — execution-mode plugins.

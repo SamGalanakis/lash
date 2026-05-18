@@ -548,7 +548,11 @@ impl ModeProtocolDriverPlugin for EffectHostTestProtocolDriver {
 
     fn build_preamble(&self, input: crate::ModeBuildInput) -> crate::ModePreamble {
         crate::ModePreamble {
-            config: crate::ModeConfig::chat(Arc::new(EffectHostTestDriver), true),
+            config: crate::ModeConfig::chat(
+                Arc::new(EffectHostTestDriver),
+                true,
+                Arc::new(effect_host_turn_limit_final_message),
+            ),
             tool_specs: input.tool_surface.model_tool_specs(),
             tool_names: input.tool_surface.tool_names(),
             tool_names_fingerprint: input.tool_surface.tool_names_fingerprint(),
@@ -556,6 +560,26 @@ impl ModeProtocolDriverPlugin for EffectHostTestProtocolDriver {
             execution_prompt: Arc::from(""),
             prompt_contributions: input.extra_prompt_contributions,
         }
+    }
+}
+
+fn effect_host_turn_limit_final_message(message_id: String, max_turns: usize) -> crate::Message {
+    crate::Message {
+        id: message_id.clone(),
+        role: crate::MessageRole::System,
+        parts: crate::shared_parts(vec![crate::Part {
+            id: format!("{message_id}.p0"),
+            kind: crate::PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before a final test response."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: crate::PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
     }
 }
 

@@ -131,7 +131,7 @@ pub enum PluginDirective {
 impl PluginDirective {
     pub fn short_circuit(result: ToolResult) -> Self {
         Self::ShortCircuitTool {
-            output: *result.output,
+            output: result.into_output(),
         }
     }
 

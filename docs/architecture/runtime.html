@@ -115,7 +115,7 @@ flowchart TD
             <div class="diagram-title">Tool result projection hooks</div>
             <div class="mermaid">
 flowchart LR
-  Tools["Tool dispatch ToolResult"] --> BeforeState["BeforeState projector"]
+  Tools["Tool dispatch ToolCallOutput"] --> BeforeState["BeforeState projector"]
   BeforeState --> Graph["SessionGraph storage"]
   Tools --> BeforeModel["BeforeModel projector"]
   BeforeModel --> Provider["next LlmRequest"]

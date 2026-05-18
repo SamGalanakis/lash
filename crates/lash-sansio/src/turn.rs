@@ -44,6 +44,7 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             session_id: input.session_id,
             emit_llm_trace: input.emit_llm_trace,
             termination: input.termination,
+            turn_limit_final_message: input.mode_preamble.config.turn_limit_final_message.clone(),
         },
         input.messages,
         input.events,
@@ -133,7 +134,11 @@ mod tests {
             ExecutionMode::standard(),
         ));
         let mode_preamble = Arc::new(ModePreamble {
-            config: ModeConfig::chat(Arc::new(NoopDriver), false),
+            config: ModeConfig::chat(
+                Arc::new(NoopDriver),
+                false,
+                Arc::new(test_turn_limit_final_message),
+            ),
             tool_specs: tool_surface.model_tool_specs(),
             tool_names: tool_surface.tool_names(),
             tool_names_fingerprint: tool_surface.tool_names_fingerprint(),
@@ -180,5 +185,25 @@ mod tests {
                 .contains("Be precise.")
         );
         assert_eq!(prepared.mode_preamble.tool_specs.len(), 1);
+    }
+
+    fn test_turn_limit_final_message(message_id: String, max_turns: usize) -> crate::Message {
+        crate::Message {
+            id: message_id.clone(),
+            role: crate::MessageRole::System,
+            parts: crate::shared_parts(vec![crate::Part {
+                id: format!("{message_id}.p0"),
+                kind: crate::PartKind::Error,
+                content: format!("Turn limit reached ({max_turns}) before a final test response."),
+                attachment: None,
+                tool_call_id: None,
+                tool_name: None,
+                tool_replay: None,
+                prune_state: crate::PruneState::Intact,
+                reasoning_meta: None,
+                response_meta: None,
+            }]),
+            origin: None,
+        }
     }
 }

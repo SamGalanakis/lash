@@ -435,7 +435,7 @@ mod tests {
         let value = result.value_for_projection();
         assert!(value.get("session_id").and_then(Value::as_str).is_some());
         assert!(matches!(
-            result.output.control,
+            result.as_output().control,
             Some(ToolControl::Handoff { .. })
         ));
         let created = manager.created.lock().expect("created");

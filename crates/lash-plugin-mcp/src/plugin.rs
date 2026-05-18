@@ -292,9 +292,9 @@ mod tests {
                 &lash_core::testing::mock_tool_context(),
             )
             .await;
-        assert!(result.output.is_success(), "{result:?}");
+        assert!(result.is_success(), "{result:?}");
         assert_eq!(
-            result.output.value_for_projection(),
+            result.value_for_projection(),
             json!({ "matches": ["matched"] })
         );
 

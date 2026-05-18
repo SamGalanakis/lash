@@ -551,12 +551,42 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
             )));
             return actions;
         }
-        actions.push(DriverAction::ScheduleTurnLimitFinal);
+        if let Some(max_turns) = ctx.turn_limit_final_to_schedule() {
+            actions.push(DriverAction::ScheduleTurnLimitFinal {
+                message: turn_limit_final_message(fresh_message_id(), max_turns),
+            });
+        }
         actions.push(DriverAction::StartCheckpoint {
             checkpoint: CheckpointKind::AfterWork,
             on_empty: CheckpointResumeAction::PrepareIteration,
         });
         actions
+    }
+}
+
+pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> Message {
+    Message {
+        id: message_id.clone(),
+        role: MessageRole::System,
+        parts: shared_parts(vec![Part {
+            id: format!("{message_id}.p0"),
+            kind: PartKind::Text,
+            content: format!(
+                "Turn limit reached ({max_turns}). You MUST reply in plain prose now containing:\n\
+                1. Summary of what you accomplished\n\
+                2. List of remaining tasks not yet completed\n\
+                3. Recommended next steps\n\
+                Do NOT emit a lashlang code fence, call tools, or call submit/continue_as."
+            ),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
     }
 }
 

@@ -103,7 +103,7 @@ fn retry_after_ms(
     if matches!(retry_policy, ToolRetryPolicy::Never) {
         return None;
     }
-    let ToolCallOutcome::Failure(failure) = &result.output.outcome else {
+    let ToolCallOutcome::Failure(failure) = &result.as_output().outcome else {
         return None;
     };
     let ToolRetryDisposition::Safe { after_ms } = &failure.retry else {
@@ -112,9 +112,10 @@ fn retry_after_ms(
     Some(retry_policy.delay_ms_for_retry(retry_index, *after_ms))
 }
 
-fn mark_retry_exhausted(mut result: ToolResult, attempts: u32) -> ToolResult {
-    if let ToolCallOutcome::Failure(failure) = &mut result.output.outcome {
+fn mark_retry_exhausted(result: ToolResult, attempts: u32) -> ToolResult {
+    let mut output = result.into_output();
+    if let ToolCallOutcome::Failure(failure) = &mut output.outcome {
         failure.retry = ToolRetryDisposition::Exhausted { attempts };
     }
-    result
+    ToolResult::from_output(output)
 }

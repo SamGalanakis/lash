@@ -39,6 +39,27 @@ fn test_config_with_termination(
             rlm_termination,
         )
         .expect("valid rlm turn options"),
+        turn_limit_final_message: Arc::new(test_turn_limit_final_message),
+    }
+}
+
+fn test_turn_limit_final_message(message_id: String, max_turns: usize) -> Message {
+    Message {
+        id: message_id.clone(),
+        role: MessageRole::System,
+        parts: lash_sansio::shared_parts(vec![Part {
+            id: format!("{message_id}.p0"),
+            kind: PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before a final test response."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
     }
 }
 

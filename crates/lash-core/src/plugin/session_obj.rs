@@ -965,7 +965,7 @@ impl PluginSession {
                 result.value_for_projection()
             )));
         }
-        serde_json::from_value(result.into_value_for_projection())
+        serde_json::from_value(result.into_output().value_for_projection())
             .map_err(|err| PluginError::Invoke(format!("invalid {} output: {err}", Op::NAME)))
     }
 }

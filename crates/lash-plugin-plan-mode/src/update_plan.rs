@@ -327,7 +327,7 @@ mod tests {
             &json!({"plan":[{"step":"","status":"pending"}]}),
         )
         .await;
-        assert!(!result.success);
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -346,7 +346,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(!result.success);
+        assert!(!result.is_success());
     }
 
     #[tokio::test]
@@ -364,7 +364,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(result.success);
+        assert!(result.is_success());
         assert_eq!(state.lock().unwrap().generation, 1);
     }
 

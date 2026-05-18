@@ -1827,14 +1827,23 @@ mod tests {
     async fn exec_command_returns_exit_code_when_command_finishes() {
         let shell = test_shell();
         let result = run(&shell, "exec_command", &json!({"cmd": "echo hello"})).await;
-        assert!(result.success);
-        assert!(result.result.get("session_id").is_none());
-        assert_eq!(result.result["status"], "completed");
-        assert_eq!(result.result["done"], true);
-        assert_eq!(result.result["running"], false);
-        assert_eq!(result.result["exit_code"], 0);
-        assert!(result.result["wall_time_seconds"].as_f64().is_some());
-        assert!(result.result["output"].as_str().unwrap().contains("hello"));
+        assert!(result.is_success());
+        assert!(result.value_for_projection().get("session_id").is_none());
+        assert_eq!(result.value_for_projection()["status"], "completed");
+        assert_eq!(result.value_for_projection()["done"], true);
+        assert_eq!(result.value_for_projection()["running"], false);
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert!(
+            result.value_for_projection()["wall_time_seconds"]
+                .as_f64()
+                .is_some()
+        );
+        assert!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .contains("hello")
+        );
     }
 
     #[tokio::test]
@@ -1846,12 +1855,17 @@ mod tests {
             &json!({"cmd": "sleep 0.05; echo done"}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        assert!(result.result.get("session_id").is_none());
-        assert_eq!(result.result["status"], "completed");
-        assert_eq!(result.result["done"], true);
-        assert_eq!(result.result["exit_code"], 0);
-        assert!(result.result["output"].as_str().unwrap().contains("done"));
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert!(result.value_for_projection().get("session_id").is_none());
+        assert_eq!(result.value_for_projection()["status"], "completed");
+        assert_eq!(result.value_for_projection()["done"], true);
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .contains("done")
+        );
     }
 
     #[tokio::test]
@@ -1864,9 +1878,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "{}", result.result);
-        assert_eq!(result.result["exit_code"], 0);
-        assert_eq!(result.result["output"].as_str().unwrap().trim(), "no-tty");
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert_eq!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .trim(),
+            "no-tty"
+        );
     }
 
     #[tokio::test]
@@ -1879,8 +1899,14 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "{}", result.result);
-        assert_eq!(result.result["output"].as_str().unwrap().trim(), "True");
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .trim(),
+            "True"
+        );
     }
 
     #[tokio::test]
@@ -1893,8 +1919,9 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "{}", result.result);
-        let output = result.result["output"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        let output = result_value["output"].as_str().unwrap();
         assert!(output.contains("stdout-line"), "{output}");
         assert!(output.contains("stderr-line"), "{output}");
     }
@@ -1909,9 +1936,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "{}", result.result);
-        assert_eq!(result.result["exit_code"], 0);
-        assert_eq!(result.result["output"].as_str().unwrap().trim(), "tty");
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
+        assert_eq!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .trim(),
+            "tty"
+        );
     }
 
     #[tokio::test]
@@ -1923,13 +1956,13 @@ mod tests {
             &json!({"cmd": "printf started; sleep 5", "timeout_ms": 50}),
         )
         .await;
-        assert!(!result.success, "{}", result.result);
-        assert_eq!(result.result["status"], "timed_out");
-        assert_eq!(result.result["done"], true);
-        assert_eq!(result.result["running"], false);
-        assert!(result.result.get("session_id").is_none());
+        assert!(!result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["status"], "timed_out");
+        assert_eq!(result.value_for_projection()["done"], true);
+        assert_eq!(result.value_for_projection()["running"], false);
+        assert!(result.value_for_projection().get("session_id").is_none());
         assert!(
-            result.result["output"]
+            result.value_for_projection()["output"]
                 .as_str()
                 .unwrap_or("")
                 .contains("started")
@@ -1958,8 +1991,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.success, "{}", result.result);
-        assert_eq!(result.result["status"], "timed_out");
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["status"], "timed_out");
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert!(!marker.exists(), "timed-out child process wrote marker");
         let _ = fs::remove_file(marker);
@@ -1974,12 +2007,16 @@ mod tests {
             &json!({"cmd": "sleep 1; echo done", "poll_ms": 10}),
         )
         .await;
-        assert!(result.success);
-        assert!(result.result["session_id"].as_i64().is_some());
-        assert_eq!(result.result["status"], "running");
-        assert_eq!(result.result["done"], false);
-        assert_eq!(result.result["running"], true);
-        assert!(result.result["exit_code"].is_null());
+        assert!(result.is_success());
+        assert!(
+            result.value_for_projection()["session_id"]
+                .as_i64()
+                .is_some()
+        );
+        assert_eq!(result.value_for_projection()["status"], "running");
+        assert_eq!(result.value_for_projection()["done"], false);
+        assert_eq!(result.value_for_projection()["running"], true);
+        assert!(result.value_for_projection()["exit_code"].is_null());
     }
 
     #[tokio::test]
@@ -1992,8 +2029,8 @@ mod tests {
             &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
         )
         .await;
-        assert!(open.success, "{}", open.result);
-        let session_id = open.result["session_id"].as_i64().unwrap();
+        assert!(open.is_success(), "{}", open.value_for_projection());
+        let session_id = open.value_for_projection()["session_id"].as_i64().unwrap();
 
         let result = run(
             &shell,
@@ -2001,12 +2038,12 @@ mod tests {
             &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
         )
         .await;
-        assert!(result.success);
-        assert!(result.result.get("session_id").is_none());
-        assert_eq!(result.result["status"], "completed");
-        assert_eq!(result.result["exit_code"], 0);
+        assert!(result.is_success());
+        assert!(result.value_for_projection().get("session_id").is_none());
+        assert_eq!(result.value_for_projection()["status"], "completed");
+        assert_eq!(result.value_for_projection()["exit_code"], 0);
         assert!(
-            result.result["output"]
+            result.value_for_projection()["output"]
                 .as_str()
                 .unwrap()
                 .contains("got:hello")
@@ -2024,8 +2061,8 @@ mod tests {
                 &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
             )
             .await;
-            assert!(open.success);
-            let session_id = open.result["session_id"].as_i64().unwrap();
+            assert!(open.is_success());
+            let session_id = open.value_for_projection()["session_id"].as_i64().unwrap();
 
             let result = run(
                 &shell,
@@ -2033,15 +2070,15 @@ mod tests {
                 &json!({"session_id": session_id, "chars": "hello\n", "poll_ms": 1000}),
             )
             .await;
-            assert!(result.success);
+            assert!(result.is_success());
             assert!(
-                result.result.get("session_id").is_none(),
+                result.value_for_projection().get("session_id").is_none(),
                 "expected completed handle, got: {}",
-                result.result
+                result.value_for_projection()
             );
-            assert_eq!(result.result["exit_code"], 0);
+            assert_eq!(result.value_for_projection()["exit_code"], 0);
             assert!(
-                result.result["output"]
+                result.value_for_projection()["output"]
                     .as_str()
                     .unwrap()
                     .contains("got:hello")
@@ -2058,8 +2095,8 @@ mod tests {
             &json!({"cmd": "cat", "poll_ms": 10, "login": false}),
         )
         .await;
-        assert!(open.success);
-        let session_id = open.result["session_id"].as_i64().unwrap();
+        assert!(open.is_success());
+        let session_id = open.value_for_projection()["session_id"].as_i64().unwrap();
 
         let result = run(
             &shell,
@@ -2067,10 +2104,11 @@ mod tests {
             &json!({"session_id": session_id, "chars": "hello", "close_stdin": true, "poll_ms": 1000}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        assert!(result.result.get("session_id").is_none());
-        assert_eq!(result.result["exit_code"], 0);
-        let output = result.result["output"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        assert!(result_value.get("session_id").is_none());
+        assert_eq!(result_value["exit_code"], 0);
+        let output = result_value["output"].as_str().unwrap();
         assert!(
             output.contains("hello"),
             "expected cat to echo input, got: {output}"
@@ -2086,18 +2124,24 @@ mod tests {
             &json!({"cmd": "pwd", "workdir": "tmp"}),
         )
         .await;
-        assert!(result.success);
-        assert_eq!(result.result["output"].as_str().unwrap().trim_end(), "/tmp");
+        assert!(result.is_success());
+        assert_eq!(
+            result.value_for_projection()["output"]
+                .as_str()
+                .unwrap()
+                .trim_end(),
+            "/tmp"
+        );
     }
 
     #[tokio::test]
     async fn exec_command_pipeline_failure_uses_pipefail() {
         let shell = test_shell();
         let result = run(&shell, "exec_command", &json!({"cmd": "false | cat"})).await;
-        assert!(!result.success);
-        assert_ne!(result.result["exit_code"], 0);
+        assert!(!result.is_success());
+        assert_ne!(result.value_for_projection()["exit_code"], 0);
         assert_eq!(
-            result.result["error"].as_str(),
+            result.value_for_projection()["error"].as_str(),
             Some("Command exited with code 1")
         );
     }
@@ -2111,11 +2155,11 @@ mod tests {
             &json!({"cmd": "echo expected failure; exit 7", "allow_nonzero_exit": true}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        assert_eq!(result.result["exit_code"], 7);
-        assert!(result.result["error"].is_null());
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 7);
+        assert!(result.value_for_projection()["error"].is_null());
         assert!(
-            result.result["output"]
+            result.value_for_projection()["output"]
                 .as_str()
                 .unwrap()
                 .contains("expected failure")
@@ -2132,8 +2176,8 @@ mod tests {
             &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
         )
         .await;
-        assert!(open.success, "{}", open.result);
-        let session_id = open.result["session_id"].as_i64().unwrap();
+        assert!(open.is_success(), "{}", open.value_for_projection());
+        let session_id = open.value_for_projection()["session_id"].as_i64().unwrap();
 
         let result = run(
             &shell,
@@ -2141,10 +2185,10 @@ mod tests {
             &json!({"session_id": session_id, "chars": "go\n", "poll_ms": 1000}),
         )
         .await;
-        assert!(!result.success, "{}", result.result);
-        assert_eq!(result.result["exit_code"], 7);
+        assert!(!result.is_success(), "{}", result.value_for_projection());
+        assert_eq!(result.value_for_projection()["exit_code"], 7);
         assert_eq!(
-            result.result["error"].as_str(),
+            result.value_for_projection()["error"].as_str(),
             Some("Command exited with code 7")
         );
     }
@@ -2158,9 +2202,10 @@ mod tests {
             &json!({"cmd": "python3 -c 'print(\"hello \" * 4000)'", "max_output_tokens": 16, "login": false}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        let output = result.result["output"].as_str().unwrap();
-        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        let output = result_value["output"].as_str().unwrap();
+        let full_output_path = result_value["full_output_path"].as_str().unwrap();
         let full_output = fs::read_to_string(full_output_path).expect("full output file");
         assert!(output.contains("[truncated]"));
         assert!(full_output.contains("hello hello"));
@@ -2175,9 +2220,10 @@ mod tests {
             &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", MAX_OUTPUT + 8192), "login": false}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        let output = result.result["output"].as_str().unwrap();
-        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        let output = result_value["output"].as_str().unwrap();
+        let full_output_path = result_value["full_output_path"].as_str().unwrap();
         let full_output = fs::read_to_string(full_output_path).expect("full output file");
         assert!(output.contains("[truncated]"));
         assert!(full_output.len() >= MAX_OUTPUT + 8192);
@@ -2192,9 +2238,10 @@ mod tests {
             &json!({"cmd": format!("python3 -c 'import sys; sys.stdout.write(\"x\" * {})'", SPILL_OUTPUT_THRESHOLD + 4096), "login": false}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        assert!(result.result["output"].as_str().is_some());
-        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        assert!(result_value["output"].as_str().is_some());
+        let full_output_path = result_value["full_output_path"].as_str().unwrap();
         let full_output = fs::read_to_string(full_output_path).expect("full output file");
         assert!(full_output.len() >= SPILL_OUTPUT_THRESHOLD + 4096);
     }
@@ -2209,8 +2256,8 @@ mod tests {
             &json!({"cmd": cmd, "poll_ms": 10, "login": false}),
         )
         .await;
-        assert!(open.success, "{}", open.result);
-        let session_id = open.result["session_id"].as_i64().unwrap();
+        assert!(open.is_success(), "{}", open.value_for_projection());
+        let session_id = open.value_for_projection()["session_id"].as_i64().unwrap();
         let payload = "segment ".repeat(5000);
 
         let result = run(
@@ -2219,9 +2266,10 @@ mod tests {
             &json!({"session_id": session_id, "chars": payload, "close_stdin": true, "poll_ms": 1000, "max_output_tokens": 24}),
         )
         .await;
-        assert!(result.success, "{}", result.result);
-        let output = result.result["output"].as_str().unwrap();
-        let full_output_path = result.result["full_output_path"].as_str().unwrap();
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let result_value = result.value_for_projection();
+        let output = result_value["output"].as_str().unwrap();
+        let full_output_path = result_value["full_output_path"].as_str().unwrap();
         let full_output = fs::read_to_string(full_output_path).expect("full output file");
         assert!(output.contains("[truncated]"));
         assert!(full_output.contains("segment segment"));
@@ -2352,8 +2400,13 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "cancelled dispatch should return in under 1s (took {elapsed:?})"
         );
-        assert!(!result.success, "cancelled result should be an error");
-        assert_eq!(result.result.as_str(), Some("tool call cancelled"));
+        assert!(!result.is_success(), "cancelled result should be an error");
+        assert!(
+            result
+                .value_for_projection()
+                .to_string()
+                .contains("tool call cancelled")
+        );
     }
 
     #[tokio::test]
@@ -2380,11 +2433,12 @@ mod tests {
             "login": false,
         });
         let open = run(&shell, "start_command", &args).await;
-        assert!(open.success, "{}", open.result);
-        let session_id = open.result["session_id"]
+        assert!(open.is_success(), "{}", open.value_for_projection());
+        let open_value = open.value_for_projection();
+        let session_id = open_value["session_id"]
             .as_i64()
             .expect("expected a running session_id");
-        let captured = open.result["output"].as_str().unwrap_or("");
+        let captured = open_value["output"].as_str().unwrap_or("");
         let pid: Option<i32> = captured
             .lines()
             .find_map(|line| line.trim().parse::<i32>().ok());
@@ -2414,8 +2468,13 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "cancelled dispatch should return in under 1s (took {elapsed:?})"
         );
-        assert!(!result.success, "cancelled result should be an error");
-        assert_eq!(result.result.as_str(), Some("tool call cancelled"));
+        assert!(!result.is_success(), "cancelled result should be an error");
+        assert!(
+            result
+                .value_for_projection()
+                .to_string()
+                .contains("tool call cancelled")
+        );
 
         if let Some(pid) = pid
             && cfg!(target_os = "linux")

@@ -920,11 +920,10 @@ impl SessionPlugin for PlanModePlugin {
         reg.tool_calls().after(Arc::new(move |ctx| {
             let state = Arc::clone(&after_tool_state);
             Box::pin(async move {
+                let result_value = ctx.result.value_for_projection();
                 let approved = ctx.tool_name == "plan_exit"
                     && ctx.result.is_success()
-                    && ctx
-                        .result
-                        .value_for_projection()
+                    && result_value
                         .get("approved")
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
@@ -932,16 +931,12 @@ impl SessionPlugin for PlanModePlugin {
                     let mut directives = vec![PluginDirective::emit_runtime_events(vec![
                         plan_mode_state_event(&ctx.session_id, false, None)?,
                     ])];
-                    if ctx
-                        .result
-                        .value_for_projection()
+                    if result_value
                         .get("execution_mode")
                         .and_then(|value| value.as_str())
                         == Some("fresh_context")
                     {
-                        let plan_path = ctx
-                            .result
-                            .value_for_projection()
+                        let plan_path = result_value
                             .get("plan_path")
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()

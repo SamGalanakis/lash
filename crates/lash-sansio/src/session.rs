@@ -1,4 +1,18 @@
-use crate::{AttachmentRef, ExecImage, ToolCallRecord};
+use crate::{AttachmentRef, ToolCallRecord};
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExecImage {
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<AttachmentRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<u8>,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TextProjectionMetadata {

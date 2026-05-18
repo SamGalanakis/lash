@@ -39,7 +39,7 @@ use lash_core::{
     CheckpointKind, DriverAction, DriverContextView, ExecutionMode, LlmOutputPart, LlmResponse,
     ModeBuildInput, ModeConfig, ModePreamble, ProgressSender, SessionError, ToolContract,
     ToolManifest, ToolResult, TurnFinish, TurnOutcome, TurnStop, append_assistant_text_part,
-    normalized_response_parts, reasoning_part, turn_limit_exhausted_message,
+    normalized_response_parts, reasoning_part,
 };
 use serde_json::Value;
 
@@ -124,7 +124,11 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
         let tool_names = input.tool_surface.tool_names();
         let tool_names_fingerprint = input.tool_surface.tool_names_fingerprint();
         ModePreamble {
-            config: ModeConfig::chat(Arc::new(StandardDriver), true),
+            config: ModeConfig::chat(
+                Arc::new(StandardDriver),
+                true,
+                Arc::new(turn_limit_exhausted_message),
+            ),
             tool_specs: input.tool_surface.model_tool_specs(),
             tool_names,
             tool_names_fingerprint,
@@ -132,6 +136,26 @@ impl ModeProtocolDriverPlugin for StandardProtocolDriver {
             execution_prompt: Arc::from(STANDARD_EXECUTION_SECTION),
             prompt_contributions: input.extra_prompt_contributions,
         }
+    }
+}
+
+fn turn_limit_exhausted_message(message_id: String, max_turns: usize) -> Message {
+    Message {
+        id: message_id.clone(),
+        role: MessageRole::System,
+        parts: shared_parts(vec![Part {
+            id: format!("{message_id}.p0"),
+            kind: PartKind::Error,
+            content: format!("Turn limit reached ({max_turns}) before a final assistant response."),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]),
+        origin: None,
     }
 }
 

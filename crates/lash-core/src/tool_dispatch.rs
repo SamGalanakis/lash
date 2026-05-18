@@ -460,7 +460,7 @@ fn outcome(
         call_id: None,
         tool: tool_name,
         args,
-        output: *result.output,
+        output: result.into_output(),
         duration_ms,
     };
     ToolDispatchOutcome { record }
