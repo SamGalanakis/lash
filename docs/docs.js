@@ -1060,9 +1060,13 @@
     loadMermaidIfNeeded();
     wireSpaNav();
     wireSearchTrigger();
-    // re-run the scene now that we know the spine X — landscape's
-    // strand needs to converge at the snake's bottom
-    if (typeof window.__LASH_SCENE_RUN === "function") {
+    // Re-run the scene only on docs pages — the brazier strand needs
+    // to converge at the snake's bottom (now that drawSpineSnake has
+    // set __LASH_SNAKE_ANCHOR_X). On the landing there's no spine
+    // anchor to update, and the second run would just cause a visible
+    // double-animation right after the IIFE's first one.
+    if (document.body.classList.contains("docs-page") &&
+        typeof window.__LASH_SCENE_RUN === "function") {
       window.__LASH_SCENE_RUN();
     }
   }

@@ -449,15 +449,23 @@
 
     const brazierZone = nearPeaks.filter(p =>
       p.peakX > convergence.x + 80 && p.peakX < W * 0.50);
-    const nunZone = nearPeaks.filter(p => p.peakX > W * 0.58);
+    // Nun zone: right half of the scene, but pulled in from the right
+    // edge so her instrument and dish stay fully on-canvas — too close
+    // to the edge and the dish gets clipped by the cover overflow.
+    const nunZone = nearPeaks.filter(p =>
+      p.peakX > W * 0.58 && p.peakX < W * 0.88);
     const brazierPeak = brazierZone.length
       ? pick(brazierZone)
       : nearPeaks.slice().sort((a, b) =>
           Math.abs(a.peakX - (convergence.x + W * 0.18))
         - Math.abs(b.peakX - (convergence.x + W * 0.18)))[0];
+    // Fallback when the zone is empty: pick the peak closest to 75%
+    // (centre of the safe zone) rather than the rightmost peak, so
+    // we never silently land the nun pressed against the edge.
     const nunPeak = nunZone.length
       ? pick(nunZone)
-      : nearPeaks.slice().sort((a, b) => b.peakX - a.peakX)[0];
+      : nearPeaks.slice().sort((a, b) =>
+          Math.abs(a.peakX - W * 0.75) - Math.abs(b.peakX - W * 0.75))[0];
 
     const brazier = {
       baseX: brazierPeak.peakX,
