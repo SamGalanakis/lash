@@ -12,7 +12,6 @@ mod execution_context;
 mod monitor_handles;
 mod tool_execution;
 
-pub(crate) use async_handles::AsyncToolHandleMap;
 pub use execution_context::ModeExecutionContext;
 pub use tool_execution::{ModeToolBatchItem, ModeToolReply};
 
@@ -154,7 +153,6 @@ pub struct Session {
     /// and we skip the section/Vec-join work in
     /// `lash_sansio::PromptTemplate::render`.
     prompt_cache: Arc<lash_sansio::PromptCache>,
-    async_tool_handles: AsyncToolHandleMap,
 }
 
 impl Session {
@@ -174,7 +172,6 @@ impl Session {
             message_tx: None,
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
-            async_tool_handles: Default::default(),
         };
 
         let mode_session = Arc::clone(session.plugins().mode_session());
@@ -402,20 +399,23 @@ impl Session {
         clippy::too_many_arguments,
         reason = "mode execution bridge carries explicit per-turn runtime dependencies"
     )]
-    pub(crate) fn mode_execution_context(
+    pub(crate) fn mode_execution_context<'run>(
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        effect_host: crate::runtime::RuntimeEffectHostHandle<'run>,
+        detached_effect_host: Arc<dyn crate::RuntimeEffectHost>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
         turn_context: crate::TurnContext,
-    ) -> ModeExecutionContext {
+    ) -> ModeExecutionContext<'run> {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
             surface: self.tool_surface(session_id, self.execution_mode.clone()),
             host,
+            effect_host,
             session_id: session_id.to_string(),
             event_tx,
             turn_injection_bridge: self.turn_injection_bridge().clone(),
@@ -426,8 +426,7 @@ impl Session {
             session_id.to_string(),
             self.execution_mode.clone(),
             dispatch,
-            Arc::clone(&self.async_tool_handles),
-            self.message_tx.clone(),
+            detached_effect_host,
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             mode_extension,
@@ -454,10 +453,6 @@ impl Session {
     }
 
     pub async fn reset(&mut self) -> Result<(), SessionError> {
-        self.async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .clear();
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")

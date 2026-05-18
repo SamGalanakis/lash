@@ -53,10 +53,12 @@ sequenceDiagram
       EffectHost-->>Runtime: Result<LlmResponse, LlmCallError>
       Runtime->>Machine: Response::LlmComplete
     else ToolCalls
-      Runtime->>EffectHost: tool_batch(invocation, calls)
-      EffectHost->>Tools: native/mode/provider tools
-      Tools-->>EffectHost: ToolResult converted to ToolCallOutput + ModelToolReturn
-      EffectHost-->>Runtime: Vec<CompletedToolCall>
+      loop each PendingToolCall
+        Runtime->>EffectHost: tool_call(invocation, call)
+        EffectHost->>Tools: native/mode/provider tool
+        Tools-->>EffectHost: ToolResult converted to ToolCallOutput + ModelToolReturn
+        EffectHost-->>Runtime: CompletedToolCall
+      end
       Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
       Runtime->>Machine: Response::ToolResults
     else ExecCode

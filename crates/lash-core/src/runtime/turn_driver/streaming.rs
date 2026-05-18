@@ -52,7 +52,7 @@ fn refine_terminal_reason_for_context_window(
     }
 }
 
-impl RuntimeTurnDriver {
+impl RuntimeTurnDriver<'_> {
     async fn transform_assistant_stream_chunk(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,

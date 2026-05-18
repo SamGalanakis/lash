@@ -70,7 +70,7 @@ pub(crate) struct CompletedModeToolCall {
     pub record: ToolCallRecord,
 }
 
-impl ModeExecutionContext {
+impl ModeExecutionContext<'_> {
     pub(crate) async fn execute_tool_call(
         &self,
         call_id: String,
@@ -78,6 +78,7 @@ impl ModeExecutionContext {
         args: serde_json::Value,
         index: usize,
         replay: Option<crate::llm::types::ProviderReplayMeta>,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
     ) -> CompletedModeToolCall {
         let _ = self
             .dispatch
@@ -121,7 +122,8 @@ impl ModeExecutionContext {
             self.dispatch.turn_context.clone(),
             Arc::clone(&self.dispatch.attachment_store),
             Some(call_id.clone()),
-        );
+        )
+        .with_tool_effect_metadata(effect_metadata);
         tool_context.cancellation_token = self.cancellation_token.clone();
         let mut outcome = dispatch_tool_call_with_execution_context(
             &self.dispatch,
@@ -199,14 +201,14 @@ impl ModeExecutionContext {
         index: usize,
     ) -> ModeToolReply {
         if name == "list_async_handles" {
-            let live_monitor_tasks = self.live_monitor_tasks().await;
-            return self.list_async_handles(live_monitor_tasks);
+            let live_tasks = self.live_background_tasks().await;
+            return self.list_async_handles(live_tasks);
         }
         if name == "monitor" {
             return self.start_monitor_handle_call(call_id, args, index).await;
         }
         let executed = self
-            .execute_tool_call(call_id, name, args, index, None)
+            .execute_tool_call(call_id, name, args, index, None, None)
             .await;
         let reply = ModeToolReply::from_output(executed.completed.output);
         reply.with_record(executed.record)

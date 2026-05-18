@@ -70,16 +70,18 @@ use assembly::{
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use effect_host::{
-    DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata, EffectOrigin,
-    LocalRuntimeEffectHost, RuntimeEffectHost, RuntimeEffectKind, TurnEffectLocalExecutor,
+    BackgroundTaskExecutor, DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata,
+    EffectOrigin, LocalRuntimeEffectHost, RuntimeEffectHost, RuntimeEffectKind, RuntimeEffectScope,
+    TurnEffectLocalExecutor,
 };
+pub(crate) use effect_host::{RuntimeEffectHostHandle, tool_retry_sleep_invocation};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
-    BackgroundTaskEvent, BackgroundTaskFilter, BackgroundTaskHost, BackgroundTaskId,
-    BackgroundTaskKind, BackgroundTaskOutcome, BackgroundTaskRecord, BackgroundTaskRegistration,
-    BackgroundTaskScope, BackgroundTaskState, EmbeddedRuntimeHost, LocalBackgroundTaskCancel,
-    LocalBackgroundTaskHost, RuntimeCoreConfig,
+    BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskFilter, BackgroundTaskId,
+    BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskOutcome, BackgroundTaskRecord,
+    BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope, BackgroundTaskState,
+    EmbeddedRuntimeHost, LocalBackgroundTaskRegistry, RuntimeCoreConfig,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};

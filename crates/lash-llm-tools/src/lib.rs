@@ -107,6 +107,7 @@ impl LlmToolsProvider {
                     stream_events: None,
                     session_id: Some(format!("{}-llm-query", context.session_id())),
                     originating_tool_call_id: None,
+                    idempotency_key: None,
                 },
                 "llm_query",
             )

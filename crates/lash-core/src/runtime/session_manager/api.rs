@@ -98,64 +98,40 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn spawn_managed_task(
+    async fn start_background_task(
         &self,
         session_id: &str,
-        spec: crate::BackgroundTaskRegistration,
-        task: crate::plugin::PluginSessionTask,
-    ) -> Result<(), crate::PluginError> {
+        registration: crate::BackgroundTaskRegistration,
+        executor: crate::BackgroundTaskExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.background
-            .spawn_managed_task(&self.current, &self.managed, session_id, spec, task)
+            .start_background_task(
+                &self.current,
+                &self.managed,
+                session_id,
+                registration,
+                executor,
+            )
             .await
     }
 
-    async fn cancel_managed_task(
+    async fn await_background_task(
         &self,
-        session_id: &str,
         task_id: &str,
-    ) -> Result<(), crate::PluginError> {
+    ) -> Result<crate::BackgroundTaskCompletion, crate::PluginError> {
         self.background
-            .cancel_managed_task(&self.current, session_id, task_id)
+            .await_background_task(&self.current, task_id)
             .await
-    }
-
-    async fn register_background_task(
-        &self,
-        session_id: &str,
-        spec: crate::BackgroundTaskRegistration,
-        cancel: Option<crate::LocalBackgroundTaskCancel>,
-    ) -> Result<(), crate::PluginError> {
-        self.background
-            .register_background_task(&self.current, session_id, spec, cancel)
-            .await
-    }
-
-    async fn unregister_background_task(&self, session_id: &str, task_id: &str) {
-        self.background
-            .unregister_background_task(&self.current, session_id, task_id)
-            .await;
     }
 
     async fn complete_background_task(
         &self,
-        session_id: &str,
         task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
+        completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.background
-            .complete_background_task(&self.current, session_id, task_id, state)
-            .await;
-    }
-
-    async fn transition_background_task_live_state(
-        &self,
-        session_id: &str,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
-        self.background
-            .transition_background_task_live_state(&self.current, session_id, task_id, state)
-            .await;
+            .complete_background_task(&self.current, task_id, completion)
+            .await
     }
 
     async fn list_background_tasks(
@@ -173,7 +149,13 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         task_id: &str,
     ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
         self.background
-            .cancel_background_task(&self.current, Arc::new(self.clone()), session_id, task_id)
+            .cancel_background_task(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                task_id,
+            )
             .await
     }
 
@@ -182,7 +164,12 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         session_id: &str,
     ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
         self.background
-            .cancel_all_background_tasks(&self.current, Arc::new(self.clone()), session_id)
+            .cancel_all_background_tasks(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+            )
             .await
     }
 
@@ -304,6 +291,7 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .direct_llm_completion(&self.current, &self.usage, request, usage_source)
             .await
     }
+
     async fn emit_trace_event(
         &self,
         context: lash_trace::TraceContext,

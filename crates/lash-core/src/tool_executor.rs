@@ -11,7 +11,7 @@ use crate::{
 /// invocation loop: attempt context, retry policy, delay, idempotency key
 /// requirements, and final exhaustion marking.
 pub(crate) async fn execute_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     manifest: &ToolManifest,
     tool_name: &str,
     args: &serde_json::Value,
@@ -47,7 +47,7 @@ pub(crate) async fn execute_tool_call(
             return mark_retry_exhausted(result, attempt);
         }
         if retry_after_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(retry_after_ms)).await;
+            sleep_before_retry(context, &tool_context, tool_name, attempt, retry_after_ms).await;
         }
     }
 
@@ -62,7 +62,7 @@ pub(crate) async fn execute_tool_call(
 }
 
 async fn execute_once(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
     args: &serde_json::Value,
     progress: Option<&ProgressSender>,
@@ -84,6 +84,51 @@ async fn execute_once(
             progress,
         })
         .await
+}
+
+async fn sleep_before_retry(
+    context: &ToolDispatchContext<'_>,
+    tool_context: &ToolContext,
+    tool_name: &str,
+    attempt: u32,
+    retry_after_ms: u64,
+) {
+    let duration = std::time::Duration::from_millis(retry_after_ms);
+    let cancellation = tool_context
+        .cancellation_token()
+        .cloned()
+        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+    let invocation = if let Some(parent) = tool_context.tool_effect_metadata.as_ref() {
+        crate::runtime::tool_retry_sleep_invocation(parent, tool_name, attempt, cancellation)
+    } else {
+        let idempotency_base =
+            derive_idempotency_key(tool_context, tool_name).unwrap_or_else(|| {
+                format!(
+                    "lash-tool:{}:unknown:{tool_name}",
+                    tool_context.session_id()
+                )
+            });
+        let effect_id = format!("{idempotency_base}:attempt:{attempt}:sleep");
+        crate::EffectInvocation::new(
+            crate::EffectInvocationMetadata {
+                session_id: tool_context.session_id().to_string(),
+                origin: crate::EffectOrigin::Turn,
+                turn_id: None,
+                turn_index: None,
+                mode_iteration: None,
+                effect_id: effect_id.clone(),
+                effect_kind: crate::RuntimeEffectKind::Sleep,
+                idempotency_key: effect_id,
+                turn_checkpoint: None,
+            },
+            cancellation,
+        )
+    };
+    context
+        .effect_host
+        .as_host()
+        .sleep(invocation, duration)
+        .await;
 }
 
 fn derive_idempotency_key(tool_context: &ToolContext, tool_name: &str) -> Option<String> {

@@ -50,10 +50,10 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Runtime Effect Host</h2>
-            <p><code>RuntimeTurnDriver</code> only polls <code>TurnMachine</code>, builds an <code>EffectInvocation</code>, invokes the configured <code>RuntimeEffectHost</code>, and feeds the returned response back. The local host preserves today's in-process behavior; custom hosts can persist or schedule effects before delegating to the typed local executor method for that effect.</p>
+            <p><code>RuntimeTurnDriver</code> only polls <code>TurnMachine</code>, builds an <code>EffectInvocation</code>, invokes the active scoped <code>RuntimeEffectHost</code>, and feeds the returned response back. The local host is the in-process fallback; durable hosts run a turn through <code>RuntimeEffectScope</code> with a stable turn id.</p>
           </div>
-          <p>Every invocation carries session id, origin, turn index, mode iteration, effect id, effect kind, a stable idempotency key, cancellation, and a serialized <code>TurnCheckpoint</code> for turn-originated effects. The boundary covers turn LLM calls, direct/plugin LLM completions, tool batches, RLM exec, checkpoints, and execution-surface sync.</p>
-          <p>Install it through <code>RuntimeCoreConfig::with_effect_host</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, or <code>EmbeddedRuntimeBuilder::with_effect_host</code>. <code>RuntimeEnvironment</code> carries one <code>core: RuntimeCoreConfig</code>; builder methods for attachments, prompt, traces, termination, and effect hosting mutate that core instead of mirroring fields on the environment. The app facade's advanced builder also accepts an effect host for embedders that stay on <code>lash</code>.</p>
+          <p>Every invocation carries session id, origin, turn index, mode iteration, effect id, effect kind, a stable idempotency key, cancellation, and a serialized <code>TurnCheckpoint</code> for turn-originated effects. The boundary covers turn LLM calls, direct/plugin LLM completions, individual tool calls, retry sleeps, RLM exec, checkpoints, and execution-surface sync.</p>
+          <p><code>RuntimeCoreConfig::with_effect_host</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, and <code>EmbeddedRuntimeBuilder::with_effect_host</code> configure the local/default host. Durable workflow adapters should prefer the scoped turn entrypoints so the borrowed workflow host and stable turn identity are explicit for that run.</p>
         </div>
 
         <div class="section">

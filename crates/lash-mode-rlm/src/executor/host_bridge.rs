@@ -16,8 +16,8 @@ use crate::projection_codec::{
     flow_record_to_tool_args, flow_to_json_value, format_output_value, json_to_flow_value,
 };
 
-pub(super) struct HostBridge {
-    ctx: ModeExecutionContext,
+pub(super) struct HostBridge<'run> {
+    ctx: ModeExecutionContext<'run>,
     observe_projection: ToolOutputBudgetConfig,
     tool_result_projectors: Vec<crate::RlmToolResultProjector>,
     observations: Mutex<Vec<String>>,
@@ -28,9 +28,9 @@ pub(super) struct HostBridge {
     next_tool_index: Mutex<usize>,
 }
 
-impl HostBridge {
+impl<'run> HostBridge<'run> {
     pub(super) fn new(
-        ctx: ModeExecutionContext,
+        ctx: ModeExecutionContext<'run>,
         observe_projection: ToolOutputBudgetConfig,
         tool_result_projectors: Vec<crate::RlmToolResultProjector>,
     ) -> Self {
@@ -114,7 +114,7 @@ impl HostBridge {
     }
 }
 
-impl ToolHost for HostBridge {
+impl ToolHost for HostBridge<'_> {
     async fn call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ToolHostError> {
         let index = self.next_index();
         let reply = self

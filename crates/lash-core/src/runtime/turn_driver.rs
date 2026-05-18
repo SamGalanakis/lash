@@ -257,10 +257,11 @@ fn prose_before_lashlang_fence(text: &str) -> &str {
     text
 }
 
-pub(super) struct RuntimeTurnDriver {
+pub(super) struct RuntimeTurnDriver<'a> {
     pub(super) session: Session,
     pub(super) policy: SessionPolicy,
     pub(super) host: RuntimeHost,
+    pub(super) effect_scope: RuntimeEffectScope<'a>,
     pub(super) session_id: String,
     pub(super) turn_id: String,
     pub(super) turn_index: usize,
@@ -323,7 +324,7 @@ impl PreparedExecutionSurface {
     }
 }
 
-impl RuntimeTurnDriver {
+impl<'run> RuntimeTurnDriver<'run> {
     fn turn_effect_invocation(
         &self,
         machine: &TurnMachine,
@@ -357,7 +358,7 @@ impl RuntimeTurnDriver {
         machine: &'a mut TurnMachine,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> TurnEffectLocalExecutor<'a> {
+    ) -> TurnEffectLocalExecutor<'a, 'run> {
         TurnEffectLocalExecutor::new(self, machine, event_tx.clone(), cancel.clone())
     }
 
@@ -371,8 +372,8 @@ impl RuntimeTurnDriver {
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         let invocation =
             self.turn_effect_invocation(machine, id, RuntimeEffectKind::LlmCall, cancel.clone());
-        let effect_host = Arc::clone(&self.host.core.effect_host);
-        effect_host
+        self.effect_scope
+            .host()
             .llm_call(
                 invocation,
                 request,
@@ -391,8 +392,8 @@ impl RuntimeTurnDriver {
     ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
         let invocation =
             self.turn_effect_invocation(machine, id, RuntimeEffectKind::Checkpoint, cancel.clone());
-        let effect_host = Arc::clone(&self.host.core.effect_host);
-        effect_host
+        self.effect_scope
+            .host()
             .checkpoint(
                 invocation,
                 checkpoint,
@@ -415,8 +416,8 @@ impl RuntimeTurnDriver {
             RuntimeEffectKind::SyncExecutionSurface,
             cancel.clone(),
         );
-        let effect_host = Arc::clone(&self.host.core.effect_host);
-        effect_host
+        self.effect_scope
+            .host()
             .sync_execution_surface(
                 invocation,
                 update_machine_config,
@@ -425,7 +426,7 @@ impl RuntimeTurnDriver {
             .await
     }
 
-    async fn invoke_turn_tool_batch_effect(
+    async fn invoke_turn_tool_calls_effect(
         &mut self,
         machine: &mut TurnMachine,
         id: crate::sansio::EffectId,
@@ -433,16 +434,29 @@ impl RuntimeTurnDriver {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Vec<crate::sansio::CompletedToolCall> {
-        let invocation =
-            self.turn_effect_invocation(machine, id, RuntimeEffectKind::ToolBatch, cancel.clone());
-        let effect_host = Arc::clone(&self.host.core.effect_host);
-        effect_host
-            .tool_batch(
-                invocation,
-                calls,
-                self.turn_effect_executor(machine, event_tx, cancel),
-            )
-            .await
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            let mut invocation = self.turn_effect_invocation(
+                machine,
+                id,
+                RuntimeEffectKind::ToolCall,
+                cancel.clone(),
+            );
+            invocation.metadata.effect_id = format!("{}:{}", id.0, call.call_id);
+            invocation.metadata.idempotency_key =
+                format!("{}:{}", invocation.metadata.idempotency_key, call.call_id);
+            let result = self
+                .effect_scope
+                .host()
+                .tool_call(
+                    invocation.clone(),
+                    call,
+                    self.turn_effect_executor(machine, event_tx, cancel),
+                )
+                .await;
+            results.push(result);
+        }
+        results
     }
 
     async fn invoke_turn_exec_effect(
@@ -455,8 +469,8 @@ impl RuntimeTurnDriver {
     ) -> Result<crate::ExecResponse, String> {
         let invocation =
             self.turn_effect_invocation(machine, id, RuntimeEffectKind::ExecCode, cancel.clone());
-        let effect_host = Arc::clone(&self.host.core.effect_host);
-        effect_host
+        self.effect_scope
+            .host()
             .exec_code(
                 invocation,
                 code,
@@ -731,7 +745,7 @@ impl RuntimeTurnDriver {
                             }
                         }
                         let results = self
-                            .invoke_turn_tool_batch_effect(
+                            .invoke_turn_tool_calls_effect(
                                 &mut machine,
                                 id,
                                 calls,

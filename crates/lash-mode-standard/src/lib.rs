@@ -173,7 +173,7 @@ impl ModeNativeToolsPlugin for StandardModeNativeTools {
 
     async fn execute(
         &self,
-        context: &ToolDispatchContext,
+        context: &ToolDispatchContext<'_>,
         name: &str,
         args: &Value,
         progress: Option<&ProgressSender>,
@@ -193,7 +193,7 @@ struct BatchCallSpec {
 }
 
 async fn execute_batch_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     args: &Value,
     progress: Option<&ProgressSender>,
 ) -> ToolResult {

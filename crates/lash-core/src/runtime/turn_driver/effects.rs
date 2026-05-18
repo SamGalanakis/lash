@@ -1,6 +1,6 @@
 use super::*;
 
-impl RuntimeTurnDriver {
+impl RuntimeTurnDriver<'_> {
     pub(in crate::runtime) async fn run_checkpoint(
         &mut self,
         machine: &mut TurnMachine,
@@ -158,6 +158,8 @@ impl RuntimeTurnDriver {
             .mode_execution_context(
                 &self.session_id,
                 manager,
+                crate::runtime::RuntimeEffectHostHandle::borrowed(self.effect_scope.host()),
+                Arc::clone(&self.host.core.effect_host),
                 session_event_tx.clone(),
                 chronological_projection,
                 self.mode_extension.clone(),

@@ -8,6 +8,8 @@ use crate::{DirectCompletion, DirectLlmCompletion, DirectRequest, ExecResponse, 
 struct EffectHostRecord {
     kind: RuntimeEffectKind,
     origin: EffectOrigin,
+    turn_id: Option<String>,
+    effect_id: String,
     idempotency_key: String,
 }
 
@@ -35,6 +37,8 @@ impl RecordingEffectHost {
             .push(EffectHostRecord {
                 kind: invocation.metadata.effect_kind,
                 origin: invocation.metadata.origin.clone(),
+                turn_id: invocation.metadata.turn_id.clone(),
+                effect_id: invocation.metadata.effect_id.clone(),
                 idempotency_key: invocation.metadata.idempotency_key.clone(),
             });
     }
@@ -46,7 +50,7 @@ impl RuntimeEffectHost for RecordingEffectHost {
         &self,
         invocation: EffectInvocation,
         request: Arc<LlmRequest>,
-        executor: TurnEffectLocalExecutor<'_>,
+        executor: TurnEffectLocalExecutor<'_, '_>,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         self.record(&invocation);
         executor.llm_call(request).await
@@ -78,21 +82,21 @@ impl RuntimeEffectHost for RecordingEffectHost {
         executor.direct_llm_completion(request, usage_source).await
     }
 
-    async fn tool_batch(
+    async fn tool_call(
         &self,
         invocation: EffectInvocation,
-        calls: Vec<PendingToolCall>,
-        executor: TurnEffectLocalExecutor<'_>,
-    ) -> Vec<CompletedToolCall> {
+        call: PendingToolCall,
+        executor: TurnEffectLocalExecutor<'_, '_>,
+    ) -> CompletedToolCall {
         self.record(&invocation);
-        executor.tool_batch(calls).await
+        executor.tool_call(call, invocation.metadata).await
     }
 
     async fn exec_code(
         &self,
         invocation: EffectInvocation,
         code: String,
-        executor: TurnEffectLocalExecutor<'_>,
+        executor: TurnEffectLocalExecutor<'_, '_>,
     ) -> Result<ExecResponse, String> {
         self.record(&invocation);
         executor.exec_code(code).await
@@ -102,7 +106,7 @@ impl RuntimeEffectHost for RecordingEffectHost {
         &self,
         invocation: EffectInvocation,
         checkpoint: CheckpointKind,
-        executor: TurnEffectLocalExecutor<'_>,
+        executor: TurnEffectLocalExecutor<'_, '_>,
     ) -> Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeError> {
         self.record(&invocation);
         executor.checkpoint(checkpoint).await
@@ -112,10 +116,14 @@ impl RuntimeEffectHost for RecordingEffectHost {
         &self,
         invocation: EffectInvocation,
         update_machine_config: bool,
-        executor: TurnEffectLocalExecutor<'_>,
+        executor: TurnEffectLocalExecutor<'_, '_>,
     ) -> Result<Option<ExecutionSurfaceSync>, String> {
         self.record(&invocation);
         executor.sync_execution_surface(update_machine_config).await
+    }
+
+    async fn sleep(&self, invocation: EffectInvocation, _duration: std::time::Duration) {
+        self.record(&invocation);
     }
 }
 
@@ -181,7 +189,209 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_host_once() {
 }
 
 #[tokio::test]
-async fn tool_batch_effect_crosses_host_once_and_runs_local_tools() {
+async fn scoped_borrowed_effect_host_uses_required_stable_turn_id() {
+    let recorder = RecordingEffectHost::default();
+    assert!(RuntimeEffectScope::new(&recorder, "").is_err());
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+    )
+    .await;
+
+    let effect_scope =
+        RuntimeEffectScope::new(&recorder, "stable-scoped-turn").expect("effect scope");
+    let turn = runtime
+        .stream_turn_with_effect_scope(
+            TurnInput::text("hello"),
+            &NoopEventSink,
+            effect_scope,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    assert!(
+        recorder
+            .records()
+            .iter()
+            .all(|record| record.idempotency_key.contains("stable-scoped-turn"))
+    );
+}
+
+#[tokio::test]
+async fn scoped_borrowed_effect_host_reaches_tool_direct_completions() {
+    struct DirectTool;
+
+    fn direct_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "direct_tool",
+            "Issue a direct completion from inside a tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for DirectTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![direct_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "direct_tool").then(|| Arc::new(direct_tool_definition().contract()))
+        }
+
+        async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let completion = call
+                .context
+                .direct_completion(
+                    crate::DirectRequest::text("mock-model", "nested"),
+                    "tool-direct",
+                )
+                .await
+                .expect("tool direct completion");
+            crate::ToolResult::ok(serde_json::json!({ "text": completion.text }))
+        }
+    }
+
+    let default_recorder = RecordingEffectHost::default();
+    let scoped_recorder = RecordingEffectHost::default();
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: String::new(),
+                parts: vec![LlmOutputPart::ToolCall {
+                    call_id: "direct-call-1".to_string(),
+                    tool_name: "direct_tool".to_string(),
+                    input_json: serde_json::json!({}).to_string(),
+                    replay: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "nested answer".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "nested answer".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "finished".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "finished".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(DirectTool),
+        transport,
+        host_with_effect_recorder(default_recorder.clone()),
+    )
+    .await;
+
+    let effect_scope =
+        RuntimeEffectScope::new(&scoped_recorder, "scoped-tool-direct").expect("effect scope");
+    let turn = runtime
+        .stream_turn_with_effect_scope(
+            TurnInput::text("use direct tool"),
+            &NoopEventSink,
+            effect_scope,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    assert_eq!(
+        scoped_recorder.count_kind(RuntimeEffectKind::DirectCompletion),
+        1
+    );
+    assert_eq!(
+        default_recorder.count_kind(RuntimeEffectKind::DirectCompletion),
+        0
+    );
+    assert!(scoped_recorder.records().iter().any(|record| {
+        record.kind == RuntimeEffectKind::DirectCompletion
+            && record.idempotency_key.contains("tool:direct-call-1")
+    }));
+}
+
+#[tokio::test]
+async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
+    struct RetryOnceTool {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn retry_once_tool_definition() -> crate::ToolDefinition {
+        crate::ToolDefinition::raw(
+            "retry_once",
+            "Fails once with a safe retry.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        )
+        .with_retry_policy(crate::ToolRetryPolicy::safe(2, 1, 1))
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ToolProvider for RetryOnceTool {
+        fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+            vec![retry_once_tool_definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+            (name == "retry_once").then(|| Arc::new(retry_once_tool_definition().contract()))
+        }
+
+        async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                return crate::ToolResult::retryable_failure(
+                    crate::ToolFailureClass::External,
+                    "transient",
+                    "transient failure",
+                    Some(1),
+                );
+            }
+            crate::ToolResult::ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
     let recorder = RecordingEffectHost::default();
     let transport = mock_provider(vec![
         MockCall {
@@ -189,11 +399,84 @@ async fn tool_batch_effect_crosses_host_once_and_runs_local_tools() {
             response: Ok(LlmResponse {
                 full_text: String::new(),
                 parts: vec![LlmOutputPart::ToolCall {
-                    call_id: "call-1".to_string(),
-                    tool_name: "echo_tool".to_string(),
-                    input_json: serde_json::json!({"value": "hi"}).to_string(),
+                    call_id: "retry-call-1".to_string(),
+                    tool_name: "retry_once".to_string(),
+                    input_json: serde_json::json!({}).to_string(),
                     replay: None,
                 }],
+                ..LlmResponse::default()
+            }),
+        },
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: "finished".to_string(),
+                parts: vec![LlmOutputPart::Text {
+                    text: "finished".to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            }),
+        },
+    ]);
+    let mut runtime = runtime_with_plugins_and_tools_and_host(
+        Vec::new(),
+        Arc::new(RetryOnceTool {
+            attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+        transport,
+        EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
+    )
+    .await;
+
+    let effect_scope =
+        RuntimeEffectScope::new(&recorder, "scoped-retry-sleep").expect("effect scope");
+    let turn = runtime
+        .stream_turn_with_effect_scope(
+            TurnInput::text("use retry tool"),
+            &NoopEventSink,
+            effect_scope,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    let sleep_records = recorder
+        .records()
+        .into_iter()
+        .filter(|record| record.kind == RuntimeEffectKind::Sleep)
+        .collect::<Vec<_>>();
+    assert_eq!(sleep_records.len(), 1);
+    let sleep = &sleep_records[0];
+    assert_eq!(sleep.turn_id.as_deref(), Some("scoped-retry-sleep"));
+    assert!(sleep.effect_id.contains("retry-call-1"));
+    assert!(sleep.idempotency_key.contains("scoped-retry-sleep"));
+    assert!(sleep.idempotency_key.contains("retry-call-1"));
+}
+
+#[tokio::test]
+async fn tool_call_effect_crosses_host_per_logical_call_and_runs_local_tools() {
+    let recorder = RecordingEffectHost::default();
+    let transport = mock_provider(vec![
+        MockCall {
+            stream_events: Vec::new(),
+            response: Ok(LlmResponse {
+                full_text: String::new(),
+                parts: vec![
+                    LlmOutputPart::ToolCall {
+                        call_id: "call-1".to_string(),
+                        tool_name: "echo_tool".to_string(),
+                        input_json: serde_json::json!({"value": "hi"}).to_string(),
+                        replay: None,
+                    },
+                    LlmOutputPart::ToolCall {
+                        call_id: "call-2".to_string(),
+                        tool_name: "echo_tool".to_string(),
+                        input_json: serde_json::json!({"value": "there"}).to_string(),
+                        replay: None,
+                    },
+                ],
                 ..LlmResponse::default()
             }),
         },
@@ -235,7 +518,15 @@ async fn tool_batch_effect_crosses_host_once_and_runs_local_tools() {
         .expect("turn");
 
     assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
-    assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolBatch), 1);
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::ToolCall), 2);
+    let tool_keys = recorder
+        .records()
+        .into_iter()
+        .filter(|record| record.kind == RuntimeEffectKind::ToolCall)
+        .map(|record| record.idempotency_key)
+        .collect::<Vec<_>>();
+    assert!(tool_keys.iter().any(|key| key.ends_with(":call-1")));
+    assert!(tool_keys.iter().any(|key| key.ends_with(":call-2")));
     assert!(
         active_tool_calls(&turn.state)
             .iter()
@@ -332,6 +623,12 @@ async fn direct_completion_crosses_host_and_records_usage_and_trace() {
     assert_eq!(completion.text, "direct answer");
     assert_eq!(completion.usage.input_tokens, 7);
     assert_eq!(recorder.count_kind(RuntimeEffectKind::DirectCompletion), 1);
+    assert!(recorder.records().iter().any(|record| {
+        record.kind == RuntimeEffectKind::DirectCompletion
+            && record
+                .idempotency_key
+                .contains("tool:originating-tool-call")
+    }));
     assert_token_ledger_entry(&runtime, "direct-test", "mock-model", &completion.usage);
     assert_trace_contains_completed_llm_call(&trace_path, Some("originating-tool-call"));
 }
@@ -522,7 +819,7 @@ struct EffectHostTestModeSession;
 impl ModeSessionPlugin for EffectHostTestModeSession {
     async fn execute_code(
         &self,
-        _ctx: crate::ModeExecutionContext,
+        _ctx: crate::ModeExecutionContext<'_>,
         _request: crate::ExecRequest,
     ) -> Result<crate::ExecResponse, crate::SessionError> {
         Ok(crate::ExecResponse {

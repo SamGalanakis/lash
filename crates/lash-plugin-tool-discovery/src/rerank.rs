@@ -65,6 +65,7 @@ pub(crate) fn llm_rerank_request(
         stream_events: None,
         session_id: None,
         originating_tool_call_id: None,
+        idempotency_key: None,
     }
 }
 

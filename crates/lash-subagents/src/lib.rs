@@ -90,7 +90,7 @@ impl PluginFactory for SubagentsPluginFactory {
         let is_rlm = execution_mode == lash_core::ExecutionMode::new("rlm");
         if is_rlm && !ctx.background_tasks_available {
             return Err(PluginError::Registration(
-                "subagents require session background-task support; configure a BackgroundTaskHost before installing SubagentsPluginFactory"
+                "subagents require session background-task support; configure a BackgroundTaskRegistry before installing SubagentsPluginFactory"
                     .to_string(),
             ));
         }

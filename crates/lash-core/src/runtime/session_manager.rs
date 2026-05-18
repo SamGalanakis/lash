@@ -57,7 +57,6 @@ pub(in crate::runtime) struct CurrentSessionCapability {
     pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
-    async_tool_handles: Option<crate::session::AsyncToolHandleMap>,
 }
 
 #[derive(Clone)]
@@ -156,10 +155,6 @@ impl CurrentSessionCapability {
             host: runtime.host.clone(),
             plugins,
             store: runtime.services.store.clone(),
-            async_tool_handles: runtime
-                .session
-                .as_ref()
-                .map(|session| session.async_tool_handle_map()),
         }
     }
 }

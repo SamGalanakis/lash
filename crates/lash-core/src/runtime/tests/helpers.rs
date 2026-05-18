@@ -835,7 +835,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
-        Arc::new(LocalBackgroundTaskHost::default()),
+        Arc::new(LocalBackgroundTaskRegistry::default()),
     );
     let mut runtime = LashRuntime::from_background_state(
         standard_test_policy(),
@@ -855,7 +855,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
 
 pub(super) async fn standard_runtime_with_shared_background_executor(
     transport: TestProvider,
-    executor: Arc<dyn BackgroundTaskHost>,
+    executor: Arc<dyn BackgroundTaskRegistry>,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(test_host_config(), executor);

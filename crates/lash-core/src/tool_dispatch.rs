@@ -17,11 +17,12 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct ToolDispatchContext {
+pub struct ToolDispatchContext<'run> {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) effect_host: crate::runtime::RuntimeEffectHostHandle<'run>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
@@ -48,7 +49,7 @@ pub struct ParallelToolCallOutcome {
 }
 
 pub(crate) async fn dispatch_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
@@ -65,7 +66,7 @@ pub(crate) async fn dispatch_tool_call(
 }
 
 pub(crate) async fn dispatch_tool_call_with_execution_context(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
@@ -300,7 +301,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
 }
 
 fn resolve_callable_manifest(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> Option<ToolManifest> {
     if let Some(entry) = context
@@ -342,7 +343,7 @@ fn resolve_callable_manifest(
 }
 
 pub(crate) async fn dispatch_parallel_tool_call(
-    context: Arc<ToolDispatchContext>,
+    context: Arc<ToolDispatchContext<'_>>,
     spec: ParallelToolCallSpec,
     progress: Option<ProgressSender>,
 ) -> ParallelToolCallOutcome {
@@ -357,7 +358,7 @@ pub(crate) async fn dispatch_parallel_tool_call(
 /// tool names default to [`ToolExecutionMode::Parallel`] — the dispatcher
 /// will still surface an "unknown tool" error via the normal path.
 pub(crate) fn resolve_tool_execution_mode(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> ToolExecutionMode {
     context
@@ -370,7 +371,7 @@ pub(crate) fn resolve_tool_execution_mode(
 }
 
 pub(crate) fn resolve_tool_argument_projection_policy(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> crate::ToolArgumentProjectionPolicy {
     context
@@ -433,7 +434,7 @@ where
 
 /// Dispatch a batch of tool calls produced by one model response.
 pub async fn dispatch_parallel_tool_calls(
-    context: Arc<ToolDispatchContext>,
+    context: Arc<ToolDispatchContext<'_>>,
     specs: Vec<ParallelToolCallSpec>,
     progress: Option<&ProgressSender>,
 ) -> Vec<ParallelToolCallOutcome> {
@@ -478,6 +479,7 @@ fn runtime_failure(
 mod tests {
     use super::*;
     use crate::plugin::{PluginHost, StaticPluginFactory};
+    use crate::runtime::RuntimeEffectHostHandle;
     use crate::{
         ExecutionMode, ToolCall, ToolCallOutcome, ToolProvider, ToolRetryDisposition,
         ToolRetryPolicy,
@@ -766,7 +768,7 @@ mod tests {
         )
     }
 
-    fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext {
+    fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
         let tools = plugins.tools();
@@ -776,6 +778,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -795,7 +800,7 @@ mod tests {
 
     use crate::testing::MockSessionManager;
 
-    fn dispatch_context() -> ToolDispatchContext {
+    fn dispatch_context() -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
@@ -805,6 +810,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -815,7 +823,7 @@ mod tests {
 
     fn projection_policy_dispatch_context(
         captured: Arc<std::sync::Mutex<Option<crate::ToolArgumentProjectionPolicy>>>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let provider: Arc<dyn ToolProvider> = Arc::new(ProjectionPolicyTools);
         let hook_captured = Arc::clone(&captured);
@@ -842,6 +850,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -872,6 +883,7 @@ mod tests {
         successes_after: usize,
         cancel_on_first: bool,
         observed_attempts: SharedAttemptObservations,
+        retry_after_ms: Option<u64>,
     }
 
     #[async_trait::async_trait]
@@ -959,7 +971,7 @@ mod tests {
                 crate::ToolFailureClass::External,
                 "transient",
                 "transient failure",
-                Some(0),
+                self.retry_after_ms,
             )
         }
     }
@@ -967,7 +979,7 @@ mod tests {
     fn lazy_contract_dispatch_context(
         contracts_resolved: Arc<AtomicUsize>,
         executed: Arc<AtomicUsize>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let provider: Arc<dyn ToolProvider> = Arc::new(CountingContractTools {
             contracts_resolved,
@@ -984,6 +996,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -992,7 +1007,7 @@ mod tests {
         }
     }
 
-    fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext {
+    fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::clone(&provider));
         let tools = plugins.tools();
@@ -1002,6 +1017,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1022,20 +1040,21 @@ mod tests {
         successes_after: usize,
         cancel_on_first: bool,
         observed_attempts: SharedAttemptObservations,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         exact_dispatch_context(Arc::new(RetryProbeTools {
             definition: retry_tool("retry_probe", retry_policy),
             attempts,
             successes_after,
             cancel_on_first,
             observed_attempts,
+            retry_after_ms: Some(0),
         }))
     }
 
     fn parallel_dispatch_context(
         barrier: Arc<Barrier>,
         started: Arc<AtomicUsize>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
@@ -1045,6 +1064,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1247,6 +1269,62 @@ mod tests {
                 .map(|(attempt, max, _)| (*attempt, *max))
                 .collect::<Vec<_>>(),
             vec![(1, 3), (2, 3)]
+        );
+    }
+
+    #[derive(Default)]
+    struct SleepRecordingEffectHost {
+        sleeps: Arc<std::sync::Mutex<Vec<crate::EffectInvocationMetadata>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeEffectHost for SleepRecordingEffectHost {
+        async fn sleep(&self, invocation: crate::EffectInvocation, _duration: std::time::Duration) {
+            self.sleeps
+                .lock()
+                .expect("sleep records")
+                .push(invocation.metadata);
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_delay_crosses_effect_host_as_sleep_effect() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::new(SleepRecordingEffectHost::default());
+        let mut context = exact_dispatch_context(Arc::new(RetryProbeTools {
+            definition: retry_tool("retry_probe", ToolRetryPolicy::safe(3, 25, 25)),
+            attempts: Arc::clone(&attempts),
+            successes_after: 2,
+            cancel_on_first: false,
+            observed_attempts: Arc::clone(&observed),
+            retry_after_ms: Some(25),
+        }));
+        context.effect_host = RuntimeEffectHostHandle::shared(recorder.clone());
+        let tool_context = ToolContext::new(
+            context.session_id.clone(),
+            Arc::clone(&context.host),
+            context.turn_context.clone(),
+            Arc::clone(&context.attachment_store),
+            Some("call-1".to_string()),
+        );
+
+        let outcome = dispatch_tool_call_with_execution_context(
+            &context,
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+            tool_context,
+        )
+        .await;
+
+        assert!(outcome.record.output.is_success());
+        let sleeps = recorder.sleeps.lock().expect("sleep records");
+        assert_eq!(sleeps.len(), 1);
+        assert_eq!(sleeps[0].effect_kind, crate::RuntimeEffectKind::Sleep);
+        assert_eq!(
+            sleeps[0].idempotency_key,
+            "lash-tool:session:call-1:retry_probe:attempt:1:sleep"
         );
     }
 
@@ -1544,7 +1622,7 @@ mod tests {
 
     fn serial_dispatch_context(
         log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
         let tools = plugins.tools();
@@ -1554,6 +1632,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1690,6 +1771,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1812,6 +1896,9 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_host: RuntimeEffectHostHandle::shared(Arc::new(
+                crate::LocalRuntimeEffectHost::default(),
+            )),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),

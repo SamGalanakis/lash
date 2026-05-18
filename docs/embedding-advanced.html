@@ -65,9 +65,9 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool batches, mid-turn worker migration — install a custom <code>RuntimeEffectHost</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectHost</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
-          <p>Shape: the runtime driver polls <code>TurnMachine</code>, builds <code>EffectInvocation</code> metadata, invokes the host with a <code>RuntimeEffect</code>, and feeds the returned outcome back as the matching response. Turn invocations include a serialized <code>TurnCheckpoint</code> and stable idempotency key; direct/plugin LLM completions use the same host boundary after request normalization.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code>, builds <code>EffectInvocation</code> metadata, invokes the active scoped host for each logical effect, and feeds the returned outcome back as the matching response. Turn invocations include a serialized <code>TurnCheckpoint</code> and stable idempotency key; direct/plugin LLM completions use the same host boundary after request normalization.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 

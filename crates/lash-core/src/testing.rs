@@ -17,9 +17,9 @@ use crate::provider::{
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
-    PersistedSessionState, ProviderOptions, SessionPolicy, SessionStateEnvelope, TokenUsage,
-    TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    AssembledTurn, AssistantOutput, BackgroundTaskRegistry, ExecutionMode, ExecutionSummary,
+    OutputState, PersistedSessionState, ProviderOptions, RuntimeEffectHost, SessionPolicy,
+    SessionStateEnvelope, TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
 type CompletionFuture =
@@ -371,6 +371,7 @@ pub struct MockSessionManager {
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
     pub tool_registry: Option<crate::ToolRegistry>,
+    pub background: Arc<crate::LocalBackgroundTaskRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub cancelled: Mutex<Vec<String>>,
     pub closed: Mutex<Vec<String>>,
@@ -383,6 +384,7 @@ impl Default for MockSessionManager {
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,
+            background: Arc::new(crate::LocalBackgroundTaskRegistry::default()),
             created: Mutex::new(Vec::new()),
             cancelled: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -504,6 +506,61 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
             .expect("cancelled lock")
             .push(turn_id.to_string());
         Ok(())
+    }
+
+    async fn start_background_task(
+        &self,
+        _session_id: &str,
+        registration: crate::BackgroundTaskRegistration,
+        executor: crate::BackgroundTaskExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.background.register(registration.clone()).await?;
+        crate::LocalRuntimeEffectHost::default()
+            .start_background_task(self.background.clone(), registration, executor)
+            .await
+    }
+
+    async fn await_background_task(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
+        self.background.await_completion(task_id).await
+    }
+
+    async fn complete_background_task(
+        &self,
+        task_id: &str,
+        completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.background.complete(task_id, completion).await
+    }
+
+    async fn list_background_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+        Ok(self
+            .background
+            .list(crate::BackgroundTaskFilter {
+                session_id: Some(session_id.to_string()),
+                kind: None,
+                include_terminal: true,
+            })
+            .await)
+    }
+
+    async fn cancel_background_task(
+        &self,
+        _session_id: &str,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        crate::LocalRuntimeEffectHost::default()
+            .request_background_task_cancel(
+                self.background.clone(),
+                task_id,
+                Some("requested by test".to_string()),
+            )
+            .await
     }
 }
 // ─────────────────────────────────────────────────────────────────────
@@ -695,7 +752,7 @@ mod test_mode_fakes {
 
         async fn execute(
             &self,
-            context: &crate::tool_dispatch::ToolDispatchContext,
+            context: &crate::tool_dispatch::ToolDispatchContext<'_>,
             name: &str,
             args: &serde_json::Value,
             progress: Option<&crate::ProgressSender>,
@@ -748,7 +805,7 @@ mod test_mode_fakes {
     /// Minimal batch executor used by lash's own tests (mirrors the
     /// behavior of `lash-mode-standard`'s `execute_batch_tool_call`).
     async fn execute_test_batch(
-        context: &crate::tool_dispatch::ToolDispatchContext,
+        context: &crate::tool_dispatch::ToolDispatchContext<'_>,
         args: &serde_json::Value,
         progress: Option<&crate::ProgressSender>,
     ) -> crate::ToolResult {

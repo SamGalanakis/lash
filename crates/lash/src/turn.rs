@@ -106,6 +106,20 @@ impl TurnBuilder {
         })
     }
 
+    pub async fn run_with_effect_scope(
+        self,
+        effect_scope: RuntimeEffectScope<'_>,
+    ) -> Result<TurnOutput> {
+        let collector = RunActivityCollector::default();
+        let result = self
+            .stream_with_effect_scope(&collector, effect_scope)
+            .await?;
+        Ok(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        })
+    }
+
     pub async fn collect_with(self, events: &dyn TurnActivitySink) -> Result<TurnOutput> {
         let collector = RunActivityCollector::default();
         let fanout = BorrowedTurnActivityFanout {
@@ -164,6 +178,23 @@ impl TurnBuilder {
     pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
         let (runtime, input, cancel) = self.prepare()?;
         stream_prepared_turn(&runtime, input, None, Some(events), cancel).await
+    }
+
+    pub async fn stream_with_effect_scope(
+        self,
+        events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
+    ) -> Result<TurnResult> {
+        let (runtime, input, cancel) = self.prepare()?;
+        stream_prepared_turn_with_effect_scope(
+            &runtime,
+            input,
+            None,
+            Some(events),
+            effect_scope,
+            cancel,
+        )
+        .await
     }
 
     pub fn into_stream(self) -> Result<TurnStream> {
@@ -231,8 +262,34 @@ pub(crate) async fn stream_prepared_turn(
     turn_events: Option<&dyn TurnActivitySink>,
     cancel: CancellationToken,
 ) -> Result<TurnResult> {
-    let turn =
-        stream_prepared_assembled(runtime, input, session_events, turn_events, cancel).await?;
+    let turn = Box::pin(stream_prepared_assembled(
+        runtime,
+        input,
+        session_events,
+        turn_events,
+        cancel,
+    ))
+    .await?;
+    Ok(TurnResult::from_assembled(turn))
+}
+
+pub(crate) async fn stream_prepared_turn_with_effect_scope(
+    runtime: &RuntimeHandle,
+    input: TurnInput,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    effect_scope: RuntimeEffectScope<'_>,
+    cancel: CancellationToken,
+) -> Result<TurnResult> {
+    let turn = Box::pin(stream_prepared_assembled_with_effect_scope(
+        runtime,
+        input,
+        session_events,
+        turn_events,
+        effect_scope,
+        cancel,
+    ))
+    .await?;
     Ok(TurnResult::from_assembled(turn))
 }
 
@@ -243,8 +300,39 @@ pub(crate) async fn stream_prepared_assembled(
     turn_events: Option<&dyn TurnActivitySink>,
     cancel: CancellationToken,
 ) -> Result<AssembledTurn> {
-    let turn =
-        stream_prepared_followed(runtime, input, session_events, turn_events, cancel).await?;
+    let turn = Box::pin(stream_prepared_followed(
+        runtime,
+        input,
+        session_events,
+        turn_events,
+        cancel,
+    ))
+    .await?;
+    turn.into_final_turn().ok_or_else(|| {
+        EmbedError::Runtime(lash_core::RuntimeError {
+            code: "empty_followed_turn".to_string(),
+            message: "runtime completed without an assembled turn".to_string(),
+        })
+    })
+}
+
+pub(crate) async fn stream_prepared_assembled_with_effect_scope(
+    runtime: &RuntimeHandle,
+    input: TurnInput,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    effect_scope: RuntimeEffectScope<'_>,
+    cancel: CancellationToken,
+) -> Result<AssembledTurn> {
+    let turn = Box::pin(stream_prepared_followed_with_effect_scope(
+        runtime,
+        input,
+        session_events,
+        turn_events,
+        effect_scope,
+        cancel,
+    ))
+    .await?;
     turn.into_final_turn().ok_or_else(|| {
         EmbedError::Runtime(lash_core::RuntimeError {
             code: "empty_followed_turn".to_string(),
@@ -270,35 +358,62 @@ pub(crate) async fn stream_prepared_followed(
     }
     let turn = match (session_events, turn_events) {
         (Some(session_events), Some(turn_events)) => {
-            writer
-                .stream_turn_with_events_following_handoffs(
-                    input,
-                    session_events,
-                    turn_events,
-                    cancel,
-                )
-                .await?
+            Box::pin(writer.stream_turn_with_events_following_handoffs(
+                input,
+                session_events,
+                turn_events,
+                cancel,
+            ))
+            .await?
         }
         (Some(session_events), None) => {
-            writer
-                .stream_turn_following_handoffs(input, session_events, cancel)
-                .await?
+            Box::pin(writer.stream_turn_following_handoffs(input, session_events, cancel)).await?
         }
         (None, Some(turn_events)) => {
-            writer
-                .stream_turn_events_following_handoffs(input, turn_events, cancel)
+            Box::pin(writer.stream_turn_events_following_handoffs(input, turn_events, cancel))
                 .await?
         }
         (None, None) => {
-            writer
-                .stream_turn_events_following_handoffs(
-                    input,
-                    &lash_core::NoopTurnActivitySink,
-                    cancel,
-                )
-                .await?
+            Box::pin(writer.stream_turn_events_following_handoffs(
+                input,
+                &lash_core::NoopTurnActivitySink,
+                cancel,
+            ))
+            .await?
         }
     };
+    runtime.publish_from(&writer);
+    Ok(turn)
+}
+
+pub(crate) async fn stream_prepared_followed_with_effect_scope(
+    runtime: &RuntimeHandle,
+    input: TurnInput,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    effect_scope: RuntimeEffectScope<'_>,
+    cancel: CancellationToken,
+) -> Result<lash_core::FollowedTurn> {
+    let writer_handle = runtime.writer();
+    let mut writer = writer_handle.lock().await;
+    if let Some(extension) = input.mode_extension.as_ref() {
+        writer
+            .validate_mode_turn_extension(extension)
+            .await
+            .map_err(EmbedError::Session)?;
+    }
+    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
+    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
+    let turn = Box::pin(
+        writer.stream_turn_with_events_following_handoffs_with_effect_scope(
+            input,
+            session_events,
+            turn_events,
+            effect_scope,
+            cancel,
+        ),
+    )
+    .await?;
     runtime.publish_from(&writer);
     Ok(turn)
 }

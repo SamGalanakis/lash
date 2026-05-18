@@ -71,6 +71,23 @@ impl LashRuntime {
             .await
     }
 
+    pub async fn stream_turn_with_effect_scope(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        effect_scope: RuntimeEffectScope<'_>,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        self.stream_turn_with_semantic_events_with_effect_scope(
+            input,
+            events,
+            &NoopTurnActivitySink,
+            effect_scope,
+            cancel,
+        )
+        .await
+    }
+
     pub(crate) async fn stream_turn_with_semantic_events(
         &mut self,
         input: TurnInput,
@@ -78,6 +95,63 @@ impl LashRuntime {
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
+        let effect_host = Arc::clone(&self.host.core.effect_host);
+        let turn_id = input
+            .trace_turn_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let effect_scope = RuntimeEffectScope::new(effect_host.as_ref(), &turn_id)?;
+        self.stream_turn_with_semantic_events_with_effect_scope(
+            input,
+            events,
+            turn_events,
+            effect_scope,
+            cancel,
+        )
+        .await
+    }
+
+    pub(crate) async fn stream_turn_with_semantic_events_with_effect_scope(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        crate::runtime::effect_host::scope_active_effect_host(
+            effect_scope,
+            self.stream_turn_with_semantic_events_with_effect_scope_inner(
+                input,
+                events,
+                turn_events,
+                effect_scope,
+                cancel,
+            ),
+        )
+        .await
+    }
+
+    async fn stream_turn_with_semantic_events_with_effect_scope_inner(
+        &mut self,
+        mut input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
+        cancel: CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        if let Some(input_turn_id) = input.trace_turn_id.as_deref()
+            && input_turn_id != effect_scope.turn_id()
+        {
+            return Err(RuntimeError {
+                code: "effect_scope_turn_id_mismatch".to_string(),
+                message: format!(
+                    "input trace_turn_id `{input_turn_id}` does not match effect scope turn_id `{}`",
+                    effect_scope.turn_id()
+                ),
+            });
+        }
+        input.trace_turn_id = Some(effect_scope.turn_id().to_string());
         if let Some(execution_session_id) = self
             .active_handoff_leaf(&self.state.session_id)
             .await
@@ -89,12 +163,19 @@ impl LashRuntime {
                     input,
                     events,
                     turn_events,
+                    effect_scope,
                     cancel,
                 )
                 .await;
         }
-        self.stream_turn_inner(input.clone(), events, turn_events, cancel.clone())
-            .await
+        self.stream_turn_inner(
+            input.clone(),
+            events,
+            turn_events,
+            effect_scope,
+            cancel.clone(),
+        )
+        .await
     }
 
     async fn active_handoff_leaf(&self, session_id: &str) -> Option<String> {
@@ -116,6 +197,7 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let runtime_handle = {
@@ -129,7 +211,7 @@ impl LashRuntime {
         let mut runtime = runtime_handle.runtime.lock().await;
         runtime.state.turn_index = self.state.turn_index;
         let turn = runtime
-            .stream_turn_inner(input, events, turn_events, cancel)
+            .stream_turn_inner(input, events, turn_events, effect_scope, cancel)
             .await?;
         runtime_handle.publish_from(&runtime);
         self.state.turn_index = turn.state.turn_index;
@@ -185,24 +267,80 @@ impl LashRuntime {
             .await
     }
 
+    pub async fn stream_turn_with_events_following_handoffs_with_effect_scope(
+        &mut self,
+        input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
+            input,
+            events,
+            turn_events,
+            effect_scope,
+            cancel,
+        )
+        .await
+    }
+
     async fn stream_turn_following_handoffs_with_semantic_events(
         &mut self,
-        mut input: TurnInput,
+        input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
         cancel: CancellationToken,
     ) -> Result<FollowedTurn, RuntimeError> {
-        let follow_mode_turn_options = input.mode_turn_options.clone();
-        let follow_turn_context = input.turn_context.clone();
+        let effect_host = Arc::clone(&self.host.core.effect_host);
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let effect_scope = RuntimeEffectScope::new(effect_host.as_ref(), &follow_trace_turn_id)?;
+        self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
+            input,
+            events,
+            turn_events,
+            effect_scope,
+            cancel,
+        )
+        .await
+    }
+
+    async fn stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
+        &mut self,
+        mut input: TurnInput,
+        events: &dyn EventSink,
+        turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
+        cancel: CancellationToken,
+    ) -> Result<FollowedTurn, RuntimeError> {
+        if let Some(input_turn_id) = input.trace_turn_id.as_deref()
+            && input_turn_id != effect_scope.turn_id()
+        {
+            return Err(RuntimeError {
+                code: "effect_scope_turn_id_mismatch".to_string(),
+                message: format!(
+                    "input trace_turn_id `{input_turn_id}` does not match effect scope turn_id `{}`",
+                    effect_scope.turn_id()
+                ),
+            });
+        }
+        let follow_mode_turn_options = input.mode_turn_options.clone();
+        let follow_turn_context = input.turn_context.clone();
+        let follow_trace_turn_id = effect_scope.turn_id().to_string();
         input.trace_turn_id = Some(follow_trace_turn_id.clone());
         let mut turns = Vec::new();
         loop {
             let turn = self
-                .stream_turn_with_semantic_events(input, events, turn_events, cancel.clone())
+                .stream_turn_with_semantic_events_with_effect_scope(
+                    input,
+                    events,
+                    turn_events,
+                    effect_scope,
+                    cancel.clone(),
+                )
                 .await?;
             let successor_session_id = match &turn.outcome {
                 TurnOutcome::Handoff { session_id } => Some(session_id.clone()),
@@ -247,6 +385,7 @@ impl LashRuntime {
         input: TurnInput,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         self.refresh_session_graph_from_store().await;
@@ -456,6 +595,7 @@ impl LashRuntime {
             turn_index,
             events,
             turn_events,
+            effect_scope,
             cancel,
         )
         .await
@@ -483,6 +623,7 @@ impl LashRuntime {
         turn_index: usize,
         events: &dyn EventSink,
         turn_events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectScope<'_>,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
@@ -639,8 +780,9 @@ impl LashRuntime {
             session,
             policy: turn_policy.clone(),
             host: self.host.clone(),
+            effect_scope,
             session_id: self.state.session_id.clone(),
-            turn_id: trace_turn_id.clone(),
+            turn_id: effect_scope.turn_id().to_string(),
             turn_index,
             turn_pipeline,
             llm_stream_summaries: HashMap::new(),
@@ -652,49 +794,27 @@ impl LashRuntime {
             turn_phase_probe: self.turn_phase_probe.clone(),
         };
         let mode_run_offset = 0;
-        let run_task = tokio::spawn(async move {
-            let (new_messages, new_mode_iteration) = driver
-                .run(prepared.messages, event_tx, cancel, mode_run_offset)
-                .await;
-            (driver, new_messages, new_mode_iteration)
-        });
-        tokio::pin!(run_task);
-
         self.mark_phase_begin(RuntimeTurnPhase::EffectLoop);
-        let (driver, new_messages, _new_mode_iteration) = loop {
-            tokio::select! {
-                maybe_event = event_rx.recv() => {
-                    if let Some(event) = maybe_event {
-                        emit_runtime_stream_event_to_sinks(
-                            events,
-                            turn_events,
-                            event,
-                            &mut assembler,
-                        )
-                        .await;
-                    }
-                }
-                joined = &mut run_task => {
-                    child_usage_event_relay.clear();
-                    let joined = match joined {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let issue = TurnIssue {
-                                kind: "runtime".to_string(),
-                                code: Some("run_task_join_failed".to_string()),
-                                terminal_reason: None,
-                                message: format!("Runtime turn task failed: {e}"),
-                                raw: None,
-                            };
-                            return Ok(assembler.finish(
-                                self.state.export_state(),
-                                cancel_state.is_cancelled(),
-                                Some(issue),
-                                &self.host.core.termination,
-                            ));
+        let (new_messages, _new_mode_iteration) = {
+            let run_future = driver.run(prepared.messages, event_tx, cancel, mode_run_offset);
+            tokio::pin!(run_future);
+            loop {
+                tokio::select! {
+                    maybe_event = event_rx.recv() => {
+                        if let Some(event) = maybe_event {
+                            emit_runtime_stream_event_to_sinks(
+                                events,
+                                turn_events,
+                                event,
+                                &mut assembler,
+                            )
+                            .await;
                         }
-                    };
-                    break joined;
+                    }
+                    completed = &mut run_future => {
+                        child_usage_event_relay.clear();
+                        break completed;
+                    }
                 }
             }
         };

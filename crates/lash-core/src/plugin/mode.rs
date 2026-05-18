@@ -70,7 +70,7 @@ pub trait ModeSessionPlugin: Send + Sync {
 
     async fn execute_code(
         &self,
-        _ctx: ModeExecutionContext,
+        _ctx: ModeExecutionContext<'_>,
         _request: ExecRequest,
     ) -> Result<ExecResponse, crate::SessionError> {
         Err(crate::SessionError::RlmUnavailable)
@@ -179,7 +179,7 @@ pub trait ModeNativeToolsPlugin: Send + Sync {
 
     async fn execute(
         &self,
-        context: &crate::tool_dispatch::ToolDispatchContext,
+        context: &crate::tool_dispatch::ToolDispatchContext<'_>,
         name: &str,
         args: &serde_json::Value,
         progress: Option<&crate::ProgressSender>,

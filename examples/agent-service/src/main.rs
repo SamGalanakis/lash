@@ -15,6 +15,7 @@ use bytes::Bytes;
 use lash::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
     TurnBuilder, TurnEvent, TurnInput, TurnOutput,
+    advanced::{LocalBackgroundTaskRegistry, LocalRuntimeEffectHost},
     plugins::{PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin},
     prompt::PromptContribution,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
@@ -207,8 +208,58 @@ impl TraceSink for FanoutTraceSink {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentServiceDurability {
+    Local,
+    Restate,
+}
+
+impl AgentServiceDurability {
+    fn configured() -> anyhow_like::Result<Self> {
+        let mut args = std::env::args().skip(1);
+        let mut from_args = None;
+        while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("--durability=") {
+                from_args = Some(value.to_string());
+                continue;
+            }
+            if arg == "--durability" {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--durability requires local or restate".to_string())?;
+                from_args = Some(value);
+                continue;
+            }
+            return Err(format!("unknown argument `{arg}`"));
+        }
+
+        let raw = from_args
+            .or_else(|| std::env::var("AGENT_SERVICE_DURABILITY").ok())
+            .unwrap_or_else(|| "local".to_string());
+        Self::parse(&raw)
+    }
+
+    fn parse(value: &str) -> anyhow_like::Result<Self> {
+        match value {
+            "local" => Ok(Self::Local),
+            "restate" => Ok(Self::Restate),
+            other => Err(format!(
+                "invalid durability `{other}`; expected `local` or `restate`"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Restate => "restate",
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow_like::Result<()> {
+    let durability = AgentServiceDurability::configured()?;
     let api_key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY is required".to_string())?;
     let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.5".to_string());
@@ -238,7 +289,7 @@ async fn main() -> anyhow_like::Result<()> {
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
-    let core = LashCore::builder()
+    let core_builder = LashCore::builder()
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::rlm())
         .provider(provider)
@@ -251,9 +302,21 @@ async fn main() -> anyhow_like::Result<()> {
                 Arc::new(JsonlTraceSink::new(trace_path)),
             ],
         })))
-        .trace_level(TraceLevel::Extended)
-        .build()
-        .map_err(|err| err.to_string())?;
+        .trace_level(TraceLevel::Extended);
+    let core = match durability {
+        AgentServiceDurability::Local => core_builder
+            .advanced()
+            .effect_host(Arc::new(LocalRuntimeEffectHost::default()))
+            .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+            .build()
+            .map_err(|err| err.to_string())?,
+        AgentServiceDurability::Restate => {
+            return Err(
+                "AGENT_SERVICE_DURABILITY=restate requires a Restate RuntimeEffectHost adapter"
+                    .to_string(),
+            );
+        }
+    };
 
     let app_db = AppDb::open(&data_dir.join("app.db")).map_err(|err| err.to_string())?;
     let state = AppStateData {
@@ -277,7 +340,10 @@ async fn main() -> anyhow_like::Result<()> {
         )
         .with_state(state);
 
-    println!("agent-service listening on http://{addr}");
+    println!(
+        "agent-service listening on http://{addr} (durability: {})",
+        durability.as_str()
+    );
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|err| err.to_string())?;

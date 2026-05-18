@@ -38,6 +38,7 @@ pub struct ToolContext {
     pub(crate) attempt_number: u32,
     pub(crate) max_attempts: u32,
     pub(crate) idempotency_key: Option<String>,
+    pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,61 +118,47 @@ pub struct ToolTaskControl {
 }
 
 impl ToolTaskControl {
-    pub async fn register_background_task(
+    pub async fn start_background_task(
         &self,
-        spec: crate::BackgroundTaskRegistration,
-        cancel: Option<crate::LocalBackgroundTaskCancel>,
-    ) -> Result<(), PluginError> {
+        registration: crate::BackgroundTaskRegistration,
+        executor: crate::BackgroundTaskExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         self.host
-            .register_background_task(&self.session_id, spec, cancel)
+            .start_background_task(&self.session_id, registration, executor)
             .await
     }
 
-    pub async fn unregister_background_task(&self, task_id: &str) {
-        self.unregister_background_task_for_session(&self.session_id, task_id)
-            .await;
+    pub async fn await_background_task(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
+        self.host.await_background_task(task_id).await
     }
 
-    pub async fn complete_background_task(&self, task_id: &str, state: crate::BackgroundTaskState) {
-        self.complete_background_task_for_session(&self.session_id, task_id, state)
-            .await;
+    pub async fn complete_background_task(
+        &self,
+        task_id: &str,
+        completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.host
+            .complete_background_task(task_id, completion)
+            .await
     }
 
-    pub async fn transition_background_task_live_state(
+    pub async fn complete_background_task_with_state(
         &self,
         task_id: &str,
         state: crate::BackgroundTaskState,
-    ) {
-        self.transition_background_task_live_state_for_session(&self.session_id, task_id, state)
-            .await;
-    }
-
-    pub async fn unregister_background_task_for_session(&self, session_id: &str, task_id: &str) {
-        self.host
-            .unregister_background_task(session_id, task_id)
-            .await;
-    }
-
-    pub async fn complete_background_task_for_session(
-        &self,
-        session_id: &str,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
-        self.host
-            .complete_background_task(session_id, task_id, state)
-            .await;
-    }
-
-    pub async fn transition_background_task_live_state_for_session(
-        &self,
-        session_id: &str,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
-        self.host
-            .transition_background_task_live_state(session_id, task_id, state)
-            .await;
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.complete_background_task(
+            task_id,
+            crate::BackgroundTaskCompletion {
+                state,
+                summary: None,
+                output: None,
+            },
+        )
+        .await
     }
 
     pub async fn validate_async_handles_visible(
@@ -229,6 +216,7 @@ impl ToolContext {
             attempt_number: 1,
             max_attempts: 1,
             idempotency_key: None,
+            tool_effect_metadata: None,
         }
     }
 
@@ -366,6 +354,14 @@ impl ToolContext {
         self
     }
 
+    pub(crate) fn with_tool_effect_metadata(
+        mut self,
+        metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> Self {
+        self.tool_effect_metadata = metadata;
+        self
+    }
+
     /// Constructor reserved for `lash_core::testing` helpers. Do not call directly;
     /// use [`lash_core::testing::mock_tool_context`] instead.
     #[cfg(any(test, feature = "testing"))]
@@ -376,8 +372,8 @@ impl ToolContext {
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         tool_call_id: Option<String>,
-    ) -> Self {
-        Self::new(
+    ) -> ToolContext {
+        ToolContext::new(
             session_id,
             host,
             turn_context,

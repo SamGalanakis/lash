@@ -395,7 +395,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn execute_code(
         &self,
-        ctx: lash_core::ModeExecutionContext,
+        ctx: lash_core::ModeExecutionContext<'_>,
         request: lash_core::ExecRequest,
     ) -> Result<lash_core::ExecResponse, SessionError> {
         let session_projected_bindings = self.session_projected_bindings.lock().await.clone();

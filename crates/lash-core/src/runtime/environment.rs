@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
-use super::host::BackgroundTaskHost;
+use super::host::BackgroundTaskRegistry;
 use super::{RuntimeCoreConfig, RuntimeEffectHost, TerminationPolicy};
 
 /// Where session nodes live at runtime.
@@ -72,7 +72,7 @@ pub struct RuntimeEnvironment {
     pub residency: Residency,
 
     // Host-owned background task lifecycle and local execution support.
-    pub background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
+    pub background_task_registry: Option<Arc<dyn BackgroundTaskRegistry>>,
 
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
@@ -111,7 +111,7 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl RuntimeEnvironmentBuilder {
     pub fn with_plugin_host(mut self, host: Arc<crate::PluginHost>) -> Self {
-        self.env.plugin_host = Some(if self.env.background_task_host.is_some() {
+        self.env.plugin_host = Some(if self.env.background_task_registry.is_some() {
             Arc::new(host.as_ref().clone().with_background_tasks())
         } else {
             host
@@ -124,11 +124,11 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_background_task_host(
+    pub fn with_background_task_registry(
         mut self,
-        background_task_host: Arc<dyn BackgroundTaskHost>,
+        background_task_registry: Arc<dyn BackgroundTaskRegistry>,
     ) -> Self {
-        self.env.background_task_host = Some(background_task_host);
+        self.env.background_task_registry = Some(background_task_registry);
         if let Some(host) = self.env.plugin_host.take() {
             self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_background_tasks()));
         }
@@ -226,7 +226,7 @@ mod tests {
         let attachment_store: Arc<dyn crate::AttachmentStore> =
             Arc::new(crate::InMemoryAttachmentStore::new());
         let effect_host: Arc<dyn RuntimeEffectHost> =
-            Arc::new(crate::runtime::LocalRuntimeEffectHost);
+            Arc::new(crate::runtime::LocalRuntimeEffectHost::default());
         let trace_context = TraceContext::default().for_session("session-1");
         let termination = TerminationPolicy {
             treat_missing_done_as_failure: false,
