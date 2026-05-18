@@ -135,7 +135,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3>Profiling</h3>
-                <p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> (in <code>examples/bench_support/mod.rs</code>) cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p>
+                <p><code>examples/perf.rs</code>, <code>examples/profile.rs</code>, and <code>Scenario::ALL</code> cover whole-language performance sweeps, including compiler and builtin hot paths. <code>ProfileReport</code> aggregates per-instruction and per-builtin counts/times.</p>
               </div>
             </li>
           </ol>
@@ -174,7 +174,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
                 <tr><td><code>crates/lash-mode-rlm/src/executor/projections.rs</code></td><td>Built-in <code>history</code> binding, session/turn projected binding assembly, projection-ref rehydration, and projected-name pruning.</td></tr>
                 <tr><td><code>crates/lash-mode-rlm/src/projection_codec.rs</code></td><td>Shared RLM projection wire codec for projected JSON normalization, seed-field preservation, Lashlang value JSON conversion, output formatting, and projection-ref extraction.</td></tr>
                 <tr><td><code>crates/lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>
-                <tr><td><code>crates/lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling and benchmark entrypoints.</td></tr>
+                <tr><td><code>crates/lashlang/examples/perf.rs</code>, <code>profile.rs</code></td><td>Whole-language profiling entrypoints.</td></tr>
               </tbody>
             </table>
           </div>

@@ -850,12 +850,26 @@ tbody tr:last-child td { border-bottom: 1px solid var(--rule-strong); }
   margin: 0;
   padding: 0;
   max-width: none;
+  /* clip the slide-in transforms so they can't visually bleed onto
+     the spine / text / page bg during a regen. */
+  overflow: hidden;
+}
+
+/* FOUC guard — until fonts have downloaded (or the failsafe fires),
+   hide the body so users don't see a flash of serif Times before the
+   page typography settles. theme.js sets `.lash-ready` on <html>. */
+:root:not(.lash-ready) body {
+  visibility: hidden;
+}
+:root.lash-ready body {
+  visibility: visible;
 }
 .cover__svg {
   width: 100%;
   height: auto;
   display: block;
   background: var(--bg);
+  overflow: hidden;
 }
 .cover__caption {
   max-width: var(--page-max);
@@ -929,19 +943,29 @@ body.docs-page {
   color: var(--sodium);
 }
 
-/* the main vertical thread draws in on first visit — once it's
-   settled, subsequent navigations show it instantly so clicking
-   the TOC feels snappy. The .lash-revisit class on <html> (set
-   by theme.js on second+ pageviews in a session) skips the
-   entrance. */
-.spine-thread { opacity: 1; }
-:root:not(.lash-revisit) .spine-thread {
+/* the main vertical thread draws UP on first visit — continuing
+   the lash that bloomed out of the brazier at the bottom of the
+   cover SVG. Triggered by html.spine-revealed (set by scene.js
+   after its intro bloom reaches the spine attachment point).
+   .lash-revisit (set by theme.js on 2nd+ pageviews) skips the
+   entrance so the TOC feels snappy on later navs.
+
+   Implemented as a keyframe animation rather than a transition
+   because SVG stroke-dashoffset doesn't reliably react to CSS
+   transitions in Chrome — but it does animate via @keyframes. */
+.spine-thread {
+  opacity: 1;
   stroke-dasharray: 4000;
-  stroke-dashoffset: 4000;
-  animation: spine-draw 1100ms cubic-bezier(0.2, 0.6, 0.2, 1) forwards;
 }
-@keyframes spine-draw {
-  to { stroke-dashoffset: 0; }
+:root:not(.lash-revisit):not(.spine-revealed) .spine-thread {
+  stroke-dashoffset: 4000;
+}
+:root.spine-revealed:not(.lash-revisit) .spine-thread {
+  animation: spine-draw-up 1500ms cubic-bezier(0.22, 0.72, 0.18, 1) forwards;
+}
+@keyframes spine-draw-up {
+  from { stroke-dashoffset: 4000; }
+  to   { stroke-dashoffset: 0; }
 }
 
 /* staggered fade-in of TOC entries — first visit only */
@@ -1254,11 +1278,13 @@ body.docs-page .pager__next strong { font-size: 1.18rem; }
 /* ── compact cover for docs pages ───────────────────── */
 .cover--compact { /* placeholder hook */ }
 body.docs-page .cover { margin-top: 0; }
-body.docs-page .cover__caption { font-size: 0.66rem; margin-top: var(--space-sm); padding-bottom: var(--space-xl); }
-/* one navigation path on docs pages — the floating #toc-jump is the
-   single way back; the cover-caption "back to top" link is redundant
-   chrome and gets hidden here. Landing keeps its link (no floating). */
-body.docs-page .cover__top { display: none; }
+/* docs subpages: drop the SOURCE listing under the SVG entirely.
+   The floating #toc-jump button is the single way back to top, and
+   the source paths were producing a multi-line strip below an
+   otherwise flush scene. Mountains plant at the bottom edge; the
+   page ends there. */
+body.docs-page .cover__caption { display: none; }
+body.docs-page .cover__top     { display: none; }
 
 /* ── floating "back to contents" button ─────────────────
    Appears once the TOC has scrolled out of view; clicking
@@ -1477,6 +1503,107 @@ body.docs-page .cover__top { display: none; }
 .sun:hover .sun__glow   { opacity: 0.18; }
 .sun:hover .sun__corona { opacity: 0.40; }
 .sun:hover .sun__disc   { opacity: 1.00; }
+
+/* sun click → ignition burst. One quick pop so beat 1 (inhale) ends
+   visibly before beat 2 (slide + bloom) begins. */
+.sun--burst { animation: sun-burst 300ms cubic-bezier(0.18, 0.7, 0.22, 1.05); }
+.sun--burst .sun__glow   { animation: sun-burst-glow   300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.sun--burst .sun__corona { animation: sun-burst-corona 300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.sun--burst .sun__disc   { animation: sun-burst-disc   300ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+@keyframes sun-burst {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.6); }
+  100% { transform: scale(1); }
+}
+@keyframes sun-burst-glow   { 0%, 100% { opacity: 0.10; } 40% { opacity: 0.85; } }
+@keyframes sun-burst-corona { 0%, 100% { opacity: 0.22; } 40% { opacity: 0.95; } }
+@keyframes sun-burst-disc {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); opacity: 0.92; }
+  40%      { filter: drop-shadow(0 0 20px var(--sodium)); opacity: 1; }
+}
+
+/* ── parallax swap — mountain ranges slide past each other on
+   regenerate. JS sets inline transforms on .scene-enter wrappers
+   inside .cover; CSS owns transition timing, easing, and per-depth
+   staggering. Strictly scoped to .cover so spine / TOC / body /
+   pager are never touched by these rules. */
+.cover .scene-enter,
+.cover .scene-exit {
+  will-change: transform, opacity;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.cover .scene-enter {
+  transition:
+    transform 760ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity  520ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+.cover .scene-enter--depth-back    { transition-delay: 0ms;   }
+.cover .scene-enter--depth-ground  { transition-delay: 40ms;  }
+.cover .scene-enter--depth-mid     { transition-delay: 90ms;  }
+.cover .scene-enter--depth-near    { transition-delay: 170ms; }
+.cover .scene-enter--depth-figures { transition-delay: 260ms; }
+
+/* INTRO — first generate() of the page. Slower, more cinematic
+   pace: deeper stagger, longer transit, gentler ease. Lets the
+   eye register the scene composing itself. Stripped after the
+   intro plays so later regens (sun click) feel snappy. */
+.cover.cover--intro .scene-enter {
+  transition:
+    transform 1280ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   920ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+.cover.cover--intro .scene-enter--depth-back    { transition-delay: 0ms;   }
+.cover.cover--intro .scene-enter--depth-ground  { transition-delay: 100ms; }
+.cover.cover--intro .scene-enter--depth-mid     { transition-delay: 220ms; }
+.cover.cover--intro .scene-enter--depth-near    { transition-delay: 400ms; }
+.cover.cover--intro .scene-enter--depth-figures { transition-delay: 580ms; }
+.cover.cover--intro .ray-emit {
+  transition:
+    transform 880ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   520ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+.cover.cover--intro .ray-emit--strand {
+  transition:
+    transform 980ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   600ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+
+.cover .scene-exit {
+  transition:
+    transform 620ms cubic-bezier(0.42, 0, 0.30, 1),
+    opacity  520ms cubic-bezier(0.42, 0, 0.30, 1);
+}
+.cover .scene-exit--depth-back    { transition-delay: 60ms; }
+.cover .scene-exit--depth-ground  { transition-delay: 20ms; }
+.cover .scene-exit--depth-mid     { transition-delay: 30ms; }
+.cover .scene-exit--depth-near    { transition-delay: 0ms;  }
+.cover .scene-exit--depth-figures { transition-delay: 0ms;  }
+
+/* Lash rays — anchored at their source sun via inline transform-
+   origin (set in JS). Default transition is the elegant grow used
+   during the BEAT 2.b bloom. The recede on sun click overrides
+   inline with a snappier duration. */
+.cover .ray-emit {
+  transition:
+    transform 560ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   360ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+.cover .ray-emit--strand {
+  transition:
+    transform 680ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity   420ms cubic-bezier(0.22, 0.72, 0.18, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cover .scene-enter,
+  .cover .scene-exit,
+  .cover .ray-emit { transition: opacity 160ms linear !important; }
+  .cover .sun--burst,
+  .cover .sun--burst .sun__glow,
+  .cover .sun--burst .sun__corona,
+  .cover .sun--burst .sun__disc { animation: none !important; }
+}
 
 /* knot bead — gentle pulse on hover when clickable (links nearby) */
 .knot__bead {

@@ -48,7 +48,7 @@
             <article class="panel"><h3>Per-chat model</h3><p>The product DB stores <code>model</code> and <code>model_variant</code>; turns apply the current selection through <code>TurnBuilder::model(...)</code>.</p></article>
             <article class="panel"><h3>Typed plugin input</h3><p>The board state is validated as typed per-turn input, then read by prompt hooks and app tools without string parsing.</p></article>
             <article class="panel"><h3>Semantic stream</h3><p>The browser renders <code>TurnEvent</code>s for live assistant prose, reasoning deltas, code blocks, tool cards, usage, and submitted terminal values. Prose completion is settled from the returned <code>TurnOutput</code>, not from a separate final stream event.</p></article>
-            <article class="panel"><h3>Split persistence</h3><p><code>lash-sqlite-store</code> persists runtime state; the app database owns chat rows, board snapshots, model choice, titles, and rendered activity rows.</p></article>
+            <article class="panel"><h3>Split persistence</h3><p><code>lash-sqlite-store</code> persists runtime state; the app database stores chat rows, board snapshots, model choice, titles, and rendered activity rows.</p></article>
           </div>
         </div>
 
@@ -96,7 +96,7 @@ let assistant_text = assistant_text_for_persistence(
     &amp;output,
     &amp;turn_state.lock().expect("turn state lock").assistant_prose,
 );</code></pre>
-          <p><code>.with_board(...)</code> is a small app-owned extension trait over <code>TurnBuilder::with_plugin_input</code>. It keeps route code focused on product terms while still using the typed plugin input API. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: submitted values render from <code>TurnFinish::SubmittedValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
+          <p><code>.with_board(...)</code> is a small application extension trait over <code>TurnBuilder::with_plugin_input</code>. It keeps route code focused on product terms while still using the typed plugin input API. <code>assistant_text_for_persistence</code> derives the product chat row from terminal semantics: submitted values render from <code>TurnFinish::SubmittedValue</code>, while prose comes from <code>TurnFinish::AssistantMessage</code> with streamed prose only as a live UI preview.</p>
         </div>
 
         <div class="section" id="browser-controls">

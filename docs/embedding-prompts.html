@@ -249,7 +249,7 @@ impl lash::tools::ToolProvider for BoardTools {
     }
 }</code></pre>
           </div>
-          <p>Human input follows the same rule: a host-owned tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
+          <p>Human input follows the same rule: a host-supplied tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
           <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>
           <pre><code>trait BoardTurnExt {
     fn with_board(self, board: BoardState) -&gt; Self;

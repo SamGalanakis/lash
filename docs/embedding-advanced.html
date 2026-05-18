@@ -74,7 +74,7 @@ let core = LashCore::rlm()
         <div class="section" id="subagents">
           <div class="section-header">
             <h2>Subagents</h2>
-            <p>Same <code>SessionSpec</code> shape as root sessions. The factory owns the capability registry; child policy resolves from the live parent snapshot.</p>
+            <p>Same <code>SessionSpec</code> shape as root sessions. The factory keeps the capability registry; child policy resolves from the live parent snapshot.</p>
           </div>
           <pre><code>use std::sync::Arc;
 use lash::{plugins::PluginFactory, SessionSpec};
@@ -114,7 +114,7 @@ let core = LashCore::rlm()
         <div class="section" id="mcp-servers">
           <div class="section-header">
             <h2>MCP Servers</h2>
-            <p><code>lash-plugin-mcp</code> wraps the <code>rmcp</code> SDK with three transports: <code>stdio</code>, <code>streamable_http</code>, <code>sse</code>. The plugin owns a shared connection pool — stdio servers spawn once per process, not per session.</p>
+            <p><code>lash-plugin-mcp</code> wraps the <code>rmcp</code> SDK with three transports: <code>stdio</code>, <code>streamable_http</code>, <code>sse</code>. The plugin keeps a shared connection pool — stdio servers spawn once per process, not per session.</p>
           </div>
           <pre><code>use std::collections::BTreeMap;
 use lash_plugin_mcp::{McpPluginFactory, McpServerConfig};
@@ -170,7 +170,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="complete-example">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The browser example: app-owned chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal rendering from <code>TurnOutput</code>.</p>
+            <p>The browser example: application chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal rendering from <code>TurnOutput</code>.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>

@@ -369,7 +369,11 @@
     svg.style.height = H + "px";
 
     const thread = document.createElementNS(NS, "path");
-    thread.setAttribute("d", `M ${mainX} 0 L ${mainX} ${H.toFixed(2)}`);
+    // Reversed M…L — start at the BOTTOM so a stroke-dashoffset
+    // animation draws from the brazier-strand attachment point UP
+    // through the page. Visually continues the lash that bloomed
+    // out of the brazier at the bottom of the cover SVG.
+    thread.setAttribute("d", `M ${mainX} ${H.toFixed(2)} L ${mainX} 0`);
     thread.setAttribute("class", "spine-thread");
     thread.setAttribute("fill", "none");
     thread.setAttribute("stroke", "currentColor");

@@ -35,7 +35,6 @@ flowchart TD
     Facade["lash (facade)<br/>app-facing core/session/turn API"]
     Export["lash-export<br/>multi-session tree &rarr; HTML / JSON"]
     TraceViewer["lash-trace-viewer<br/>JSONL trace browser"]
-    Bench["benchmark runners<br/>CLBench, SWE-bench, LongCoT, LongMemEval"]
   end
 
   subgraph Runtime["Async host runtime"]
@@ -65,7 +64,6 @@ flowchart TD
   CLI --> Facade
   CLI --> L
   Facade --> L
-  Bench --> Facade
   Export --> Read
   TraceViewer --> Trace
   L --> Env
@@ -93,9 +91,9 @@ flowchart TD
             <p>These figures are workspace-level and exclude generated build output.</p>
           </div>
           <div class="stats">
-            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">48</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language, export, tracing, file-index, harness optimizer, examples, and benchmark crates.</span></article>
+            <article class="stat"><div class="micro-label">Cargo members</div><span class="stat-value">48</span><span class="stat-note">Runtime core, facade, CLI/TUI, providers, plugins (including MCP), language, export, tracing, file-index, harness optimizer, and examples.</span></article>
             <article class="stat"><div class="micro-label">Rust source</div><span class="stat-value">~191k LOC</span><span class="stat-note">Measured by line count over <code>*.rs</code> outside <code>target</code>; Rust dominates the workspace.</span></article>
-            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">~422</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, benches, examples, and trace/export utilities.</span></article>
+            <article class="stat"><div class="micro-label">Rust files</div><span class="stat-value">~422</span><span class="stat-note">Includes library crates, CLI/TUI, providers, tests, examples, and trace/export utilities.</span></article>
             <article class="stat"><div class="micro-label">Execution modes</div><span class="stat-value">2 active</span><span class="stat-note"><code>standard</code> uses native tool calls; <code>rlm</code> drives work through Lashlang and can hand off to a successor session via <code>continue_as</code>.</span></article>
           </div>
         </div>
@@ -115,7 +113,7 @@ flowchart TD
             <li>
               <div>
                 <h3>Projection is derived.</h3>
-                <p><code>SessionReadView</code> and <code>ChronologicalProjection</code> read graph state into semantic order. The CLI's <code>UiTimeline</code> is downstream of that — never a persistence owner.</p>
+                <p><code>SessionReadView</code> and <code>ChronologicalProjection</code> read graph state into semantic order. The CLI's <code>UiTimeline</code> is downstream of that and never writes persistence.</p>
               </div>
             </li>
             <li>

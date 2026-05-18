@@ -27,7 +27,7 @@
           </div>
           <dl class="def-list">
             <dt>Durable session graph</dt>
-            <dd>Conversation records, tool events, mode events, and plugin nodes live in one <code>SessionGraph</code> per session. <code>SessionReadView</code> and <code>ChronologicalProjection</code> read it; nothing else owns persistence.</dd>
+            <dd>Conversation records, tool events, mode events, and plugin nodes live in one <code>SessionGraph</code> per session. <code>SessionReadView</code> and <code>ChronologicalProjection</code> read it; persistence writes stay behind the runtime store.</dd>
             <dt>Per-turn atomic commit</dt>
             <dd><code>RuntimeCommit</code> writes graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS on <code>expected_head_revision</code>. Partial turn = no commit.</dd>
             <dt>Typed plugin capabilities</dt>
