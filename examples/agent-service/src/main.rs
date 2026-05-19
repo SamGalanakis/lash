@@ -12,6 +12,8 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bytes::Bytes;
+#[cfg(feature = "restate")]
+use lash::advanced::RuntimeErrorCode;
 use lash::{
     LashCore, LashSession, ModeId, ModePreset, PluginBinding, TurnActivity, TurnActivitySink,
     TurnBuilder, TurnEvent, TurnInput, TurnOutput,
@@ -38,6 +40,12 @@ struct AppStateData {
     db: Arc<Mutex<AppDb>>,
     default_model: String,
     default_model_variant: Option<String>,
+    #[cfg_attr(not(feature = "restate"), allow(dead_code))]
+    durability: AgentServiceDurability,
+    #[cfg(feature = "restate")]
+    restate_ingress_url: Option<String>,
+    #[cfg(feature = "restate")]
+    restate_http: reqwest::Client,
 }
 
 impl AppStateData {
@@ -73,6 +81,14 @@ struct AppError {
     status: StatusCode,
     message: String,
 }
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AppError {}
 
 impl AppError {
     fn bad_request(message: impl Into<String>) -> Self {
@@ -158,6 +174,47 @@ struct AppSettings {
     model_variants: Vec<&'static str>,
 }
 
+#[cfg(feature = "restate")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AgentServiceTurnWorkflowRequest {
+    turn_id: String,
+    chat_id: String,
+    text: String,
+    board: BoardState,
+    model: String,
+    model_variant: Option<String>,
+}
+
+#[cfg(feature = "restate")]
+#[restate_sdk::workflow]
+trait AgentServiceTurnWorkflow {
+    async fn run(
+        request: restate_sdk::serde::Json<AgentServiceTurnWorkflowRequest>,
+    ) -> restate_sdk::errors::HandlerResult<restate_sdk::serde::Json<()>>;
+}
+
+#[cfg(feature = "restate")]
+struct AgentServiceTurnWorkflowImpl {
+    state: AppStateData,
+}
+
+#[cfg(feature = "restate")]
+impl AgentServiceTurnWorkflow for AgentServiceTurnWorkflowImpl {
+    async fn run(
+        &self,
+        ctx: restate_sdk::prelude::WorkflowContext<'_>,
+        restate_sdk::serde::Json(request): restate_sdk::serde::Json<
+            AgentServiceTurnWorkflowRequest,
+        >,
+    ) -> restate_sdk::errors::HandlerResult<restate_sdk::serde::Json<()>> {
+        let controller = lash_restate::RestateRuntimeEffectController::new(ctx);
+        run_restate_chat_turn_and_persist(self.state.clone(), request, &controller)
+            .await
+            .map_err(restate_sdk::errors::TerminalError::from_error)?;
+        Ok(restate_sdk::serde::Json(()))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ChatModelSelection {
     model: String,
@@ -171,6 +228,13 @@ enum StreamItem {
     Message { message: ChatMessage },
     Error { message: String },
     Done,
+}
+
+#[cfg(feature = "restate")]
+struct TurnOutboxEvent {
+    id: i64,
+    item_json: String,
+    is_done: bool,
 }
 
 impl StreamItem {
@@ -269,6 +333,21 @@ async fn main() -> anyhow_like::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
         .parse()
         .map_err(|err| format!("invalid AGENT_SERVICE_ADDR: {err}"))?;
+    #[cfg(feature = "restate")]
+    let restate_endpoint_addr: SocketAddr = std::env::var("AGENT_SERVICE_RESTATE_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:9080".to_string())
+        .parse()
+        .map_err(|err| format!("invalid AGENT_SERVICE_RESTATE_ADDR: {err}"))?;
+    #[cfg(feature = "restate")]
+    let restate_ingress_url = std::env::var("RESTATE_INGRESS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    #[cfg(not(feature = "restate"))]
+    if durability == AgentServiceDurability::Restate {
+        return Err(
+            "AGENT_SERVICE_DURABILITY=restate requires `cargo run -p agent-service --features restate`"
+                .to_string(),
+        );
+    }
     let data_dir = std::env::var("AGENT_SERVICE_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".agent-service"));
@@ -311,10 +390,16 @@ async fn main() -> anyhow_like::Result<()> {
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
-            return Err(
-                "AGENT_SERVICE_DURABILITY=restate requires a Restate RuntimeEffectController adapter"
-                    .to_string(),
-            );
+            #[cfg(feature = "restate")]
+            {
+                core_builder
+                    .advanced()
+                    .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+                    .build()
+                    .map_err(|err| err.to_string())?
+            }
+            #[cfg(not(feature = "restate"))]
+            unreachable!("restate mode is rejected before core construction");
         }
     };
 
@@ -324,7 +409,31 @@ async fn main() -> anyhow_like::Result<()> {
         db: Arc::new(Mutex::new(app_db)),
         default_model: model,
         default_model_variant: Some(model_variant),
+        durability,
+        #[cfg(feature = "restate")]
+        restate_ingress_url: (durability == AgentServiceDurability::Restate)
+            .then_some(restate_ingress_url),
+        #[cfg(feature = "restate")]
+        restate_http: reqwest::Client::new(),
     };
+
+    #[cfg(feature = "restate")]
+    if durability == AgentServiceDurability::Restate {
+        let endpoint = restate_sdk::endpoint::Endpoint::builder()
+            .bind(
+                AgentServiceTurnWorkflowImpl {
+                    state: state.clone(),
+                }
+                .serve(),
+            )
+            .build();
+        tokio::spawn(async move {
+            restate_sdk::http_server::HttpServer::new(endpoint)
+                .listen_and_serve(restate_endpoint_addr)
+                .await;
+        });
+        println!("agent-service Restate endpoint listening on http://{restate_endpoint_addr}");
+    }
 
     let app = Router::new()
         .route("/", get(index))
@@ -470,6 +579,19 @@ async fn send_message(
         })
         .await?;
 
+    #[cfg(feature = "restate")]
+    if state.durability == AgentServiceDurability::Restate {
+        return send_message_restate(
+            state,
+            chat_id,
+            text,
+            request.board,
+            user_message,
+            model_selection,
+        )
+        .await;
+    }
+
     let session = state.open_session(&chat_id).await?;
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let run_state = state.clone();
@@ -481,9 +603,10 @@ async fn send_message(
             .await;
         let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
         let ui_events = ChannelTurnEvents {
-            tx: tx.clone(),
+            tx: Some(tx.clone()),
             state: run_state.clone(),
             chat_id: chat_id.clone(),
+            turn_id: None,
             turn_state: Arc::clone(&turn_state),
         };
         let turn = session
@@ -551,10 +674,216 @@ async fn send_message(
         .expect("valid streaming response"))
 }
 
-struct ChannelTurnEvents {
-    tx: mpsc::Sender<StreamItem>,
+#[cfg(feature = "restate")]
+async fn send_message_restate(
     state: AppStateData,
     chat_id: String,
+    text: String,
+    board: BoardState,
+    user_message: ChatMessage,
+    model_selection: ChatModelSelection,
+) -> AppResult<Response> {
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    state
+        .with_db({
+            let turn_id = turn_id.clone();
+            let user_message = user_message.clone();
+            move |db| {
+                db.insert_turn_event(
+                    &turn_id,
+                    &StreamItem::Message {
+                        message: user_message,
+                    },
+                )
+            }
+        })
+        .await?;
+
+    let request = AgentServiceTurnWorkflowRequest {
+        turn_id: turn_id.clone(),
+        chat_id,
+        text,
+        board,
+        model: model_selection.model,
+        model_variant: model_selection.model_variant,
+    };
+    let ingress = state
+        .restate_ingress_url
+        .clone()
+        .ok_or_else(|| AppError::internal("Restate ingress URL is not configured"))?;
+    let url = format!(
+        "{}/AgentServiceTurnWorkflow/{}/run/send",
+        ingress.trim_end_matches('/'),
+        turn_id
+    );
+    let response = state
+        .restate_http
+        .post(url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|err| AppError::internal(format!("Restate workflow submit failed: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::internal(format!(
+            "Restate workflow submit failed with status {}",
+            response.status()
+        )));
+    }
+
+    stream_turn_outbox(state, turn_id).await
+}
+
+#[cfg(feature = "restate")]
+async fn stream_turn_outbox(state: AppStateData, turn_id: String) -> AppResult<Response> {
+    let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
+    tokio::spawn(async move {
+        let mut last_id = 0_i64;
+        loop {
+            match state
+                .with_db({
+                    let turn_id = turn_id.clone();
+                    move |db| db.list_turn_events_after(&turn_id, last_id)
+                })
+                .await
+            {
+                Ok(events) => {
+                    let mut done = false;
+                    for event in events {
+                        last_id = event.id;
+                        if event.is_done {
+                            done = true;
+                        }
+                        let mut line = event.item_json;
+                        line.push('\n');
+                        if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                            return;
+                        }
+                    }
+                    if done {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let mut line = json!({
+                        "type": "error",
+                        "message": err.message,
+                    })
+                    .to_string();
+                    line.push('\n');
+                    let _ = tx.send(Ok(Bytes::from(line))).await;
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    });
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(ReceiverStream::new(rx)))
+        .expect("valid streaming response"))
+}
+
+#[cfg(feature = "restate")]
+async fn run_restate_chat_turn_and_persist(
+    state: AppStateData,
+    request: AgentServiceTurnWorkflowRequest,
+    controller: &lash_restate::RestateRuntimeEffectController<
+        '_,
+        restate_sdk::prelude::WorkflowContext<'_>,
+    >,
+) -> AppResult<()> {
+    let session = state.open_session(&request.chat_id).await?;
+    let turn_state = Arc::new(Mutex::new(TurnPersistenceState::default()));
+    let ui_events = ChannelTurnEvents {
+        tx: None,
+        state: state.clone(),
+        chat_id: request.chat_id.clone(),
+        turn_id: Some(request.turn_id.clone()),
+        turn_state: Arc::clone(&turn_state),
+    };
+
+    let resume_scope = controller
+        .effect_scope(&request.turn_id)
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    let output = match session
+        .resume_turn(request.turn_id.clone())
+        .stream_with_effect_scope(&ui_events, resume_scope)
+        .await
+    {
+        Ok(output) => Ok(output),
+        Err(err)
+            if matches!(
+                &err,
+                lash::EmbedError::Runtime(runtime)
+                    if runtime.is_code(RuntimeErrorCode::RuntimeTurnCheckpointMissing)
+            ) =>
+        {
+            let fresh_scope = controller
+                .effect_scope(&request.turn_id)
+                .map_err(|err| AppError::internal(err.to_string()))?;
+            let mut input = TurnInput::text(request.text.clone());
+            input.trace_turn_id = Some(request.turn_id.clone());
+            let turn = session
+                .turn(input)
+                .model(request.model.clone(), request.model_variant.clone())
+                .with_board(request.board)
+                .require_submit();
+            match turn {
+                Ok(turn) => turn.stream_with_effect_scope(&ui_events, fresh_scope).await,
+                Err(err) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    };
+
+    match output {
+        Ok(output) => {
+            let assistant_text = assistant_text_for_persistence(
+                &TurnOutput {
+                    result: output,
+                    activities: Vec::new(),
+                },
+                &turn_state.lock().expect("turn state lock").assistant_prose,
+            );
+            let message = state
+                .with_db({
+                    let chat_id = request.chat_id.clone();
+                    move |db| db.insert_message(&chat_id, "assistant", &assistant_text)
+                })
+                .await?;
+            state
+                .with_db({
+                    let turn_id = request.turn_id.clone();
+                    move |db| db.insert_turn_event(&turn_id, &StreamItem::Message { message })
+                })
+                .await?;
+        }
+        Err(err) => {
+            state
+                .with_db({
+                    let turn_id = request.turn_id.clone();
+                    let message = err.to_string();
+                    move |db| db.insert_turn_event(&turn_id, &StreamItem::Error { message })
+                })
+                .await?;
+        }
+    }
+    state
+        .with_db({
+            let turn_id = request.turn_id;
+            move |db| db.insert_turn_event(&turn_id, &StreamItem::Done)
+        })
+        .await?;
+    Ok(())
+}
+
+struct ChannelTurnEvents {
+    tx: Option<mpsc::Sender<StreamItem>>,
+    state: AppStateData,
+    chat_id: String,
+    turn_id: Option<String>,
     turn_state: Arc<Mutex<TurnPersistenceState>>,
 }
 
@@ -568,6 +897,28 @@ struct TurnPersistenceState {
 }
 
 impl ChannelTurnEvents {
+    async fn emit_item(&self, item: StreamItem) {
+        if let Some(turn_id) = self.turn_id.clone() {
+            let item_for_db = item.clone();
+            if let Err(err) = self
+                .state
+                .with_db(move |db| db.insert_turn_event(&turn_id, &item_for_db))
+                .await
+            {
+                if let Some(tx) = &self.tx {
+                    let _ = tx
+                        .send(StreamItem::Error {
+                            message: err.message,
+                        })
+                        .await;
+                }
+            }
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(item).await;
+        }
+    }
+
     async fn handle(&self, activity: TurnActivity) {
         let event = &activity.event;
         if let TurnEvent::AssistantProseDelta { text } = &event {
@@ -576,7 +927,7 @@ impl ChannelTurnEvents {
                 .expect("turn state lock")
                 .assistant_prose
                 .push_str(text);
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         // Keep persisted message order tied to event start order. The browser
@@ -616,15 +967,13 @@ impl ChannelTurnEvents {
                         .map(|_| ())
                 };
                 if let Err(err) = result {
-                    let _ = self
-                        .tx
-                        .send(StreamItem::Error {
-                            message: err.message,
-                        })
-                        .await;
+                    self.emit_item(StreamItem::Error {
+                        message: err.message,
+                    })
+                    .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if let TurnEvent::CodeBlockStarted { code, .. } = &event {
@@ -646,15 +995,13 @@ impl ChannelTurnEvents {
                         .code_message = Some(message.id);
                 }
                 Err(err) => {
-                    let _ = self
-                        .tx
-                        .send(StreamItem::Error {
-                            message: err.message,
-                        })
-                        .await;
+                    self.emit_item(StreamItem::Error {
+                        message: err.message,
+                    })
+                    .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallStarted { .. }) {
@@ -675,15 +1022,13 @@ impl ChannelTurnEvents {
                         .insert(activity.correlation_id.0.clone(), message.id);
                 }
                 Err(err) => {
-                    let _ = self
-                        .tx
-                        .send(StreamItem::Error {
-                            message: err.message,
-                        })
-                        .await;
+                    self.emit_item(StreamItem::Error {
+                        message: err.message,
+                    })
+                    .await;
                 }
             }
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::ToolCallCompleted { .. }) {
@@ -708,14 +1053,12 @@ impl ChannelTurnEvents {
                 })
                 .await;
             if let Err(err) = result {
-                let _ = self
-                    .tx
-                    .send(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
+                self.emit_item(StreamItem::Error {
+                    message: err.message,
+                })
+                .await;
             }
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(&event, TurnEvent::CodeBlockCompleted { .. }) {
@@ -738,24 +1081,22 @@ impl ChannelTurnEvents {
                 })
                 .await;
             if let Err(err) = result {
-                let _ = self
-                    .tx
-                    .send(StreamItem::Error {
-                        message: err.message,
-                    })
-                    .await;
+                self.emit_item(StreamItem::Error {
+                    message: err.message,
+                })
+                .await;
             }
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
         if matches!(
             &event,
             TurnEvent::SubmittedValue { .. } | TurnEvent::ToolValue { .. }
         ) {
-            let _ = self.tx.send(StreamItem::event(activity)).await;
+            let _ = self.emit_item(StreamItem::event(activity)).await;
             return;
         }
-        let _ = self.tx.send(StreamItem::event(activity)).await;
+        let _ = self.emit_item(StreamItem::event(activity)).await;
     }
 }
 
@@ -1098,6 +1439,15 @@ impl AppDb {
             );
             CREATE INDEX IF NOT EXISTS idx_code_block_tool_calls_tool_message
                 ON code_block_tool_calls(tool_call_message_id);
+            CREATE TABLE IF NOT EXISTS turn_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id TEXT NOT NULL,
+                item_json TEXT NOT NULL,
+                is_done INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turn_events_turn_id_id
+                ON turn_events(turn_id, id);
             ",
         )?;
         add_column_if_missing(&conn, "chats", "model_variant", "TEXT")?;
@@ -1106,6 +1456,41 @@ impl AppDb {
         let mut db = Self { conn };
         db.migrate_legacy_chat_model_labels()?;
         Ok(db)
+    }
+
+    fn insert_turn_event(&mut self, turn_id: &str, item: &StreamItem) -> AppResult<()> {
+        let item_json =
+            serde_json::to_string(item).map_err(|err| AppError::internal(err.to_string()))?;
+        let is_done = matches!(item, StreamItem::Done);
+        self.conn.execute(
+            "INSERT INTO turn_events (turn_id, item_json, is_done, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            params![turn_id, item_json, is_done as i64],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "restate")]
+    fn list_turn_events_after(
+        &mut self,
+        turn_id: &str,
+        last_id: i64,
+    ) -> AppResult<Vec<TurnOutboxEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, item_json, is_done
+             FROM turn_events
+             WHERE turn_id = ?1 AND id > ?2
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![turn_id, last_id], |row| {
+            Ok(TurnOutboxEvent {
+                id: row.get(0)?,
+                item_json: row.get(1)?,
+                is_done: row.get::<_, i64>(2)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)
     }
 
     fn list_chats(&mut self) -> AppResult<Vec<ChatSummary>> {

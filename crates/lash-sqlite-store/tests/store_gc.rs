@@ -322,6 +322,140 @@ async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_c
 }
 
 #[tokio::test]
+async fn stale_completed_turn_commit_rejects_and_preserves_resume_state() {
+    let store = Store::memory().expect("store");
+    let old = store
+        .claim_runtime_turn_lease("root", "turn-stale-final", "owner-a", 20)
+        .await
+        .expect("old lease");
+    store
+        .save_runtime_turn_checkpoint(&old, runtime_turn_checkpoint("root", "turn-stale-final"))
+        .await
+        .expect("save checkpoint");
+    let record = runtime_effect_record("root", "turn-stale-final", "current");
+    store
+        .save_runtime_effect_outcome(&old, record.clone())
+        .await
+        .expect("save journal");
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let current = store
+        .claim_runtime_turn_lease("root", "turn-stale-final", "owner-b", 60_000)
+        .await
+        .expect("new lease");
+
+    let state = PersistedSessionState {
+        session_id: "root".to_string(),
+        ..PersistedSessionState::default()
+    };
+    let err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(
+                &state,
+                &[TokenLedgerEntry {
+                    source: "turn".to_string(),
+                    model: "mock".to_string(),
+                    usage: TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 0,
+                        cached_input_tokens: 0,
+                        reasoning_tokens: 0,
+                    },
+                }],
+            )
+            .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&old)),
+        )
+        .await
+        .expect_err("stale final commit must fail");
+
+    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
+    assert!(
+        store
+            .load_runtime_turn_checkpoint("root", "turn-stale-final")
+            .await
+            .expect("load checkpoint")
+            .is_some()
+    );
+    assert!(
+        store
+            .load_runtime_effect_outcome("root", "turn-stale-final", &record.idempotency_key)
+            .await
+            .expect("load journal")
+            .is_some()
+    );
+    assert!(
+        store
+            .load_session(SessionReadScope::FullGraph)
+            .await
+            .expect("load session")
+            .is_none()
+    );
+    store
+        .save_runtime_effect_outcome(
+            &current,
+            runtime_effect_record("root", "turn-stale-final", "after-stale-final"),
+        )
+        .await
+        .expect("current owner can still write");
+}
+
+#[tokio::test]
+async fn expired_completed_turn_commit_rejects_and_preserves_resume_state() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-expired-final", "owner-a", 20)
+        .await
+        .expect("lease");
+    store
+        .save_runtime_turn_checkpoint(
+            &lease,
+            runtime_turn_checkpoint("root", "turn-expired-final"),
+        )
+        .await
+        .expect("save checkpoint");
+    let record = runtime_effect_record("root", "turn-expired-final", "effect");
+    store
+        .save_runtime_effect_outcome(&lease, record.clone())
+        .await
+        .expect("save journal");
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let state = PersistedSessionState {
+        session_id: "root".to_string(),
+        ..PersistedSessionState::default()
+    };
+    let err = store
+        .commit_runtime_state(
+            RuntimeCommit::persisted_state(&state, &[])
+                .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease)),
+        )
+        .await
+        .expect_err("expired final commit must fail");
+
+    assert!(matches!(err, StoreError::RuntimeTurnLeaseExpired { .. }));
+    assert!(
+        store
+            .load_runtime_turn_checkpoint("root", "turn-expired-final")
+            .await
+            .expect("load checkpoint")
+            .is_some()
+    );
+    assert!(
+        store
+            .load_runtime_effect_outcome("root", "turn-expired-final", &record.idempotency_key)
+            .await
+            .expect("load journal")
+            .is_some()
+    );
+    assert!(
+        store
+            .load_session(SessionReadScope::FullGraph)
+            .await
+            .expect("load session")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
     let store = Store::memory().expect("store");
     let lease = store
@@ -412,7 +546,7 @@ async fn superseded_runtime_turn_lease_cannot_write_or_clear_newer_owner() {
 async fn renewed_runtime_turn_lease_survives_original_expiry() {
     let store = Store::memory().expect("store");
     let lease = store
-        .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 1)
+        .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 20)
         .await
         .expect("lease");
     let renewed = store

@@ -129,10 +129,10 @@ pub mod advanced {
         RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
         RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-        RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
-        RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle, SessionPolicy,
-        SessionStateEnvelope, SessionTurnHandle, StandardContextApproach, TerminationPolicy,
-        TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
+        RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
+        SessionPolicy, SessionStateEnvelope, SessionTurnHandle, StandardContextApproach,
+        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

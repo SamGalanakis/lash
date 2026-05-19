@@ -20,8 +20,31 @@ AGENT_SERVICE_TRACE=.agent-service/trace.jsonl
 AGENT_SERVICE_DURABILITY=local
 ```
 
-The durability mode can also be passed as `--durability local`. The `restate`
-mode is reserved for builds that link a Restate `RuntimeEffectController` adapter.
+The durability mode can also be passed as `--durability local`.
+
+Restate mode is feature-gated and runnable:
+
+```bash
+docker run --rm -p 8080:8080 -p 9070:9070 -p 9071:9071 restatedev/restate:latest
+OPENROUTER_API_KEY=... \
+AGENT_SERVICE_DURABILITY=restate \
+AGENT_SERVICE_RESTATE_ADDR=127.0.0.1:9080 \
+RESTATE_INGRESS_URL=http://127.0.0.1:8080 \
+cargo run -p agent-service --features restate -- --durability restate
+
+restate deployments register http://host.docker.internal:9080
+```
+
+In Restate mode the Axum app still serves `AGENT_SERVICE_ADDR`, the same process
+also serves a Restate endpoint on `AGENT_SERVICE_RESTATE_ADDR`, and browser
+turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run` through
+`RESTATE_INGRESS_URL`. The workflow creates a
+`RestateRuntimeEffectController`, first attempts
+`session.resume_turn(turn_id).stream_with_effect_scope(...)`, and falls back to
+a fresh `session.turn(...).stream_with_effect_scope(...)` only when Lash has no
+checkpoint for that turn id yet. Turn progress is written to an app-owned
+SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
+route restart or while the workflow is running in the Restate handler.
 
 Then open `http://127.0.0.1:3000`.
 

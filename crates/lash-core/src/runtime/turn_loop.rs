@@ -55,6 +55,17 @@ async fn abandon_runtime_turn_lease_best_effort(
     }
 }
 
+struct LeasedTurnFinish {
+    turn_pipeline: TurnCommitPipeline,
+    assembler: TurnAssembler,
+    new_messages: crate::MessageSequence,
+    policy: SessionPolicy,
+    turn_index: usize,
+    turn_lease: Option<crate::RuntimeTurnLease>,
+    trace_turn_id: String,
+    abandon_context: &'static str,
+}
+
 impl LashRuntime {
     fn max_context_tokens(&self) -> usize {
         self.policy
@@ -76,6 +87,207 @@ impl LashRuntime {
         if let Some(probe) = self.turn_phase_probe.as_ref() {
             probe.end(phase);
         }
+    }
+
+    async fn finish_leased_turn(
+        &mut self,
+        finish: LeasedTurnFinish,
+        events: &dyn EventSink,
+        cancel_state: &CancellationToken,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let LeasedTurnFinish {
+            mut turn_pipeline,
+            assembler,
+            new_messages,
+            policy,
+            turn_index,
+            turn_lease,
+            trace_turn_id,
+            abandon_context,
+        } = finish;
+        let store = self
+            .session
+            .as_ref()
+            .and_then(|session| session.history_store());
+        self.policy = self.state.policy.clone();
+        turn_pipeline.state_mut().policy = self.policy.clone();
+        turn_pipeline.state_mut().turn_index = turn_index;
+
+        let mut turn_usage_delta = {
+            let mut ledger = self.shared_token_ledger.lock().expect("token ledger lock");
+            std::mem::take(&mut *ledger)
+        };
+        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
+            turn_usage_delta.push(TokenLedgerEntry {
+                source: "turn".to_string(),
+                model: policy.model.clone(),
+                usage: assembler.token_usage.clone(),
+            });
+        }
+        let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
+
+        turn_pipeline.finalize_turn_read_state(
+            new_messages,
+            &assembler.tool_calls,
+            cancel_state.is_cancelled(),
+        );
+        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
+            turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
+        }
+
+        let last_prompt_usage = assembler
+            .last_llm_usage()
+            .and_then(|usage| normalize_prompt_usage(&policy.provider, usage));
+        turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage;
+        let assembled_state = turn_pipeline.export_state_for_assembly();
+        let assembled = assembler.finish(
+            assembled_state,
+            cancel_state.is_cancelled(),
+            None,
+            &self.host.core.termination,
+        );
+
+        let Some(session) = self.session.as_ref() else {
+            self.state.apply_exported_state(&assembled.state);
+            self.emit_completed_turn_trace(&assembled.state, &assembled.outcome, &trace_turn_id);
+            return Ok(assembled);
+        };
+
+        let plugins = Arc::clone(session.plugins());
+        let manager = match self.runtime_session_manager_for_turn(None) {
+            Ok(manager) => manager,
+            Err(err) => {
+                let runtime_err =
+                    RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string());
+                let context = format!("{abandon_context}_finalize_manager");
+                abandon_runtime_turn_lease_best_effort(
+                    store.as_ref().map(|store| store.as_ref()),
+                    turn_lease.as_ref(),
+                    &context,
+                )
+                .await;
+                return Err(runtime_err);
+            }
+        };
+
+        self.mark_phase_begin(RuntimeTurnPhase::FinalizeTurn);
+        let finalized = match plugins.finalize_turn(assembled, manager).await {
+            Ok(finalized) => finalized,
+            Err(err) => {
+                self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
+                let runtime_err =
+                    RuntimeError::new(RuntimeErrorCode::PluginFinalizeTurn, err.to_string());
+                let context = format!("{abandon_context}_finalize_turn");
+                abandon_runtime_turn_lease_best_effort(
+                    store.as_ref().map(|store| store.as_ref()),
+                    turn_lease.as_ref(),
+                    &context,
+                )
+                .await;
+                return Err(runtime_err);
+            }
+        };
+        self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
+
+        let mut returned_turn = finalized.turn;
+        self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
+        if let Err(err) = turn_pipeline
+            .final_commit(
+                &mut returned_turn,
+                self.session.as_mut(),
+                &turn_usage_delta,
+                turn_lease
+                    .as_ref()
+                    .map(crate::RuntimeTurnCompletion::from_lease),
+            )
+            .await
+        {
+            self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
+            let context = format!("{abandon_context}_final_commit");
+            abandon_runtime_turn_lease_best_effort(
+                store.as_ref().map(|store| store.as_ref()),
+                turn_lease.as_ref(),
+                &context,
+            )
+            .await;
+            return Err(err);
+        }
+
+        emit_session_events_to_sink(events, finalized.events).await;
+        self.state = turn_pipeline.into_final_state();
+        self.emit_persisted_turn_plugin_event(&returned_turn).await;
+        self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
+
+        self.emit_completed_turn_trace(
+            &returned_turn.state,
+            &returned_turn.outcome,
+            &trace_turn_id,
+        );
+        Ok(returned_turn)
+    }
+
+    fn emit_completed_turn_trace(
+        &self,
+        state: &SessionStateEnvelope,
+        outcome: &TurnOutcome,
+        trace_turn_id: &str,
+    ) {
+        if self.host.core.trace_sink.is_none() {
+            return;
+        }
+
+        let (status, done_reason, handoff) = trace_fields_from_outcome(outcome);
+        crate::trace::emit_trace(
+            &self.host.core.trace_sink,
+            &self.host.core.trace_context,
+            lash_trace::TraceContext::default()
+                .for_session(state.session_id.clone())
+                .for_turn_index(state.turn_index)
+                .for_turn(trace_turn_id.to_string()),
+            lash_trace::TraceEvent::TurnCompleted {
+                status: status.to_string(),
+                done_reason: done_reason.to_string(),
+                handoff,
+            },
+        );
+    }
+
+    async fn emit_persisted_turn_plugin_event(&self, returned_turn: &AssembledTurn) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Ok(host) = self.runtime_session_manager() else {
+            return;
+        };
+
+        let direct_completions = self
+            .runtime_session_manager()
+            .map(|manager| {
+                manager.direct_completion_client(
+                    crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                        &self.host.core.effect_controller,
+                    )),
+                    None,
+                    None,
+                )
+            })
+            .unwrap_or_else(|_| {
+                crate::DirectCompletionClient::unavailable(
+                    "direct completions are unavailable while emitting persisted turn events",
+                )
+            });
+
+        session
+            .plugins()
+            .emit_runtime_event(crate::PluginLifecycleEvent::TurnPersisted(
+                crate::SessionStateChangedContext {
+                    session_id: self.state.session_id.clone(),
+                    state: crate::SessionReadView::from_exported_state(&returned_turn.state),
+                    host,
+                    direct_completions,
+                },
+            ))
+            .await;
     }
 
     /// Run a single turn and stream events to the host sink.
@@ -186,13 +398,13 @@ impl LashRuntime {
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
         if turn_id != effect_scope.turn_id() {
-            return Err(RuntimeError {
-                code: "effect_scope_turn_id_mismatch".to_string(),
-                message: format!(
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::EffectScopeTurnIdMismatch,
+                format!(
                     "resume turn_id `{turn_id}` does not match effect scope turn_id `{}`",
                     effect_scope.turn_id()
                 ),
-            });
+            ));
         }
         if effect_scope
             .controller()
@@ -200,41 +412,43 @@ impl LashRuntime {
             && self.host.core.attachment_store.persistence()
                 != crate::AttachmentStorePersistence::Durable
         {
-            return Err(RuntimeError {
-                code: "durable_attachment_store_required".to_string(),
-                message: "durable effect controllers require a durable attachment store"
-                    .to_string(),
-            });
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::DurableAttachmentStoreRequired,
+                "durable effect controllers require a durable attachment store",
+            ));
         }
         self.refresh_session_graph_from_store().await;
         let store = self
             .session
             .as_ref()
             .and_then(|session| session.history_store())
-            .ok_or_else(|| RuntimeError {
-                code: "runtime_turn_resume_store_required".to_string(),
-                message: "resuming a turn requires a persistent runtime store".to_string(),
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RuntimeTurnResumeStoreRequired,
+                    "resuming a turn requires a persistent runtime store",
+                )
             })?;
         let checkpoint_record = store
             .load_runtime_turn_checkpoint(&self.state.session_id, turn_id)
             .await
-            .map_err(|err| RuntimeError {
-                code: "runtime_turn_checkpoint_load".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::RuntimeTurnCheckpointLoad, err.to_string())
             })?
-            .ok_or_else(|| RuntimeError {
-                code: "runtime_turn_checkpoint_missing".to_string(),
-                message: format!("no in-flight runtime turn checkpoint found for `{turn_id}`"),
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RuntimeTurnCheckpointMissing,
+                    format!("no in-flight runtime turn checkpoint found for `{turn_id}`"),
+                )
             })?;
         if checkpoint_record.provider_id != self.policy.provider.kind() {
-            return Err(RuntimeError {
-                code: "runtime_turn_resume_provider_mismatch".to_string(),
-                message: format!(
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RuntimeTurnResumeProviderMismatch,
+                format!(
                     "checkpoint requires provider `{}`, current runtime has `{}`",
                     checkpoint_record.provider_id,
                     self.policy.provider.kind()
                 ),
-            });
+            ));
         }
         let turn_lease = store
             .claim_runtime_turn_lease(
@@ -244,17 +458,15 @@ impl LashRuntime {
                 RUNTIME_TURN_LEASE_TTL_MS,
             )
             .await
-            .map_err(|err| RuntimeError {
-                code: "runtime_turn_lease".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::RuntimeTurnLease, err.to_string())
             })?;
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let manager = self
             .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
-            .map_err(|err| RuntimeError {
-                code: "plugin_session_manager".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
         let mut turn_policy = self.policy.clone();
         turn_policy.execution_mode = checkpoint_record.machine_config.execution_mode.clone();
@@ -356,118 +568,30 @@ impl LashRuntime {
             emit_runtime_stream_event_to_sinks(events, turn_events, event, &mut assembler).await;
         }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
-        let child_ledger = {
-            let mut ledger = self.shared_token_ledger.lock().expect("token ledger lock");
-            std::mem::take(&mut *ledger)
-        };
         let RuntimeTurnDriver {
             session,
             policy,
-            mut turn_pipeline,
+            turn_pipeline,
             turn_lease: current_turn_lease,
             ..
         } = driver;
         let turn_lease = current_turn_lease.unwrap_or(turn_lease);
         self.session = Some(session);
-        self.policy = self.state.policy.clone();
-        turn_pipeline.state_mut().policy = self.policy.clone();
-        turn_pipeline.state_mut().turn_index = resume_turn_index;
-        let mut turn_usage_delta = child_ledger.clone();
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
-            turn_usage_delta.push(TokenLedgerEntry {
-                source: "turn".to_string(),
-                model: policy.model.clone(),
-                usage: assembler.token_usage.clone(),
-            });
-        }
-        let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
-        turn_pipeline.finalize_turn_read_state(
-            new_messages,
-            &assembler.tool_calls,
-            cancel_state.is_cancelled(),
-        );
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
-            turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
-        }
-        let last_prompt_usage = assembler
-            .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(&policy.provider, usage));
-        turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage;
-        let assembled_state = turn_pipeline.export_state_for_assembly();
-        let assembled = assembler.finish(
-            assembled_state,
-            cancel_state.is_cancelled(),
-            None,
-            &self.host.core.termination,
-        );
-        let finalize_manager = if self.session.is_some() {
-            Some(match self.runtime_session_manager_for_turn(None) {
-                Ok(manager) => manager,
-                Err(err) => {
-                    let runtime_err = RuntimeError {
-                        code: "plugin_session_manager".to_string(),
-                        message: err.to_string(),
-                    };
-                    abandon_runtime_turn_lease_best_effort(
-                        Some(store.as_ref()),
-                        Some(&turn_lease),
-                        "resume_finalize_manager",
-                    )
-                    .await;
-                    return Err(runtime_err);
-                }
-            })
-        } else {
-            None
-        };
-        if let Some(session) = self.session.as_ref() {
-            let plugins = Arc::clone(session.plugins());
-            let manager = finalize_manager.expect("finalize manager should exist with session");
-            self.mark_phase_begin(RuntimeTurnPhase::FinalizeTurn);
-            let finalized = match plugins.finalize_turn(assembled, manager).await {
-                Ok(finalized) => finalized,
-                Err(err) => {
-                    let runtime_err = RuntimeError {
-                        code: "plugin_finalize_turn".to_string(),
-                        message: err.to_string(),
-                    };
-                    abandon_runtime_turn_lease_best_effort(
-                        Some(store.as_ref()),
-                        Some(&turn_lease),
-                        "resume_finalize_turn",
-                    )
-                    .await;
-                    return Err(runtime_err);
-                }
-            };
-            self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
-            let mut returned_turn = finalized.turn;
-            self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
-            if let Err(err) = turn_pipeline
-                .final_commit(
-                    &mut returned_turn,
-                    self.session.as_mut(),
-                    &turn_usage_delta,
-                    Some(crate::RuntimeTurnCompletion::from_lease(&turn_lease)),
-                )
-                .await
-            {
-                abandon_runtime_turn_lease_best_effort(
-                    Some(store.as_ref()),
-                    Some(&turn_lease),
-                    "resume_final_commit",
-                )
-                .await;
-                return Err(err);
-            }
-            emit_session_events_to_sink(events, finalized.events).await;
-            self.state = turn_pipeline.into_final_state();
-            self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
-            Ok(returned_turn)
-        } else {
-            self.state.apply_exported_state(&assembled.state);
-            Ok(assembled)
-        }
+        self.finish_leased_turn(
+            LeasedTurnFinish {
+                turn_pipeline,
+                assembler,
+                new_messages,
+                policy,
+                turn_index: resume_turn_index,
+                turn_lease: Some(turn_lease),
+                trace_turn_id: turn_id.to_string(),
+                abandon_context: "resume",
+            },
+            events,
+            &cancel_state,
+        )
+        .await
     }
 
     pub(crate) async fn stream_turn_with_semantic_events_with_effect_scope(
@@ -499,13 +623,13 @@ impl LashRuntime {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && input_turn_id != effect_scope.turn_id()
         {
-            return Err(RuntimeError {
-                code: "effect_scope_turn_id_mismatch".to_string(),
-                message: format!(
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::EffectScopeTurnIdMismatch,
+                format!(
                     "input trace_turn_id `{input_turn_id}` does not match effect scope turn_id `{}`",
                     effect_scope.turn_id()
                 ),
-            });
+            ));
         }
         if effect_scope
             .controller()
@@ -513,11 +637,10 @@ impl LashRuntime {
             && self.host.core.attachment_store.persistence()
                 != crate::AttachmentStorePersistence::Durable
         {
-            return Err(RuntimeError {
-                code: "durable_attachment_store_required".to_string(),
-                message: "durable effect controllers require a durable attachment store"
-                    .to_string(),
-            });
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::DurableAttachmentStoreRequired,
+                "durable effect controllers require a durable attachment store",
+            ));
         }
         input.trace_turn_id = Some(effect_scope.turn_id().to_string());
         if let Some(execution_session_id) = self
@@ -572,9 +695,11 @@ impl LashRuntime {
             let registry = self.managed_sessions.lock().await;
             registry.get(&execution_session_id).cloned()
         }
-        .ok_or_else(|| RuntimeError {
-            code: "handoff_successor_missing".to_string(),
-            message: format!("active handoff session `{execution_session_id}` is unavailable"),
+        .ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::HandoffSuccessorMissing,
+                format!("active handoff session `{execution_session_id}` is unavailable"),
+            )
         })?;
         let mut runtime = runtime_handle.runtime.lock().await;
         runtime.state.turn_index = self.state.turn_index;
@@ -688,13 +813,13 @@ impl LashRuntime {
         if let Some(input_turn_id) = input.trace_turn_id.as_deref()
             && input_turn_id != effect_scope.turn_id()
         {
-            return Err(RuntimeError {
-                code: "effect_scope_turn_id_mismatch".to_string(),
-                message: format!(
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::EffectScopeTurnIdMismatch,
+                format!(
                     "input trace_turn_id `{input_turn_id}` does not match effect scope turn_id `{}`",
                     effect_scope.turn_id()
                 ),
-            });
+            ));
         }
         let follow_mode_turn_options = input.mode_turn_options.clone();
         let follow_turn_context = input.turn_context.clone();
@@ -726,11 +851,13 @@ impl LashRuntime {
                 .lock()
                 .expect("pending first turn inputs lock")
                 .remove(&successor_session_id)
-                .ok_or_else(|| RuntimeError {
-                    code: "handoff_missing_first_turn".to_string(),
-                    message: format!(
-                        "handoff session `{successor_session_id}` did not provide a first turn"
-                    ),
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::HandoffMissingFirstTurn,
+                        format!(
+                            "handoff session `{successor_session_id}` did not provide a first turn"
+                        ),
+                    )
                 })?;
             input = turn_input_from_plugin_message(seed);
             input.mode_turn_options = follow_mode_turn_options.clone();
@@ -773,9 +900,8 @@ impl LashRuntime {
             mode_session
                 .validate_turn_extension(extension)
                 .await
-                .map_err(|err| RuntimeError {
-                    code: "mode_turn_extension".to_string(),
-                    message: err.to_string(),
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::ModeTurnExtension, err.to_string())
                 })?;
         }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
@@ -906,19 +1032,18 @@ impl LashRuntime {
             origin: None,
         });
 
-        let manager = self
-            .runtime_session_manager_for_turn(None)
-            .map_err(|err| RuntimeError {
-                code: "plugin_session_manager".to_string(),
-                message: err.to_string(),
-            })?;
+        let manager = self.runtime_session_manager_for_turn(None).map_err(|err| {
+            RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
+        })?;
         let plugin_session = self
             .session
             .as_ref()
             .map(|s| Arc::clone(s.plugins()))
-            .ok_or_else(|| RuntimeError {
-                code: "context_prepare_turn".to_string(),
-                message: "runtime session not available".to_string(),
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    RuntimeErrorCode::ContextPrepareTurn,
+                    "runtime session not available",
+                )
             })?;
         let turn_ctx = crate::TurnTransformContext {
             session_id: self.state.session_id.clone(),
@@ -948,9 +1073,8 @@ impl LashRuntime {
                 },
             )
             .await
-            .map_err(|err| RuntimeError {
-                code: "context_prepare_turn".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::ContextPrepareTurn, err.to_string())
             })?;
         self.mark_phase_end(RuntimeTurnPhase::ContextTransform);
         // Release the read-view's graph clone before the rest of the turn
@@ -1029,9 +1153,8 @@ impl LashRuntime {
             .unwrap_or_else(|| self.mode_turn_options.clone());
         let manager = self
             .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
-            .map_err(|err| RuntimeError {
-                code: "plugin_session_manager".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
         let plugins = {
             let session = self
@@ -1064,9 +1187,8 @@ impl LashRuntime {
             loop {
                 tokio::select! {
                     prepared = &mut prepare_turn => {
-                        let prepared = prepared.map_err(|err| RuntimeError {
-                            code: "plugin_prepare_turn".to_string(),
-                            message: err.to_string(),
+                        let prepared = prepared.map_err(|err| {
+                            RuntimeError::new(RuntimeErrorCode::PluginPrepareTurn, err.to_string())
                         })?;
                         self.mark_phase_end(RuntimeTurnPhase::BeforeTurnHooks);
                         break prepared;
@@ -1149,9 +1271,8 @@ impl LashRuntime {
                 self.session.as_mut(),
             )
             .await
-            .map_err(|err| RuntimeError {
-                code: "store_commit_failed".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string())
             })?;
         let turn_lease = if let Some(store) = store.as_ref() {
             Some(
@@ -1163,9 +1284,8 @@ impl LashRuntime {
                         RUNTIME_TURN_LEASE_TTL_MS,
                     )
                     .await
-                    .map_err(|err| RuntimeError {
-                        code: "runtime_turn_lease".to_string(),
-                        message: err.to_string(),
+                    .map_err(|err| {
+                        RuntimeError::new(RuntimeErrorCode::RuntimeTurnLease, err.to_string())
                     })?,
             )
         } else {
@@ -1250,225 +1370,30 @@ impl LashRuntime {
             "runtime post-run_task"
         );
 
-        // Drain the shared token ledger (child sessions + direct
-        // completions + async OM observers/reflectors). Merge it after
-        // restoring the latest progress checkpoint state so in-turn
-        // progress commits cannot wipe live child usage.
-        let child_ledger = {
-            let mut ledger = self.shared_token_ledger.lock().expect("token ledger lock");
-            std::mem::take(&mut *ledger)
-        };
-
         let RuntimeTurnDriver {
             session,
             policy,
-            mut turn_pipeline,
+            turn_pipeline,
             turn_lease: current_turn_lease,
             ..
         } = driver;
         let turn_lease = current_turn_lease.or(turn_lease);
         self.session = Some(session);
-        self.policy = self.state.policy.clone();
-        turn_pipeline.state_mut().policy = self.policy.clone();
-        turn_pipeline.state_mut().turn_index = turn_index;
-        let mut turn_usage_delta = child_ledger.clone();
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
-            let entry = TokenLedgerEntry {
-                source: "turn".to_string(),
-                model: self.policy.model.clone(),
-                usage: assembler.token_usage.clone(),
-            };
-            turn_usage_delta.push(entry);
-        }
-        let turn_usage_delta = merge_usage_delta_entries(turn_usage_delta);
-        turn_pipeline.finalize_turn_read_state(
-            new_messages,
-            &assembler.tool_calls,
-            cancel_state.is_cancelled(),
-        );
-        if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
-            turn_pipeline.state_mut().token_usage = assembler.token_usage.clone();
-        }
-
-        let last_prompt_usage = assembler
-            .last_llm_usage()
-            .and_then(|usage| normalize_prompt_usage(&policy.provider, usage));
-        let finalize_manager = if self.session.is_some() {
-            Some(match self.runtime_session_manager_for_turn(None) {
-                Ok(manager) => manager,
-                Err(err) => {
-                    let runtime_err = RuntimeError {
-                        code: "plugin_session_manager".to_string(),
-                        message: err.to_string(),
-                    };
-                    abandon_runtime_turn_lease_best_effort(
-                        store.as_ref().map(|store| store.as_ref()),
-                        turn_lease.as_ref(),
-                        "finalize_manager",
-                    )
-                    .await;
-                    return Err(runtime_err);
-                }
-            })
-        } else {
-            None
-        };
-        tracing::debug!(
-            rss_kb = debug_rss_kb(),
-            state_message_count = turn_pipeline.state_mut().read_model().messages.len(),
-            graph_node_count = turn_pipeline.state_mut().session_graph.nodes.len(),
-            token_ledger_entries = turn_pipeline.state_mut().token_ledger.len(),
-            "runtime before assembler.finish"
-        );
-        turn_pipeline.state_mut().last_prompt_usage = last_prompt_usage.clone();
-        let assembled_state = turn_pipeline.export_state_for_assembly();
-        let assembled = assembler.finish(
-            assembled_state,
-            cancel_state.is_cancelled(),
-            None,
-            &self.host.core.termination,
-        );
-        tracing::debug!(
-            rss_kb = debug_rss_kb(),
-            assembled_message_count = assembled.state.read_model().messages.len(),
-            assembled_graph_node_count = assembled.state.session_graph.nodes.len(),
-            "runtime after assembler.finish"
-        );
-        if let Some(session) = self.session.as_ref() {
-            let plugins = Arc::clone(session.plugins());
-            let manager = finalize_manager.expect("finalize manager should exist with session");
-            tracing::debug!(rss_kb = debug_rss_kb(), "runtime before finalize_turn");
-            self.mark_phase_begin(RuntimeTurnPhase::FinalizeTurn);
-            let finalized = match plugins.finalize_turn(assembled, manager).await {
-                Ok(finalized) => finalized,
-                Err(err) => {
-                    let runtime_err = RuntimeError {
-                        code: "plugin_finalize_turn".to_string(),
-                        message: err.to_string(),
-                    };
-                    abandon_runtime_turn_lease_best_effort(
-                        store.as_ref().map(|store| store.as_ref()),
-                        turn_lease.as_ref(),
-                        "finalize_turn",
-                    )
-                    .await;
-                    return Err(runtime_err);
-                }
-            };
-            self.mark_phase_end(RuntimeTurnPhase::FinalizeTurn);
-            tracing::debug!(
-                rss_kb = debug_rss_kb(),
-                finalized_message_count = finalized.turn.state.read_model().messages.len(),
-                "runtime after finalize_turn"
-            );
-            let mut returned_turn = finalized.turn;
-            tracing::debug!(
-                rss_kb = debug_rss_kb(),
-                tool_state_present = turn_pipeline.state_mut().tool_state_ref.is_some()
-                    || turn_pipeline.state_mut().tool_state_snapshot.is_some(),
-                plugin_snapshot_present = turn_pipeline.state_mut().plugin_snapshot_ref.is_some()
-                    || turn_pipeline.state_mut().plugin_snapshot.is_some(),
-                "runtime before stamp_runtime_state"
-            );
-            self.mark_phase_begin(RuntimeTurnPhase::PersistTurn);
-            if let Err(err) = turn_pipeline
-                .final_commit(
-                    &mut returned_turn,
-                    self.session.as_mut(),
-                    &turn_usage_delta,
-                    turn_lease
-                        .as_ref()
-                        .map(crate::RuntimeTurnCompletion::from_lease),
-                )
-                .await
-            {
-                abandon_runtime_turn_lease_best_effort(
-                    store.as_ref().map(|store| store.as_ref()),
-                    turn_lease.as_ref(),
-                    "final_commit",
-                )
-                .await;
-                return Err(err);
-            }
-            tracing::debug!(
-                rss_kb = debug_rss_kb(),
-                resident_graph_node_count = returned_turn.state.session_graph.nodes.len(),
-                persisted_message_count = returned_turn.state.read_model().messages.len(),
-                "runtime after stamp_runtime_state"
-            );
-            emit_session_events_to_sink(events, finalized.events).await;
-            self.state = turn_pipeline.into_final_state();
-            if let Some(session) = self.session.as_ref()
-                && let Ok(host) = self.runtime_session_manager()
-            {
-                session
-                    .plugins()
-                    .emit_runtime_event(crate::PluginLifecycleEvent::TurnPersisted(
-                        crate::SessionStateChangedContext {
-                            session_id: self.state.session_id.clone(),
-                            state: crate::SessionReadView::from_exported_state(
-                                &returned_turn.state,
-                            ),
-                            host,
-                            direct_completions: self
-                                .runtime_session_manager()
-                                .map(|manager| {
-                                    manager.direct_completion_client(
-                                        crate::runtime::RuntimeEffectControllerHandle::shared(
-                                            Arc::clone(&self.host.core.effect_controller),
-                                        ),
-                                        None,
-                                        None,
-                                    )
-                                })
-                                .unwrap_or_else(|_| {
-                                    crate::DirectCompletionClient::unavailable(
-                                        "direct completions are unavailable while emitting persisted turn events",
-                                    )
-                                }),
-                        },
-                    ))
-                    .await;
-            }
-            self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
-            if self.host.core.trace_sink.is_some() {
-                let (status, done_reason, handoff) =
-                    trace_fields_from_outcome(&returned_turn.outcome);
-                crate::trace::emit_trace(
-                    &self.host.core.trace_sink,
-                    &self.host.core.trace_context,
-                    lash_trace::TraceContext::default()
-                        .for_session(returned_turn.state.session_id.clone())
-                        .for_turn_index(returned_turn.state.turn_index)
-                        .for_turn(trace_turn_id.clone()),
-                    lash_trace::TraceEvent::TurnCompleted {
-                        status: status.to_string(),
-                        done_reason: done_reason.to_string(),
-                        handoff,
-                    },
-                );
-            }
-            Ok(returned_turn)
-        } else {
-            self.state.apply_exported_state(&assembled.state);
-            if self.host.core.trace_sink.is_some() {
-                let (status, done_reason, handoff) = trace_fields_from_outcome(&assembled.outcome);
-                crate::trace::emit_trace(
-                    &self.host.core.trace_sink,
-                    &self.host.core.trace_context,
-                    lash_trace::TraceContext::default()
-                        .for_session(assembled.state.session_id.clone())
-                        .for_turn_index(assembled.state.turn_index)
-                        .for_turn(trace_turn_id),
-                    lash_trace::TraceEvent::TurnCompleted {
-                        status: status.to_string(),
-                        done_reason: done_reason.to_string(),
-                        handoff,
-                    },
-                );
-            }
-            Ok(assembled)
-        }
+        self.finish_leased_turn(
+            LeasedTurnFinish {
+                turn_pipeline,
+                assembler,
+                new_messages,
+                policy,
+                turn_index,
+                turn_lease,
+                trace_turn_id,
+                abandon_context: "fresh",
+            },
+            events,
+            &cancel_state,
+        )
+        .await
     }
     fn normalize_input_items(
         &self,
@@ -1504,16 +1429,16 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
 
 fn ensure_durable_turn_input(input: &TurnInput) -> Result<(), RuntimeError> {
     if input.mode_extension.is_some() {
-        return Err(RuntimeError {
-            code: "durable_turn_live_mode_extension".to_string(),
-            message: "durable turn resume does not support live mode_extension inputs; encode resumable data in mode_turn_options or persisted plugin state".to_string(),
-        });
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::DurableTurnLiveModeExtension,
+            "durable turn resume does not support live mode_extension inputs; encode resumable data in mode_turn_options or persisted plugin state",
+        ));
     }
     if input.turn_context.has_plugin_inputs() {
-        return Err(RuntimeError {
-            code: "durable_turn_live_plugin_input".to_string(),
-            message: "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in mode_turn_options or persisted plugin state".to_string(),
-        });
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::DurableTurnLivePluginInput,
+            "durable turn resume does not support live TurnContext plugin inputs; encode resumable data in mode_turn_options or persisted plugin state",
+        ));
     }
     Ok(())
 }

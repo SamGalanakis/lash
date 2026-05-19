@@ -512,6 +512,29 @@ fn ensure_runtime_turn_lease_conn(
     Ok(())
 }
 
+fn ensure_runtime_turn_completion_conn(
+    conn: &Connection,
+    completed: &lash_core::RuntimeTurnCompletion,
+) -> Result<(), StoreError> {
+    let now = current_epoch_ms();
+    let Some(current) =
+        load_runtime_turn_lease_from_conn(conn, &completed.session_id, &completed.turn_id)
+            .map_err(sqlite_error)?
+    else {
+        return Err(StoreError::RuntimeTurnLeaseExpired {
+            session_id: completed.session_id.clone(),
+            turn_id: completed.turn_id.clone(),
+        });
+    };
+    if current.lease_token != completed.lease_token || current.expires_at_epoch_ms <= now {
+        return Err(StoreError::RuntimeTurnLeaseExpired {
+            session_id: completed.session_id.clone(),
+            turn_id: completed.turn_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -1351,6 +1374,15 @@ impl RuntimePersistence for Store {
                     expected: commit.expected_head_revision,
                     actual: actual_revision,
                 });
+            }
+            if let Some(completed) = &commit.completed_turn {
+                if completed.session_id != commit.session_id {
+                    return Err(StoreError::RuntimeTurnLeaseExpired {
+                        session_id: completed.session_id.clone(),
+                        turn_id: completed.turn_id.clone(),
+                    });
+                }
+                ensure_runtime_turn_completion_conn(&tx, completed)?;
             }
 
             let stored_checkpoint =

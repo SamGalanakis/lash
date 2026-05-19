@@ -199,7 +199,7 @@ pub use runtime::{
     Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,

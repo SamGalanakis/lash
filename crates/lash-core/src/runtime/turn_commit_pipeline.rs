@@ -8,7 +8,9 @@ use crate::{
     shared_parts,
 };
 
-use super::{PersistedSessionState, RuntimeError, TurnCommitDraft, merge_ledger_entry};
+use super::{
+    PersistedSessionState, RuntimeError, RuntimeErrorCode, TurnCommitDraft, merge_ledger_entry,
+};
 
 pub(super) struct ProgressBoundaryCommit {
     pub(super) mode_events: Vec<crate::ModeEvent>,
@@ -277,10 +279,7 @@ impl TurnCommitPipeline {
             completed_turn,
         )
         .await
-        .map_err(|err| RuntimeError {
-            code: "store_commit_failed".to_string(),
-            message: err.to_string(),
-        })?;
+        .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
         returned_turn.state = self.final_state_mut().export_state();
         Ok(())
     }
@@ -581,6 +580,12 @@ mod tests {
                 return Err(StoreError::HeadRevisionConflict {
                     expected: commit.expected_head_revision,
                     actual,
+                });
+            }
+            if let Some(completed) = &commit.completed_turn {
+                return Err(StoreError::RuntimeTurnLeaseExpired {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
                 });
             }
             let mut graph = self.session_graph.lock().expect("lock graph");

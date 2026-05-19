@@ -12,7 +12,7 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ### Durable per-turn commits
 
-Every completed turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through the final commit transaction.
+Every completed turn lands as one lease-fenced `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through a final commit that still owns an active, unexpired lease.
 
 ### Sans-IO state machine for workflow integration
 

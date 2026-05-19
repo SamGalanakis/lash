@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PluginError, RuntimeError};
+use crate::{PluginError, RuntimeError, RuntimeErrorCode};
 
 use crate::runtime::host::{
     BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry,
@@ -57,10 +57,10 @@ impl<'run> RuntimeEffectControllerScope<'run> {
         turn_id: &'run str,
     ) -> Result<Self, RuntimeError> {
         if turn_id.is_empty() {
-            return Err(RuntimeError {
-                code: "missing_effect_scope_turn_id".to_string(),
-                message: "scoped durable runs require a non-empty stable turn_id".to_string(),
-            });
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::MissingEffectScopeTurnId,
+                "scoped durable runs require a non-empty stable turn_id",
+            ));
         }
         Ok(Self {
             controller,
@@ -133,16 +133,13 @@ impl RuntimeEffectControllerError {
     }
 
     pub(crate) fn into_runtime_error(self) -> RuntimeError {
-        RuntimeError {
-            code: self.code,
-            message: self.message,
-        }
+        RuntimeError::new(self.code, self.message)
     }
 }
 
 impl From<RuntimeError> for RuntimeEffectControllerError {
     fn from(err: RuntimeError) -> Self {
-        Self::new(err.code, err.message)
+        Self::new(err.code.as_str(), err.message)
     }
 }
 

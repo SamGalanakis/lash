@@ -3,6 +3,7 @@ mod builder;
 mod config_ops;
 mod effect;
 mod environment;
+mod error;
 mod host;
 mod io;
 mod lifecycle;
@@ -80,6 +81,7 @@ pub use effect::{
 };
 pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
+pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
     BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskExternalRef, BackgroundTaskFilter,
@@ -473,21 +475,6 @@ impl FollowedTurn {
             .count()
     }
 }
-
-/// Runtime error for unexpected failures.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeError {
-    pub code: String,
-    pub message: String,
-}
-
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RuntimeError {}
 
 /// Termination policy knobs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

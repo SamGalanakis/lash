@@ -279,6 +279,24 @@ impl crate::store::RuntimePersistence for RecordingStore {
                 actual,
             });
         }
+        if let Some(completed) = &commit.completed_turn {
+            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
+            let lease_matches = self
+                .runtime_turn_leases
+                .lock()
+                .expect("lock runtime turn leases")
+                .get(&lease_key)
+                .is_some_and(|lease| {
+                    lease.lease_token == completed.lease_token
+                        && lease.expires_at_epoch_ms > current_epoch_ms()
+                });
+            if !lease_matches {
+                return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+        }
         let mut graph = self.session_graph.lock().expect("lock graph");
         let leaf_node_id = match &commit.graph {
             crate::store::GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
@@ -363,8 +381,8 @@ impl crate::store::RuntimePersistence for RecordingStore {
             owner_id: owner_id.to_string(),
             lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
             fencing_token: 1,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
+            claimed_at_epoch_ms: current_epoch_ms(),
+            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
         };
         self.runtime_turn_leases
             .lock()
@@ -378,8 +396,20 @@ impl crate::store::RuntimePersistence for RecordingStore {
         lease: &crate::RuntimeTurnLease,
         lease_ttl_ms: u64,
     ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
+            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
+                session_id: lease.session_id.clone(),
+                turn_id: lease.turn_id.clone(),
+            })?;
         let renewed = crate::RuntimeTurnLease {
-            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
+            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
             ..lease.clone()
         };
         self.runtime_turn_leases
@@ -428,7 +458,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .lock()
             .expect("lock runtime turn leases")
             .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| current.lease_token == lease.lease_token)
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
             .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
                 session_id: lease.session_id.clone(),
                 turn_id: lease.turn_id.clone(),
@@ -469,7 +502,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .lock()
             .expect("lock runtime turn leases")
             .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| current.lease_token == lease.lease_token)
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
             .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
                 session_id: lease.session_id.clone(),
                 turn_id: lease.turn_id.clone(),
@@ -535,6 +571,13 @@ impl crate::store::RuntimePersistence for RecordingStore {
     async fn gc_unreachable(&self) -> Result<crate::store::GcReport, crate::store::StoreError> {
         Ok(crate::store::GcReport::default())
     }
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 impl RecordingStore {

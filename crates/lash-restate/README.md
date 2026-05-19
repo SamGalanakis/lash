@@ -21,7 +21,7 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
         ctx: WorkflowContext<'_>,
         Json(req): Json<TurnRequest>,
     ) -> HandlerResult<Json<TurnResponse>> {
-        let effect_controller = RestateRuntimeEffectController::new(ctx, hooks);
+        let effect_controller = RestateRuntimeEffectController::new(ctx);
         let turn_id = req.turn_id.clone();
         let effect_scope = effect_controller
             .effect_scope(&turn_id)
@@ -47,15 +47,42 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
 
 The adapter journals Lash LLM calls, tool calls, direct completions,
 checkpoints, execution-surface syncs, and exec effects with Restate
-`ctx.run(...).name(envelope.metadata.idempotency_key)`. Runtime sleeps use
-Restate durable timers. Lash also saves the in-flight `RuntimeTurnCheckpoint`
-and runtime effect journal in its configured `RuntimePersistence` under a
+`ctx.run(...).name(envelope.metadata.idempotency_key)`, then runs the normal
+Lash local executor inside that journaled block. Runtime sleeps use Restate
+durable timers. Lash also saves the in-flight `RuntimeTurnCheckpoint` and
+runtime effect journal in its configured `RuntimePersistence` under a
 `RuntimeTurnLease`. The runtime renews the same lease token before checkpoint
 and journal writes, abandons ownership on controller/runtime errors while
-preserving resume data, and clears checkpoint plus journal rows only through
-the final commit path. After worker movement or process loss, call
-`resume_turn(turn_id)` with the same effect scope to claim ownership again,
-reload the checkpoint, and replay recorded outcomes. `RestateRuntimeHooks`
-receives only serialized Lash requests and background-task registrations;
-unsupported effects must return an explicit host error instead of falling back
-to local execution.
+preserving resume data, and clears checkpoint plus journal rows only through a
+lease-fenced final commit. A final commit with a missing, expired, or
+superseded lease fails before mutating graph, checkpoint, usage, or in-flight
+turn rows.
+
+After worker movement or process loss, call `resume_turn(turn_id)` with the
+same effect scope to claim ownership again, reload the checkpoint, and replay
+recorded outcomes.
+
+Background tasks are scheduled through the first-party
+`LashBackgroundTaskWorkflow`. Bind it on your Restate endpoint with `.serve()`:
+
+```rust,no_run
+use std::sync::Arc;
+
+use lash_restate::{
+    LashBackgroundTaskWorkflow, LashBackgroundTaskWorkflowImpl, RestateBackgroundTaskRunner,
+};
+use restate_sdk::prelude::Endpoint;
+
+fn endpoint<R>(runner: Arc<R>) -> restate_sdk::endpoint::Endpoint
+where
+    R: RestateBackgroundTaskRunner,
+{
+    Endpoint::builder()
+        .bind(LashBackgroundTaskWorkflowImpl::new(runner).serve())
+        .build()
+}
+```
+
+The controller submits workflow `run` with workflow key
+`BackgroundTaskRegistration.id` and sends cancellation to the workflow's shared
+`cancel` handler.

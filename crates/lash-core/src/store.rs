@@ -547,6 +547,12 @@ impl Default for SessionHeadMeta {
 }
 
 /// Exact persistence protocol required by the runtime.
+///
+/// This is intentionally the runtime's atomic transaction facade: one backend
+/// owns session graph/head commits, durable turn leases, turn checkpoints, and
+/// effect-journal rows together. Keep this monolithic until a second real
+/// backend proves that splitting store facets removes more complexity than it
+/// adds.
 #[async_trait::async_trait]
 pub trait RuntimePersistence: Send + Sync {
     async fn load_session(

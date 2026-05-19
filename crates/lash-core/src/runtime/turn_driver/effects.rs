@@ -11,18 +11,12 @@ impl RuntimeTurnDriver<'_> {
             .session
             .turn_injection_bridge()
             .drain()
-            .map_err(|err| RuntimeError {
-                code: "turn_injection_bridge".to_string(),
-                message: err,
-            })?;
+            .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInjectionBridge, err))?;
         let injected = self
             .session
             .turn_input_injection_bridge()
             .drain()
-            .map_err(|err| RuntimeError {
-                code: "turn_input_injection_bridge".to_string(),
-                message: err,
-            })?;
+            .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
         let injected_messages = injected
             .iter()
             .map(|item| item.message.clone())
@@ -37,9 +31,8 @@ impl RuntimeTurnDriver<'_> {
                 host: self.session_manager.clone(),
             })
             .await
-            .map_err(|err| RuntimeError {
-                code: "plugin_checkpoint".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::PluginCheckpoint, err.to_string())
             })?;
         if !injected.is_empty() {
             send_session_event(
@@ -61,10 +54,7 @@ impl RuntimeTurnDriver<'_> {
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;
         if let Some(abort) = applied.abort {
-            return Err(RuntimeError {
-                code: abort.code,
-                message: abort.message,
-            });
+            return Err(RuntimeError::new(abort.code, abort.message));
         }
 
         if !committed.is_empty() {
