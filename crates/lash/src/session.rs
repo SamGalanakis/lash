@@ -331,6 +331,14 @@ impl LashSession {
         self.turn(input).run().await
     }
 
+    pub fn resume_turn(&self, turn_id: impl Into<String>) -> ResumeTurnBuilder {
+        ResumeTurnBuilder {
+            runtime: self.runtime.clone(),
+            turn_id: turn_id.into(),
+            cancel: CancellationToken::new(),
+        }
+    }
+
     pub fn turn(&self, input: TurnInput) -> TurnBuilder {
         TurnBuilder {
             runtime: self.runtime.clone(),

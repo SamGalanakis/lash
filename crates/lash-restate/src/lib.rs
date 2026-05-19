@@ -2,8 +2,11 @@
 //!
 //! The primary entrypoint is [`RestateRuntimeEffectController`]. Construct it inside
 //! a Restate service, object, or workflow handler, derive a stable
-//! [`RuntimeEffectControllerScope`](lash_core::RuntimeEffectControllerScope), and run the Lash turn
-//! through the scoped API.
+//! [`RuntimeEffectControllerScope`](lash_core::RuntimeEffectControllerScope), and run or resume
+//! the Lash turn through the scoped API. Fresh durable turns should use a stable
+//! `TurnInput::with_trace_turn_id(turn_id)`; resumed turns should use the
+//! facade `session.resume_turn(turn_id).run_with_effect_scope(scope)` handle so
+//! Lash reloads its `RuntimeTurnCheckpoint` and runtime effect journal.
 //!
 //! ```rust,ignore
 //! use lash_restate::RestateRuntimeEffectController;
@@ -13,7 +16,7 @@
 //! # struct TurnRequest { turn_id: String }
 //! # #[derive(serde::Serialize, serde::Deserialize)]
 //! # struct TurnResponse;
-//! # async fn run_lash_turn(
+//! # async fn run_or_resume_lash_turn(
 //! #     _scope: lash_core::RuntimeEffectControllerScope<'_>,
 //! #     _req: TurnRequest,
 //! # ) -> Result<TurnResponse, std::io::Error> {
@@ -38,7 +41,7 @@
 //!         let effect_scope = effect_controller
 //!             .effect_scope(&turn_id)
 //!             .map_err(TerminalError::from_error)?;
-//!         let response = run_lash_turn(effect_scope, req)
+//!         let response = run_or_resume_lash_turn(effect_scope, req)
 //!             .await
 //!             .map_err(TerminalError::from_error)?;
 //!         Ok(Json(response))
@@ -50,7 +53,9 @@
 //! not to call the Restate context from inside the closure. This adapter follows
 //! that rule: every Lash effect is wrapped as one immediately awaited
 //! `ctx.run(...).name(envelope.metadata.idempotency_key)` call, and
-//! sleep commands map to Restate's durable timer.
+//! sleep commands map to Restate's durable timer. Lash's own runtime journal
+//! stores the same completed effect outcome by idempotency key and envelope
+//! hash before the restored `TurnMachine` consumes it.
 
 use std::fmt;
 use std::future::Future;
@@ -66,7 +71,10 @@ use lash_core::{
     RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
     RuntimeError,
 };
-use restate_sdk::context::{ContextSideEffects, ContextTimers, RunFuture, RunRetryPolicy};
+use restate_sdk::context::{
+    Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
+    SharedWorkflowContext, WorkflowContext,
+};
 use restate_sdk::errors::{HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
 use serde::{Serialize, de::DeserializeOwned};
@@ -187,6 +195,77 @@ impl fmt::Debug for RestateEffectControllerOptions {
     }
 }
 
+#[doc(hidden)]
+pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
+    fn sleep_send<'run>(
+        &'run self,
+        duration: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
+
+    fn run_json_send<'run, T, Fut>(
+        &'run self,
+        effect_name: String,
+        retry_policy: Option<RunRetryPolicy>,
+        future: Fut,
+    ) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run,
+        T: Serialize + DeserializeOwned + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static;
+}
+
+macro_rules! impl_restate_controller_context {
+    ($($context:ident),+ $(,)?) => {
+        $(
+            impl<'ctx> RestateControllerContext<'ctx> for $context<'ctx> {
+                fn sleep_send<'run>(
+                    &'run self,
+                    duration: Duration,
+                ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    Box::pin(async move {
+                        restate_sdk::context::ContextTimers::sleep(self, duration).await
+                    })
+                }
+
+                fn run_json_send<'run, T, Fut>(
+                    &'run self,
+                    effect_name: String,
+                    retry_policy: Option<RunRetryPolicy>,
+                    future: Fut,
+                ) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                    T: Serialize + DeserializeOwned + Send + 'static,
+                    Fut: Future<Output = T> + Send + 'static,
+                {
+                    let future: RestateHandlerFuture<'ctx, T> =
+                        Box::pin(async move { Ok(Json(future.await)) });
+                    let run = restate_sdk::context::ContextSideEffects::run(self, move || future);
+                    let run = restate_sdk::context::RunFuture::name(run, effect_name);
+                    let run = match retry_policy {
+                        Some(policy) => restate_sdk::context::RunFuture::retry_policy(run, policy),
+                        None => run,
+                    };
+                    Box::pin(async move { run.await })
+                }
+            }
+        )+
+    };
+}
+
+impl_restate_controller_context!(
+    RestateContext,
+    SharedObjectContext,
+    ObjectContext,
+    SharedWorkflowContext,
+    WorkflowContext,
+);
+
 /// Lash [`RuntimeEffectController`] backed by a Restate handler context.
 ///
 /// This type is intentionally handler-scoped. Create one inside the Restate
@@ -224,7 +303,7 @@ impl<'ctx, C, H> RestateRuntimeEffectController<'ctx, C, H> {
 
 impl<'ctx, C, H> RestateRuntimeEffectController<'ctx, C, H>
 where
-    C: ContextSideEffects<'ctx> + ContextTimers<'ctx> + Send + Sync + 'ctx,
+    C: RestateControllerContext<'ctx>,
     H: RestateRuntimeHooks + Send + Sync + 'static,
 {
     pub fn effect_scope<'run>(
@@ -246,17 +325,14 @@ where
     {
         let effect_name = restate_effect_name(&metadata);
         let run_retry_policy = self.options.run_retry_policy.clone();
-        let future: RestateHandlerFuture<'ctx, T> = Box::pin(async move { Ok(Json(future.await)) });
-        let run = self.context.run(move || future).name(effect_name.clone());
-        let run = match run_retry_policy {
-            Some(policy) => run.retry_policy(policy),
-            None => run,
-        };
-        let run = unsafe { send_restate_run(run) };
-        let Json(value) = run.await.map_err(|source| RestateEffectError::Terminal {
-            effect: effect_name,
-            terminal: source,
-        })?;
+        let Json(value) = self
+            .context
+            .run_json_send(effect_name.clone(), run_retry_policy, future)
+            .await
+            .map_err(|source| RestateEffectError::Terminal {
+                effect: effect_name,
+                terminal: source,
+            })?;
         Ok(value)
     }
 }
@@ -276,7 +352,7 @@ where
 #[async_trait::async_trait]
 impl<'ctx, C, H> RuntimeEffectController for RestateRuntimeEffectController<'ctx, C, H>
 where
-    C: ContextSideEffects<'ctx> + ContextTimers<'ctx> + Send + Sync + 'ctx,
+    C: RestateControllerContext<'ctx>,
     H: RestateRuntimeHooks + Send + Sync + 'static,
 {
     fn requires_durable_attachment_store(&self) -> bool {
@@ -294,8 +370,7 @@ where
                     unreachable!("timer execution is only selected for sleep effects");
                 };
                 let duration = Duration::from_millis(*duration_ms);
-                let sleep = unsafe { send_restate_sleep(self.context.sleep(duration)) };
-                if let Err(err) = sleep.await {
+                if let Err(err) = self.context.sleep_send(duration).await {
                     tracing_sleep_error(&envelope.metadata, &err);
                     return Err(RuntimeEffectControllerError::new(
                         "restate_effect_controller",
@@ -423,46 +498,6 @@ fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError)
         error = %err,
         "Restate durable sleep failed"
     );
-}
-
-unsafe fn send_restate_sleep<'a, F>(
-    future: F,
-) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'a>>
-where
-    F: Future<Output = Result<(), TerminalError>> + 'a,
-{
-    // SAFETY: Restate's handler context futures are tied to one handler and are
-    // immediately awaited by this controller. The SDK's public ContextTimers
-    // trait does not expose `Send`, while RuntimeEffectController's async trait
-    // requires the returned future to be `Send`.
-    let boxed: Pin<Box<dyn Future<Output = Result<(), TerminalError>> + 'a>> = Box::pin(future);
-    unsafe {
-        std::mem::transmute::<
-            Pin<Box<dyn Future<Output = Result<(), TerminalError>> + 'a>>,
-            Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'a>>,
-        >(boxed)
-    }
-}
-
-unsafe fn send_restate_run<'a, T, F>(
-    future: F,
-) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'a>>
-where
-    T: 'static,
-    F: Future<Output = Result<Json<T>, TerminalError>> + 'a,
-{
-    // SAFETY: Restate's journaled run future is created and awaited inside the
-    // same handler-scoped controller method. The SDK's public
-    // ContextSideEffects trait omits `Send`, while RuntimeEffectController's
-    // async trait requires it.
-    let boxed: Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + 'a>> =
-        Box::pin(future);
-    unsafe {
-        std::mem::transmute::<
-            Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + 'a>>,
-            Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'a>>,
-        >(boxed)
-    }
 }
 
 #[cfg(test)]
@@ -615,16 +650,6 @@ mod tests {
         for (command, expected) in cases {
             assert_eq!(restate_effect_execution(&command), expected);
         }
-    }
-
-    #[test]
-    fn private_send_helpers_return_send_futures() {
-        fn assert_send<T: Send>(_: T) {}
-
-        let sleep = unsafe { send_restate_sleep(async { Ok(()) }) };
-        assert_send(sleep);
-        let run = unsafe { send_restate_run(async { Ok(Json(())) }) };
-        assert_send(run);
     }
 
     #[derive(Default)]

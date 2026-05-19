@@ -79,8 +79,11 @@ impl RuntimeTurnDriver<'_> {
         let manager = self.session_manager.clone();
         let effect_controller =
             crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
-        let direct_completions = manager
-            .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
+        let direct_completions = manager.direct_completion_client(
+            effect_controller.clone_scoped(),
+            Some(self.turn_id.clone()),
+            self.turn_lease.clone(),
+        );
         let context = match self.session.mode_execution_context(
             &self.session_id,
             manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,

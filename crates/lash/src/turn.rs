@@ -231,6 +231,173 @@ impl TurnStream {
     }
 }
 
+pub struct ResumeTurnBuilder {
+    pub(crate) runtime: RuntimeHandle,
+    pub(crate) turn_id: String,
+    pub(crate) cancel: CancellationToken,
+}
+
+impl ResumeTurnBuilder {
+    pub fn cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub async fn run(self) -> Result<TurnOutput> {
+        let collector = RunActivityCollector::default();
+        let result = self.stream(&collector).await?;
+        Ok(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        })
+    }
+
+    pub async fn run_with_effect_scope(
+        self,
+        effect_scope: RuntimeEffectControllerScope<'_>,
+    ) -> Result<TurnOutput> {
+        let collector = RunActivityCollector::default();
+        let result = self
+            .stream_with_effect_scope(&collector, effect_scope)
+            .await?;
+        Ok(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        })
+    }
+
+    pub async fn collect_with(self, events: &dyn TurnActivitySink) -> Result<TurnOutput> {
+        let collector = RunActivityCollector::default();
+        let fanout = BorrowedTurnActivityFanout {
+            live: events,
+            collector: &collector,
+        };
+        let result = self.stream(&fanout).await?;
+        Ok(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        })
+    }
+
+    pub async fn collect_with_effect_scope(
+        self,
+        events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectControllerScope<'_>,
+    ) -> Result<TurnOutput> {
+        let collector = RunActivityCollector::default();
+        let fanout = BorrowedTurnActivityFanout {
+            live: events,
+            collector: &collector,
+        };
+        let result = self.stream_with_effect_scope(&fanout, effect_scope).await?;
+        Ok(TurnOutput {
+            result,
+            activities: collector.into_activities(),
+        })
+    }
+
+    pub async fn stream(self, events: &dyn TurnActivitySink) -> Result<TurnResult> {
+        let assembled = resume_prepared_assembled(
+            &self.runtime,
+            &self.turn_id,
+            None,
+            Some(events),
+            self.cancel,
+        )
+        .await?;
+        Ok(TurnResult::from_assembled(assembled))
+    }
+
+    pub async fn stream_with_effect_scope(
+        self,
+        events: &dyn TurnActivitySink,
+        effect_scope: RuntimeEffectControllerScope<'_>,
+    ) -> Result<TurnResult> {
+        let assembled = resume_prepared_assembled_with_effect_scope(
+            &self.runtime,
+            &self.turn_id,
+            None,
+            Some(events),
+            effect_scope,
+            self.cancel,
+        )
+        .await?;
+        Ok(TurnResult::from_assembled(assembled))
+    }
+
+    pub async fn collect_session_events_with(self, events: &dyn EventSink) -> Result<TurnResult> {
+        let assembled = resume_prepared_assembled(
+            &self.runtime,
+            &self.turn_id,
+            Some(events),
+            None,
+            self.cancel,
+        )
+        .await?;
+        Ok(TurnResult::from_assembled(assembled))
+    }
+
+    pub async fn collect_session_events_with_effect_scope(
+        self,
+        events: &dyn EventSink,
+        effect_scope: RuntimeEffectControllerScope<'_>,
+    ) -> Result<TurnResult> {
+        let assembled = resume_prepared_assembled_with_effect_scope(
+            &self.runtime,
+            &self.turn_id,
+            Some(events),
+            None,
+            effect_scope,
+            self.cancel,
+        )
+        .await?;
+        Ok(TurnResult::from_assembled(assembled))
+    }
+}
+
+pub(crate) async fn resume_prepared_assembled(
+    runtime: &RuntimeHandle,
+    turn_id: &str,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    cancel: CancellationToken,
+) -> Result<AssembledTurn> {
+    let writer_handle = runtime.writer();
+    let mut writer = writer_handle.lock().await;
+    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
+    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
+    let turn = writer
+        .resume_turn_with_events(turn_id, session_events, turn_events, cancel)
+        .await?;
+    runtime.publish_from(&writer);
+    Ok(turn)
+}
+
+pub(crate) async fn resume_prepared_assembled_with_effect_scope(
+    runtime: &RuntimeHandle,
+    turn_id: &str,
+    session_events: Option<&dyn EventSink>,
+    turn_events: Option<&dyn TurnActivitySink>,
+    effect_scope: RuntimeEffectControllerScope<'_>,
+    cancel: CancellationToken,
+) -> Result<AssembledTurn> {
+    let writer_handle = runtime.writer();
+    let mut writer = writer_handle.lock().await;
+    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
+    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
+    let turn = writer
+        .resume_turn_with_events_and_effect_scope(
+            turn_id,
+            session_events,
+            turn_events,
+            effect_scope,
+            cancel,
+        )
+        .await?;
+    runtime.publish_from(&writer);
+    Ok(turn)
+}
+
 struct ChannelTurnActivitySink {
     tx: mpsc::Sender<Result<TurnActivity>>,
 }

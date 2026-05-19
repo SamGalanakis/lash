@@ -27,12 +27,14 @@ impl<'run> DirectCompletionClient<'run> {
         manager: Arc<RuntimeSessionManager>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         turn_id: Option<String>,
+        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
             inner: Arc::new(RuntimeDirectCompletionInvoker {
                 manager,
                 effect_controller,
                 turn_id,
+                turn_lease,
             }),
         }
     }
@@ -83,6 +85,7 @@ struct RuntimeDirectCompletionInvoker<'run> {
     manager: Arc<RuntimeSessionManager>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     turn_id: Option<String>,
+    turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
 impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
@@ -101,6 +104,7 @@ impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
                     usage_source,
                     self.effect_controller.as_controller(),
                     self.turn_id.as_deref(),
+                    self.turn_lease.as_ref(),
                 )
                 .await
         })
@@ -121,6 +125,7 @@ impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
                     usage_source,
                     self.effect_controller.as_controller(),
                     self.turn_id.as_deref(),
+                    self.turn_lease.as_ref(),
                 )
                 .await
         })
@@ -192,6 +197,7 @@ impl DirectCompletionCapability {
         usage_source: &str,
         effect_controller: &dyn crate::RuntimeEffectController,
         turn_id: Option<&str>,
+        turn_lease: Option<&crate::RuntimeTurnLease>,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
         let provider = current.policy.provider.clone();
         let model = if let Some(selection) = provider.default_agent_model(&request.model) {
@@ -219,13 +225,13 @@ impl DirectCompletionCapability {
             current.host.core.attachment_store.as_ref(),
         )
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let discriminator = crate::runtime::effect_controller::direct_request_discriminator(
+        let discriminator = crate::runtime::effect::direct_request_discriminator(
             &request_spec,
             request.idempotency_key.as_deref(),
             request.originating_tool_call_id.as_deref(),
         )
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let metadata = crate::runtime::effect_controller::direct_effect_metadata(
+        let metadata = crate::runtime::effect::direct_effect_metadata(
             &current.session_id,
             usage_source,
             crate::RuntimeEffectKind::DirectCompletion,
@@ -242,17 +248,19 @@ impl DirectCompletionCapability {
                 usage_source: usage_source.clone(),
             },
         );
-        let outcome = effect_controller
-            .execute_effect(
-                envelope,
-                crate::RuntimeEffectLocalExecutor::direct(
-                    provider,
-                    Arc::clone(&current.host.core.attachment_store),
-                ),
-            )
-            .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        crate::runtime::effect_controller::apply_direct_completion_outcome(
+        let outcome = crate::runtime::effect::execute_effect_with_journal(
+            current.store.as_ref().map(|store| store.as_ref()),
+            turn_lease,
+            effect_controller,
+            envelope,
+            crate::RuntimeEffectLocalExecutor::direct(
+                provider,
+                Arc::clone(&current.host.core.attachment_store),
+            ),
+        )
+        .await
+        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        crate::runtime::effect::apply_direct_completion_outcome(
             current,
             usage_capability,
             &request,
@@ -272,6 +280,7 @@ impl DirectCompletionCapability {
         usage_source: &str,
         effect_controller: &dyn crate::RuntimeEffectController,
         turn_id: Option<&str>,
+        turn_lease: Option<&crate::RuntimeTurnLease>,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
         let provider = current.policy.provider.clone();
         let request_spec = crate::LlmRequestSpec::from_request(
@@ -279,13 +288,10 @@ impl DirectCompletionCapability {
             current.host.core.attachment_store.as_ref(),
         )
         .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let discriminator = crate::runtime::effect_controller::direct_request_discriminator(
-            &request_spec,
-            None,
-            None,
-        )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        let metadata = crate::runtime::effect_controller::direct_effect_metadata(
+        let discriminator =
+            crate::runtime::effect::direct_request_discriminator(&request_spec, None, None)
+                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        let metadata = crate::runtime::effect::direct_effect_metadata(
             &current.session_id,
             usage_source,
             crate::RuntimeEffectKind::DirectLlmCompletion,
@@ -300,17 +306,19 @@ impl DirectCompletionCapability {
                 usage_source: usage_source.clone(),
             },
         );
-        let outcome = effect_controller
-            .execute_effect(
-                envelope,
-                crate::RuntimeEffectLocalExecutor::direct(
-                    provider,
-                    Arc::clone(&current.host.core.attachment_store),
-                ),
-            )
-            .await
-            .map_err(|err| crate::PluginError::Session(err.to_string()))?;
-        crate::runtime::effect_controller::apply_direct_llm_completion_outcome(
+        let outcome = crate::runtime::effect::execute_effect_with_journal(
+            current.store.as_ref().map(|store| store.as_ref()),
+            turn_lease,
+            effect_controller,
+            envelope,
+            crate::RuntimeEffectLocalExecutor::direct(
+                provider,
+                Arc::clone(&current.host.core.attachment_store),
+            ),
+        )
+        .await
+        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        crate::runtime::effect::apply_direct_llm_completion_outcome(
             current,
             usage_capability,
             &request,

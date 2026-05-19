@@ -1,13 +1,18 @@
 use lash_core::{
-    ExecutionMode, HydratedSessionCheckpoint, PersistedSessionConfig, PersistedSessionState,
-    PersistedTurnState, PluginSessionSnapshot, RuntimeCommit, RuntimePersistence, SessionGraph,
-    SessionHead, SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    StandardContextApproach, TokenLedgerEntry, TokenUsage, ToolState,
+    ExecutionMode, HostModeProtocol, HydratedSessionCheckpoint, ModeConfig, ModePreamble,
+    ModeTurnOptions, PersistedSessionConfig, PersistedSessionState, PersistedTurnState,
+    PluginSessionSnapshot, PreparedPrompt, PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RuntimeCommit, RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome,
+    RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
+    RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead, SessionPolicy, SessionReadScope,
+    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, StoreError,
+    TokenLedgerEntry, TokenUsage, ToolState,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
     StoreOptions,
 };
+use std::sync::Arc;
 
 #[test]
 fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
@@ -260,6 +265,311 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
             .expect("load meta")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_commit() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-1", "test-owner", 60_000)
+        .await
+        .expect("lease");
+    let record = RuntimeEffectJournalRecord {
+        schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+        session_id: "root".to_string(),
+        turn_id: "turn-1".to_string(),
+        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
+        envelope_hash: "hash-a".to_string(),
+        effect_kind: RuntimeEffectKind::Sleep,
+        outcome: RuntimeEffectOutcome::Sleep,
+        created_at_epoch_ms: 1,
+    };
+    store
+        .save_runtime_effect_outcome(&lease, record.clone())
+        .await
+        .expect("save journal");
+
+    let loaded = store
+        .load_runtime_effect_outcome("root", "turn-1", &record.idempotency_key)
+        .await
+        .expect("load journal")
+        .expect("journal record");
+    assert_eq!(loaded.envelope_hash, "hash-a");
+
+    let state = PersistedSessionState {
+        session_id: "root".to_string(),
+        ..PersistedSessionState::default()
+    };
+    let commit = RuntimeCommit::persisted_state(&state, &[])
+        .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease));
+    store
+        .commit_runtime_state(commit)
+        .await
+        .expect("final commit clears turn");
+
+    let cleared = store
+        .load_runtime_effect_outcome("root", "turn-1", &record.idempotency_key)
+        .await
+        .expect("load after clear");
+    assert!(cleared.is_none());
+    assert!(
+        store
+            .load_runtime_turn_checkpoint("root", "turn-1")
+            .await
+            .expect("load checkpoint")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-abandon", "owner-a", 60_000)
+        .await
+        .expect("lease");
+    let checkpoint = runtime_turn_checkpoint("root", "turn-abandon");
+    store
+        .save_runtime_turn_checkpoint(&lease, checkpoint)
+        .await
+        .expect("save checkpoint");
+    let record = runtime_effect_record("root", "turn-abandon", "effect-a");
+    store
+        .save_runtime_effect_outcome(&lease, record.clone())
+        .await
+        .expect("save journal");
+
+    store
+        .abandon_runtime_turn_lease(&lease)
+        .await
+        .expect("abandon lease");
+
+    assert!(
+        store
+            .load_runtime_turn_checkpoint("root", "turn-abandon")
+            .await
+            .expect("load checkpoint")
+            .is_some()
+    );
+    assert!(
+        store
+            .load_runtime_effect_outcome("root", "turn-abandon", &record.idempotency_key)
+            .await
+            .expect("load journal")
+            .is_some()
+    );
+    store
+        .claim_runtime_turn_lease("root", "turn-abandon", "owner-b", 60_000)
+        .await
+        .expect("new owner can claim abandoned turn");
+}
+
+#[tokio::test]
+async fn superseded_runtime_turn_lease_cannot_write_or_clear_newer_owner() {
+    let store = Store::memory().expect("store");
+    let old = store
+        .claim_runtime_turn_lease("root", "turn-superseded", "owner-a", 0)
+        .await
+        .expect("old lease");
+    let current = store
+        .claim_runtime_turn_lease("root", "turn-superseded", "owner-b", 60_000)
+        .await
+        .expect("new lease");
+
+    let stale_save = store
+        .save_runtime_effect_outcome(
+            &old,
+            runtime_effect_record("root", "turn-superseded", "stale"),
+        )
+        .await;
+    assert!(matches!(
+        stale_save,
+        Err(StoreError::RuntimeTurnLeaseExpired { .. })
+    ));
+
+    store
+        .abandon_runtime_turn_lease(&old)
+        .await
+        .expect("stale abandon is ignored");
+
+    let conflict = store
+        .claim_runtime_turn_lease("root", "turn-superseded", "owner-c", 60_000)
+        .await;
+    assert!(matches!(
+        conflict,
+        Err(StoreError::RuntimeTurnLeaseConflict { .. })
+    ));
+    store
+        .save_runtime_effect_outcome(
+            &current,
+            runtime_effect_record("root", "turn-superseded", "current"),
+        )
+        .await
+        .expect("current owner can still write");
+}
+
+#[tokio::test]
+async fn renewed_runtime_turn_lease_survives_original_expiry() {
+    let store = Store::memory().expect("store");
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-renew", "owner-a", 1)
+        .await
+        .expect("lease");
+    let renewed = store
+        .renew_runtime_turn_lease(&lease, 60_000)
+        .await
+        .expect("renew lease");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    store
+        .save_runtime_effect_outcome(
+            &renewed,
+            runtime_effect_record("root", "turn-renew", "renewed"),
+        )
+        .await
+        .expect("renewed lease can write after original expiry");
+}
+
+#[tokio::test]
+async fn active_runtime_turn_lease_fences_competing_claims() {
+    let store = Store::memory().expect("store");
+    store
+        .claim_runtime_turn_lease("root", "turn-active", "owner-a", 60_000)
+        .await
+        .expect("lease");
+
+    let conflict = store
+        .claim_runtime_turn_lease("root", "turn-active", "owner-b", 60_000)
+        .await;
+
+    assert!(matches!(
+        conflict,
+        Err(StoreError::RuntimeTurnLeaseConflict { .. })
+    ));
+}
+
+struct NoopDriver;
+
+impl lash_sansio::ProtocolDriverHandle<HostModeProtocol> for NoopDriver {
+    fn prepare_mode_iteration(
+        &self,
+        _ctx: lash_core::DriverContextView<'_>,
+    ) -> Vec<lash_core::DriverAction> {
+        Vec::new()
+    }
+
+    fn handle_llm_success(
+        &self,
+        _ctx: lash_core::DriverContextView<'_>,
+        _waiting: lash_sansio::WaitingLlmState<HostModeProtocol>,
+        _llm_response: lash_core::LlmResponse,
+        _text_streamed: bool,
+    ) -> Vec<lash_core::DriverAction> {
+        Vec::new()
+    }
+
+    fn handle_tool_results(
+        &self,
+        _ctx: lash_core::DriverContextView<'_>,
+        _completed: Vec<lash_sansio::CompletedToolCall>,
+    ) -> Vec<lash_core::DriverAction> {
+        Vec::new()
+    }
+
+    fn handle_exec_result(
+        &self,
+        _ctx: lash_core::DriverContextView<'_>,
+        _waiting: lash_sansio::WaitingExecState<HostModeProtocol>,
+        _result: Result<lash_core::ExecResponse, String>,
+    ) -> Vec<lash_core::DriverAction> {
+        Vec::new()
+    }
+}
+
+fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckpoint {
+    let termination = ModeTurnOptions::default();
+    let tool_names = Arc::new(Vec::new());
+    let mode_preamble = Arc::new(ModePreamble {
+        config: ModeConfig::chat(
+            Arc::new(NoopDriver),
+            false,
+            Arc::new(|message_id, _max_turns| lash_core::Message {
+                id: message_id.clone(),
+                role: lash_core::MessageRole::System,
+                parts: lash_core::shared_parts(Vec::new()),
+                origin: None,
+            }),
+        ),
+        tool_specs: Arc::new(Vec::new()),
+        tool_names: Arc::clone(&tool_names),
+        tool_names_fingerprint: lash_core::prompt_tool_names_fingerprint(&tool_names),
+        omitted_tool_count: 0,
+        execution_prompt: Arc::from(""),
+        prompt_contributions: Vec::new(),
+    });
+    let prepared = lash_core::build_turn(lash_core::SansIoTurnInput {
+        session_id: session_id.to_string(),
+        run_session_id: None,
+        autonomous: false,
+        model: "mock-model".to_string(),
+        mode: ExecutionMode::standard(),
+        messages: lash_core::MessageSequence::default(),
+        events: Arc::new(Vec::new()),
+        mode_run_offset: 0,
+        mode_preamble: Arc::clone(&mode_preamble),
+        prepared_prompt: PreparedPrompt {
+            context: PromptContext::default(),
+            system_prompt: Arc::from(""),
+        },
+        max_turns: None,
+        model_variant: None,
+        emit_llm_trace: false,
+        termination: termination.clone(),
+    });
+    RuntimeTurnCheckpoint::new(
+        session_id,
+        turn_id,
+        1,
+        0,
+        prepared.machine.checkpoint(),
+        RuntimeTurnMachineConfigSnapshot {
+            execution_mode: ExecutionMode::standard(),
+            session_id: session_id.to_string(),
+            run_session_id: None,
+            autonomous: false,
+            model: "mock-model".to_string(),
+            model_variant: None,
+            max_turns: None,
+            sync_execution_surface: false,
+            tool_specs: Vec::new(),
+            system_prompt: String::new(),
+            termination,
+        },
+        ModeTurnOptions::default(),
+        lash_core::PromptLayer::new(),
+        "mock-provider",
+        "mock-model",
+        None,
+        1,
+    )
+    .expect("runtime checkpoint")
+}
+
+fn runtime_effect_record(
+    session_id: &str,
+    turn_id: &str,
+    effect: &str,
+) -> RuntimeEffectJournalRecord {
+    RuntimeEffectJournalRecord {
+        schema_version: RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        idempotency_key: format!("{session_id}:{turn_id}:{effect}"),
+        envelope_hash: format!("hash-{effect}"),
+        effect_kind: RuntimeEffectKind::Sleep,
+        outcome: RuntimeEffectOutcome::Sleep,
+        created_at_epoch_ms: 1,
+    }
 }
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {

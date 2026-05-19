@@ -28,8 +28,8 @@ pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
 };
 pub use crate::turn::{
-    FollowedTurnResult, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult, TurnStream,
-    message_role, message_text,
+    FollowedTurnResult, ResumeTurnBuilder, TurnActivityFanout, TurnBuilder, TurnOutput, TurnResult,
+    TurnStream, message_role, message_text,
 };
 pub use lash_core::{
     InputItem, PluginStack, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
@@ -41,8 +41,8 @@ pub mod prelude {
         AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError,
         FollowedTurnResult, Handoffs, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId,
         ModePreset, ObservableSession, PluginActions, PluginBinding, PluginStack, Result,
-        SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput,
-        TurnOutput, TurnResult, TurnStream,
+        ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder,
+        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -75,11 +75,15 @@ pub mod persistence {
     pub use lash_core::{
         AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
         PersistedSessionConfig, PersistedSessionRead, PersistedSessionState, PersistedTurnState,
-        RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint,
-        SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta, SessionMeta,
-        SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
+        RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+        RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+        RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+        RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
+        SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
+        SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
         SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
         load_persisted_session_state, load_persisted_session_state_active_path,
+        runtime_turn_checkpoint_hash,
     };
 }
 
@@ -125,9 +129,10 @@ pub mod advanced {
         RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
         RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-        RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation, SessionEvent,
-        SessionHandle, SessionPolicy, SessionStateEnvelope, SessionTurnHandle,
-        StandardContextApproach, TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
+        RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle, SessionPolicy,
+        SessionStateEnvelope, SessionTurnHandle, StandardContextApproach, TerminationPolicy,
+        TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

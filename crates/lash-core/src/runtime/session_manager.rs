@@ -201,8 +201,9 @@ impl RuntimeSessionManager {
         self: &Arc<Self>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         turn_id: Option<String>,
+        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> DirectCompletionClient<'run> {
-        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id)
+        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id, turn_lease)
     }
 
     pub(super) fn new(

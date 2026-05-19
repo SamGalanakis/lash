@@ -1,7 +1,7 @@
 mod assembly;
 mod builder;
 mod config_ops;
-mod effect_controller;
+mod effect;
 mod environment;
 mod host;
 mod io;
@@ -58,6 +58,8 @@ use turn_commit_draft::*;
 use turn_commit_pipeline::*;
 use turn_driver::*;
 
+pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
+
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
 
@@ -69,13 +71,14 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
-pub use effect_controller::{
+pub use effect::{
     BackgroundTaskLocalExecutor, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
-    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, RuntimeEffectCommand,
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, LocalBackgroundCancelPolicy,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
 };
-pub(crate) use effect_controller::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
+pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
@@ -265,6 +268,10 @@ impl TurnContext {
 
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
         self.plugin_inputs.contains_key(plugin_id)
+    }
+
+    pub fn has_plugin_inputs(&self) -> bool {
+        !self.plugin_inputs.is_empty()
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {

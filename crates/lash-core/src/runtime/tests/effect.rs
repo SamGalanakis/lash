@@ -1,6 +1,7 @@
 use super::*;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use crate::plugin::{ModeProtocolDriverPlugin, ModeSessionPlugin};
+use crate::store::RuntimePersistence;
 
 #[derive(Clone, Debug)]
 struct EffectControllerRecord {
@@ -404,6 +405,216 @@ async fn standard_turn_llm_and_checkpoint_effects_cross_controller_once() {
             .as_deref()
             .is_some_and(|hash| hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
     }));
+}
+
+#[tokio::test]
+async fn durable_turn_persists_checkpoints_and_journal_then_clears_on_commit() {
+    let recorder = RecordingEffectController::default();
+    let store = Arc::new(RecordingStore::default());
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            usage: LlmUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            ..LlmResponse::default()
+        }),
+    }]);
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        host_with_effect_recorder(recorder),
+        store.clone(),
+    )
+    .await;
+
+    let turn = runtime
+        .run_turn_assembled(TurnInput::text("hello"), CancellationToken::new())
+        .await
+        .expect("turn");
+
+    assert!(matches!(turn.outcome, TurnOutcome::Finished(_)));
+    assert!(store.runtime_turn_checkpoint_save_count() >= 1);
+    assert!(store.runtime_effect_journal_save_count() >= 1);
+    assert!(
+        store.runtime_turn_lease_renew_count()
+            >= store.runtime_turn_checkpoint_save_count()
+                + store.runtime_effect_journal_save_count()
+    );
+    assert_eq!(store.runtime_turn_checkpoint_count(), 0);
+    assert_eq!(store.runtime_effect_journal_count(), 0);
+}
+
+#[tokio::test]
+async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
+    #[derive(Clone)]
+    struct FailToolCallController {
+        inner: RecordingEffectController,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeEffectController for FailToolCallController {
+        async fn execute_effect(
+            &self,
+            envelope: RuntimeEffectEnvelope,
+            local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+            if envelope.metadata.effect_kind == RuntimeEffectKind::ToolCall {
+                return Err(RuntimeEffectControllerError::new(
+                    "controller_failed",
+                    "tool call controller failed",
+                ));
+            }
+            self.inner.execute_effect(envelope, local_executor).await
+        }
+
+        async fn start_background_task(
+            &self,
+            registry: Arc<dyn BackgroundTaskRegistry>,
+            registration: BackgroundTaskRegistration,
+            local_executor: crate::BackgroundTaskLocalExecutor,
+        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
+            self.inner
+                .start_background_task(registry, registration, local_executor)
+                .await
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
+            self.inner
+                .request_background_task_cancel(registry, task_id, reason)
+                .await
+        }
+    }
+
+    let recorder = RecordingEffectController::default();
+    let store = Arc::new(RecordingStore::default());
+    let transport = mock_provider(Vec::new());
+    let host = EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_effect_controller(
+        Arc::new(FailToolCallController {
+            inner: recorder.clone(),
+        }),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EchoTool),
+        transport,
+        host,
+        store.clone(),
+    )
+    .await;
+
+    let err = runtime
+        .run_turn_assembled(TurnInput::text("use the tool"), CancellationToken::new())
+        .await
+        .expect_err("controller failure should abort durable turn");
+
+    assert_eq!(err.code, "controller_failed");
+    assert_eq!(store.runtime_turn_lease_abandon_count(), 1);
+    assert!(store.runtime_turn_checkpoint_count() >= 1);
+    assert!(store.runtime_effect_journal_count() >= 1);
+}
+
+#[tokio::test]
+async fn effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
+    let recorder = RecordingEffectController::default();
+    let store = RecordingStore::default();
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-1", "test", 60_000)
+        .await
+        .expect("lease");
+    let metadata = EffectInvocationMetadata {
+        session_id: "root".to_string(),
+        origin: EffectOrigin::Turn,
+        turn_id: Some("turn-1".to_string()),
+        turn_index: Some(1),
+        mode_iteration: Some(0),
+        effect_id: "sleep".to_string(),
+        effect_kind: RuntimeEffectKind::Sleep,
+        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
+        turn_checkpoint_hash: Some("0".repeat(64)),
+    };
+    let envelope = RuntimeEffectEnvelope::new(
+        metadata.clone(),
+        RuntimeEffectCommand::Sleep { duration_ms: 1 },
+    );
+
+    let first = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &recorder,
+        envelope.clone(),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect("first effect");
+    let second = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &recorder,
+        envelope,
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect("replayed effect");
+
+    assert!(matches!(first, RuntimeEffectOutcome::Sleep));
+    assert!(matches!(second, RuntimeEffectOutcome::Sleep));
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 1);
+
+    let mismatched = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &recorder,
+        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 2 }),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect_err("hash mismatch should fail");
+    assert_eq!(mismatched.code, "runtime_effect_journal_hash_mismatch");
+}
+
+#[tokio::test]
+async fn journaled_turn_effect_requires_lease_before_controller_execution() {
+    let recorder = RecordingEffectController::default();
+    let store = RecordingStore::default();
+    let metadata = EffectInvocationMetadata {
+        session_id: "root".to_string(),
+        origin: EffectOrigin::Turn,
+        turn_id: Some("turn-1".to_string()),
+        turn_index: Some(1),
+        mode_iteration: Some(0),
+        effect_id: "sleep".to_string(),
+        effect_kind: RuntimeEffectKind::Sleep,
+        idempotency_key: "root:turn-1:1:0:sleep:1".to_string(),
+        turn_checkpoint_hash: Some("0".repeat(64)),
+    };
+
+    let err = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        None,
+        &recorder,
+        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 1 }),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect_err("missing turn lease must fail");
+
+    assert_eq!(err.code, "runtime_turn_lease_required");
+    assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 0);
 }
 
 #[tokio::test]
@@ -988,6 +1199,7 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         None,
+        None,
     );
     let mut request = crate::DirectRequest::text("mock-model", "summarize");
     request.originating_tool_call_id = Some("originating-tool-call".to_string());
@@ -1010,6 +1222,66 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
     assert_eq!(ledger[0].source, "direct-test");
     assert_eq!(ledger[0].model, "mock-model");
     assert_eq!(ledger[0].usage.input_tokens, 7);
+}
+
+#[tokio::test]
+async fn in_turn_direct_completion_requires_lease_and_journals_under_it() {
+    let recorder = RecordingEffectController::default();
+    let store = Arc::new(RecordingStore::default());
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "direct answer".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "direct answer".to_string(),
+                response_meta: None,
+            }],
+            usage: LlmUsage {
+                input_tokens: 7,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            ..LlmResponse::default()
+        }),
+    }]);
+    let host = EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default().with_effect_controller(Arc::new(recorder.clone())),
+    );
+    let runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EmptyTools),
+        transport,
+        host,
+        store.clone(),
+    )
+    .await;
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-direct", "test", 60_000)
+        .await
+        .expect("lease");
+
+    let manager = runtime.runtime_session_manager().expect("session manager");
+    let direct = manager.direct_completion_client(
+        RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
+        Some("turn-direct".to_string()),
+        Some(lease),
+    );
+    let completion = direct
+        .direct_completion(
+            crate::DirectRequest::text("mock-model", "summarize"),
+            "direct-test",
+        )
+        .await
+        .expect("direct completion");
+
+    assert_eq!(completion.text, "direct answer");
+    assert!(recorder.records().iter().any(|record| {
+        record.kind == RuntimeEffectKind::DirectCompletion
+            && record.turn_id.as_deref() == Some("turn-direct")
+    }));
+    assert_eq!(store.runtime_effect_journal_save_count(), 1);
+    assert!(store.runtime_turn_lease_renew_count() >= 2);
 }
 
 #[tokio::test]
@@ -1045,6 +1317,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
     let manager = runtime.runtime_session_manager().expect("session manager");
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
+        None,
         None,
     );
     let request = LlmRequest {
@@ -1117,6 +1390,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
     let direct = manager.direct_completion_client(
         RuntimeEffectControllerHandle::shared(Arc::new(recorder.clone())),
         None,
+        None,
     );
     let completion = direct
         .direct_llm_completion(request, "direct-image-test")
@@ -1133,14 +1407,27 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
     assert!(envelope.contains(&expected_attachment_id));
 }
 
+fn effect_module_sources(manifest_dir: &std::path::Path) -> Vec<PathBuf> {
+    let dir = manifest_dir.join("src/runtime/effect");
+    let mut paths = std::fs::read_dir(&dir)
+        .expect("read effect module directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
 #[test]
 fn runtime_effect_executor_has_no_legacy_future_api() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source_files = [
-        manifest_dir.join("src/runtime/effect_controller.rs"),
-        manifest_dir.join("src/runtime/turn_driver.rs"),
-        manifest_dir.join("src/runtime/session_manager/direct.rs"),
-    ];
+    let source_files = effect_module_sources(&manifest_dir)
+        .into_iter()
+        .chain([
+            manifest_dir.join("src/runtime/turn_driver.rs"),
+            manifest_dir.join("src/runtime/session_manager/direct.rs"),
+        ])
+        .collect::<Vec<_>>();
     let legacy_future_type = ["Effect", "Future"].concat();
     let legacy_constructor = ["Runtime", "Effect", "Executor", "::new"].concat();
     for path in source_files {
@@ -1161,13 +1448,15 @@ fn runtime_effect_executor_has_no_legacy_future_api() {
 #[test]
 fn runtime_effect_controller_cutover_has_no_legacy_host_request_or_fallback_symbols() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source_files = [
-        manifest_dir.join("src/runtime/effect_controller.rs"),
-        manifest_dir.join("src/runtime/turn_driver.rs"),
-        manifest_dir.join("src/runtime/session_manager/direct.rs"),
-        manifest_dir.join("src/tool_executor.rs"),
-        manifest_dir.join("src/runtime/assembly.rs"),
-    ];
+    let source_files = effect_module_sources(&manifest_dir)
+        .into_iter()
+        .chain([
+            manifest_dir.join("src/runtime/turn_driver.rs"),
+            manifest_dir.join("src/runtime/session_manager/direct.rs"),
+            manifest_dir.join("src/tool_executor.rs"),
+            manifest_dir.join("src/runtime/assembly.rs"),
+        ])
+        .collect::<Vec<_>>();
     let forbidden = [
         ["Runtime", "Effect", "Host"].concat(),
         ["Local", "Runtime", "Effect", "Host"].concat(),

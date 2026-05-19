@@ -25,4 +25,5 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.3" }
 tokio = { workspace = true, features = ["full"] }

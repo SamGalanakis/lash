@@ -165,7 +165,6 @@ pub struct BackgroundTaskScope {
 pub enum BackgroundCancelPolicy {
     #[default]
     Cooperative,
-    AbortLocal,
     External,
 }
 
@@ -958,7 +957,7 @@ impl From<BackgroundRuntimeHost> for RuntimeHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::BackgroundTaskLocalExecutor;
+    use crate::runtime::{BackgroundTaskLocalExecutor, LocalBackgroundCancelPolicy};
 
     fn spec(id: &str, kind: BackgroundTaskKind) -> BackgroundTaskRegistration {
         BackgroundTaskRegistration {
@@ -1194,6 +1193,42 @@ mod tests {
         assert_eq!(completion.state, BackgroundTaskState::Cancelled);
     }
 
+    #[tokio::test]
+    async fn local_effect_controller_can_abort_local_background_task_on_cancel() {
+        let registry = Arc::new(LocalBackgroundTaskRegistry::default());
+        let effect_controller = InlineRuntimeEffectController::default();
+        let registration = spec("task:abort", BackgroundTaskKind::Tool);
+        registry
+            .register(registration.clone())
+            .await
+            .expect("register");
+
+        effect_controller
+            .start_background_task(
+                registry.clone(),
+                registration,
+                BackgroundTaskLocalExecutor::new(|_| async move {
+                    std::future::pending::<BackgroundTaskCompletion>().await
+                })
+                .with_cancel_policy(LocalBackgroundCancelPolicy::LocalAbort),
+            )
+            .await
+            .expect("start");
+        let cancelled = effect_controller
+            .request_background_task_cancel(registry.clone(), "task:abort", Some("stop".into()))
+            .await
+            .expect("request cancel");
+
+        assert_eq!(cancelled.state, BackgroundTaskState::Cancelled);
+        assert_eq!(
+            cancelled
+                .result
+                .as_ref()
+                .and_then(|out| out.summary.as_deref()),
+            Some("stop")
+        );
+    }
+
     struct FakeDurableEffectController;
 
     #[async_trait::async_trait]
@@ -1258,7 +1293,8 @@ mod tests {
                 registration,
                 BackgroundTaskLocalExecutor::new(|_| async {
                     panic!("durable controller should not run the local executor")
-                }),
+                })
+                .with_cancel_policy(LocalBackgroundCancelPolicy::LocalAbort),
             )
             .await
             .expect("schedule");

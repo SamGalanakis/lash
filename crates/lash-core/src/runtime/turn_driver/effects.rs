@@ -155,8 +155,11 @@ impl RuntimeTurnDriver<'_> {
         let chronological_projection = read_view.shared_chronological_projection();
         let effect_controller =
             crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
-        let direct_completions = manager
-            .direct_completion_client(effect_controller.clone_scoped(), Some(self.turn_id.clone()));
+        let direct_completions = manager.direct_completion_client(
+            effect_controller.clone_scoped(),
+            Some(self.turn_id.clone()),
+            self.turn_lease.clone(),
+        );
         let context = self
             .session
             .mode_execution_context(

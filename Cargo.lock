@@ -2788,7 +2788,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 
@@ -2835,6 +2834,7 @@ dependencies = [
  "async-trait",
  "flate2",
  "lash-core",
+ "lash-sansio",
  "rmp-serde",
  "rusqlite",
  "serde",
