@@ -314,40 +314,6 @@ pub struct RuntimeTurnCheckpoint {
     pub updated_at_epoch_ms: u64,
 }
 
-impl RuntimeTurnCheckpoint {
-    pub fn new(
-        session_id: impl Into<String>,
-        turn_id: impl Into<String>,
-        turn_index: usize,
-        mode_iteration: usize,
-        checkpoint: lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
-        machine_config: RuntimeTurnMachineConfigSnapshot,
-        mode_turn_options: crate::ModeTurnOptions,
-        turn_prompt_layer: crate::PromptLayer,
-        provider_id: impl Into<String>,
-        model: impl Into<String>,
-        model_variant: Option<String>,
-        updated_at_epoch_ms: u64,
-    ) -> Result<Self, StoreError> {
-        let checkpoint_hash = runtime_turn_checkpoint_hash(&checkpoint)?;
-        Ok(Self {
-            schema_version: RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-            session_id: session_id.into(),
-            turn_id: turn_id.into(),
-            turn_index,
-            mode_iteration,
-            checkpoint_hash,
-            machine_config,
-            checkpoint,
-            mode_turn_options,
-            turn_prompt_layer,
-            provider_id: provider_id.into(),
-            model: model.into(),
-            model_variant,
-            updated_at_epoch_ms,
-        })
-    }
-}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnLease {

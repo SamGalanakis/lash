@@ -10,3 +10,9 @@ pub enum PluginError {
     #[error("plugin session error: {0}")]
     Session(String),
 }
+
+impl From<crate::RuntimeEffectControllerError> for PluginError {
+    fn from(err: crate::RuntimeEffectControllerError) -> Self {
+        PluginError::Session(err.to_string())
+    }
+}

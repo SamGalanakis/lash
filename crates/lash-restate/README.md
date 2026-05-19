@@ -26,24 +26,19 @@ impl AgentTurnWorkflow for AgentTurnWorkflowImpl {
         let effect_scope = effect_controller
             .effect_scope(&turn_id)
             .map_err(TerminalError::from_error)?;
-
-        let output = if req.resume {
-            req.session
-                .resume_turn(&turn_id)
-                .run_with_effect_scope(effect_scope)
-                .await
-        } else {
-            req.session
-                .turn(req.input.with_trace_turn_id(turn_id))
-                .run_with_effect_scope(effect_scope)
-                .await
-        }
-        .map_err(TerminalError::from_error)?;
-
-        Ok(Json(TurnResponse::from(output)))
+        let response = run_or_resume_lash_turn(effect_scope, req)
+            .await
+            .map_err(TerminalError::from_error)?;
+        Ok(Json(response))
     }
 }
 ```
+
+The application owns `run_or_resume_lash_turn`: open the `LashSession` from
+stable request data, call `session.resume_turn(turn_id).run_with_effect_scope`
+when recovering a known in-flight turn, or call
+`session.turn(input.with_trace_turn_id(turn_id)).run_with_effect_scope` for a
+fresh durable turn.
 
 The adapter journals Lash LLM calls, tool calls, direct completions,
 checkpoints, execution-surface syncs, and exec effects with Restate

@@ -42,9 +42,9 @@ impl CurrentSessionCapability {
                 let runtime = runtime.runtime.lock().await;
                 return runtime.active_tool_catalog();
             }
-            return Ok(self
+            return self
                 .plugins
-                .tool_catalog(session_id, self.policy.execution_mode.clone())?);
+                .tool_catalog(session_id, self.policy.execution_mode.clone());
         }
         let runtime = {
             let registry = managed.registry.lock().await;

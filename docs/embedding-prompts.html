@@ -192,23 +192,23 @@ let result = session
           <div class="diagram">
             <div class="diagram-title">Plugin and tool pattern</div>
             <pre><code>#[derive(Clone, Debug)]
-struct BoardPlugin;
+struct ToneConfig;
 
 #[derive(Clone, Debug)]
-struct BoardConfig;
-
-#[derive(Clone, Debug)]
-struct BoardTurnInput {
-    board: BoardState,
+struct ToneTurnInput {
+    tone: String,
 }
 
-impl lash::PluginBinding for BoardPlugin {
-    const ID: &amp;'static str = "board";
-    type SessionConfig = BoardConfig;
-    type Input = BoardTurnInput;
+#[derive(Clone, Debug)]
+struct TonePlugin;
+
+impl lash::PluginBinding for TonePlugin {
+    const ID: &amp;'static str = "tone";
+    type SessionConfig = ToneConfig;
+    type Input = ToneTurnInput;
 
     fn factory(_: &amp;Self::SessionConfig) -&gt; Arc&lt;dyn lash::plugins::PluginFactory&gt; {
-        Arc::new(BoardPluginFactory)
+        Arc::new(TonePluginFactory)
     }
 
     fn requires_turn_input(_: &amp;Self::SessionConfig) -&gt; bool {
@@ -216,48 +216,59 @@ impl lash::PluginBinding for BoardPlugin {
     }
 }
 
-impl lash::plugins::SessionPlugin for BoardSessionPlugin {
-    fn id(&amp;self) -&gt; &amp;'static str { BoardPlugin::ID }
+impl lash::plugins::SessionPlugin for ToneSessionPlugin {
+    fn id(&amp;self) -&gt; &amp;'static str { TonePlugin::ID }
 
     fn register(&amp;self, reg: &amp;mut lash::plugins::PluginRegistrar) -&gt; Result&lt;(), lash::plugins::PluginError&gt; {
         reg.prompt().contribute(Arc::new(|ctx| {
             Box::pin(async move {
-                let Some(input) = ctx.turn_context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
+                let Some(input) = ctx.turn_context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
                     return Ok(Vec::new());
                 };
                 Ok(vec![lash::PromptContribution::environment(
-                    "Board",
-                    format_board(&amp;input.board),
+                    "Tone",
+                    format!("Use this response tone: {}", input.tone),
                 )])
             })
         }));
-        reg.tools().provider(Arc::new(BoardTools))
+        reg.tools().provider(Arc::new(ToneTools))
     }
 }
 
 #[async_trait::async_trait]
-impl lash::tools::ToolProvider for BoardTools {
-    fn definitions(&amp;self) -&gt; Vec&lt;lash::tools::ToolDefinition&gt; {
-        vec![/* read_board, play_move, app tools */]
+impl lash::tools::ToolProvider for ToneTools {
+    fn tool_manifests(&amp;self) -&gt; Vec&lt;lash::tools::ToolManifest&gt; {
+        tone_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.manifest())
+            .collect()
+    }
+
+    fn resolve_contract(&amp;self, name: &amp;str) -&gt; Option&lt;Arc&lt;lash::tools::ToolContract&gt;&gt; {
+        tone_tool_definitions()
+            .into_iter()
+            .find(|definition| definition.name == name)
+            .map(|definition| Arc::new(definition.contract()))
     }
 
     async fn execute(&amp;self, call: lash::tools::ToolCall&lt;'_&gt;) -&gt; lash::tools::ToolResult {
-        let Some(input) = call.context.plugin_input::&lt;BoardTurnInput&gt;(BoardPlugin::ID) else {
-            return lash::tools::ToolResult::err_fmt("missing board input");
+        let Some(input) = call.context.plugin_input::&lt;ToneTurnInput&gt;(TonePlugin::ID) else {
+            return lash::tools::ToolResult::err_fmt("missing tone input");
         };
-        run_board_tool(call.name, call.args, &amp;input.board)
+        run_tone_tool(call.name, call.args, &amp;input.tone)
     }
 }</code></pre>
           </div>
           <p>Human input follows the same rule: a host-supplied tool that waits inside its implementation and returns a normal tool result. No separate runtime prompt event.</p>
+          <p>Per-turn plugin input is live host state. It is useful for local, synchronous turns, but durable workflow integrations that may resume a turn later should keep canonical app state in a store and have prompt hooks or tools reload it by session id. The <a href="./example-agent-service.html">agent-service example</a> uses that store-backed pattern for its board state.</p>
           <p>Plugin crates should export a domain extension trait wrapping the generic input primitive:</p>
-          <pre><code>trait BoardTurnExt {
-    fn with_board(self, board: BoardState) -&gt; Self;
+          <pre><code>trait ToneTurnExt {
+    fn with_tone(self, tone: impl Into&lt;String&gt;) -&gt; Self;
 }
 
-impl BoardTurnExt for lash::TurnBuilder {
-    fn with_board(self, board: BoardState) -&gt; Self {
-        self.with_plugin_input::&lt;BoardPlugin&gt;(BoardTurnInput { board })
+impl ToneTurnExt for lash::TurnBuilder {
+    fn with_tone(self, tone: impl Into&lt;String&gt;) -&gt; Self {
+        self.with_plugin_input::&lt;TonePlugin&gt;(ToneTurnInput { tone: tone.into() })
     }
 }</code></pre>
           <p>Install on the session; use the extension method before each run:</p>
@@ -270,13 +281,13 @@ impl BoardTurnExt for lash::TurnBuilder {
 let session = core
     .session(chat_id)
     .rlm()
-    .plugin::&lt;BoardPlugin&gt;(BoardConfig)
+    .plugin::&lt;TonePlugin&gt;(ToneConfig)
     .open()
     .await?;
 
 let result = session
-    .turn(TurnInput::text("Play one move."))
-    .with_board(board)
+    .turn(TurnInput::text("Summarize this incident."))
+    .with_tone("brief and factual")
     .require_submit()?
     .collect_with(&amp;sink)
     .await?;</code></pre>

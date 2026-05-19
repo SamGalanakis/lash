@@ -295,7 +295,7 @@ macro_rules! impl_restate_controller_context {
                         Some(policy) => restate_sdk::context::RunFuture::retry_policy(run, policy),
                         None => run,
                     };
-                    Box::pin(async move { run.await })
+                    Box::pin(run)
                 }
 
                 fn start_background_workflow<'run>(
@@ -613,6 +613,7 @@ fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError)
 mod tests {
     use super::*;
     use futures_util::{StreamExt, stream};
+    use http_body_util::{BodyExt, Empty};
     use lash_core::{
         BackgroundCancelPolicy, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskScope,
         BackgroundTaskState,
@@ -1053,12 +1054,12 @@ mod tests {
         S::discover()
     }
 
-    #[test]
-    fn background_task_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
+    #[tokio::test]
+    async fn background_task_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         let runner = Arc::new(RecordingRunner::default());
         let service = LashBackgroundTaskWorkflowImpl::new(runner).serve();
         let discovery = discover_service(&service);
-        let _endpoint = Endpoint::builder().bind(service).build();
+        let endpoint = Endpoint::builder().bind(service).build();
 
         assert_eq!(discovery.name.to_string(), "LashBackgroundTaskWorkflow");
         assert_eq!(
@@ -1085,6 +1086,47 @@ mod tests {
         assert_eq!(
             cancel.ty.as_ref().map(ToString::to_string).as_deref(),
             Some("SHARED")
+        );
+
+        let response = endpoint.handle(
+            http::Request::builder()
+                .uri("/discover")
+                .header("accept", "application/vnd.restate.endpointmanifest.v3+json")
+                .body(Empty::<bytes::Bytes>::new())
+                .expect("discover request"),
+        );
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/vnd.restate.endpointmanifest.v3+json")
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("discover response body")
+            .to_bytes();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&body).expect("discover response json");
+        let workflow = manifest["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .find(|service| service["name"] == "LashBackgroundTaskWorkflow")
+            .expect("workflow service");
+        let handlers = workflow["handlers"].as_array().expect("handlers array");
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["name"] == "run" && handler["ty"] == "WORKFLOW")
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["name"] == "cancel" && handler["ty"] == "SHARED")
         );
     }
 

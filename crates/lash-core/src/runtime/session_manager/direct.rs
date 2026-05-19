@@ -219,18 +219,18 @@ impl DirectCompletionCapability {
             &request,
             current.host.core.attachment_store.as_ref(),
         )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         let normalized_spec = crate::LlmRequestSpec::from_request(
             &llm_request,
             current.host.core.attachment_store.as_ref(),
         )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         let discriminator = crate::runtime::effect::direct_request_discriminator(
             &request_spec,
             request.idempotency_key.as_deref(),
             request.originating_tool_call_id.as_deref(),
         )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         let metadata = crate::runtime::effect::direct_effect_metadata(
             &current.session_id,
             usage_source,
@@ -259,7 +259,7 @@ impl DirectCompletionCapability {
             ),
         )
         .await
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         crate::runtime::effect::apply_direct_completion_outcome(
             current,
             usage_capability,
@@ -287,10 +287,10 @@ impl DirectCompletionCapability {
             &request,
             current.host.core.attachment_store.as_ref(),
         )
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         let discriminator =
             crate::runtime::effect::direct_request_discriminator(&request_spec, None, None)
-                .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+                ?;
         let metadata = crate::runtime::effect::direct_effect_metadata(
             &current.session_id,
             usage_source,
@@ -317,7 +317,7 @@ impl DirectCompletionCapability {
             ),
         )
         .await
-        .map_err(|err| crate::PluginError::Session(err.to_string()))?;
+        ?;
         crate::runtime::effect::apply_direct_llm_completion_outcome(
             current,
             usage_capability,

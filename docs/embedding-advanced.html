@@ -170,7 +170,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="complete-example">
           <div class="section-header">
             <h2>Complete Example</h2>
-            <p>The browser example: application chat database, RLM mode, typed plugin input, tools that read turn input, semantic stream events, terminal rendering from <code>TurnOutput</code>.</p>
+            <p>The browser example: application chat database, RLM mode, typed session plugin activation, app-owned board tools, semantic stream events, terminal rendering from <code>TurnOutput</code>, and optional Restate turn durability.</p>
           </div>
           <pre><code>OPENROUTER_API_KEY=... cargo run -p agent-service
 # then open http://127.0.0.1:3000</code></pre>
@@ -184,7 +184,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
           </div>
           <div class="module-grid">
             <article class="panel"><h3><a href="./quickstart.html">Quickstart</a></h3><p>Minimal builder, one turn, prose extraction.</p></article>
-            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM submit, typed plugin input, app tools, streaming, per-chat model selection, SQLite.</p></article>
+            <article class="panel"><h3><a href="./example-agent-service.html">Agent Service</a></h3><p>Browser example: OpenRouter, RLM submit, typed session plugin activation, app-owned tools, streaming, per-chat model selection, SQLite, Restate.</p></article>
             <article class="panel"><h3><a href="./plugins.html">Plugins</a></h3><p><code>PluginFactory</code>, <code>SessionPlugin</code>, registering tools and hooks, cheap-build contract, four reference plugins.</p></article>
             <article class="panel"><h3><a href="./persistence.html">Persistence</a></h3><p><code>lash-sqlite-store</code>, what's persisted, in-memory mode, GC and vacuum.</p></article>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>

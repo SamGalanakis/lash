@@ -675,6 +675,21 @@ fn benchmark_stream_profile_for_request(
     scenario: RuntimePerfScenario,
     request: &LlmRequest,
 ) -> BenchmarkStreamProfile {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::ObservationalMemoryMaintenance
+    ) && request
+        .session_id
+        .as_deref()
+        .is_some_and(|id| id.ends_with("-om-observer"))
+    {
+        return text_profile(
+            "<observations>Runtime perf observer captured persisted benchmark messages.</observations>\n\
+             <current-task>Measure post-persist observational memory maintenance.</current-task>\n\
+             <suggested-response>Report the runtime perf benchmark marker.</suggested-response>",
+        );
+    }
+
     if request.output_spec.is_some()
         || request
             .session_id

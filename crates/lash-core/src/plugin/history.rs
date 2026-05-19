@@ -127,9 +127,9 @@ impl SessionReadMeta {
 
 #[derive(Debug)]
 enum SessionReadGraph {
-    Owned(Arc<crate::SessionGraph>),
+    Owned(crate::SessionGraph),
     Derived {
-        cache: OnceLock<Arc<crate::SessionGraph>>,
+        cache: OnceLock<crate::SessionGraph>,
         base_graph: Arc<crate::SessionGraph>,
     },
 }
@@ -163,14 +163,14 @@ impl SessionReadView {
         let read_model = state.session_graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_state_ref(state),
-            graph: SessionReadGraph::Owned(Arc::new(state.session_graph.clone())),
+            graph: SessionReadGraph::Owned(state.session_graph.clone()),
             read_model,
             chronological_projection: OnceLock::new(),
         }))
     }
 
     pub fn from_persisted_state(state: &PersistedSessionState) -> Self {
-        let graph = Arc::new(state.session_graph.clone());
+        let graph = state.session_graph.clone();
         let read_model = graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_persisted_ref(state),
@@ -185,7 +185,7 @@ impl SessionReadView {
         policy: SessionPolicy,
         mode_turn_options: crate::ModeTurnOptions,
     ) -> Self {
-        let graph = Arc::new(state.session_graph.clone());
+        let graph = state.session_graph.clone();
         let read_model = graph.read_model();
         Self(Arc::new(SessionReadState {
             meta: SessionReadMeta::from_persisted_ref(state)
@@ -217,16 +217,16 @@ impl SessionReadView {
         )
     }
 
-    fn graph_arc(&self) -> &Arc<crate::SessionGraph> {
+    fn session_graph(&self) -> &crate::SessionGraph {
         match &self.0.graph {
             SessionReadGraph::Owned(graph) => graph,
             SessionReadGraph::Derived { cache, base_graph } => cache.get_or_init(|| {
-                let mut graph = base_graph.as_ref().clone();
+                let mut graph = (**base_graph).clone();
                 graph.replace_active_read_state(
                     self.0.read_model.messages.as_slice(),
                     self.0.read_model.tool_calls.as_slice(),
                 );
-                Arc::new(graph)
+                graph
             }),
         }
     }
@@ -237,10 +237,6 @@ impl SessionReadView {
 
     pub fn policy(&self) -> &SessionPolicy {
         &self.0.meta.policy
-    }
-
-    fn session_graph(&self) -> &crate::SessionGraph {
-        self.graph_arc().as_ref()
     }
 
     pub fn materialized_session_graph(&self) -> crate::SessionGraph {

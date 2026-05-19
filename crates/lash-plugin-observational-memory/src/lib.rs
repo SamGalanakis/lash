@@ -95,34 +95,49 @@ impl SessionPlugin for ObservationalMemoryPlugin {
         );
 
         let config = self.config.clone();
-        reg.session().on_event(Arc::new(move |event| {
-            let config = config.clone();
-            Box::pin(async move {
-                if let PluginLifecycleEvent::TurnPersisted(ctx) = event {
-                    let graph = ctx.state.to_owned_state().session_graph;
-                    if !should_run_async_maintenance(&config, &graph) {
-                        return Ok(());
-                    }
-                    let session_id = ctx.session_id.clone();
-                    let host = Arc::clone(&ctx.host);
-                    host.spawn_hidden_task(
-                        &session_id,
-                        OBSERVATIONAL_MEMORY_PLUGIN_ID,
-                        Box::pin(async move {
-                            if let Err(err) = run_async_maintenance(config, graph, ctx).await {
-                                tracing::warn!("observational-memory maintenance failed: {err}");
-                            }
-                            Ok(())
-                        }),
-                    )
-                    .await?;
-                }
-                Ok(())
-            })
-        }));
+        reg.session()
+            .on_event(observational_memory_event_hook(config));
 
         Ok(())
     }
+}
+
+fn observational_memory_event_hook(
+    config: ObservationalMemoryConfig,
+) -> lash_core::plugin::PluginLifecycleEventHook {
+    Arc::new(move |event| {
+        let config = config.clone();
+        Box::pin(async move {
+            if let PluginLifecycleEvent::TurnPersisted(ctx) = event {
+                maybe_spawn_post_persist_memory_maintenance(config, ctx).await?;
+            }
+            Ok(())
+        })
+    })
+}
+
+async fn maybe_spawn_post_persist_memory_maintenance(
+    config: ObservationalMemoryConfig,
+    ctx: SessionStateChangedContext,
+) -> Result<(), PluginError> {
+    let graph = ctx.state.to_owned_state().session_graph;
+    if !should_run_async_maintenance(&config, &graph) {
+        return Ok(());
+    }
+
+    let session_id = ctx.session_id.clone();
+    let host = Arc::clone(&ctx.host);
+    host.spawn_hidden_task(
+        &session_id,
+        OBSERVATIONAL_MEMORY_PLUGIN_ID,
+        Box::pin(async move {
+            if let Err(err) = run_async_maintenance(config, graph, ctx).await {
+                tracing::warn!("observational-memory maintenance failed: {err}");
+            }
+            Ok(())
+        }),
+    )
+    .await
 }
 
 async fn run_async_maintenance(

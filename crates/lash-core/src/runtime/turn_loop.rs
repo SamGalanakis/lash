@@ -215,7 +215,7 @@ impl LashRuntime {
 
         emit_session_events_to_sink(events, finalized.events).await;
         self.state = turn_pipeline.into_final_state();
-        self.emit_persisted_turn_plugin_event(&returned_turn).await;
+        self.emit_turn_persisted_event(&returned_turn).await;
         self.mark_phase_end(RuntimeTurnPhase::PersistTurn);
 
         self.emit_completed_turn_trace(
@@ -252,30 +252,22 @@ impl LashRuntime {
         );
     }
 
-    async fn emit_persisted_turn_plugin_event(&self, returned_turn: &AssembledTurn) {
+    async fn emit_turn_persisted_event(&self, returned_turn: &AssembledTurn) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let Ok(host) = self.runtime_session_manager() else {
+        let Ok(manager) = self.runtime_session_manager() else {
             return;
         };
+        let host = manager.clone();
 
-        let direct_completions = self
-            .runtime_session_manager()
-            .map(|manager| {
-                manager.direct_completion_client(
-                    crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
-                        &self.host.core.effect_controller,
-                    )),
-                    None,
-                    None,
-                )
-            })
-            .unwrap_or_else(|_| {
-                crate::DirectCompletionClient::unavailable(
-                    "direct completions are unavailable while emitting persisted turn events",
-                )
-            });
+        let direct_completions = manager.direct_completion_client(
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.host.core.effect_controller,
+            )),
+            None,
+            None,
+        );
 
         session
             .plugins()

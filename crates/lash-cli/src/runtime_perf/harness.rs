@@ -354,7 +354,18 @@ pub(crate) async fn seed_runtime_state(
         .await
         .map_err(|err| anyhow::anyhow!("seed historical messages: {err}"))?;
 
-    if matches!(scenario, RuntimePerfScenario::ObservationalMemory) {
+    if matches!(
+        scenario,
+        RuntimePerfScenario::ObservationalMemory
+            | RuntimePerfScenario::ObservationalMemoryMaintenance
+    ) {
+        if matches!(
+            scenario,
+            RuntimePerfScenario::ObservationalMemoryMaintenance
+        ) {
+            return Ok(());
+        }
+
         let observed_through_message_id = runtime
             .read_view()
             .messages()
@@ -508,6 +519,10 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .rsplit_once(": ")
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::ObservationalMemoryMaintenance => format!(
+            "Turn {} in observational memory maintenance benchmark mode. Leave the hidden observer maintenance path eligible after persistence and reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
         ),
         RuntimePerfScenario::OpenAiCompatStream => format!(
             "Turn {} in OpenAI-compatible streaming benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",

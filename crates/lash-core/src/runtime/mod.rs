@@ -13,7 +13,7 @@ mod session_manager;
 mod session_ops;
 mod state;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod turn_commit_draft;
 mod turn_commit_pipeline;
 mod turn_driver;

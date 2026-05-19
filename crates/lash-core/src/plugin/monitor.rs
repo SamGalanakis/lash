@@ -855,16 +855,12 @@ async fn run_monitor_task(
         .map_err(|_| PluginError::Session("monitor state poisoned".to_string()))?;
     if let Some(entry) = state.snapshot.monitors.get_mut(&id) {
         let was_stopped = entry.status.state == MonitorRunState::Stopped;
-        entry.status.state = if was_stopped {
+        entry.status.state = if was_stopped || cancelled {
             MonitorRunState::Stopped
-        } else if cancelled {
-            MonitorRunState::Stopped
-        } else if timed_out {
+        } else if timed_out || !exit.success() {
             MonitorRunState::Failed
-        } else if exit.success() {
-            MonitorRunState::Exited
         } else {
-            MonitorRunState::Failed
+            MonitorRunState::Exited
         };
         entry.status.last_exit_status = exit.code();
         entry.status.armed = false;

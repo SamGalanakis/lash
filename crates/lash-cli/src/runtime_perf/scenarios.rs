@@ -14,6 +14,7 @@ pub(crate) enum RuntimePerfScenario {
     RlmGlobals,
     RlmLargeToolSurface,
     ObservationalMemory,
+    ObservationalMemoryMaintenance,
     OpenAiCompatStream,
     EmbedStandard,
     EmbedRlm,
@@ -23,7 +24,7 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 16] = [
+    pub(crate) const DEFAULTS: [Self; 17] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -34,6 +35,7 @@ impl RuntimePerfScenario {
         Self::RlmGlobals,
         Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
+        Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
         Self::EmbedRlm,
@@ -41,7 +43,7 @@ impl RuntimePerfScenario {
         Self::StoreReopen,
         Self::TurnCheckpoint,
     ];
-    pub(crate) const KNOWN: [Self; 16] = [
+    pub(crate) const KNOWN: [Self; 17] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
@@ -52,6 +54,7 @@ impl RuntimePerfScenario {
         Self::RlmGlobals,
         Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
+        Self::ObservationalMemoryMaintenance,
         Self::OpenAiCompatStream,
         Self::EmbedStandard,
         Self::EmbedRlm,
@@ -72,6 +75,7 @@ impl RuntimePerfScenario {
             "rlm_globals" => Some(Self::RlmGlobals),
             "rlm_large_tool_surface" => Some(Self::RlmLargeToolSurface),
             "observational_memory" => Some(Self::ObservationalMemory),
+            "observational_memory_maintenance" => Some(Self::ObservationalMemoryMaintenance),
             "openai_compat_stream" => Some(Self::OpenAiCompatStream),
             "embed_standard" => Some(Self::EmbedStandard),
             "embed_rlm" => Some(Self::EmbedRlm),
@@ -94,6 +98,7 @@ impl RuntimePerfScenario {
             Self::RlmGlobals => "rlm_globals",
             Self::RlmLargeToolSurface => "rlm_large_tool_surface",
             Self::ObservationalMemory => "observational_memory",
+            Self::ObservationalMemoryMaintenance => "observational_memory_maintenance",
             Self::OpenAiCompatStream => "openai_compat_stream",
             Self::EmbedStandard => "embed_standard",
             Self::EmbedRlm => "embed_rlm",
@@ -108,6 +113,7 @@ impl RuntimePerfScenario {
             Self::Standard
             | Self::StandardToolCalls
             | Self::ObservationalMemory
+            | Self::ObservationalMemoryMaintenance
             | Self::OpenAiCompatStream
             | Self::EmbedStandard
             | Self::ScopedEffectController
@@ -131,6 +137,18 @@ impl RuntimePerfScenario {
                 Self::ObservationalMemory => StandardContextApproach::ObservationalMemory(
                     ObservationalMemoryConfig::default(),
                 ),
+                Self::ObservationalMemoryMaintenance => {
+                    StandardContextApproach::ObservationalMemory(ObservationalMemoryConfig {
+                        observation_message_tokens: 30_000,
+                        observation_buffer_tokens: 128,
+                        observation_block_after_tokens: 60_000,
+                        observation_max_tokens_per_batch: 128,
+                        previous_observer_tokens: 256,
+                        reflection_observation_tokens: 40_000,
+                        reflection_buffer_activation_bps: 5_000,
+                        reflection_block_after_tokens: 60_000,
+                    })
+                }
                 _ => StandardContextApproach::RollingHistory(RollingHistoryConfig),
             }),
         }

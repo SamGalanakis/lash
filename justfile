@@ -9,6 +9,48 @@ dev *args:
   cargo build --manifest-path "{{repo}}/crates/lash-cli/Cargo.toml"
   cd "${LASH_DEV_LAUNCH_CWD:-{{invocation_directory()}}}" && exec "{{repo}}/target/debug/lash" "$@"
 
+agent-service-restate-e2e:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image="${AGENT_SERVICE_RESTATE_IMAGE:-restatedev/restate:latest}"
+  container="${AGENT_SERVICE_RESTATE_CONTAINER:-lash-agent-service-restate-e2e}"
+  admin_port="${RESTATE_ADMIN_PORT:-19070}"
+  ingress_port="${RESTATE_INGRESS_PORT:-18080}"
+  node_port="${RESTATE_NODE_PORT:-15122}"
+  endpoint_bind="${AGENT_SERVICE_E2E_ENDPOINT_BIND:-127.0.0.1:19080}"
+  endpoint_url="${AGENT_SERVICE_E2E_ENDPOINT_URL:-http://127.0.0.1:19080}"
+  admin_url="${RESTATE_ADMIN_URL:-http://127.0.0.1:$admin_port}"
+  ingress_url="${RESTATE_INGRESS_URL:-http://127.0.0.1:$ingress_port}"
+
+  cleanup() {
+    docker rm -f "$container" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+  cleanup
+
+  docker run -d --name "$container" --network host \
+    -e RESTATE_ADMIN__BIND_PORT="$admin_port" \
+    -e RESTATE_INGRESS__BIND_PORT="$ingress_port" \
+    -e RESTATE_BIND_PORT="$node_port" \
+    "$image" >/dev/null
+
+  deadline=$((SECONDS + 60))
+  until (echo >"/dev/tcp/127.0.0.1/$admin_port") >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      docker logs "$container" >&2 || true
+      echo "Restate admin port $admin_port did not become ready" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+
+  RESTATE_INGRESS_URL="$ingress_url" \
+  RESTATE_ADMIN_URL="$admin_url" \
+  AGENT_SERVICE_E2E_ENDPOINT_BIND="$endpoint_bind" \
+  AGENT_SERVICE_E2E_ENDPOINT_URL="$endpoint_url" \
+  cargo test -p agent-service --features restate \
+    live_restate_ingress_runs_agent_turn_workflow_end_to_end -- --ignored --nocapture
+
 # ── crates.io publishing ─────────────────────────────────────
 # Topological order of every publishable crate. Computed once via
 # `cargo metadata` then frozen here; edit by hand if a new internal

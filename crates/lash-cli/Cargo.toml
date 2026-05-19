@@ -24,7 +24,7 @@ name = "lash"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["full"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false }
 lash-runtime = { path = "../lash", version = "=0.1.0-alpha.4" }
 lash-plugin-mcp = { path = "../lash-plugin-mcp", version = "=0.1.0-alpha.4" }
 lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.4", optional = true }
@@ -73,7 +73,7 @@ stats_alloc = "0.1"
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["full", "testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

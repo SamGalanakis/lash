@@ -73,11 +73,11 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
-        PersistedSessionConfig, PersistedSessionRead, PersistedSessionState, PersistedTurnState,
-        RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-        RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
-        RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+        AttachmentStore, BlobRef, FileAttachmentStore, GcReport, GraphCommitDelta,
+        HydratedSessionCheckpoint, ModeEvent, PersistedSessionConfig, PersistedSessionRead,
+        PersistedSessionState, PersistedTurnState, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+        RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
+        RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
         RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
         SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
         SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,

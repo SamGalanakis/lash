@@ -71,7 +71,11 @@ pub struct SessionStateChangedContext {
 
 #[derive(Clone)]
 pub enum PluginLifecycleEvent {
-    TurnCommitted(Arc<AssembledTurn>),
+    TurnFinalized(Arc<AssembledTurn>),
+    /// Best-effort observer hook emitted after durable session state advances.
+    ///
+    /// Hook failures are isolated from the foreground turn: the turn has already
+    /// committed, and observers must not affect that commit.
     TurnPersisted(SessionStateChangedContext),
     SessionRestored(SessionReadView),
     SessionConfigChanged(Box<SessionConfigChangedContext>),

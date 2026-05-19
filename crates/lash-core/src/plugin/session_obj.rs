@@ -764,7 +764,7 @@ impl PluginSession {
         }
 
         if self.has_runtime_event_hooks() {
-            self.emit_runtime_event(PluginLifecycleEvent::TurnCommitted(Arc::new(turn.clone())))
+            self.emit_runtime_event(PluginLifecycleEvent::TurnFinalized(Arc::new(turn.clone())))
                 .await;
         }
 

@@ -14,14 +14,18 @@ lash-restate = { path = "../../crates/lash-restate", version = "=0.1.0-alpha.4",
 lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.4" }
 lash-runtime = { path = "../../crates/lash", version = "=0.1.0-alpha.4" }
 lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.4" }
-reqwest = { workspace = true, features = ["json", "rustls"], optional = true }
+reqwest = { workspace = true, features = ["json", "rustls", "http2"], optional = true }
 restate-sdk = { workspace = true, optional = true }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-stream = "0.1"
 uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+lash-core = { path = "../../crates/lash-core", version = "=0.1.0-alpha.4", features = ["testing"] }
+tempfile = { workspace = true }
 
 [features]
 restate = ["dep:lash-restate", "dep:reqwest", "dep:restate-sdk"]

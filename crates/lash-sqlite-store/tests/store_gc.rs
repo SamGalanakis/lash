@@ -660,13 +660,17 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         emit_llm_trace: false,
         termination: termination.clone(),
     });
-    RuntimeTurnCheckpoint::new(
-        session_id,
-        turn_id,
-        1,
-        0,
-        prepared.machine.checkpoint(),
-        RuntimeTurnMachineConfigSnapshot {
+    let checkpoint = prepared.machine.checkpoint();
+    let checkpoint_hash =
+        lash_core::runtime_turn_checkpoint_hash(&checkpoint).expect("checkpoint hash");
+    RuntimeTurnCheckpoint {
+        schema_version: lash_core::RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        turn_index: 1,
+        mode_iteration: 0,
+        checkpoint_hash,
+        machine_config: RuntimeTurnMachineConfigSnapshot {
             execution_mode: ExecutionMode::standard(),
             session_id: session_id.to_string(),
             run_session_id: None,
@@ -679,14 +683,14 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
             system_prompt: String::new(),
             termination,
         },
-        ModeTurnOptions::default(),
-        lash_core::PromptLayer::new(),
-        "mock-provider",
-        "mock-model",
-        None,
-        1,
-    )
-    .expect("runtime checkpoint")
+        checkpoint,
+        mode_turn_options: ModeTurnOptions::default(),
+        turn_prompt_layer: lash_core::PromptLayer::new(),
+        provider_id: "mock-provider".to_string(),
+        model: "mock-model".to_string(),
+        model_variant: None,
+        updated_at_epoch_ms: 1,
+    }
 }
 
 fn runtime_effect_record(

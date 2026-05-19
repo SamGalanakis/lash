@@ -72,6 +72,7 @@ async fn rank(call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         stream_events: None,
         session_id: None,                 // filled by ToolContext
         originating_tool_call_id: None,   // filled by ToolContext
+        idempotency_key: None,
     };
 
     match call.context.direct_completion(request, "my_tool").await {

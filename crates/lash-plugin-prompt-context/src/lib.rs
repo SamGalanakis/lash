@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use lash_core::PreparedContext;
 use lash_core::PromptContribution;
 use lash_core::plugin::{
     HistoryError, PluginDirective, PluginError, PluginFactory, PluginRegistrar,
     PluginSessionContext, TurnContextTransform, TurnTransformContext,
 };
-use lash_core::session_model::context::PreparedContext;
 use lash_core::{
     ExecutionMode, Message, MessageRole, Part, PartKind, PluginMessage, PruneState, shared_parts,
 };

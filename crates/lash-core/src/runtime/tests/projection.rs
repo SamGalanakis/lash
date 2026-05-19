@@ -25,7 +25,7 @@ async fn tool_result_projector_only_changes_model_observation() {
                 runtime_event: Some(Arc::new(move |event| {
                     let committed_results = Arc::clone(&committed_results);
                     Box::pin(async move {
-                        if let crate::plugin::PluginLifecycleEvent::TurnCommitted(turn) = event {
+                        if let crate::plugin::PluginLifecycleEvent::TurnFinalized(turn) = event {
                             committed_results.lock().await.push((
                                 turn.tool_calls
                                     .first()

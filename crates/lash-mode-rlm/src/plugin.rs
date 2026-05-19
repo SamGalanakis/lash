@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
+use lash_core::PreparedContext;
 use lash_core::llm::types::{
     LlmContentBlock, LlmJsonSchema, LlmMessage, LlmOutputSpec, LlmRequest, LlmRole, LlmToolChoice,
 };
@@ -10,7 +11,6 @@ use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin, ToolCallHookContext, TurnContextTransform, TurnTransformContext,
 };
-use lash_core::session_model::context::PreparedContext;
 use lash_core::{
     CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
     ToolOutputBudgetConfig,
