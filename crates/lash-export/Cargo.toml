@@ -6,10 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5" }
-lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.5" }
-lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.5" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.5" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.6" }
+lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.6" }
+lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.6" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.6" }
 anyhow = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

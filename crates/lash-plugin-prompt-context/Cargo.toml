@@ -14,11 +14,11 @@ keywords = ["lash", "agent", "prompt", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.6" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.6", features = ["testing"] }
 tokio = { workspace = true, features = ["full"] }

@@ -10,14 +10,14 @@ name = "bench-longmemeval-rlm"
 path = "src/main.rs"
 
 [dependencies]
-lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.5" }
-lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.5" }
-lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.5" }
-lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.5" }
-lash-plugin-observational-memory = { path = "../../../crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.5" }
-lash-plugin-rolling-history = { path = "../../../crates/lash-plugin-rolling-history", version = "=0.1.0-alpha.5" }
-lash-provider-openai = { path = "../../../crates/lash-provider-openai", version = "=0.1.0-alpha.5" }
-lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.5" }
+lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.6" }
+lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.6" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.6" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.6" }
+lash-plugin-observational-memory = { path = "../../../crates/lash-plugin-observational-memory", version = "=0.1.0-alpha.6" }
+lash-plugin-rolling-history = { path = "../../../crates/lash-plugin-rolling-history", version = "=0.1.0-alpha.6" }
+lash-provider-openai = { path = "../../../crates/lash-provider-openai", version = "=0.1.0-alpha.6" }
+lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.6" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive", "env"] }
