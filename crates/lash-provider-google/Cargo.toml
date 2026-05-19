@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "llm", "google", "gemini"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.4" }
-lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.4" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.5" }
+lash-provider-auth = { path = "../lash-provider-auth", version = "=0.1.0-alpha.5" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }

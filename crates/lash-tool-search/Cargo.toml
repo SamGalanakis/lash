@@ -18,8 +18,8 @@ default = []
 fff-zlob = ["fff-search/zlob"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.4" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.5" }
 async-trait = { workspace = true }
 # Keep this exact until fff-search/zlob publish a Zig-compatible replacement.
 fff-search = { version = "=0.6.2-nightly.a677d64", default-features = false }
@@ -29,5 +29,5 @@ tokio = { workspace = true, features = ["rt", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.5", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
