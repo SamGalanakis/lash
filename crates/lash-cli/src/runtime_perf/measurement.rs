@@ -203,16 +203,10 @@ impl lash::advanced::RuntimeEffectController for ScopedPerfEffectController {
     async fn execute_effect(
         &self,
         envelope: lash::advanced::RuntimeEffectEnvelope,
-        _local_executor: lash::advanced::RuntimeEffectLocalExecutor<'_>,
+        local_executor: lash::advanced::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<lash::advanced::RuntimeEffectOutcome, lash::advanced::RuntimeEffectControllerError>
     {
-        Err(lash::advanced::RuntimeEffectControllerError::new(
-            "runtime_perf_effect_controller_unsupported",
-            format!(
-                "runtime perf scoped controller cannot execute {}",
-                envelope.command.kind().as_str()
-            ),
-        ))
+        local_executor.execute(envelope).await
     }
 
     async fn start_background_task(
