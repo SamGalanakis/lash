@@ -14,6 +14,6 @@ keywords = ["lash", "agent", "rlm", "types", "lashlang"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.3" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.4" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

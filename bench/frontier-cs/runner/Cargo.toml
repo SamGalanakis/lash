@@ -10,17 +10,17 @@ name = "bench-frontier-cs"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.3", default-features = false, features = ["full"] }
-lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.3" }
-lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.3" }
-lash-export = { path = "../../../crates/lash-export", version = "=0.1.0-alpha.3" }
-lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.3" }
-lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.3" }
-lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.3" }
-lash-rlm-types = { path = "../../../crates/lash-rlm-types", version = "=0.1.0-alpha.3" }
-lash-provider-openai = { path = "../../../crates/lash-provider-openai", version = "=0.1.0-alpha.3" }
-lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.3" }
-lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.3" }
+lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["full"] }
+lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.4" }
+lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.4" }
+lash-export = { path = "../../../crates/lash-export", version = "=0.1.0-alpha.4" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.4" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.4" }
+lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.4" }
+lash-rlm-types = { path = "../../../crates/lash-rlm-types", version = "=0.1.0-alpha.4" }
+lash-provider-openai = { path = "../../../crates/lash-provider-openai", version = "=0.1.0-alpha.4" }
+lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.4" }
+lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.4" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive", "env"] }
