@@ -17,7 +17,11 @@ OPENROUTER_MODEL_VARIANT=medium
 AGENT_SERVICE_ADDR=127.0.0.1:3000
 AGENT_SERVICE_DATA_DIR=.agent-service
 AGENT_SERVICE_TRACE=.agent-service/trace.jsonl
+AGENT_SERVICE_DURABILITY=local
 ```
+
+The durability mode can also be passed as `--durability local`. The `restate`
+mode is reserved for builds that link a Restate `RuntimeEffectController` adapter.
 
 Then open `http://127.0.0.1:3000`.
 

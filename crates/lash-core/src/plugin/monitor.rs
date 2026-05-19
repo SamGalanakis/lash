@@ -307,12 +307,13 @@ impl MonitorPlugin {
                 .collect::<Vec<_>>()
         };
         for spec in to_start {
-            self.start_task(session_id, host.clone(), spec).await?;
+            self.start_monitor_task(session_id, host.clone(), spec)
+                .await?;
         }
         Ok(())
     }
 
-    async fn start_task(
+    async fn start_monitor_task(
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
@@ -326,21 +327,62 @@ impl MonitorPlugin {
         let managed_spec = crate::BackgroundTaskRegistration {
             id: task_id.clone(),
             kind: crate::BackgroundTaskKind::Monitor,
-            producer: "monitor",
+            producer: "monitor".to_string(),
+            scope: crate::BackgroundTaskScope {
+                session_id: session_id.to_string(),
+            },
             child_session_id: None,
             parent_task_id: None,
+            input: crate::BackgroundTaskInput::Monitor { spec: spec.clone() },
+            attempt: crate::BackgroundTaskAttempt::default(),
+            cancel_policy: crate::BackgroundCancelPolicy::Cooperative,
+            close_policy: crate::BackgroundClosePolicy::Cancel,
         };
         match host
-            .spawn_managed_task(
+            .start_background_task(
                 session_id,
                 managed_spec,
-                Box::pin(async move {
-                    run_monitor_task(state, session_id_owned, spec_clone, task_host).await
+                crate::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
+                    let result = run_monitor_task(
+                        state,
+                        session_id_owned,
+                        spec_clone,
+                        task_host,
+                        cancellation,
+                    )
+                    .await;
+                    match result {
+                        Ok(exit) if exit.cancelled => crate::BackgroundTaskCompletion {
+                            state: crate::BackgroundTaskState::Cancelled,
+                            summary: Some("monitor stopped".to_string()),
+                            output: Some(crate::ToolCallOutput::cancelled(
+                                crate::ToolCancellation::runtime("monitor stopped"),
+                            )),
+                        },
+                        Ok(_) => crate::BackgroundTaskCompletion {
+                            state: crate::BackgroundTaskState::Completed,
+                            summary: Some("monitor exited".to_string()),
+                            output: Some(crate::ToolCallOutput::success(serde_json::json!({
+                                "task_id": task_id,
+                                "kind": "monitor",
+                                "state": "completed",
+                            }))),
+                        },
+                        Err(err) => crate::BackgroundTaskCompletion {
+                            state: crate::BackgroundTaskState::Failed,
+                            summary: Some(err.to_string()),
+                            output: Some(crate::ToolCallOutput::failure(crate::ToolFailure::tool(
+                                crate::ToolFailureClass::Execution,
+                                "monitor_failed",
+                                err.to_string(),
+                            ))),
+                        },
+                    }
                 }),
             )
             .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
                     entry.status.armed = true;
@@ -351,7 +393,7 @@ impl MonitorPlugin {
                 Self::bump_revision(&mut state);
                 Ok(())
             }
-            Err(err) if err.to_string().contains("already running") => {
+            Err(err) if err.to_string().contains("already registered") => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
                     entry.status.state = MonitorRunState::Running;
@@ -484,7 +526,7 @@ impl MonitorPlugin {
             entry_spec
         };
         if let Err(err) = self
-            .start_task(session_id, ctx.host.clone(), entry_spec)
+            .start_monitor_task(session_id, ctx.host.clone(), entry_spec)
             .await
         {
             return ToolResult::err_fmt(err.to_string());
@@ -497,7 +539,7 @@ impl MonitorPlugin {
     }
 
     async fn handle_stop(&self, ctx: PluginActionContext, args: serde_json::Value) -> ToolResult {
-        let Some(session_id) = ctx.session_id.as_deref() else {
+        let Some(_session_id) = ctx.session_id.as_deref() else {
             return ToolResult::err_fmt("monitor.stop requires a session");
         };
         let parsed = match serde_json::from_value::<StopMonitorArgs>(args) {
@@ -519,9 +561,19 @@ impl MonitorPlugin {
             return ToolResult::err_fmt(err.to_string());
         }
 
+        let task_id = format!("monitor:{}", parsed.id);
         if let Err(err) = ctx
             .host
-            .cancel_managed_task(session_id, &format!("monitor:{}", parsed.id))
+            .complete_background_task(
+                &task_id,
+                crate::BackgroundTaskCompletion {
+                    state: crate::BackgroundTaskState::Cancelled,
+                    summary: Some("monitor stopped".to_string()),
+                    output: Some(crate::ToolCallOutput::cancelled(
+                        crate::ToolCancellation::runtime("monitor stopped"),
+                    )),
+                },
+            )
             .await
         {
             return ToolResult::err_fmt(err.to_string());
@@ -691,7 +743,8 @@ async fn run_monitor_task(
     _session_id: String,
     spec: MonitorSpec,
     _host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
-) -> Result<(), PluginError> {
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<MonitorTaskExit, PluginError> {
     let timeout_deadline = (!spec.persistent)
         .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(spec.timeout_ms));
     let mut command = Command::new("bash");
@@ -733,6 +786,7 @@ async fn run_monitor_task(
     let mut stderr_done = false;
     let mut timeout = timeout_deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
     let mut timed_out = false;
+    let mut cancelled = false;
 
     let id = spec.id.clone();
     let wake_policy = spec.wake_policy;
@@ -741,6 +795,10 @@ async fn run_monitor_task(
         select! {
             _ = timeout.as_mut().unwrap(), if timeout.is_some() => {
                 timed_out = true;
+                break;
+            }
+            _ = cancellation.cancelled() => {
+                cancelled = true;
                 break;
             }
             line = stdout_lines.next_line(), if !stdout_done => {
@@ -766,7 +824,7 @@ async fn run_monitor_task(
     }
 
     let exit =
-        if timed_out {
+        if timed_out || cancelled {
             terminate_monitor_process_tree(runtime_pid).await?;
             child
                 .wait()
@@ -799,6 +857,8 @@ async fn run_monitor_task(
         let was_stopped = entry.status.state == MonitorRunState::Stopped;
         entry.status.state = if was_stopped {
             MonitorRunState::Stopped
+        } else if cancelled {
+            MonitorRunState::Stopped
         } else if timed_out {
             MonitorRunState::Failed
         } else if exit.success() {
@@ -812,6 +872,8 @@ async fn run_monitor_task(
         if timed_out {
             entry.status.last_error =
                 Some(format!("monitor timed out after {}ms", spec.timeout_ms));
+        } else if cancelled {
+            entry.status.last_error = None;
         } else if !exit.success() && !was_stopped {
             entry.status.last_error = Some(format!(
                 "monitor exited with status {}",
@@ -843,7 +905,11 @@ async fn run_monitor_task(
             None,
         );
     }
-    Ok(())
+    Ok(MonitorTaskExit { cancelled })
+}
+
+struct MonitorTaskExit {
+    cancelled: bool,
 }
 
 #[cfg(unix)]
@@ -986,9 +1052,15 @@ mod tests {
         let host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost> =
             Arc::new(MockSessionManager::default());
 
-        run_monitor_task(state.clone(), "root".to_string(), spec, host)
-            .await
-            .expect("monitor task should complete after timeout");
+        run_monitor_task(
+            state.clone(),
+            "root".to_string(),
+            spec,
+            host,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("monitor task should complete after timeout");
 
         let guard = state.lock().expect("monitor state");
         let entry = guard

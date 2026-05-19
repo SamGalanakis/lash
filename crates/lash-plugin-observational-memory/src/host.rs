@@ -10,11 +10,20 @@ use lash_core::{
 pub(crate) struct OmRuntimeHost<'a> {
     session_id: &'a str,
     host: &'a Arc<dyn RuntimeSessionHost>,
+    direct_completions: lash_core::DirectCompletionClient<'a>,
 }
 
 impl<'a> OmRuntimeHost<'a> {
-    pub(crate) fn new(session_id: &'a str, host: &'a Arc<dyn RuntimeSessionHost>) -> Self {
-        Self { session_id, host }
+    pub(crate) fn new(
+        session_id: &'a str,
+        host: &'a Arc<dyn RuntimeSessionHost>,
+        direct_completions: lash_core::DirectCompletionClient<'a>,
+    ) -> Self {
+        Self {
+            session_id,
+            host,
+            direct_completions,
+        }
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -34,7 +43,9 @@ impl<'a> OmRuntimeHost<'a> {
         request: DirectRequest,
         usage_source: &str,
     ) -> Result<DirectCompletion, PluginError> {
-        self.host.direct_completion(request, usage_source).await
+        self.direct_completions
+            .direct_completion(request, usage_source)
+            .await
     }
 }
 

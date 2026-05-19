@@ -20,18 +20,21 @@ impl LashRuntime {
             self.state.plugin_snapshot_revision = None;
         }
     }
-    pub(super) fn active_tool_catalog(&self) -> Vec<serde_json::Value> {
-        self.active_tool_catalog_shared().as_ref().clone()
+    pub(super) fn active_tool_catalog(&self) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        self.active_tool_catalog_shared()
+            .map(|catalog| catalog.as_ref().clone())
     }
 
-    pub(super) fn active_tool_catalog_shared(&self) -> Arc<Vec<serde_json::Value>> {
+    pub(super) fn active_tool_catalog_shared(
+        &self,
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
         self.session
             .as_ref()
             .map(|session| {
                 session
                     .shared_tool_catalog(&self.state.session_id, self.policy.execution_mode.clone())
             })
-            .unwrap_or_else(|| Arc::new(Vec::new()))
+            .unwrap_or_else(|| Ok(Arc::new(Vec::new())))
     }
 
     pub fn tool_state(&self) -> Result<crate::ToolState, SessionError> {
@@ -156,14 +159,14 @@ impl LashRuntime {
 
     pub(super) fn runtime_session_manager(
         &self,
-    ) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
+    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(self, true, None)?))
     }
 
     pub(super) fn runtime_session_manager_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
-    ) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
+    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             false,
@@ -173,6 +176,7 @@ impl LashRuntime {
 
     pub fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>, PluginActionInvokeError> {
         self.runtime_session_manager()
+            .map(|manager| manager as Arc<dyn RuntimeSessionHost>)
     }
 
     /// The plugin session bound to the currently active runtime session, if any.

@@ -32,8 +32,8 @@ pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 // Re-exports
 pub use attachments::{
-    AttachmentStore, AttachmentStoreError, FileAttachmentStore, InMemoryAttachmentStore,
-    StoredAttachment,
+    AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
+    InMemoryAttachmentStore, StoredAttachment,
 };
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
@@ -185,20 +185,25 @@ pub use provider::{
 };
 pub use runtime::{
     AssembledTurn, AssistantOutput, BackgroundCancelPolicy, BackgroundClosePolicy,
-    BackgroundRuntimeHost, BackgroundTaskAttempt, BackgroundTaskEvent, BackgroundTaskFilter,
-    BackgroundTaskHost, BackgroundTaskId, BackgroundTaskKind, BackgroundTaskOutcome,
-    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskScope, BackgroundTaskState,
-    CodeOutputRecord, DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata,
-    EffectOrigin, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary,
-    FollowedTurn, InputItem, LashRuntime, LocalBackgroundTaskCancel, LocalBackgroundTaskHost,
-    LocalRuntimeEffectHost, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
-    ModeTurnExtensionHandle, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
-    PersistedSessionState, PromptUsage, Residency, RuntimeCoreConfig, RuntimeEffectHost,
-    RuntimeEffectKind, RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle,
-    RuntimeObservation, SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory,
-    SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnContext, TurnEffectLocalExecutor, TurnEvent, TurnInput, TurnIssue,
-    UsageReportRow, UsageTotals, diff_token_ledger, diff_usage_reports,
+    BackgroundRuntimeHost, BackgroundTaskAttempt, BackgroundTaskCompletion, BackgroundTaskEvent,
+    BackgroundTaskExternalRef, BackgroundTaskFilter, BackgroundTaskId, BackgroundTaskInput,
+    BackgroundTaskKind, BackgroundTaskLocalExecutor, BackgroundTaskOutcome, BackgroundTaskRecord,
+    BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope,
+    BackgroundTaskStartReceipt, BackgroundTaskState, BackgroundTaskUpdate, CodeOutputRecord,
+    DirectCompletionClient, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
+    EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
+    InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
+    LocalBackgroundCancelPolicy, LocalBackgroundTaskRegistry, ModeSessionExtension,
+    ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle, NoopEventSink,
+    NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState, PromptUsage,
+    Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
+    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
+    TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
+    TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,
+    diff_usage_reports,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
 pub use schemars::JsonSchema;
@@ -215,10 +220,13 @@ pub use session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolE
 pub use session_model::{SessionPolicy, SessionSpec};
 pub use store::{
     BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
-    RuntimeCommit, RuntimeCommitResult, RuntimePersistence, SessionCheckpoint, SessionHead,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
+    RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot, SessionCheckpoint, SessionHead,
     SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
     load_persisted_session_state, load_persisted_session_state_active_path,
-    refresh_persisted_session_state,
+    refresh_persisted_session_state, runtime_turn_checkpoint_hash,
 };
 pub use tool_provider::{
     ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolProvider, ToolSessionControl,

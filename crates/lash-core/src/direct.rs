@@ -7,33 +7,34 @@ use crate::provider::ProviderHandle;
 use lash_trace::{TraceContext, TraceError, TraceEvent, TraceSink};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DirectRole {
     System,
     User,
     Assistant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DirectPart {
     Text(String),
     Image(usize),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirectMessage {
     pub role: DirectRole,
     pub parts: Vec<DirectPart>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirectJsonSchema {
     pub name: String,
     pub schema: serde_json::Value,
     pub strict: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DirectOutputSpec {
     #[default]
     Text,
@@ -41,20 +42,34 @@ pub enum DirectOutputSpec {
     JsonSchema(DirectJsonSchema),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DirectRequest {
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
+    #[serde(default)]
     pub messages: Vec<DirectMessage>,
+    #[serde(default)]
     pub attachments: Vec<LlmAttachment>,
+    #[serde(default)]
     pub output: DirectOutputSpec,
+    #[serde(default, skip)]
     pub stream_events: Option<LlmEventSender>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Set this when issuing a direct completion from inside a tool's
     /// `execute`. Carries the calling tool's call id all the way to the
     /// trace event so the renderer can group fan-outs (e.g.
     /// tournament_rerank's batch reranks) under their parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_tool_call_id: Option<String>,
+    /// Stable caller-provided idempotency discriminator for direct effects.
+    ///
+    /// Calls from a parent tool automatically include that tool call id in the
+    /// derived key. Set this when the same tool or plugin hook may issue more
+    /// than one otherwise-identical direct request during a turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 impl DirectRequest {
@@ -71,6 +86,7 @@ impl DirectRequest {
             stream_events: None,
             session_id: None,
             originating_tool_call_id: None,
+            idempotency_key: None,
         }
     }
 
@@ -90,6 +106,11 @@ impl DirectRequest {
             output: DirectOutputSpec::JsonSchema(schema),
             ..Self::text(model, prompt)
         }
+    }
+
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
     }
 }
 
@@ -221,6 +242,7 @@ pub(crate) fn build_llm_request(
         stream_events: _,
         session_id,
         originating_tool_call_id: _,
+        idempotency_key: _,
     } = request;
 
     let output_spec = match output {

@@ -11,6 +11,7 @@ use lash::{
     },
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
+use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_provider_openai::OpenAiCompatibleProvider;
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
@@ -27,29 +28,64 @@ const DEFAULT_PROMPT: &str =
 const HISTORY_EXCHANGES: usize = 18;
 
 pub(crate) struct BenchmarkRuntime {
-    session: lash::LashSession,
+    core: LashCore,
+    session: Option<lash::LashSession>,
     store: Arc<RuntimePerfStore>,
     _openai_compat_server: Option<OpenAiCompatBenchServer>,
 }
 
 impl BenchmarkRuntime {
     pub(crate) fn usage_report(&self) -> lash::usage::SessionUsageReport {
-        self.session.usage_report()
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .usage_report()
     }
 
     pub(crate) fn read_view(&self) -> lash::persistence::SessionReadView {
-        self.session.read_view()
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .read_view()
     }
 
-    pub(crate) fn graph_node_count(&self) -> usize {
-        self.store.graph_node_count()
+    pub(crate) fn store(&self) -> Arc<RuntimePerfStore> {
+        Arc::clone(&self.store)
+    }
+
+    pub(crate) fn core(&self) -> LashCore {
+        self.core.clone()
+    }
+
+    pub(crate) async fn reopen_with_state(
+        &mut self,
+        scenario: RuntimePerfScenario,
+        state: lash::persistence::PersistedSessionState,
+    ) -> anyhow::Result<()> {
+        if let Some(session) = self.session.take() {
+            session.close().await?;
+        }
+        let store = Arc::clone(&self.store) as Arc<dyn lash::persistence::RuntimePersistence>;
+        self.session = Some(
+            self.core
+                .session(format!("runtime-perf-{}", scenario.name()))
+                .mode(ModeId::new(scenario.execution_mode().plugin_id()))
+                .store(store)
+                .open_with_state(state)
+                .await?,
+        );
+        Ok(())
     }
 
     pub(crate) async fn set_turn_phase_probe(
         &self,
         probe: Arc<dyn lash::advanced::RuntimeTurnPhaseProbe>,
     ) {
-        self.session.set_turn_phase_probe(probe).await;
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .set_turn_phase_probe(probe)
+            .await;
     }
 
     pub(crate) async fn run_turn(
@@ -58,6 +94,8 @@ impl BenchmarkRuntime {
         cancel: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<lash::TurnResult> {
         self.session
+            .as_ref()
+            .expect("benchmark session")
             .turn(input)
             .cancel(cancel)
             .collect_session_events_with(&lash::advanced::NoopEventSink)
@@ -65,13 +103,41 @@ impl BenchmarkRuntime {
             .map_err(anyhow::Error::from)
     }
 
+    pub(crate) async fn run_turn_with_effect_scope(
+        &self,
+        input: lash::TurnInput,
+        cancel: tokio_util::sync::CancellationToken,
+        effect_scope: lash::advanced::RuntimeEffectControllerScope<'_>,
+    ) -> anyhow::Result<lash::TurnResult> {
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .turn(input)
+            .cancel(cancel)
+            .run_with_effect_scope(effect_scope)
+            .await
+            .map(|output| output.result)
+            .map_err(anyhow::Error::from)
+    }
+
     pub(crate) async fn await_background_work(&self) -> anyhow::Result<()> {
-        self.session.background_tasks().await_all().await?;
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .background_tasks()
+            .await_all()
+            .await?;
         Ok(())
     }
 
     pub(crate) async fn export_state(&self) -> SessionStateEnvelope {
-        self.session.control().state().export().await
+        self.session
+            .as_ref()
+            .expect("benchmark session")
+            .control()
+            .state()
+            .export()
+            .await
     }
 }
 pub(crate) fn validate_runtime_perf_turn(
@@ -145,7 +211,7 @@ pub(crate) fn build_embed_core(
     let mut builder = match scenario {
         RuntimePerfScenario::EmbedStandard => lash::LashCore::standard(),
         RuntimePerfScenario::EmbedRlm => lash::LashCore::rlm()
-            .tools(Arc::new(BenchmarkEchoTool))
+            .tools(Arc::new(BenchmarkEchoTool::default()))
             .default_mode(lash::ModeId::rlm()),
         _ => anyhow::bail!("{} is not an embed scenario", scenario.name()),
     };
@@ -159,6 +225,13 @@ pub(crate) fn build_embed_core(
 
 pub(crate) async fn build_runtime(
     scenario: RuntimePerfScenario,
+) -> anyhow::Result<BenchmarkRuntime> {
+    build_runtime_with_store(scenario, None).await
+}
+
+pub(crate) async fn build_runtime_with_store(
+    scenario: RuntimePerfScenario,
+    store: Option<Arc<RuntimePerfStore>>,
 ) -> anyhow::Result<BenchmarkRuntime> {
     let execution_mode = scenario.execution_mode();
     let standard_context_approach = scenario.standard_context_approach();
@@ -183,7 +256,7 @@ pub(crate) async fn build_runtime(
         _ => benchmark_provider(scenario).into_handle(),
     };
     let mode_id = ModeId::new(execution_mode.plugin_id());
-    let store = Arc::new(RuntimePerfStore::default());
+    let store = store.unwrap_or_else(|| Arc::new(RuntimePerfStore::default()));
     let mut plugin_stack = standard_tool_stack(StandardToolStackOptions {
         standard_context_approach: standard_context_approach.clone(),
         tavily_api_key: None,
@@ -192,15 +265,18 @@ pub(crate) async fn build_runtime(
     plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
-        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool)),
+        PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::default())),
     )));
+    if matches!(scenario, RuntimePerfScenario::RlmLlmQuery) {
+        plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
+    }
     if matches!(scenario, RuntimePerfScenario::RlmLargeToolSurface) {
         plugin_stack.push(Arc::new(StaticPluginFactory::new(
             "runtime_perf_large_tool_surface",
-            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface)),
+            PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface::default())),
         )));
     }
-    let core = LashCore::builder()
+    let builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id, standard_context_approach)?)
         .default_mode(mode_id.clone())
         .provider(provider)
@@ -209,15 +285,23 @@ pub(crate) async fn build_runtime(
         .store_factory(Arc::new(RuntimePerfStoreFactory {
             store: Arc::clone(&store),
         }))
-        .plugins(plugin_stack)
-        .build()?;
+        .plugins(plugin_stack);
+    let core = if matches!(scenario, RuntimePerfScenario::StoreReopen) {
+        builder
+            .advanced()
+            .residency(lash::advanced::Residency::ActivePathOnly)
+            .build()?
+    } else {
+        builder.build()?
+    };
     let session = core
         .session(format!("runtime-perf-{}", scenario.name()))
         .mode(mode_id)
         .open()
         .await?;
     Ok(BenchmarkRuntime {
-        session,
+        core,
+        session: Some(session),
         store,
         _openai_compat_server: openai_compat_server,
     })
@@ -258,6 +342,8 @@ pub(crate) async fn seed_runtime_state(
 
     runtime
         .session
+        .as_ref()
+        .expect("benchmark session")
         .control()
         .state()
         .append_messages(messages)
@@ -273,6 +359,8 @@ pub(crate) async fn seed_runtime_state(
             .ok_or_else(|| anyhow::anyhow!("OM scenario expected seeded messages"))?;
         runtime
             .session
+            .as_ref()
+            .expect("benchmark session")
             .control()
             .state()
             .append_plugin_body(
@@ -369,6 +457,38 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
+        RuntimePerfScenario::StandardToolCalls => format!(
+            "Turn {} in standard mode. Use the batch tool to exercise parallel benchmark_echo calls, then reply with exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmAsyncHandles => format!(
+            "Turn {} in RLM mode. Exercise start/await/cancel async handles, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmLlmQuery => format!(
+            "Turn {} in RLM mode. Exercise llm_query direct completion, then submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
+        RuntimePerfScenario::RlmToolRetry => format!(
+            "Turn {} in RLM mode. Exercise benchmark_retry and submit exactly: {}",
+            turn_index + 1,
+            DEFAULT_PROMPT
+                .rsplit_once(": ")
+                .map(|(_, text)| text)
+                .unwrap_or("runtime perf benchmark ok")
+        ),
         RuntimePerfScenario::RlmGlobals => format!(
             "Turn {} in RLM mode with bound variables updated for this turn. Inspect the current state and reply with exactly: {}",
             turn_index + 1,
@@ -391,6 +511,14 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::TurnCheckpoint => format!(
             "Turn {} in turn durability checkpoint benchmark mode. Checkpoint and restore pending effects, then reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::ScopedEffectController => format!(
+            "Turn {} in scoped effect-controller benchmark mode. Continue the benchmark chat and reply with exactly: runtime perf benchmark ok",
+            turn_index + 1
+        ),
+        RuntimePerfScenario::StoreReopen => format!(
+            "Turn {} in store reopen benchmark mode. Continue after persisted reload and reply with exactly: runtime perf benchmark ok",
             turn_index + 1
         ),
     }

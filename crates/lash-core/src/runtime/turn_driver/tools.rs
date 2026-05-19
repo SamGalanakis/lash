@@ -10,7 +10,8 @@ use crate::tool_dispatch::schedule_tool_batch;
 async fn run_one_tool_call(
     index: usize,
     pending_tool: crate::sansio::PendingToolCall,
-    context: crate::ModeExecutionContext,
+    effect_metadata: crate::EffectInvocationMetadata,
+    context: crate::ModeExecutionContext<'_>,
 ) -> crate::sansio::CompletedToolCall {
     let executed = context
         .execute_tool_call(
@@ -19,6 +20,7 @@ async fn run_one_tool_call(
             pending_tool.args,
             index,
             pending_tool.replay,
+            Some(effect_metadata),
         )
         .await;
     debug_assert_eq!(executed.index, index);
@@ -50,38 +52,16 @@ fn cancelled_completed_tool_call(
     }
 }
 
-fn internal_failure_completed_tool_call(message: String) -> crate::sansio::CompletedToolCall {
-    let call_id = uuid::Uuid::new_v4().to_string();
-    let tool_name = "unknown".to_string();
-    let output = crate::ToolCallOutput::failure(crate::ToolFailure::runtime(
-        crate::ToolFailureClass::Internal,
-        "tool_task_failed",
-        message.clone(),
-    ));
-    crate::sansio::CompletedToolCall {
-        call_id: call_id.clone(),
-        tool_name: tool_name.clone(),
-        args: serde_json::json!({}),
-        model_return: crate::ModelToolReturn {
-            call_id,
-            tool_name,
-            parts: vec![crate::ModelToolReturnPart::Text(format!(
-                "[Tool execution failed]\n{message}"
-            ))],
-        },
-        output,
-        duration_ms: 0,
-        replay: None,
-    }
-}
-
-impl RuntimeTurnDriver {
+impl RuntimeTurnDriver<'_> {
     pub(in crate::runtime) async fn run_tool_calls(
         &mut self,
-        pending_tools: Vec<crate::sansio::PendingToolCall>,
+        pending_tools: Vec<(
+            crate::sansio::PendingToolCall,
+            crate::EffectInvocationMetadata,
+        )>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
-    ) -> Vec<crate::sansio::CompletedToolCall> {
+    ) -> Result<Vec<crate::sansio::CompletedToolCall>, crate::RuntimeEffectControllerError> {
         let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
         let (turn_event_tx, mut turn_event_rx) = tokio::sync::mpsc::channel::<TurnActivity>(64);
         let runtime_event_tx = event_tx.clone();
@@ -97,61 +77,73 @@ impl RuntimeTurnDriver {
             }
         });
         let manager = self.session_manager.clone();
-        let context = self
-            .session
-            .mode_execution_context(
-                &self.session_id,
-                manager,
-                tool_event_tx,
-                Arc::new(crate::ChronologicalProjection::default()),
-                self.mode_extension.clone(),
-                self.turn_context.clone(),
-            )
-            .with_turn_event_sender(turn_event_tx);
+        let effect_controller =
+            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let direct_completions = manager.direct_completion_client(
+            effect_controller.clone_scoped(),
+            Some(self.turn_id.clone()),
+            self.turn_lease.clone(),
+        );
+        let context = match self.session.mode_execution_context(
+            &self.session_id,
+            manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+            effect_controller,
+            Arc::clone(&self.host.core.effect_controller),
+            direct_completions,
+            tool_event_tx.clone(),
+            Arc::new(crate::ChronologicalProjection::default()),
+            self.mode_extension.clone(),
+            self.turn_context.clone(),
+        ) {
+            Ok(context) => context.with_turn_event_sender(turn_event_tx),
+            Err(err) => {
+                drop(tool_event_tx);
+                drop(turn_event_tx);
+                let _ = tool_event_forwarder.await;
+                let _ = turn_event_forwarder.await;
+                return Err(crate::RuntimeEffectControllerError::new(
+                    "tool_surface_resolution_failed",
+                    err.to_string(),
+                ));
+            }
+        };
         let indexed_tools = pending_tools.into_iter().enumerate().collect::<Vec<_>>();
         let tool_cancel = cancel.child_token();
         let outcomes = schedule_tool_batch(
             indexed_tools,
             |(index, _)| *index,
-            |(_, pending_tool)| context.tool_execution_mode(&pending_tool.tool_name),
+            |(_, (pending_tool, _))| context.tool_execution_mode(&pending_tool.tool_name),
             {
                 let context = context.clone();
                 let cancel = cancel.clone();
                 let tool_cancel = tool_cancel.clone();
-                move |(index, pending_tool)| {
+                move |(index, (pending_tool, effect_metadata))| {
                     let context = context.clone().with_cancellation_token(tool_cancel.clone());
                     let cancel = cancel.clone();
                     let tool_cancel = tool_cancel.clone();
                     let cancelled_tool = pending_tool.clone();
                     async move {
-                        let mut task =
-                            tokio::spawn(run_one_tool_call(index, pending_tool, context));
+                        let tool_call =
+                            run_one_tool_call(index, pending_tool, effect_metadata, context);
+                        tokio::pin!(tool_call);
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => {
                                 tool_cancel.cancel();
-                                task.abort();
-                                cancelled_completed_tool_call(
-                                    cancelled_tool.call_id,
-                                    cancelled_tool.tool_name,
-                                    cancelled_tool.args,
-                                    cancelled_tool.replay,
-                                )
-                            }
-                            joined = &mut task => {
-                                match joined {
-                                    Ok(outcome) => outcome,
-                                    Err(err) if err.is_cancelled() => cancelled_completed_tool_call(
+                                let grace = tokio::time::sleep(std::time::Duration::from_millis(50));
+                                tokio::pin!(grace);
+                                tokio::select! {
+                                    biased;
+                                    outcome = &mut tool_call => outcome,
+                                    _ = &mut grace => cancelled_completed_tool_call(
                                         cancelled_tool.call_id,
                                         cancelled_tool.tool_name,
                                         cancelled_tool.args,
                                         cancelled_tool.replay,
                                     ),
-                                    Err(err) => internal_failure_completed_tool_call(
-                                        format!("tool task panicked: {err}"),
-                                    ),
                                 }
                             }
+                            outcome = &mut tool_call => outcome,
                         }
                     }
                 }
@@ -160,8 +152,9 @@ impl RuntimeTurnDriver {
         .await;
 
         drop(context);
+        drop(tool_event_tx);
         let _ = tool_event_forwarder.await;
         let _ = turn_event_forwarder.await;
-        outcomes
+        Ok(outcomes)
     }
 }

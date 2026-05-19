@@ -1135,13 +1135,7 @@ impl ProviderTransport for AnthropicProvider {
         .await?;
 
         let (parts, full_text, usage, terminal_reason) = Self::finalize(state);
-        let deltas = if stream_events.is_none() {
-            vec![full_text.clone()]
-        } else {
-            Vec::new()
-        };
         Ok(LlmResponse {
-            deltas,
             full_text,
             parts,
             usage,

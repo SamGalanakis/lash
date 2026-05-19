@@ -65,9 +65,9 @@ let core = LashCore::rlm()
         <div class="section" id="durable-workflows">
           <div class="section-header">
             <h2>Durable Workflows</h2>
-            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool batches, mid-turn worker migration — install a custom <code>RuntimeEffectHost</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
+            <p>Standard <code>LashCore</code> persists at the turn boundary. For sub-turn durability — expensive LLM calls, long tool calls, mid-turn worker migration — run the turn with a scoped <code>RuntimeEffectController</code>. It is the stable boundary an external workflow runtime (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>) would wrap.</p>
           </div>
-          <p>Shape: the runtime driver polls <code>TurnMachine</code>, builds <code>EffectInvocation</code> metadata, invokes the host with a <code>RuntimeEffect</code>, and feeds the returned outcome back as the matching response. Turn invocations include a serialized <code>TurnCheckpoint</code> and stable idempotency key; direct/plugin LLM completions use the same host boundary after request normalization.</p>
+          <p>Shape: the runtime driver polls <code>TurnMachine</code>, claims a <code>RuntimeTurnLease</code>, saves a lease-guarded <code>RuntimeTurnCheckpoint</code> before each reply-producing turn effect, builds <code>RuntimeEffectEnvelope</code> metadata, invokes the active scoped controller for each logical effect, renews the same lease token before journaling the returned outcome by idempotency key, and feeds it back as the matching response. <code>LashSession::resume_turn(turn_id)</code> claims ownership again, reloads the checkpoint, and replays any already-completed effect outcomes without rerunning input hooks or stream history. Controller/runtime errors abandon lease ownership while preserving resumable state; only the final commit clears the checkpoint and journal.</p>
           <p>Full contract: <a href="./architecture/durability.html">Architecture → Durability</a>. Embedders without workflow orchestration use the regular <a href="./persistence.html">session-store path</a>.</p>
         </div>
 
@@ -154,7 +154,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared background task hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-host methods are thin core mutators.</p>
+            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared background task hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-controller methods are thin core mutators.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
@@ -190,7 +190,7 @@ mcp.detach_server("old-tool").await?;</code></pre>
             <article class="panel"><h3><a href="./tracing.html">Tracing</a></h3><p><code>TraceSink</code>, JSONL schema v2, fan-out, <code>lash-trace-viewer</code>, OTel export.</p></article>
             <article class="panel"><h3><a href="./cli.html">CLI</a></h3><p>Slash commands, keyboard shortcuts, config schema, env vars, resume/fork.</p></article>
             <article class="panel"><h3><a href="./architecture/">Architecture</a></h3><p>Crate map, residency, session graph, plugin host traits, providers, Lashlang internals.</p></article>
-            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectHost</code>, deterministic effect metadata, idempotency keys, checkpoint / restore, workflow adapter seam.</p></article>
+            <article class="panel"><h3><a href="./architecture/durability.html">Durability</a></h3><p><code>RuntimeEffectController</code>, deterministic effect metadata, idempotency keys, checkpoint / restore, workflow adapter seam.</p></article>
           </div>
         </div>
   </main>

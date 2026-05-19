@@ -79,7 +79,7 @@ impl ModeNativeToolsPlugin for TaskControlsNativeTools {
 
     async fn execute(
         &self,
-        context: &ToolDispatchContext,
+        context: &ToolDispatchContext<'_>,
         name: &str,
         args: &Value,
         _progress: Option<&ProgressSender>,
@@ -138,7 +138,7 @@ impl ModeNativeToolsPlugin for MonitorNativeTool {
 
     async fn execute(
         &self,
-        context: &ToolDispatchContext,
+        context: &ToolDispatchContext<'_>,
         name: &str,
         args: &Value,
         _progress: Option<&ProgressSender>,
@@ -282,7 +282,7 @@ impl MonitorToolSpec {
 }
 
 pub async fn execute_monitor_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     spec: MonitorToolSpec,
 ) -> ToolResult {
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -331,7 +331,7 @@ pub async fn execute_monitor_tool_call(
     }
 }
 
-pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext) -> ToolResult {
+pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
     match context
         .host
         .list_background_tasks(&context.session_id)
@@ -359,7 +359,7 @@ pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext) -> Tool
 }
 
 pub async fn execute_tasks_stop_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     args: &Value,
 ) -> ToolResult {
     let Some(id) = args
@@ -387,6 +387,7 @@ pub async fn execute_tasks_stop_tool_call(
 fn state_label(state: BackgroundTaskState) -> &'static str {
     match state {
         BackgroundTaskState::Pending => "pending",
+        BackgroundTaskState::Scheduled => "scheduled",
         BackgroundTaskState::Running => "running",
         BackgroundTaskState::Waiting => "idle",
         BackgroundTaskState::Completed => "completed",

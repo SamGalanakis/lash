@@ -395,7 +395,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn execute_code(
         &self,
-        ctx: lash_core::ModeExecutionContext,
+        ctx: lash_core::ModeExecutionContext<'_>,
         request: lash_core::ExecRequest,
     ) -> Result<lash_core::ExecResponse, SessionError> {
         let session_projected_bindings = self.session_projected_bindings.lock().await.clone();
@@ -509,7 +509,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
     async fn before_llm_call(
         &self,
-        ctx: ModeBeforeLlmCallContext,
+        ctx: ModeBeforeLlmCallContext<'_>,
         request: &LlmRequest,
     ) -> Result<Option<ModeLlmCallAction>, PluginError> {
         let Some(threshold) = self.config.continue_as_forced_fallback_tokens else {
@@ -701,7 +701,7 @@ fn reject_reserved_projected_binding_names(
 }
 
 async fn forced_continue_as_args(
-    ctx: &ModeBeforeLlmCallContext,
+    ctx: &ModeBeforeLlmCallContext<'_>,
     request: &LlmRequest,
     threshold: usize,
     observed_tokens: usize,
@@ -725,7 +725,6 @@ async fn forced_continue_as_args(
         }],
     ));
     let completion = ctx
-        .host
         .direct_llm_completion(fallback_request, "continue_as_forced_context_fallback")
         .await
         .map_err(|err| {

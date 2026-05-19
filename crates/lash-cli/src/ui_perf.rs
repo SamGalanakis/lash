@@ -1,5 +1,6 @@
 mod file_index_cases;
 mod measurement;
+mod projection_cases;
 mod reactor_cases;
 mod render_cases;
 mod report;

@@ -120,7 +120,7 @@ impl RlmExecutionState {
 
 pub async fn execute_code(
     mut state: RlmExecutionState,
-    ctx: ModeExecutionContext,
+    ctx: ModeExecutionContext<'_>,
     request: ExecRequest,
     session_projected_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
@@ -155,7 +155,7 @@ fn clean_model_code(code: &str) -> String {
 
 async fn execute_code_inner(
     state: &mut RlmExecutionState,
-    ctx: ModeExecutionContext,
+    ctx: ModeExecutionContext<'_>,
     code: &str,
     start: std::time::Instant,
     session_projected_bindings: RlmProjectedBindings,
@@ -267,7 +267,7 @@ async fn execute_code_inner(
     }
 }
 
-fn tool_result_projectors(ctx: &ModeExecutionContext) -> Vec<crate::RlmToolResultProjector> {
+fn tool_result_projectors(ctx: &ModeExecutionContext<'_>) -> Vec<crate::RlmToolResultProjector> {
     ctx.turn_context()
         .plugin_input::<RlmProjectionExtension>(RLM_TURN_INPUT_PLUGIN_ID)
         .map(|extension| extension.tool_result_projectors.clone())

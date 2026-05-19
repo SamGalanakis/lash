@@ -141,6 +141,17 @@ where
     }
 }
 
+/// Run blocking work off the async runtime and return a typed value.
+pub async fn run_blocking_value<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|err| format!("blocking task failed: {err}"))
+}
+
 /// Build a normalized filesystem entry for tool output.
 /// Returns the entry plus raw mtime for optional sorting.
 pub fn build_path_entry(path: &Path, with_lines: bool) -> (PathEntry, SystemTime) {

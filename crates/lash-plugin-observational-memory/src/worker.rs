@@ -84,6 +84,7 @@ async fn run_worker_turn(
                 stream_events: None,
                 session_id: Some(format!("{}-om-{worker_kind}", om_host.session_id())),
                 originating_tool_call_id: None,
+                idempotency_key: None,
             },
             worker_kind,
         )

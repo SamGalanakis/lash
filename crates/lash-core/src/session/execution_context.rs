@@ -1,19 +1,17 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc::Sender, mpsc::UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
-use super::async_handles::AsyncToolHandleMap;
 use crate::tool_dispatch::ToolDispatchContext;
-use crate::{SandboxMessage, TurnActivity, TurnActivityId, TurnEvent};
+use crate::{TurnActivity, TurnActivityId, TurnEvent};
 
 #[derive(Clone)]
-pub struct ModeExecutionContext {
+pub struct ModeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) execution_mode: crate::ExecutionMode,
-    pub(super) dispatch: Arc<ToolDispatchContext>,
-    pub(super) async_tool_handles: AsyncToolHandleMap,
-    pub(super) message_tx: Option<UnboundedSender<SandboxMessage>>,
+    pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
+    pub(super) detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
@@ -22,7 +20,7 @@ pub struct ModeExecutionContext {
     pub(super) cancellation_token: Option<CancellationToken>,
 }
 
-impl ModeExecutionContext {
+impl<'run> ModeExecutionContext<'run> {
     #[allow(
         clippy::too_many_arguments,
         reason = "mode execution bridge carries explicit per-turn runtime dependencies"
@@ -30,9 +28,8 @@ impl ModeExecutionContext {
     pub(super) fn new(
         session_id: String,
         execution_mode: crate::ExecutionMode,
-        dispatch: Arc<ToolDispatchContext>,
-        async_tool_handles: AsyncToolHandleMap,
-        message_tx: Option<UnboundedSender<SandboxMessage>>,
+        dispatch: Arc<ToolDispatchContext<'run>>,
+        detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
@@ -42,8 +39,7 @@ impl ModeExecutionContext {
             session_id,
             execution_mode,
             dispatch,
-            async_tool_handles,
-            message_tx,
+            detached_effect_controller,
             attachment_store,
             chronological_projection,
             mode_extension,
@@ -158,6 +154,12 @@ mod tests {
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -168,8 +170,7 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            None,
+            Arc::new(crate::InlineRuntimeEffectController::default()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,

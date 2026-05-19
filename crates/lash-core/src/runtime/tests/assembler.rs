@@ -105,6 +105,37 @@ fn assembler_rewrites_assistant_message_outcome_to_last_semantic_prose_group() {
 }
 
 #[test]
+fn assembler_uses_assistant_message_outcome_without_recovery_issue_when_no_streamed_prose() {
+    let mut assembler = TurnAssembler::default();
+    assembler.push(&SessionEvent::TurnOutcome {
+        outcome: TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "settled answer".to_string(),
+        }),
+    });
+    assembler.push(&SessionEvent::Done);
+
+    let out = assembler.finish(
+        default_state().export_state(),
+        false,
+        None,
+        &TerminationPolicy::default(),
+    );
+
+    assert_eq!(
+        out.outcome,
+        TurnOutcome::Finished(TurnFinish::AssistantMessage {
+            text: "settled answer".to_string()
+        })
+    );
+    assert_eq!(out.assistant_output.safe_text, "settled answer");
+    assert!(
+        out.errors
+            .iter()
+            .all(|issue| issue.code.as_deref() != Some("assistant_output_recovered_from_state"))
+    );
+}
+
+#[test]
 fn assembler_uses_submitted_value_for_assistant_output_when_semantic_prose_streamed() {
     let mut assembler = TurnAssembler::default();
     assembler.push_turn_activity(&TurnActivity::new(

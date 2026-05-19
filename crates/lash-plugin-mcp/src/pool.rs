@@ -144,7 +144,7 @@ impl McpConnectionPool {
         &self,
         prefixed_name: &str,
         args: &Value,
-        context: &ToolContext,
+        context: &ToolContext<'_>,
     ) -> ToolResult {
         let (entry, original_name) = match self.lookup(prefixed_name).await {
             Some(found) => found,
@@ -346,7 +346,10 @@ fn import_tools(
     imported
 }
 
-fn tool_result_from_rmcp(result: rmcp::model::CallToolResult, context: &ToolContext) -> ToolResult {
+fn tool_result_from_rmcp(
+    result: rmcp::model::CallToolResult,
+    context: &ToolContext<'_>,
+) -> ToolResult {
     let is_error = result.is_error.unwrap_or(false);
 
     let mut text_parts = Vec::new();

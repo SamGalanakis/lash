@@ -11,7 +11,7 @@ use lash_core::{
     ToolResult, ToolRetryPolicy,
 };
 
-use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking};
+use lash_tool_support::{object_schema, parse_optional_usize_arg, require_str, run_blocking_value};
 
 /// Read files with line-number-prefixed output. Supports images natively.
 #[derive(Default)]
@@ -69,6 +69,32 @@ const MAX_LINE_LEN: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_BYTES_LABEL: &str = "50 KB";
 
+struct ImageAttachmentData {
+    data: Vec<u8>,
+    media_type: lash_core::MediaType,
+    width: Option<u32>,
+    height: Option<u32>,
+    label: String,
+}
+
+enum ReadFileBlockingResult {
+    Tool(ToolResult),
+    Image(ImageAttachmentData),
+}
+
+impl ReadFileBlockingResult {
+    fn tool(result: ToolResult) -> Self {
+        Self::Tool(result)
+    }
+
+    fn into_tool_result(self, context: &lash_core::ToolContext<'_>) -> ToolResult {
+        match self {
+            Self::Tool(result) => result,
+            Self::Image(image) => store_image_attachment(context, image),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolProvider for ReadFile {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
@@ -98,8 +124,10 @@ impl ToolProvider for ReadFile {
             Err(e) => return e,
         };
 
-        let context = call.context.clone();
-        run_blocking(move || execute_read_file_sync(&path_str, offset, limit, &context)).await
+        match run_blocking_value(move || execute_read_file_sync(&path_str, offset, limit)).await {
+            Ok(result) => result.into_tool_result(call.context),
+            Err(err) => ToolResult::err_fmt(format_args!("{err}")),
+        }
     }
 }
 
@@ -142,17 +170,12 @@ fn parse_limit(args: &serde_json::Value) -> Result<usize, ToolResult> {
     )
 }
 
-fn execute_read_file_sync(
-    path_str: &str,
-    offset: usize,
-    limit: usize,
-    context: &lash_core::ToolContext,
-) -> ToolResult {
+fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFileBlockingResult {
     let path = Path::new(path_str);
     if !path.exists() {
-        return ToolResult::err_fmt(format_args!(
+        return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
             "Path does not exist: {path_str}. Use `ls` or `glob` to locate the correct path."
-        ));
+        )));
     }
 
     // Directory — still works but nudges toward ls
@@ -164,12 +187,12 @@ fn execute_read_file_sync(
         {
             s.insert_str(0, "(Hint: use `ls` for directory listings.)\n");
         }
-        return ToolResult::from_output(output);
+        return ReadFileBlockingResult::tool(ToolResult::from_output(output));
     }
 
     // Image files — return as visual attachment
     if let Some(mime) = image_mime(path) {
-        return read_image(path, path_str, mime, context);
+        return read_image(path, path_str, mime);
     }
 
     // PDF files — extract text via pdf-extract (pure Rust)
@@ -179,19 +202,23 @@ fn execute_read_file_sync(
         .map(|e| e.eq_ignore_ascii_case("pdf"))
         .unwrap_or(false)
     {
-        return read_pdf(path, path_str, offset, limit);
+        return ReadFileBlockingResult::tool(read_pdf(path, path_str, offset, limit));
     }
 
     // Binary detection
     if is_likely_binary(path) {
-        return ToolResult::err_fmt(format_args!(
+        return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
             "Binary file detected: {path_str}. Use `read_image` for images, or `exec_command` for binary inspection."
-        ));
+        )));
     }
 
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(e) => return ToolResult::err_fmt(format_args!("Failed to open file: {e}")),
+        Err(e) => {
+            return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
+                "Failed to open file: {e}"
+            )));
+        }
     };
     let reader = BufReader::new(file);
     let slice = match collect_window(
@@ -202,10 +229,13 @@ fn execute_read_file_sync(
         "file",
     ) {
         Ok(slice) => slice,
-        Err(err) => return err,
+        Err(err) => return ReadFileBlockingResult::tool(err),
     };
 
-    ToolResult::ok(json!(render_window(&slice, WindowKind::Lines)))
+    ReadFileBlockingResult::tool(ToolResult::ok(json!(render_window(
+        &slice,
+        WindowKind::Lines
+    ))))
 }
 
 fn list_directory(path: &Path, offset: usize, limit: usize) -> ToolResult {
@@ -268,15 +298,14 @@ fn image_mime(path: &Path) -> Option<&'static str> {
 
 /// Read image metadata. Image bytes must be attached through ToolContext by
 /// callers that need model-visible attachments.
-fn read_image(
-    path: &Path,
-    path_str: &str,
-    mime: &str,
-    context: &lash_core::ToolContext,
-) -> ToolResult {
+fn read_image(path: &Path, path_str: &str, mime: &str) -> ReadFileBlockingResult {
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(e) => return ToolResult::err_fmt(format_args!("Failed to read image: {e}")),
+        Err(e) => {
+            return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
+                "Failed to read image: {e}"
+            )));
+        }
     };
 
     let size_kb = data.len() / 1024;
@@ -287,15 +316,30 @@ fn read_image(
     };
 
     let Some(media_type) = lash_core::MediaType::from_mime(mime) else {
-        return ToolResult::err_fmt(format_args!("Unsupported image MIME type: {mime}"));
+        return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
+            "Unsupported image MIME type: {mime}"
+        )));
     };
-    let reference = match context.put_attachment(
+    ReadFileBlockingResult::Image(ImageAttachmentData {
         data,
+        media_type,
+        width: dims.map(|(width, _)| width),
+        height: dims.map(|(_, height)| height),
+        label,
+    })
+}
+
+fn store_image_attachment(
+    context: &lash_core::ToolContext<'_>,
+    image: ImageAttachmentData,
+) -> ToolResult {
+    let reference = match context.put_attachment(
+        image.data,
         lash_core::AttachmentCreateMeta::new(
-            media_type,
-            dims.map(|(width, _)| width),
-            dims.map(|(_, height)| height),
-            Some(label),
+            image.media_type,
+            image.width,
+            image.height,
+            Some(image.label),
         ),
     ) {
         Ok(reference) => reference,
@@ -740,6 +784,11 @@ mod tests {
             Arc::new(lash_core::testing::MockSessionManager::default()),
             lash_core::TurnContext::new(),
             store.clone(),
+            lash_core::DirectCompletionClient::from_fn(|_, _| {
+                Err(lash_core::PluginError::Session(
+                    "direct completions are unavailable in read_file tests".to_string(),
+                ))
+            }),
             None,
         );
         let result = ReadFile

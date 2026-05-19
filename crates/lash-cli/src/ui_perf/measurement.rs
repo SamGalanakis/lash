@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::perf_support::time::elapsed_ms;
 
 use super::file_index_cases::run_file_index_storm_once;
+use super::projection_cases::{run_activity_projection_once, run_timeline_projection_once};
 use super::reactor_cases::run_streaming_reactor_once;
 use super::render_cases::run_render_once;
 use super::scenarios::{UiPerfScenario, UiPerfWorkload};
@@ -65,5 +66,7 @@ pub(crate) fn run_once(
         UiPerfScenario::StreamingReactor => Ok(run_streaming_reactor_once(workload)),
         UiPerfScenario::SlowSnapshot => Ok(run_slow_snapshot_once(workload)),
         UiPerfScenario::FileIndexStorm => run_file_index_storm_once(workload),
+        UiPerfScenario::TimelineProjection => Ok(run_timeline_projection_once(workload)),
+        UiPerfScenario::ActivityProjection => Ok(run_activity_projection_once(workload)),
     }
 }

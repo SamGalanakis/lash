@@ -353,7 +353,6 @@ impl std::fmt::Debug for LlmEventSender {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LlmResponse {
     pub full_text: String,
-    pub deltas: Vec<String>,
     pub parts: Vec<LlmOutputPart>,
     pub usage: LlmUsage,
     pub terminal_reason: LlmTerminalReason,

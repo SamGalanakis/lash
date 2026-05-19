@@ -16,40 +16,40 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">durability<span class="slash">/</span>workflows</h1>
-    <p class="opener__lede">Agent turns cross process boundaries. Tool calls may run for minutes, exec blocks may hand off to other workers, and the orchestrator on top might be a durable workflow runtime that expects deterministic replay. <code>RuntimeEffectHost</code> is the durable host boundary around that nondeterministic work; <code>lash-sansio</code> remains the pure state machine underneath it.</p>
+    <p class="opener__lede">Agent turns cross process boundaries. Tool calls may run for minutes, exec blocks may hand off to other workers, and the orchestrator on top might be a durable workflow runtime that expects deterministic replay. <code>RuntimeEffectController</code> is the durable effect controller boundary around that nondeterministic work; <code>lash-sansio</code> remains the pure state machine underneath it.</p>
   </section>
 
   <main class="body" id="content">
 <div class="section">
           <div class="section-header">
             <h2>Runtime Effect Boundary</h2>
-            <p><code>lash-sansio::TurnMachine</code> is still a sans-IO state machine: it yields effects and waits for matching responses. <code>lash-core</code> now wraps every reply-producing, nondeterministic effect in a typed <code>RuntimeEffectHost</code> method. The default <code>LocalRuntimeEffectHost</code> runs the local executor immediately; a durable host can persist, dedupe, schedule, or remote each effect before calling the matching local executor method.</p>
+            <p><code>lash-sansio::TurnMachine</code> is still a sans-IO state machine: it yields effects and waits for matching responses. <code>lash-core</code> wraps every reply-producing, nondeterministic effect in <code>RuntimeEffectController::execute_effect</code>. The default <code>InlineRuntimeEffectController</code> delegates to the scoped <code>RuntimeEffectLocalExecutor</code>; durable providers run the turn with a borrowed <code>RuntimeEffectControllerScope</code> so the workflow controller and stable turn id are explicit for that run.</p>
           </div>
-          <p>That shape is exactly what durable workflow runtimes (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) want from a library they're embedding. Lash does not ship a Temporal or Restate adapter yet; the adapter point is the host trait. The workflow ledger can key each invocation, persist its result, and replay with the completed effect already in hand while Lash manages the state-machine checkpoint and response application.</p>
-          <p>Embedders who only need in-process durability use <code>LocalRuntimeEffectHost</code> plus the regular <a href="../persistence.html">session store</a>. Embedders who need sub-turn durability install a custom effect host through <code>RuntimeCoreConfig::with_effect_host</code>, <code>RuntimeEnvironmentBuilder::with_effect_host</code>, or the embedded runtime builder.</p>
+          <p>That shape is exactly what durable workflow runtimes (<a href="https://temporal.io/" rel="noopener" target="_blank">Temporal</a>, <a href="https://restate.dev/" rel="noopener" target="_blank">Restate</a>, similar) want from a library they're embedding. Lash ships a Restate adapter in <code>lash-restate</code>; other workflow runtimes implement the same controller trait. The workflow ledger can key each invocation, persist its result, and replay with the completed effect already in hand while Lash manages the state-machine checkpoint and response application.</p>
+          <p>Embedders who only need local durability use <code>InlineRuntimeEffectController</code> plus the regular <a href="../persistence.html">session store</a>. Embedders who need sub-turn durability pass a scoped controller to <code>stream_turn_with_effect_scope</code> / <code>run_with_effect_scope</code>; <code>RuntimeCoreConfig::with_effect_controller</code> installs the required runtime controller.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>Runtime Effects</h2>
-            <p><code>RuntimeEffect</code> is the durable host surface. For turn-originated work, the runtime converts the sans-IO <code>Effect</code> into a runtime effect, invokes the configured host once, then feeds the matching <code>Response</code> back into <code>TurnMachine</code>.</p>
+            <p><code>RuntimeEffectKind</code> names the durable effect controller surface. For turn-originated work, the runtime converts the sans-IO <code>Effect</code> into one or more typed controller calls, invokes the active scoped controller, then feeds the matching <code>Response</code> back into <code>TurnMachine</code>.</p>
           </div>
           <div class="table">
             <table>
               <thead><tr><th>Runtime effect</th><th>Payload</th><th>Outcome / response</th></tr></thead>
               <tbody>
-                <tr><td><code>LlmCall</code></td><td><code>request: Arc&lt;LlmRequest&gt;</code></td><td><code>LlmComplete</code> with <code>Result&lt;LlmResponse, LlmCallError&gt;</code></td></tr>
-                <tr><td><code>DirectCompletion</code></td><td>Normalized direct helper request, selected model, and usage source</td><td><code>DirectCompletion</code> result for plugin/helper LLM use</td></tr>
-                <tr><td><code>DirectLlmCompletion</code></td><td>Normalized core <code>LlmRequest</code> and usage source</td><td><code>DirectLlmCompletion</code> result for direct LLM clients</td></tr>
-                <tr><td><code>ToolBatch</code></td><td><code>calls: Vec&lt;PendingToolCall&gt;</code></td><td><code>ToolResults</code> with <code>Vec&lt;CompletedToolCall&gt;</code></td></tr>
+                <tr><td><code>LlmCall</code></td><td><code>LlmRequestSpec</code> with attachment refs, not bytes</td><td><code>LlmComplete</code> with <code>Result&lt;LlmResponse, LlmCallError&gt;</code></td></tr>
+                <tr><td><code>DirectCompletion</code></td><td>Ref-only direct helper request, normalized request, selected model, and usage source</td><td><code>DirectCompletion</code> result for plugin/helper LLM use</td></tr>
+                <tr><td><code>DirectLlmCompletion</code></td><td>Ref-only core <code>LlmRequestSpec</code> and usage source</td><td><code>DirectLlmCompletion</code> result for direct LLM clients</td></tr>
+                <tr><td><code>ToolCall</code></td><td>One <code>PendingToolCall</code> from a sans-IO tool-call batch</td><td>One <code>CompletedToolCall</code>; the runtime reassembles <code>ToolResults</code> for <code>TurnMachine</code></td></tr>
                 <tr><td><code>ExecCode</code></td><td><code>code: String</code></td><td><code>ExecResult</code> with <code>Result&lt;ExecResponse, String&gt;</code></td></tr>
                 <tr><td><code>Checkpoint</code></td><td><code>checkpoint: CheckpointKind</code></td><td><code>Checkpoint</code> with plugin-injected messages</td></tr>
-                <tr><td><code>Sleep</code></td><td><code>duration: Duration</code></td><td><code>Timeout</code></td></tr>
+                <tr><td><code>Sleep</code></td><td><code>duration_ms: u64</code></td><td><code>Sleep</code></td></tr>
                 <tr><td><code>SyncExecutionSurface</code></td><td><code>update_machine_config</code> flag</td><td><code>ExecutionSurfaceSynced</code> with refreshed prompt + tool specs</td></tr>
               </tbody>
             </table>
           </div>
-          <p>Fire-and-forget sans-IO effects such as <code>Emit</code>, <code>Log</code>, <code>Progress</code>, and <code>Done</code> remain driver and commit-pipeline responsibilities. They do not cross <code>RuntimeEffectHost</code> because they do not ask the host to run nondeterministic work and return a response.</p>
+          <p>Fire-and-forget sans-IO effects such as <code>Emit</code>, <code>Log</code>, <code>Progress</code>, and <code>Done</code> remain driver and commit-pipeline responsibilities. They do not cross <code>RuntimeEffectController</code> because they do not ask the host to run nondeterministic work and return a response.</p>
         </div>
 
         <div class="section">
@@ -60,11 +60,11 @@
           <div class="def-list-grid">
             <article class="panel">
               <h3><code>WaitingLlm</code></h3>
-              <p><code>effect_id</code>, the original <code>Arc&lt;LlmRequest&gt;</code>, and optional mode <code>driver_state</code>. Restore re-issues the same request — same model, same messages, same tool spec — under the same <code>EffectId</code>.</p>
+              <p><code>effect_id</code>, the ref-only <code>LlmRequestSpec</code>, and optional mode <code>driver_state</code>. Restore re-issues the same request — same model, same messages, same tool spec, same attachment refs — under the same <code>EffectId</code>.</p>
             </article>
             <article class="panel">
               <h3><code>WaitingTools</code></h3>
-              <p><code>effect_id</code> plus the full <code>Vec&lt;PendingToolCall&gt;</code> batch the model emitted. On restore, the host sees the same list with the same call ids; tools that already completed in a partial batch are <em>not</em> rerun (see Replay Safety below).</p>
+              <p><code>effect_id</code> plus the full <code>Vec&lt;PendingToolCall&gt;</code> batch the model emitted. On restore, the runtime sees the same list with the same call ids, but the effect controller is invoked once per logical tool call so durable providers can persist, dedupe, and resume each call independently.</p>
             </article>
             <article class="panel">
               <h3><code>WaitingExec</code></h3>
@@ -90,15 +90,15 @@
             <h2>Invocation Metadata</h2>
             <p><code>EffectId(u64)</code> is a monotonic counter held in the machine. The next id is allocated on each yielded effect; the counter is part of <code>TurnCheckpoint</code> and is restored on resume. The first effect of a fresh turn is always <code>EffectId(1)</code>; the n-th effect is always <code>EffectId(n)</code> regardless of how many times the workflow crashed and replayed in between.</p>
           </div>
-          <p>Every host invocation receives serializable <code>EffectInvocationMetadata</code>: session id, origin, turn id and turn index for turn effects, mode iteration, effect id, effect kind, stable idempotency key, and serialized <code>TurnCheckpoint</code> for turn-originated effects. The live <code>EffectInvocation</code> also carries the cancellation token.</p>
-          <p>The built idempotency key includes <code>session_id</code>, <code>turn_id</code>, <code>turn_index</code>, <code>mode_iteration</code>, effect kind, and <code>EffectId</code>. A Temporal activity, Restate invocation, or custom queue keyed by that string never runs twice for the same logical effect: the first attempt persists its result, replay reads from history.</p>
+          <p>Every controller invocation receives serializable <code>EffectInvocationMetadata</code>: session id, origin, turn id and turn index for turn effects, mode iteration, effect id, effect kind, stable idempotency key, and a SHA-256 checkpoint digest for turn-originated effects. The live <code>RuntimeEffectEnvelope</code> also is fully serializable, but it carries only the digest, not the checkpoint payload. The payload lives in <code>RuntimeTurnCheckpoint</code>; completed nondeterministic outcomes live in <code>RuntimeEffectJournalRecord</code>. When <code>RuntimePersistence</code> is configured, any named turn effect with a turn id must execute under a matching <code>RuntimeTurnLease</code>; missing ownership fails before the controller is invoked. Cancellation, streams, provider trace sinks, and attachment byte hydration stay in the local executor or host workflow.</p>
+          <p>The built turn idempotency key includes <code>session_id</code>, <code>turn_id</code>, <code>turn_index</code>, <code>mode_iteration</code>, effect kind, and <code>EffectId</code>; per-tool invocations append the model tool call id. Scoped durable runs require a non-empty stable <code>turn_id</code>. Direct completions derive stable keys from the request payload, usage source, parent tool call id when present, and optional caller-provided <code>DirectRequest::idempotency_key</code>.</p>
           <p><code>EffectId</code> is local to one turn. Across turns, the counter resets to 1; use the full idempotency key, not the bare id, for globally unique effect identity.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
-            <h2>Checkpoint And Restore</h2>
-            <p>Two methods bracket every durable boundary:</p>
+            <h2>Checkpoint Primitive</h2>
+            <p>The sans-IO turn machine exposes a serializable checkpoint primitive:</p>
           </div>
           <pre><code>impl&lt;M: ModeProtocol&gt; TurnMachine&lt;M&gt; {
     pub fn checkpoint(&amp;self) -&gt; TurnCheckpoint&lt;M&gt;;
@@ -120,7 +120,7 @@
             <li><code>termination: TurnTerminationPolicyState</code> — max-turns / forced-final state.</li>
             <li><code>synced_mode_iteration: Option&lt;usize&gt;</code> — last iteration the execution surface was synced.</li>
           </ul>
-          <p>The <code>TurnMachineConfig</code> passed to <code>restore_from_checkpoint</code> is <em>not</em> serialised — it carries the protocol driver, projector, tool registry, system prompt builder, and other host-supplied plugins. The host reconstructs it the same way it built it for <code>new()</code>, then hands it back alongside the deserialised checkpoint. This is intentional: the config is what makes the abstract machine concrete, and it lives at the same layer as the workflow runtime that's driving the machine.</p>
+          <p><code>restore_from_checkpoint</code> is the pure machine rehydration primitive behind <code>LashRuntime::resume_turn</code> and the <code>lash</code> facade's <code>LashSession::resume_turn(turn_id)</code> handle. The runtime claims a fresh <code>RuntimeTurnLease</code>, loads <code>RuntimeTurnCheckpoint</code>, verifies the stored checkpoint hash against the machine checkpoint payload, rebuilds the <code>TurnMachineConfig</code> from the captured runtime snapshot plus the live host protocol driver, and continues the same effect loop. Serializable mode turn options, provider/model selection, prompt layer, tool specs, and the built execution surface fingerprint are captured in the checkpoint record; live-only plugin inputs and mode extensions are rejected on durable turn start.</p>
         </div>
 
         <div class="section">
@@ -131,7 +131,7 @@
           <ul class="bullets">
             <li><strong>Mid-LLM crash</strong> → restore yields a new <code>LlmCall</code> with the same <code>EffectId</code> and identical request. The workflow's activity for that id is the same lookup and produces the same response.</li>
             <li><strong>Post-LLM crash, pre-checkpoint</strong> → restore yields the pending <code>Checkpoint</code> effect, not another <code>LlmCall</code>. The model is not re-invoked.</li>
-            <li><strong>Mid-tool-batch crash</strong> → restore yields a <code>ToolCalls</code> effect carrying every original call. Tools that completed in the partial batch are surfaced to the host via the response shape (each <code>CompletedToolCall</code> includes its outcome). Hosts can short-circuit completed calls by id and only re-invoke the pending ones.</li>
+            <li><strong>Mid-tool-call crash</strong> → restore yields the same <code>ToolCalls</code> sans-IO effect carrying every original call. The runtime invokes the effect controller separately for each <code>PendingToolCall</code>, keyed by call id, so hosts can short-circuit completed calls and only re-invoke pending ones.</li>
             <li><strong>RLM exec crash</strong> → restore yields an <code>ExecCode</code> effect with the original code block and the driver's trajectory state. The exec result contains the parallel tool outputs in their structured form (success / failure / cancellation); no replayed <code>ToolCallStarted</code> events leak from the previous attempt.</li>
             <li><strong>Plugin checkpoint crash</strong> → restore yields the <code>Checkpoint</code> effect again. The <code>on_empty</code> resume action is preserved, so a checkpoint that contributed no messages still finishes the turn the same way.</li>
           </ul>
@@ -143,40 +143,40 @@
             <p>The runtime turn driver still runs the <code>TurnMachine</code> poll/response loop. A workflow integration wraps the effect boundary instead of reimplementing that loop:</p>
           </div>
           <pre><code>#[async_trait::async_trait]
-impl RuntimeEffectHost for WorkflowEffectHost {
-    async fn llm_call(
+impl RuntimeEffectController for WorkflowEffectController {
+    async fn execute_effect(
         &amp;self,
-        invocation: EffectInvocation,
-        request: Arc&lt;LlmRequest&gt;,
-        executor: TurnEffectLocalExecutor&lt;'_&gt;,
-    ) -&gt; (Result&lt;LlmResponse, LlmCallError&gt;, bool) {
-        let key = invocation.metadata.idempotency_key.clone();
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor&lt;'_&gt;,
+    ) -&gt; Result&lt;RuntimeEffectOutcome, RuntimeEffectControllerError&gt; {
+        let key = envelope.metadata.idempotency_key.clone();
         self.workflow
-            .run_activity(key, invocation.metadata.clone(), || async move {
-                executor.llm_call(request).await
+            .run_activity(key, envelope.metadata.clone(), || async move {
+                local_executor.execute(envelope).await
             })
             .await
     }
 }</code></pre>
-          <p>The shape matches Temporal's <em>workflow + activity</em> split and Restate's <em>handler + side-effect</em> split without a committed adapter crate yet: each <code>RuntimeEffect</code> can become one durable activity, the invocation carries the machine checkpoint, and the idempotency key joins the activity result back to the logical turn effect.</p>
+          <p>The shape matches Temporal's <em>workflow + activity</em> split and Restate's <em>handler + side-effect</em> split: each typed runtime effect can become one durable activity, the invocation carries stable turn metadata plus a checkpoint digest, and the idempotency key joins the activity result back to the logical turn effect. Lash renews the active <code>RuntimeTurnLease</code> before saving the pre-effect checkpoint and renews it again after the controller returns before saving the journaled outcome, keeping the same lease token as the fencing identity. A resumed turn can replay a completed effect without invoking the controller again. Hosts that cannot execute or replay a command return an explicit host error; Lash does not silently bypass the configured host.</p>
+          <p>Non-commit exits release ownership with <code>RuntimePersistence::abandon_runtime_turn_lease(&amp;RuntimeTurnLease)</code> on a best-effort basis while leaving <code>RuntimeTurnCheckpoint</code> and <code>RuntimeEffectJournalRecord</code> rows in place for resume. The release is token/owner/fencing guarded, so an old worker cannot clear a newer worker's claim. Successful completion uses the existing <code>RuntimeCommit.completed_turn</code> path, which deletes checkpoint and journal rows atomically with the graph commit.</p>
         </div>
 
         <div class="section">
           <div class="section-header">
             <h2>What's Covered, What Isn't</h2>
-            <p>The effect-host seam covers nondeterministic work that Lash can name as one runtime effect. Some workloads still sit outside it:</p>
+            <p>The effect-controller seam covers nondeterministic work that Lash can name as one runtime effect. Some workloads still sit outside it:</p>
           </div>
           <div class="two-col">
             <article class="panel">
               <h3>Inside the seam</h3>
-              <p>Turn LLM calls, native tool batches, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, and direct LLM completions. Turn effects include <code>EffectId</code> and checkpoint metadata; direct effects include direct-origin metadata and a stable direct idempotency key.</p>
+              <p>Turn LLM calls, native tool calls, RLM exec, plugin checkpoints, execution-surface sync, retry sleeps, direct completions, direct LLM completions, and controller-mediated background task start/cancel. Turn effects include <code>EffectId</code> and checkpoint metadata; direct effects include direct-origin metadata and a stable direct idempotency key.</p>
             </article>
             <article class="panel">
               <h3>Outside the seam</h3>
-              <p>Fire-and-forget <code>Emit</code> and <code>Log</code> effects, plugin background tasks spawned through <code>ToolContext::tasks()</code>, and anything a tool implementation does that's not its <code>execute()</code> return value. Workflows that need those durable should fold them into their own activities.</p>
+              <p>Fire-and-forget <code>Emit</code> and <code>Log</code> effects, and anything a tool implementation does that's not its <code>execute()</code> return value or a controller-mediated background task. Workflows that need those durable should fold them into their own activities.</p>
             </article>
           </div>
-          <p>Sessions opened through the regular <code>LashCore</code> / <code>LashSession</code> path also get durability through the <a href="../persistence.html">session store</a>, but at a coarser grain: a turn either commits to the store atomically or fails as a whole. Install a custom <code>RuntimeEffectHost</code> when you need crash recovery <em>inside</em> a turn — when a single LLM call is expensive enough to replay, or when a tool batch can run for minutes and you can't afford to lose its partial progress.</p>
+          <p>Sessions opened through the regular <code>LashCore</code> / <code>LashSession</code> path also get durability through the <a href="../persistence.html">session store</a>, but at a coarser grain: a turn either commits to the store atomically or fails as a whole. Run with a scoped <code>RuntimeEffectController</code> when you need crash recovery <em>inside</em> a turn — when a single LLM call is expensive enough to replay, or when an individual tool call can run for minutes and you can't afford to lose its progress.</p>
         </div>
 
         <div class="section">
@@ -188,9 +188,17 @@ impl RuntimeEffectHost for WorkflowEffectHost {
             <table>
               <thead><tr><th>Test</th><th>Asserts</th></tr></thead>
               <tbody>
-                <tr><td><code>local_runtime_effect_host_runs_executor_once</code><br><code>crates/lash-core/src/runtime/effect_host.rs</code></td><td>The default effect host delegates exactly once and preserves invocation metadata.</td></tr>
+                <tr><td><code>scoped_borrowed_effect_controller_uses_required_stable_turn_id</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>A stack-borrowed controller can drive a turn through <code>RuntimeEffectControllerScope</code>, and empty scoped turn ids are rejected.</td></tr>
                 <tr><td><code>checkpoint_before_llm_completion_reissues_same_logical_llm_call</code><br><code>crates/lash-sansio/src/sansio/tests.rs:502</code></td><td>Restore from a checkpoint taken mid-LLM yields a fresh <code>LlmCall</code> effect with the same <code>EffectId</code> and identical request payload.</td></tr>
                 <tr><td><code>checkpoint_after_llm_result_replays_checkpoint_without_second_llm</code><br><code>:521</code></td><td>Restore after the LLM completed but before the checkpoint plugin ran yields the pending <code>Checkpoint</code> effect — no duplicate model call.</td></tr>
+                <tr><td><code>tool_call_effect_crosses_controller_per_logical_call_and_runs_local_tools</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>One sans-IO tool batch becomes one controller invocation per logical tool call, with call ids in the idempotency keys.</td></tr>
+                <tr><td><code>journaled_turn_effect_requires_lease_before_controller_execution</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>A persisted turn effect with a turn id fails with <code>runtime_turn_lease_required</code> before the controller runs if no matching lease is present.</td></tr>
+                <tr><td><code>durable_controller_error_abandons_lease_and_preserves_resume_state</code><br><code>crates/lash-core/src/runtime/tests/effect.rs</code></td><td>Controller/runtime errors abandon the lease best-effort while preserving the checkpoint and completed journal rows for a future resume.</td></tr>
+                <tr><td><code>retry_delay_crosses_effect_controller_as_sleep_effect</code><br><code>crates/lash-core/src/tool_dispatch.rs</code></td><td>Runtime-owned retry delays cross the effect controller as <code>Sleep</code> effects instead of sleeping directly.</td></tr>
+                <tr><td><code>abandon_runtime_turn_lease_releases_owner_and_preserves_resume_data</code><br><code>crates/lash-sqlite-store/tests/store_gc.rs</code></td><td>SQLite abandon clears only the matching active lease token and leaves in-flight checkpoints and effect journal rows available for resume.</td></tr>
+                <tr><td><code>superseded_runtime_turn_lease_cannot_write_or_clear_newer_owner</code><br><code>crates/lash-sqlite-store/tests/store_gc.rs</code></td><td>Expired or superseded leases cannot save checkpoint/outcome data and cannot clear a newer owner's active claim.</td></tr>
+                <tr><td><code>renewed_runtime_turn_lease_survives_original_expiry</code><br><code>crates/lash-sqlite-store/tests/store_gc.rs</code></td><td>Renewing a lease extends the original token's write authority past the first expiry.</td></tr>
+                <tr><td><code>active_runtime_turn_lease_fences_competing_claims</code><br><code>crates/lash-sqlite-store/tests/store_gc.rs</code></td><td>An active unexpired lease prevents another owner from claiming the same in-flight turn.</td></tr>
                 <tr><td><code>checkpoint_preserves_parallel_tool_batch_before_any_result</code><br><code>:706</code></td><td>Round-tripping a <code>WaitingTools</code> state preserves every <code>PendingToolCall</code> with its id and arguments intact.</td></tr>
                 <tr><td><code>checkpoint_after_mixed_tool_batch_results_replays_model_feedback_once</code><br><code>:757</code></td><td>Mixed success / failure / cancellation tool outcomes round-trip without re-emitting per-tool events to the stream.</td></tr>
                 <tr><td><code>checkpoint_round_trips_waiting_exec_driver_state</code><br><code>:871</code></td><td>RLM exec waits round-trip with their driver state intact; the same code block and trajectory cursor resume after restore.</td></tr>

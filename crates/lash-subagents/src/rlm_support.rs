@@ -38,7 +38,7 @@ pub(crate) fn resolve_capability_spec(
 
 pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) registry: &'a CapabilityRegistry,
-    pub(crate) context: &'a ToolContext,
+    pub(crate) context: &'a ToolContext<'a>,
     pub(crate) session_spec: &'a SessionSpec,
     pub(crate) capability_name: &'a str,
     pub(crate) output_schema: Option<Value>,

@@ -204,6 +204,17 @@ pub(super) struct RecordingStore {
     session_graph: Mutex<crate::SessionGraph>,
     pub(super) checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
     usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
+    runtime_turn_checkpoints:
+        Mutex<std::collections::HashMap<(String, String), crate::RuntimeTurnCheckpoint>>,
+    runtime_turn_leases:
+        Mutex<std::collections::HashMap<(String, String), crate::RuntimeTurnLease>>,
+    runtime_effect_journal: Mutex<
+        std::collections::HashMap<(String, String, String), crate::RuntimeEffectJournalRecord>,
+    >,
+    runtime_turn_checkpoint_save_count: Mutex<usize>,
+    runtime_effect_journal_save_count: Mutex<usize>,
+    runtime_turn_lease_renew_count: Mutex<usize>,
+    runtime_turn_lease_abandon_count: Mutex<usize>,
 }
 
 #[async_trait::async_trait]
@@ -296,6 +307,31 @@ impl crate::store::RuntimePersistence for RecordingStore {
             execution_state_ref: commit.checkpoint.execution_state_ref.clone(),
         };
         *self.checkpoint.lock().expect("lock checkpoint") = Some(commit.checkpoint);
+        if let Some(completed) = &commit.completed_turn {
+            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
+            let lease_matches = self
+                .runtime_turn_leases
+                .lock()
+                .expect("lock runtime turn leases")
+                .get(&lease_key)
+                .is_some_and(|lease| lease.lease_token == completed.lease_token);
+            if lease_matches {
+                self.runtime_turn_checkpoints
+                    .lock()
+                    .expect("lock runtime turn checkpoints")
+                    .remove(&lease_key);
+                self.runtime_turn_leases
+                    .lock()
+                    .expect("lock runtime turn leases")
+                    .remove(&lease_key);
+                self.runtime_effect_journal
+                    .lock()
+                    .expect("lock runtime effect journal")
+                    .retain(|(session_id, turn_id, _), _| {
+                        session_id != &completed.session_id || turn_id != &completed.turn_id
+                    });
+            }
+        }
         let head_revision = actual + 1;
         *meta = Some(crate::SessionHeadMeta {
             session_id: commit.session_id,
@@ -311,6 +347,167 @@ impl crate::store::RuntimePersistence for RecordingStore {
             checkpoint_ref,
             manifest,
         })
+    }
+
+    async fn claim_runtime_turn_lease(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
+        let lease = crate::RuntimeTurnLease {
+            schema_version: crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            owner_id: owner_id.to_string(),
+            lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
+            fencing_token: 1,
+            claimed_at_epoch_ms: 0,
+            expires_at_epoch_ms: lease_ttl_ms,
+        };
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .insert((session_id.to_string(), turn_id.to_string()), lease.clone());
+        Ok(lease)
+    }
+
+    async fn renew_runtime_turn_lease(
+        &self,
+        lease: &crate::RuntimeTurnLease,
+        lease_ttl_ms: u64,
+    ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
+        let renewed = crate::RuntimeTurnLease {
+            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
+            ..lease.clone()
+        };
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .insert(
+                (renewed.session_id.clone(), renewed.turn_id.clone()),
+                renewed.clone(),
+            );
+        *self
+            .runtime_turn_lease_renew_count
+            .lock()
+            .expect("lock runtime turn lease renew count") += 1;
+        Ok(renewed)
+    }
+
+    async fn abandon_runtime_turn_lease(
+        &self,
+        lease: &crate::RuntimeTurnLease,
+    ) -> Result<(), crate::store::StoreError> {
+        let key = (lease.session_id.clone(), lease.turn_id.clone());
+        let mut leases = self
+            .runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases");
+        if leases.get(&key).is_some_and(|current| {
+            current.owner_id == lease.owner_id
+                && current.lease_token == lease.lease_token
+                && current.fencing_token == lease.fencing_token
+        }) {
+            leases.remove(&key);
+        }
+        *self
+            .runtime_turn_lease_abandon_count
+            .lock()
+            .expect("lock runtime turn lease abandon count") += 1;
+        Ok(())
+    }
+
+    async fn save_runtime_turn_checkpoint(
+        &self,
+        lease: &crate::RuntimeTurnLease,
+        checkpoint: crate::RuntimeTurnCheckpoint,
+    ) -> Result<(), crate::store::StoreError> {
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
+            .filter(|current| current.lease_token == lease.lease_token)
+            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
+                session_id: lease.session_id.clone(),
+                turn_id: lease.turn_id.clone(),
+            })?;
+        self.runtime_turn_checkpoints
+            .lock()
+            .expect("lock runtime turn checkpoints")
+            .insert(
+                (checkpoint.session_id.clone(), checkpoint.turn_id.clone()),
+                checkpoint,
+            );
+        *self
+            .runtime_turn_checkpoint_save_count
+            .lock()
+            .expect("lock runtime turn checkpoint save count") += 1;
+        Ok(())
+    }
+
+    async fn load_runtime_turn_checkpoint(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<crate::RuntimeTurnCheckpoint>, crate::store::StoreError> {
+        Ok(self
+            .runtime_turn_checkpoints
+            .lock()
+            .expect("lock runtime turn checkpoints")
+            .get(&(session_id.to_string(), turn_id.to_string()))
+            .cloned())
+    }
+
+    async fn save_runtime_effect_outcome(
+        &self,
+        lease: &crate::RuntimeTurnLease,
+        record: crate::RuntimeEffectJournalRecord,
+    ) -> Result<(), crate::store::StoreError> {
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
+            .filter(|current| current.lease_token == lease.lease_token)
+            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
+                session_id: lease.session_id.clone(),
+                turn_id: lease.turn_id.clone(),
+            })?;
+        self.runtime_effect_journal
+            .lock()
+            .expect("lock runtime effect journal")
+            .insert(
+                (
+                    record.session_id.clone(),
+                    record.turn_id.clone(),
+                    record.idempotency_key.clone(),
+                ),
+                record,
+            );
+        *self
+            .runtime_effect_journal_save_count
+            .lock()
+            .expect("lock runtime effect journal save count") += 1;
+        Ok(())
+    }
+
+    async fn load_runtime_effect_outcome(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<crate::RuntimeEffectJournalRecord>, crate::store::StoreError> {
+        Ok(self
+            .runtime_effect_journal
+            .lock()
+            .expect("lock runtime effect journal")
+            .get(&(
+                session_id.to_string(),
+                turn_id.to_string(),
+                idempotency_key.to_string(),
+            ))
+            .cloned())
     }
 
     async fn save_session_meta(
@@ -343,6 +540,48 @@ impl crate::store::RuntimePersistence for RecordingStore {
 impl RecordingStore {
     pub(super) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
+    }
+
+    pub(super) fn runtime_turn_checkpoint_count(&self) -> usize {
+        self.runtime_turn_checkpoints
+            .lock()
+            .expect("lock runtime turn checkpoints")
+            .len()
+    }
+
+    pub(super) fn runtime_effect_journal_count(&self) -> usize {
+        self.runtime_effect_journal
+            .lock()
+            .expect("lock runtime effect journal")
+            .len()
+    }
+
+    pub(super) fn runtime_turn_checkpoint_save_count(&self) -> usize {
+        *self
+            .runtime_turn_checkpoint_save_count
+            .lock()
+            .expect("lock runtime turn checkpoint save count")
+    }
+
+    pub(super) fn runtime_effect_journal_save_count(&self) -> usize {
+        *self
+            .runtime_effect_journal_save_count
+            .lock()
+            .expect("lock runtime effect journal save count")
+    }
+
+    pub(super) fn runtime_turn_lease_renew_count(&self) -> usize {
+        *self
+            .runtime_turn_lease_renew_count
+            .lock()
+            .expect("lock runtime turn lease renew count")
+    }
+
+    pub(super) fn runtime_turn_lease_abandon_count(&self) -> usize {
+        *self
+            .runtime_turn_lease_abandon_count
+            .lock()
+            .expect("lock runtime turn lease abandon count")
     }
 }
 
@@ -594,6 +833,37 @@ pub(super) async fn runtime_with_plugins_and_tools_and_host(
     runtime
 }
 
+pub(super) async fn runtime_with_plugins_and_tools_and_host_and_store(
+    plugins: Vec<Arc<dyn crate::PluginFactory>>,
+    tools: Arc<dyn crate::ToolProvider>,
+    transport: TestProvider,
+    host: EmbeddedRuntimeHost,
+    store: Arc<dyn crate::RuntimePersistence>,
+) -> LashRuntime {
+    let mut factories = plugins;
+    let tools = Arc::clone(&tools);
+    factories.push(Arc::new(StaticPluginFactory::new(
+        "test_tools",
+        crate::PluginSpec::new().with_tool_provider(Arc::clone(&tools)),
+    )));
+    let plugin_host = crate::PluginHost::new(factories);
+    let plugin_session = plugin_host
+        .build_standard_session("root", None)
+        .expect("plugins");
+    let services =
+        crate::PersistentRuntimeServices::new(plugin_session, store).into_runtime_services();
+    let mut runtime = LashRuntime::from_embedded_state(
+        standard_test_policy(),
+        host,
+        services,
+        PersistedSessionState::default(),
+    )
+    .await
+    .expect("runtime");
+    runtime.policy.provider = transport.clone().into_handle();
+    runtime
+}
+
 pub(super) struct EchoTool;
 
 fn echo_tool_definition() -> crate::ToolDefinition {
@@ -835,7 +1105,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(
         test_host_config(),
-        Arc::new(LocalBackgroundTaskHost::default()),
+        Arc::new(LocalBackgroundTaskRegistry::default()),
     );
     let mut runtime = LashRuntime::from_background_state(
         standard_test_policy(),
@@ -855,7 +1125,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
 
 pub(super) async fn standard_runtime_with_shared_background_executor(
     transport: TestProvider,
-    executor: Arc<dyn BackgroundTaskHost>,
+    executor: Arc<dyn BackgroundTaskRegistry>,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let host = BackgroundRuntimeHost::new(test_host_config(), executor);

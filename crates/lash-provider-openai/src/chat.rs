@@ -1,4 +1,5 @@
 use crate::support::*;
+use std::borrow::Cow;
 
 impl OpenAiCompatibleProvider {
     fn model_is_anthropic_claude(model: &str) -> bool {
@@ -435,61 +436,55 @@ impl OpenAiCompatibleProvider {
         if raw.is_empty() || raw == "[DONE]" {
             return Ok(());
         }
-        let event: Value = serde_json::from_str(raw).map_err(|e| {
+        let event: ChatSseEvent<'_> = serde_json::from_str(raw).map_err(|e| {
             LlmTransportError::new(format!("Invalid Chat Completions SSE payload: {e}"))
                 .with_raw(raw)
         })?;
-        if event.get("error").is_some() {
-            let retryable = event
-                .get("error")
-                .map(responses_error_is_retryable)
-                .unwrap_or(false);
-            let message = event
-                .get("error")
-                .and_then(|e| e.get("message"))
+        if let Some(error) = event.error.as_ref() {
+            let retryable = responses_error_is_retryable(error);
+            let message = error
+                .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("OpenAI-compatible chat stream error");
             return Err(LlmTransportError::new(message)
                 .retryable(retryable)
-                .with_raw(event.to_string()));
+                .with_raw(raw));
         }
-        if let Some(usage) = event.get("usage")
+        if let Some(usage) = event.usage.as_ref()
             && !usage.is_null()
         {
             state.provider_usage = Some(usage.clone());
-            merge_usage(&mut state.usage, &usage_from_response_value(&event));
+            merge_usage(&mut state.usage, &usage_from_usage_value(usage));
         }
         state.final_response_raw = Some(raw.to_string());
-        let Some(choices) = event.get("choices").and_then(Value::as_array) else {
-            return Ok(());
-        };
-        for choice in choices {
-            if let Some(usage) = choice.get("usage")
+        for choice in event.choices {
+            if let Some(usage) = choice.usage.as_ref()
                 && !usage.is_null()
             {
                 state.provider_usage = Some(usage.clone());
                 merge_usage(&mut state.usage, &usage_from_usage_value(usage));
             }
-            let Some(delta) = choice.get("delta") else {
+            let Some(delta) = choice.delta else {
                 continue;
             };
-            if let Some(content) = delta.get("content").and_then(Value::as_str) {
+            if let Some(content) = delta.content.as_ref() {
                 state.push_text_delta(content);
             }
-            for field in ["reasoning_content", "reasoning", "reasoning_text"] {
-                if let Some(reasoning) = delta.get(field).and_then(Value::as_str)
-                    && !reasoning.is_empty()
-                {
-                    state.push_reasoning_delta(reasoning);
-                    break;
-                }
+            if let Some(reasoning) = delta
+                .reasoning_content
+                .as_ref()
+                .or(delta.reasoning.as_ref())
+                .or(delta.reasoning_text.as_ref())
+                && !reasoning.is_empty()
+            {
+                state.push_reasoning_delta(reasoning);
             }
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            if let Some(tool_calls) = delta.tool_calls.as_ref() {
                 for tool_call in tool_calls {
                     state.update_tool_call_delta(tool_call);
                 }
             }
-            if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            if let Some(finish_reason) = choice.finish_reason {
                 state.terminal_reason = match finish_reason {
                     "stop" => LlmTerminalReason::Stop,
                     "tool_calls" | "function_call" => LlmTerminalReason::ToolUse,
@@ -499,7 +494,7 @@ impl OpenAiCompatibleProvider {
                     _ => LlmTerminalReason::ProviderError,
                 };
             }
-            if let Some(details) = delta.get("reasoning_details") {
+            if let Some(details) = delta.reasoning_details.as_ref() {
                 state.apply_reasoning_details(details);
             }
         }
@@ -536,6 +531,42 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ChatSseEvent<'a> {
+    #[serde(default)]
+    error: Option<Value>,
+    #[serde(default)]
+    usage: Option<Value>,
+    #[serde(default, borrow)]
+    choices: Vec<ChatSseChoice<'a>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatSseChoice<'a> {
+    #[serde(default, borrow)]
+    delta: Option<ChatSseDelta<'a>>,
+    #[serde(default, borrow)]
+    finish_reason: Option<&'a str>,
+    #[serde(default)]
+    usage: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatSseDelta<'a> {
+    #[serde(default, borrow)]
+    content: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    reasoning_content: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    reasoning: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    reasoning_text: Option<Cow<'a, str>>,
+    #[serde(default)]
+    tool_calls: Option<Vec<Value>>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChatStreamingToolCall {
     pub(crate) call_id: String,
@@ -547,7 +578,7 @@ pub(crate) struct ChatStreamingToolCall {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChatStreamState {
     pub(crate) full_text: String,
-    pub(crate) deltas: Vec<String>,
+    pub(crate) pending_text_deltas: Vec<String>,
     pub(crate) reasoning_text: String,
     pub(crate) reasoning_deltas: Vec<String>,
     pub(crate) usage: LlmUsage,
@@ -563,7 +594,7 @@ impl ChatStreamState {
             return;
         }
         self.full_text.push_str(piece);
-        self.deltas.push(piece.to_string());
+        self.pending_text_deltas.push(piece.to_string());
     }
 
     pub(crate) fn push_reasoning_delta(&mut self, piece: &str) {
@@ -621,6 +652,10 @@ impl ChatStreamState {
 
     pub(crate) fn take_reasoning_deltas(&mut self) -> Vec<String> {
         std::mem::take(&mut self.reasoning_deltas)
+    }
+
+    pub(crate) fn take_text_deltas(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_text_deltas)
     }
 
     pub(crate) fn parts(&self) -> Vec<LlmOutputPart> {

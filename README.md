@@ -12,11 +12,11 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ### Durable per-turn commits
 
-Every turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. Partial turn = no commit.
+Every completed turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through the final commit transaction.
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectHost` is the durable boundary around nondeterministic work. LLM calls, tool batches, RLM exec, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata and idempotency keys. The default host runs in process; workflow adapters can persist or schedule the same effect contract.
+`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata, idempotency keys, checkpoint digests, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal.
 
 ### Two execution modes, one commit unit
 

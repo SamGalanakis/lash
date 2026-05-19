@@ -17,9 +17,9 @@ use crate::provider::{
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
-    PersistedSessionState, ProviderOptions, SessionPolicy, SessionStateEnvelope, TokenUsage,
-    TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    AssembledTurn, AssistantOutput, BackgroundTaskRegistry, ExecutionMode, ExecutionSummary,
+    OutputState, PersistedSessionState, ProviderOptions, RuntimeEffectController, SessionPolicy,
+    SessionStateEnvelope, TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
 type CompletionFuture =
@@ -293,7 +293,7 @@ pub fn mock_session_policy() -> SessionPolicy {
 /// unit-testing a `ToolProvider` in isolation. Use [`mock_tool_context_with_host`]
 /// when the tool under test interacts with host state and needs a configured
 /// `MockSessionManager` (or another `RuntimeSessionHost` implementation).
-pub fn mock_tool_context() -> crate::ToolContext {
+pub fn mock_tool_context() -> crate::ToolContext<'static> {
     mock_tool_context_with_host(Arc::new(MockSessionManager::default()))
 }
 
@@ -302,12 +302,25 @@ pub fn mock_tool_context() -> crate::ToolContext {
 /// and the test wants to assert against captured interactions.
 pub fn mock_tool_context_with_host(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-) -> crate::ToolContext {
+) -> crate::ToolContext<'static> {
+    mock_tool_context_with_host_and_direct_completions(
+        host,
+        crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+    )
+}
+
+pub fn mock_tool_context_with_host_and_direct_completions(
+    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    direct_completions: crate::DirectCompletionClient<'static>,
+) -> crate::ToolContext<'static> {
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
         host,
         crate::TurnContext::new(),
         Arc::new(crate::InMemoryAttachmentStore::new()),
+        direct_completions,
         None,
     )
 }
@@ -371,6 +384,7 @@ pub struct MockSessionManager {
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
     pub tool_registry: Option<crate::ToolRegistry>,
+    pub background: Arc<crate::LocalBackgroundTaskRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub cancelled: Mutex<Vec<String>>,
     pub closed: Mutex<Vec<String>>,
@@ -383,6 +397,7 @@ impl Default for MockSessionManager {
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,
+            background: Arc::new(crate::LocalBackgroundTaskRegistry::default()),
             created: Mutex::new(Vec::new()),
             cancelled: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -504,6 +519,61 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
             .expect("cancelled lock")
             .push(turn_id.to_string());
         Ok(())
+    }
+
+    async fn start_background_task(
+        &self,
+        _session_id: &str,
+        registration: crate::BackgroundTaskRegistration,
+        executor: crate::BackgroundTaskLocalExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.background.register(registration.clone()).await?;
+        crate::InlineRuntimeEffectController::default()
+            .start_background_task(self.background.clone(), registration, executor)
+            .await
+    }
+
+    async fn await_background_task(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
+        self.background.await_completion(task_id).await
+    }
+
+    async fn complete_background_task(
+        &self,
+        task_id: &str,
+        completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.background.complete(task_id, completion).await
+    }
+
+    async fn list_background_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+        Ok(self
+            .background
+            .list(crate::BackgroundTaskFilter {
+                session_id: Some(session_id.to_string()),
+                kind: None,
+                include_terminal: true,
+            })
+            .await)
+    }
+
+    async fn cancel_background_task(
+        &self,
+        _session_id: &str,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        crate::InlineRuntimeEffectController::default()
+            .request_background_task_cancel(
+                self.background.clone(),
+                task_id,
+                Some("requested by test".to_string()),
+            )
+            .await
     }
 }
 // ─────────────────────────────────────────────────────────────────────
@@ -695,7 +765,7 @@ mod test_mode_fakes {
 
         async fn execute(
             &self,
-            context: &crate::tool_dispatch::ToolDispatchContext,
+            context: &crate::tool_dispatch::ToolDispatchContext<'_>,
             name: &str,
             args: &serde_json::Value,
             progress: Option<&crate::ProgressSender>,
@@ -748,7 +818,7 @@ mod test_mode_fakes {
     /// Minimal batch executor used by lash's own tests (mirrors the
     /// behavior of `lash-mode-standard`'s `execute_batch_tool_call`).
     async fn execute_test_batch(
-        context: &crate::tool_dispatch::ToolDispatchContext,
+        context: &crate::tool_dispatch::ToolDispatchContext<'_>,
         args: &serde_json::Value,
         progress: Option<&crate::ProgressSender>,
     ) -> crate::ToolResult {

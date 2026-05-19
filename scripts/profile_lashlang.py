@@ -29,6 +29,10 @@ SCENARIOS = [
     "tool_control_surface",
     "snapshot_projected_state",
     "continue_as_seed_surface",
+    "syntax_text_surface",
+    "integer_range_surface",
+    "parallel_statement_surface",
+    "image_surface",
 ]
 
 PERF_MODES = [

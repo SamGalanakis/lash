@@ -1,3 +1,5 @@
+use sha2::Digest;
+
 fn default_root_session_id() -> String {
     "root".to_string()
 }
@@ -15,6 +17,21 @@ pub enum StoreError {
     UnsupportedReadScope(SessionReadScope),
     #[error("store head revision conflict: expected {expected:?}, actual {actual}")]
     HeadRevisionConflict { expected: Option<u64>, actual: u64 },
+    #[error(
+        "turn `{turn_id}` for session `{session_id}` is already leased by `{owner_id}` until {expires_at_epoch_ms}"
+    )]
+    RuntimeTurnLeaseConflict {
+        session_id: String,
+        turn_id: String,
+        owner_id: String,
+        expires_at_epoch_ms: u64,
+    },
+    #[error("runtime turn lease for `{session_id}`/`{turn_id}` is missing or expired")]
+    RuntimeTurnLeaseExpired { session_id: String, turn_id: String },
+    #[error("runtime effect journal hash mismatch for idempotency key `{idempotency_key}`")]
+    RuntimeEffectJournalHashMismatch { idempotency_key: String },
+    #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
+    RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
     #[error("store backend error: {0}")]
     Backend(String),
 }
@@ -246,6 +263,7 @@ pub struct RuntimeCommit {
     pub graph: GraphCommitDelta,
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
+    pub completed_turn: Option<RuntimeTurnCompletion>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +271,132 @@ pub struct RuntimeCommitResult {
     pub head_revision: u64,
     pub checkpoint_ref: BlobRef,
     pub manifest: SessionCheckpoint,
+}
+
+pub const RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_TURN_LEASE_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeTurnMachineConfigSnapshot {
+    pub execution_mode: crate::ExecutionMode,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_session_id: Option<String>,
+    pub autonomous: bool,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    pub sync_execution_surface: bool,
+    pub tool_specs: Vec<crate::llm::types::LlmToolSpec>,
+    pub system_prompt: String,
+    pub termination: crate::ModeTurnOptions,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeTurnCheckpoint {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub turn_id: String,
+    pub turn_index: usize,
+    pub mode_iteration: usize,
+    pub checkpoint_hash: String,
+    pub machine_config: RuntimeTurnMachineConfigSnapshot,
+    pub checkpoint: lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
+    pub mode_turn_options: crate::ModeTurnOptions,
+    pub turn_prompt_layer: crate::PromptLayer,
+    pub provider_id: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_variant: Option<String>,
+    pub updated_at_epoch_ms: u64,
+}
+
+impl RuntimeTurnCheckpoint {
+    pub fn new(
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        turn_index: usize,
+        mode_iteration: usize,
+        checkpoint: lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
+        machine_config: RuntimeTurnMachineConfigSnapshot,
+        mode_turn_options: crate::ModeTurnOptions,
+        turn_prompt_layer: crate::PromptLayer,
+        provider_id: impl Into<String>,
+        model: impl Into<String>,
+        model_variant: Option<String>,
+        updated_at_epoch_ms: u64,
+    ) -> Result<Self, StoreError> {
+        let checkpoint_hash = runtime_turn_checkpoint_hash(&checkpoint)?;
+        Ok(Self {
+            schema_version: RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            turn_index,
+            mode_iteration,
+            checkpoint_hash,
+            machine_config,
+            checkpoint,
+            mode_turn_options,
+            turn_prompt_layer,
+            provider_id: provider_id.into(),
+            model: model.into(),
+            model_variant,
+            updated_at_epoch_ms,
+        })
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeTurnLease {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub turn_id: String,
+    pub owner_id: String,
+    pub lease_token: String,
+    pub fencing_token: u64,
+    pub claimed_at_epoch_ms: u64,
+    pub expires_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeTurnCompletion {
+    pub session_id: String,
+    pub turn_id: String,
+    pub lease_token: String,
+}
+
+impl RuntimeTurnCompletion {
+    pub fn from_lease(lease: &RuntimeTurnLease) -> Self {
+        Self {
+            session_id: lease.session_id.clone(),
+            turn_id: lease.turn_id.clone(),
+            lease_token: lease.lease_token.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeEffectJournalRecord {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub turn_id: String,
+    pub idempotency_key: String,
+    pub envelope_hash: String,
+    pub effect_kind: crate::RuntimeEffectKind,
+    pub outcome: crate::RuntimeEffectOutcome,
+    pub created_at_epoch_ms: u64,
+}
+
+pub fn runtime_turn_checkpoint_hash(
+    checkpoint: &lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
+) -> Result<String, StoreError> {
+    let bytes = serde_json::to_vec(checkpoint).map_err(|err| {
+        StoreError::Backend(format!("failed to serialize turn checkpoint: {err}"))
+    })?;
+    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
 }
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
@@ -297,6 +441,7 @@ impl RuntimeCommit {
             },
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
+            completed_turn: None,
         }
     }
 
@@ -312,7 +457,13 @@ impl RuntimeCommit {
             graph,
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
+            completed_turn: None,
         }
+    }
+
+    pub fn clearing_completed_turn(mut self, completed_turn: RuntimeTurnCompletion) -> Self {
+        self.completed_turn = Some(completed_turn);
+        self
     }
 }
 
@@ -412,6 +563,47 @@ pub trait RuntimePersistence: Send + Sync {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError>;
+
+    async fn claim_runtime_turn_lease(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        owner_id: &str,
+        lease_ttl_ms: u64,
+    ) -> Result<RuntimeTurnLease, StoreError>;
+
+    async fn renew_runtime_turn_lease(
+        &self,
+        lease: &RuntimeTurnLease,
+        lease_ttl_ms: u64,
+    ) -> Result<RuntimeTurnLease, StoreError>;
+
+    async fn abandon_runtime_turn_lease(&self, lease: &RuntimeTurnLease) -> Result<(), StoreError>;
+
+    async fn save_runtime_turn_checkpoint(
+        &self,
+        lease: &RuntimeTurnLease,
+        checkpoint: RuntimeTurnCheckpoint,
+    ) -> Result<(), StoreError>;
+
+    async fn load_runtime_turn_checkpoint(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<RuntimeTurnCheckpoint>, StoreError>;
+
+    async fn save_runtime_effect_outcome(
+        &self,
+        lease: &RuntimeTurnLease,
+        record: RuntimeEffectJournalRecord,
+    ) -> Result<(), StoreError>;
+
+    async fn load_runtime_effect_outcome(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<RuntimeEffectJournalRecord>, StoreError>;
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError>;
     async fn load_session_meta(&self) -> Result<Option<SessionMeta>, StoreError>;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use super::{BackgroundTaskHost, BackgroundTaskRecord, LashRuntime};
+use super::{BackgroundTaskFilter, BackgroundTaskRecord, BackgroundTaskRegistry, LashRuntime};
 
 #[derive(Clone)]
 pub struct RuntimeObservation {
@@ -14,12 +14,17 @@ pub struct RuntimeObservation {
     pub usage_report: super::SessionUsageReport,
     pub tool_state: Option<crate::ToolState>,
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
+    pub tool_catalog_error: Option<String>,
     pub runtime_scope_id: Arc<str>,
-    pub background_task_host: Option<Arc<dyn BackgroundTaskHost>>,
+    pub background_task_registry: Option<Arc<dyn BackgroundTaskRegistry>>,
 }
 
 impl RuntimeObservation {
     fn from_runtime(runtime: &LashRuntime) -> Self {
+        let (tool_catalog, tool_catalog_error) = match runtime.active_tool_catalog_shared() {
+            Ok(catalog) => (catalog, None),
+            Err(err) => (Arc::new(Vec::new()), Some(err.to_string())),
+        };
         Self {
             session_id: Arc::from(runtime.session_id()),
             policy: runtime.read_view().policy().clone(),
@@ -27,9 +32,10 @@ impl RuntimeObservation {
             persisted_state: runtime.export_persisted_state(),
             usage_report: runtime.usage_report(),
             tool_state: runtime.tool_state().ok(),
-            tool_catalog: runtime.active_tool_catalog_shared(),
+            tool_catalog,
+            tool_catalog_error,
             runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-            background_task_host: runtime.host.background_task_host.clone(),
+            background_task_registry: runtime.host.background_task_registry.clone(),
         }
     }
 
@@ -42,10 +48,16 @@ impl RuntimeObservation {
     }
 
     pub async fn list_background_tasks(&self) -> Vec<BackgroundTaskRecord> {
-        let Some(executor) = self.background_task_host.as_ref() else {
+        let Some(executor) = self.background_task_registry.as_ref() else {
             return Vec::new();
         };
-        executor.list_managed(&self.background_scope_key()).await
+        executor
+            .list(BackgroundTaskFilter {
+                session_id: Some(self.background_scope_key()),
+                kind: None,
+                include_terminal: true,
+            })
+            .await
     }
 }
 

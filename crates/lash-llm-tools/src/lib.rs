@@ -65,7 +65,7 @@ struct LlmToolsProvider {
 }
 
 impl LlmToolsProvider {
-    async fn llm_query(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
+    async fn llm_query(&self, args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
         let task = required_string(args, "task")?;
         let inputs = args.get("inputs").cloned().unwrap_or(Value::Null);
         let output_schema = parse_output_schema(args.get("output"))?;
@@ -107,6 +107,7 @@ impl LlmToolsProvider {
                     stream_events: None,
                     session_id: Some(format!("{}-llm-query", context.session_id())),
                     originating_tool_call_id: None,
+                    idempotency_key: None,
                 },
                 "llm_query",
             )
@@ -427,20 +428,26 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
-        async fn direct_completion(
-            &self,
-            request: lash_core::DirectRequest,
-            usage_source: &str,
-        ) -> Result<lash_core::DirectCompletion, PluginError> {
-            self.requests
-                .lock()
-                .expect("requests")
-                .push((request, usage_source.to_string()));
-            Ok(lash_core::DirectCompletion {
-                text: self.response_text.clone(),
-                usage: lash_core::TokenUsage::default(),
-            })
-        }
+    }
+
+    fn direct_completion_context(
+        manager: Arc<DirectCompletionManager>,
+    ) -> lash_core::ToolContext<'static> {
+        let completions = lash_core::DirectCompletionClient::from_fn({
+            let manager = Arc::clone(&manager);
+            move |request, usage_source| {
+                manager
+                    .requests
+                    .lock()
+                    .expect("requests")
+                    .push((request, usage_source));
+                Ok(lash_core::DirectCompletion {
+                    text: manager.response_text.clone(),
+                    usage: lash_core::TokenUsage::default(),
+                })
+            }
+        });
+        lash_core::testing::mock_tool_context_with_host_and_direct_completions(manager, completions)
     }
 
     #[test]
@@ -532,7 +539,7 @@ mod tests {
             model: None,
             model_variant: None,
         };
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = direct_completion_context(manager.clone());
 
         let args = json!({
             "task": "extract root cause",
@@ -598,7 +605,7 @@ mod tests {
             model: Some("gpt-5.5".to_string()),
             model_variant: Some("low".to_string()),
         };
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = direct_completion_context(manager.clone());
 
         let args = json!({ "task": "answer directly" });
         let result = provider
@@ -637,7 +644,7 @@ mod tests {
             model: None,
             model_variant: None,
         };
-        let context = lash_core::testing::mock_tool_context_with_host(manager);
+        let context = direct_completion_context(manager);
 
         let args = json!({ "task": "answer from missing evidence" });
         let result = provider

@@ -1,6 +1,16 @@
 use super::*;
 
 impl LashRuntime {
+    pub fn unregister_plugin_session(&self) -> Result<(), crate::PluginError> {
+        if let Some(session) = self.session.as_ref() {
+            session
+                .plugins()
+                .host()
+                .unregister_session(&self.state.session_id)?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn from_host_state(
         policy: SessionPolicy,
         host: RuntimeHost,
@@ -177,7 +187,7 @@ impl LashRuntime {
                 crate::session::TurnInputInjectionBridge::new(),
                 store,
             );
-            match env.background_task_host.as_ref() {
+            match env.background_task_registry.as_ref() {
                 Some(executor) => {
                     let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
                     Self::from_persistent_background_state(policy, host, services, state).await?
@@ -188,7 +198,7 @@ impl LashRuntime {
             }
         } else {
             let services = RuntimeServices::new(plugin_session);
-            match env.background_task_host.as_ref() {
+            match env.background_task_registry.as_ref() {
                 Some(executor) => {
                     let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
                     Self::from_background_state(policy, host, services, state).await?

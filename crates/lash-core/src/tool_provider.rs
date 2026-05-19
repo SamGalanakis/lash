@@ -23,13 +23,14 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 /// Per-call environment for [`ToolProvider::execute`]. Fields are sealed so
 /// the runtime can add capabilities without breaking tool authors.
 #[derive(Clone)]
-pub struct ToolContext {
+pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_task_id: Option<String>,
     pub(crate) turn_context: crate::TurnContext,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
+    pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
     /// `DirectRequest::originating_tool_call_id` they issue so the trace
@@ -38,6 +39,7 @@ pub struct ToolContext {
     pub(crate) attempt_number: u32,
     pub(crate) max_attempts: u32,
     pub(crate) idempotency_key: Option<String>,
+    pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,61 +119,47 @@ pub struct ToolTaskControl {
 }
 
 impl ToolTaskControl {
-    pub async fn register_background_task(
+    pub async fn start_background_task(
         &self,
-        spec: crate::BackgroundTaskRegistration,
-        cancel: Option<crate::LocalBackgroundTaskCancel>,
-    ) -> Result<(), PluginError> {
+        registration: crate::BackgroundTaskRegistration,
+        executor: crate::BackgroundTaskLocalExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         self.host
-            .register_background_task(&self.session_id, spec, cancel)
+            .start_background_task(&self.session_id, registration, executor)
             .await
     }
 
-    pub async fn unregister_background_task(&self, task_id: &str) {
-        self.unregister_background_task_for_session(&self.session_id, task_id)
-            .await;
+    pub async fn await_background_task(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
+        self.host.await_background_task(task_id).await
     }
 
-    pub async fn complete_background_task(&self, task_id: &str, state: crate::BackgroundTaskState) {
-        self.complete_background_task_for_session(&self.session_id, task_id, state)
-            .await;
+    pub async fn complete_background_task(
+        &self,
+        task_id: &str,
+        completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.host
+            .complete_background_task(task_id, completion)
+            .await
     }
 
-    pub async fn transition_background_task_live_state(
+    pub async fn complete_background_task_with_state(
         &self,
         task_id: &str,
         state: crate::BackgroundTaskState,
-    ) {
-        self.transition_background_task_live_state_for_session(&self.session_id, task_id, state)
-            .await;
-    }
-
-    pub async fn unregister_background_task_for_session(&self, session_id: &str, task_id: &str) {
-        self.host
-            .unregister_background_task(session_id, task_id)
-            .await;
-    }
-
-    pub async fn complete_background_task_for_session(
-        &self,
-        session_id: &str,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
-        self.host
-            .complete_background_task(session_id, task_id, state)
-            .await;
-    }
-
-    pub async fn transition_background_task_live_state_for_session(
-        &self,
-        session_id: &str,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) {
-        self.host
-            .transition_background_task_live_state(session_id, task_id, state)
-            .await;
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        self.complete_background_task(
+            task_id,
+            crate::BackgroundTaskCompletion {
+                state,
+                summary: None,
+                output: None,
+            },
+        )
+        .await
     }
 
     pub async fn validate_async_handles_visible(
@@ -210,12 +198,13 @@ impl ToolTaskControl {
     }
 }
 
-impl ToolContext {
+impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
+        direct_completions: crate::DirectCompletionClient<'run>,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
@@ -225,10 +214,12 @@ impl ToolContext {
             async_task_id: None,
             turn_context,
             attachment_store,
+            direct_completions,
             tool_call_id,
             attempt_number: 1,
             max_attempts: 1,
             idempotency_key: None,
+            tool_effect_metadata: None,
         }
     }
 
@@ -297,7 +288,9 @@ impl ToolContext {
         if request.originating_tool_call_id.is_none() {
             request.originating_tool_call_id = self.tool_call_id.clone();
         }
-        self.host.direct_completion(request, usage_source).await
+        self.direct_completions
+            .direct_completion(request, usage_source)
+            .await
     }
 
     pub fn cancellation_token(&self) -> Option<&tokio_util::sync::CancellationToken> {
@@ -366,6 +359,14 @@ impl ToolContext {
         self
     }
 
+    pub(crate) fn with_tool_effect_metadata(
+        mut self,
+        metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> Self {
+        self.tool_effect_metadata = metadata;
+        self
+    }
+
     /// Constructor reserved for `lash_core::testing` helpers. Do not call directly;
     /// use [`lash_core::testing::mock_tool_context`] instead.
     #[cfg(any(test, feature = "testing"))]
@@ -375,13 +376,15 @@ impl ToolContext {
         host: Arc<dyn RuntimeSessionHost>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
+        direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
-    ) -> Self {
-        Self::new(
+    ) -> ToolContext<'static> {
+        ToolContext::new(
             session_id,
             host,
             turn_context,
             attachment_store,
+            direct_completions,
             tool_call_id,
         )
     }
@@ -396,7 +399,7 @@ impl ToolContext {
 pub struct ToolCall<'a> {
     pub name: &'a str,
     pub args: &'a serde_json::Value,
-    pub context: &'a ToolContext,
+    pub context: &'a ToolContext<'a>,
     pub progress: Option<&'a ProgressSender>,
 }
 

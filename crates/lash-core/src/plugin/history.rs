@@ -304,6 +304,7 @@ pub struct TurnTransformContext {
     pub prompt_usage: Option<crate::runtime::PromptUsage>,
     pub max_context_tokens: Option<usize>,
     pub host: Arc<dyn super::RuntimeSessionHost>,
+    pub direct_completions: crate::DirectCompletionClient<'static>,
 }
 
 /// Context passed to a history rewriter.

@@ -19,7 +19,7 @@ use lash_core::provider::{
     AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
     ProviderState, ProviderTransport, VariantRequestConfig,
 };
-use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
+use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
     build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
     send_request,
@@ -442,7 +442,7 @@ impl GoogleOAuthProvider {
         out
     }
 
-    fn apply_stream_piece(full: &mut String, deltas: &mut Vec<String>, piece: &str) {
+    fn apply_stream_piece(full: &mut String, text_deltas: &mut Vec<String>, piece: &str) {
         if piece.is_empty() {
             return;
         }
@@ -450,18 +450,18 @@ impl GoogleOAuthProvider {
             let delta = &piece[full.len()..];
             if !delta.is_empty() {
                 full.push_str(delta);
-                deltas.push(delta.to_string());
+                text_deltas.push(delta.to_string());
             }
             return;
         }
         full.push_str(piece);
-        deltas.push(piece.to_string());
+        text_deltas.push(piece.to_string());
     }
 
     fn process_sse_event(
         raw: &str,
         full: &mut String,
-        deltas: &mut Vec<String>,
+        text_deltas: &mut Vec<String>,
         usage: &mut LlmUsage,
         tool_call_parts: Option<&mut Vec<LlmOutputPart>>,
     ) -> Result<(), LlmTransportError> {
@@ -479,7 +479,7 @@ impl GoogleOAuthProvider {
             *usage = new_usage;
         }
         for piece in Self::text_parts_from_event(&event) {
-            Self::apply_stream_piece(full, deltas, &piece);
+            Self::apply_stream_piece(full, text_deltas, &piece);
         }
         if let Some(parts) = tool_call_parts {
             parts.extend(Self::tool_call_parts_from_event(&event));
@@ -1041,7 +1041,6 @@ impl GoogleOAuthProvider {
             let terminal_reason = Self::terminal_reason_from_value(&value, &parts);
             return Ok(LlmResponse {
                 full_text,
-                deltas: Vec::new(),
                 parts,
                 usage,
                 terminal_reason,
@@ -1053,7 +1052,6 @@ impl GoogleOAuthProvider {
         }
 
         let mut full = String::new();
-        let mut deltas = Vec::new();
         let mut usage = LlmUsage::default();
         let mut tool_call_parts: Vec<LlmOutputPart> = Vec::new();
         drive_sse_response(
@@ -1062,22 +1060,16 @@ impl GoogleOAuthProvider {
             "Cloud Code stream chunk timed out",
             |raw| {
                 emit_provider_trace(provider_trace.as_ref(), "google", raw);
-                let prev_len = deltas.len();
+                let mut text_deltas = Vec::new();
                 let prev_usage = usage.clone();
                 Self::process_sse_event(
                     raw,
                     &mut full,
-                    &mut deltas,
+                    &mut text_deltas,
                     &mut usage,
                     Some(&mut tool_call_parts),
                 )?;
-                emit_progress(
-                    stream_events.as_ref(),
-                    &deltas,
-                    prev_len,
-                    &usage,
-                    &prev_usage,
-                );
+                emit_stream_progress(stream_events.as_ref(), text_deltas, &usage, &prev_usage);
                 Ok(())
             },
         )
@@ -1094,7 +1086,6 @@ impl GoogleOAuthProvider {
 
         Ok(LlmResponse {
             full_text: full,
-            deltas,
             parts,
             usage,
             terminal_reason: LlmTerminalReason::Stop,

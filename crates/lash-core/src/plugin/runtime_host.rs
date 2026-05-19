@@ -154,54 +154,34 @@ pub trait RuntimeSessionHost: Send + Sync {
         Ok(())
     }
 
-    async fn spawn_managed_task(
+    async fn start_background_task(
         &self,
         _session_id: &str,
-        _spec: crate::BackgroundTaskRegistration,
-        _task: PluginSessionTask,
-    ) -> Result<(), PluginError> {
+        _registration: crate::BackgroundTaskRegistration,
+        _executor: crate::BackgroundTaskLocalExecutor,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
         Err(PluginError::Session(
-            "managed background tasks are unavailable in this session".to_string(),
+            "background tasks are unavailable in this session".to_string(),
         ))
     }
 
-    async fn cancel_managed_task(
+    async fn await_background_task(
         &self,
-        _session_id: &str,
         _task_id: &str,
-    ) -> Result<(), PluginError> {
+    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
         Err(PluginError::Session(
-            "managed background tasks are unavailable in this session".to_string(),
+            "background task awaiting is unavailable in this session".to_string(),
         ))
     }
-
-    async fn register_background_task(
-        &self,
-        _session_id: &str,
-        _spec: crate::BackgroundTaskRegistration,
-        _cancel: Option<crate::LocalBackgroundTaskCancel>,
-    ) -> Result<(), PluginError> {
-        Err(PluginError::Session(
-            "background task registry is unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn unregister_background_task(&self, _session_id: &str, _task_id: &str) {}
 
     async fn complete_background_task(
         &self,
-        _session_id: &str,
         _task_id: &str,
-        _state: crate::BackgroundTaskState,
-    ) {
-    }
-
-    async fn transition_background_task_live_state(
-        &self,
-        _session_id: &str,
-        _task_id: &str,
-        _state: crate::BackgroundTaskState,
-    ) {
+        _completion: crate::BackgroundTaskCompletion,
+    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        Err(PluginError::Session(
+            "background task completion is unavailable in this session".to_string(),
+        ))
     }
 
     async fn list_background_tasks(
@@ -308,31 +288,6 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    /// Make a single LLM call without creating a full session. Used by
-    /// plugins for structured extraction, summarization, observation,
-    /// and other one-shot calls that don't need tools, turn loops, or
-    /// session state. The `usage_source` label tags the resulting
-    /// token cost in the parent session's ledger.
-    async fn direct_completion(
-        &self,
-        _request: crate::DirectRequest,
-        _usage_source: &str,
-    ) -> Result<DirectCompletion, PluginError> {
-        Err(PluginError::Session(
-            "direct completions are unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn direct_llm_completion(
-        &self,
-        _request: crate::LlmRequest,
-        _usage_source: &str,
-    ) -> Result<DirectLlmCompletion, PluginError> {
-        Err(PluginError::Session(
-            "direct LLM completions are unavailable in this session".to_string(),
-        ))
-    }
-
     async fn emit_trace_event(
         &self,
         _context: lash_trace::TraceContext,
@@ -342,15 +297,14 @@ pub trait RuntimeSessionHost: Send + Sync {
     }
 }
 
-/// Result of a single-shot LLM call via
-/// [`RuntimeSessionHost::direct_completion`].
-#[derive(Clone, Debug)]
+/// Result of a single-shot direct LLM call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectCompletion {
     pub text: String,
     pub usage: crate::TokenUsage,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectLlmCompletion {
     pub response: crate::LlmResponse,
     pub usage: crate::TokenUsage,

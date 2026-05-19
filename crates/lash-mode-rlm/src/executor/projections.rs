@@ -14,7 +14,7 @@ use crate::projection::{RlmHistoryProjection, rlm_history_projection};
 use crate::projection_codec::json_to_flow_value;
 
 pub(super) async fn projected_bindings(
-    ctx: &ModeExecutionContext,
+    ctx: &ModeExecutionContext<'_>,
     session_bindings: RlmProjectedBindings,
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> Result<ProjectedBindings, String> {

@@ -271,6 +271,7 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
     for task in &app.background_tasks {
         let state = match task.state {
             lash_core::BackgroundTaskState::Pending => "pending",
+            lash_core::BackgroundTaskState::Scheduled => "scheduled",
             lash_core::BackgroundTaskState::Running => "running",
             lash_core::BackgroundTaskState::Waiting => "idle",
             lash_core::BackgroundTaskState::Completed => "success",
@@ -286,16 +287,17 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
         let elapsed =
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
-        let state_style = match task.state {
-            lash_core::BackgroundTaskState::Pending => theme::text_subtle_style(),
-            lash_core::BackgroundTaskState::Running => theme::turn_status_state(),
-            lash_core::BackgroundTaskState::Waiting => theme::text_subtle_style(),
-            lash_core::BackgroundTaskState::Completed => theme::tool_success(),
-            lash_core::BackgroundTaskState::CancelRequested => theme::text_subtle_style(),
-            lash_core::BackgroundTaskState::Failed | lash_core::BackgroundTaskState::Cancelled => {
-                theme::tool_failure()
-            }
-        };
+        let state_style =
+            match task.state {
+                lash_core::BackgroundTaskState::Pending
+                | lash_core::BackgroundTaskState::Scheduled => theme::text_subtle_style(),
+                lash_core::BackgroundTaskState::Running => theme::turn_status_state(),
+                lash_core::BackgroundTaskState::Waiting => theme::text_subtle_style(),
+                lash_core::BackgroundTaskState::Completed => theme::tool_success(),
+                lash_core::BackgroundTaskState::CancelRequested => theme::text_subtle_style(),
+                lash_core::BackgroundTaskState::Failed
+                | lash_core::BackgroundTaskState::Cancelled => theme::tool_failure(),
+            };
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", theme::text_faint_style()),
             Span::styled(state.to_string(), state_style),

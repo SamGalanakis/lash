@@ -10,7 +10,7 @@ use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmRespo
 use lash_core::plugin::runtime_host::RuntimeSessionHost;
 use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
 use lash_core::{
-    BackgroundRuntimeHost, ExecutionMode, LashRuntime, LocalBackgroundTaskHost,
+    BackgroundRuntimeHost, ExecutionMode, LashRuntime, LocalBackgroundTaskRegistry,
     PersistedSessionState, PluginFactory, PluginHost, RuntimeCoreConfig, RuntimeServices,
     SessionPolicy,
 };
@@ -523,7 +523,7 @@ async fn run_seed_probe(
         .expect("plugin session");
     let host = BackgroundRuntimeHost::new(
         lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-        Arc::new(LocalBackgroundTaskHost::default()),
+        Arc::new(LocalBackgroundTaskRegistry::default()),
     );
     let policy = SessionPolicy {
         provider: provider.into_handle(),

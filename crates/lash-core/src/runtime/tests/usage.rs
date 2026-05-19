@@ -98,7 +98,8 @@ async fn await_background_work_waits_for_registered_jobs() {
 
 #[tokio::test]
 async fn await_background_work_does_not_cross_runtime_sessions_with_same_logical_id() {
-    let executor: Arc<dyn BackgroundTaskHost> = Arc::new(LocalBackgroundTaskHost::default());
+    let executor: Arc<dyn BackgroundTaskRegistry> =
+        Arc::new(LocalBackgroundTaskRegistry::default());
     let runtime_one = standard_runtime_with_shared_background_executor(
         mock_provider(Vec::new()),
         Arc::clone(&executor),

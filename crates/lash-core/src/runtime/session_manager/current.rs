@@ -40,11 +40,11 @@ impl CurrentSessionCapability {
         if session_id == self.session_id {
             if let Some(runtime) = managed.registry.lock().await.get(session_id).cloned() {
                 let runtime = runtime.runtime.lock().await;
-                return Ok(runtime.active_tool_catalog());
+                return runtime.active_tool_catalog();
             }
             return Ok(self
                 .plugins
-                .tool_catalog(session_id, self.policy.execution_mode.clone()));
+                .tool_catalog(session_id, self.policy.execution_mode.clone())?);
         }
         let runtime = {
             let registry = managed.registry.lock().await;
@@ -52,6 +52,9 @@ impl CurrentSessionCapability {
         }
         .ok_or_else(|| crate::PluginError::Session(format!("unknown session `{session_id}`")))?;
         let observation = runtime.observe();
+        if let Some(err) = observation.tool_catalog_error.as_ref() {
+            return Err(crate::PluginError::Session(err.clone()));
+        }
         Ok(observation.tool_catalog.as_ref().clone())
     }
 

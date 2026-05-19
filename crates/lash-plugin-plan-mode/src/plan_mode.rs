@@ -470,7 +470,7 @@ fn ensure_plan_path_from_snapshot(
 
 async fn ensure_plan_report_for_tool_context(
     state: &Arc<Mutex<PlanModeState>>,
-    context: &ToolContext,
+    context: &ToolContext<'_>,
     seed_if_missing: bool,
 ) -> Result<PlanReport, PluginError> {
     let snapshot = context.session_snapshot().await?;
@@ -557,7 +557,7 @@ where
 
 async fn set_plan_mode_enabled_state_for_tool_context(
     state: &Arc<Mutex<PlanModeState>>,
-    context: &ToolContext,
+    context: &ToolContext<'_>,
     enabled: bool,
 ) -> Result<bool, PluginError> {
     let previous = {
@@ -643,7 +643,7 @@ struct PlanModeTools {
 }
 
 impl PlanModeTools {
-    async fn execute_plan_exit(&self, context: &ToolContext) -> ToolResult {
+    async fn execute_plan_exit(&self, context: &ToolContext<'_>) -> ToolResult {
         let enabled = match self.state.lock() {
             Ok(guard) => guard.enabled,
             Err(_) => return ToolResult::err(json!("plan mode state poisoned")),

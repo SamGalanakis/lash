@@ -26,7 +26,7 @@ pub struct TextProjectionMetadata {
     pub max_lines: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecResponse {
     pub output: String,
     pub observations: Vec<String>,

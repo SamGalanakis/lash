@@ -1,7 +1,7 @@
 mod assembly;
 mod builder;
 mod config_ops;
-mod effect_host;
+mod effect;
 mod environment;
 mod host;
 mod io;
@@ -58,6 +58,8 @@ use turn_commit_draft::*;
 use turn_commit_pipeline::*;
 use turn_driver::*;
 
+pub(crate) const RUNTIME_TURN_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
+
 // `PromptUsage` is re-exported below alongside the runtime's own types.
 pub use lash_sansio::PromptUsage;
 
@@ -69,20 +71,26 @@ use assembly::{
 #[allow(unused_imports)]
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
-pub use effect_host::{
-    DirectEffectLocalExecutor, EffectInvocation, EffectInvocationMetadata, EffectOrigin,
-    LocalRuntimeEffectHost, RuntimeEffectHost, RuntimeEffectKind, TurnEffectLocalExecutor,
+pub use effect::{
+    BackgroundTaskLocalExecutor, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
+    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, LocalBackgroundCancelPolicy,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
 };
+pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use host::{
     BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
-    BackgroundTaskEvent, BackgroundTaskFilter, BackgroundTaskHost, BackgroundTaskId,
-    BackgroundTaskKind, BackgroundTaskOutcome, BackgroundTaskRecord, BackgroundTaskRegistration,
-    BackgroundTaskScope, BackgroundTaskState, EmbeddedRuntimeHost, LocalBackgroundTaskCancel,
-    LocalBackgroundTaskHost, RuntimeCoreConfig,
+    BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskExternalRef, BackgroundTaskFilter,
+    BackgroundTaskId, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskOutcome,
+    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope,
+    BackgroundTaskStartReceipt, BackgroundTaskState, BackgroundTaskUpdate, EmbeddedRuntimeHost,
+    LocalBackgroundTaskRegistry, RuntimeCoreConfig,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
+pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
@@ -260,6 +268,10 @@ impl TurnContext {
 
     pub fn has_plugin_input(&self, plugin_id: &'static str) -> bool {
         self.plugin_inputs.contains_key(plugin_id)
+    }
+
+    pub fn has_plugin_inputs(&self) -> bool {
+        !self.plugin_inputs.is_empty()
     }
 
     pub fn set_prompt_template(&mut self, template: crate::PromptTemplate) {

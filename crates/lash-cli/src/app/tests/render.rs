@@ -7,7 +7,7 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut running = lash_core::BackgroundTaskRecord::local_session(
         "test-session-id",
         "subagent:smoke",
-        lash_core::BackgroundTaskKind::Subagent,
+        lash_core::BackgroundTaskKind::SessionTurn,
         "subagent",
         lash_core::BackgroundTaskState::Running,
     );
@@ -19,7 +19,7 @@ fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut completed = lash_core::BackgroundTaskRecord::local_session(
         "test-session-id",
         "subagent:smoke",
-        lash_core::BackgroundTaskKind::Subagent,
+        lash_core::BackgroundTaskKind::SessionTurn,
         "subagent",
         lash_core::BackgroundTaskState::Completed,
     );

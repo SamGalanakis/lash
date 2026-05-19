@@ -3,7 +3,7 @@
 //! Examples are written in lashlang `call <tool> { ... }` syntax. Prompt prose
 //! is tuned for schema-first results and binding subagent output.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
@@ -31,7 +31,7 @@ pub(crate) struct RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
-    async fn spawn_agent(&self, args: &Value, context: &ToolContext) -> Result<Value, String> {
+    async fn spawn_agent(&self, args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
         let task = required_string(args, "task")?;
         let capability_name = capability_name_from_args(args, &self.registry)?;
         if self.registry.get(&capability_name).is_none() {
@@ -57,7 +57,7 @@ impl RlmSubagentToolsProvider {
 }
 
 async fn run_child_session(
-    context: &ToolContext,
+    context: &ToolContext<'_>,
     create_request: lash_core::SessionCreateRequest,
     turn_input: lash_core::TurnInput,
 ) -> Result<Value, String> {
@@ -73,32 +73,97 @@ async fn run_child_session(
         .session_id
         .clone()
         .ok_or_else(|| "child session id is required".to_string())?;
-    let child_session = context
-        .sessions()
-        .create_session(create_request)
+    let sessions = context.sessions();
+    let child_session = tokio::spawn(async move { sessions.create_session(create_request).await })
         .await
+        .map_err(|err| format!("child session creation task failed: {err}"))?
         .map_err(|err| format!("failed to create child session: {err}"))?;
     let child_session_id = child_session.session_id;
     let task_id = format!("subagent:{child_session_id}");
-    let active_turn_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-
-    let cancel = child_cancel_callback(
-        context,
-        child_session_id.clone(),
-        task_id.clone(),
-        Arc::clone(&active_turn_id),
+    let mut task_create_request = lash_core::SessionCreateRequest::child(
+        context.session_id().to_string(),
+        lash_core::SessionStartPoint::Empty,
+        child_session.policy.clone(),
+        lash_core::ModeExtras::default(),
+        "subagent",
     );
+    task_create_request.session_id = Some(child_session_id.clone());
+    let registration_input = lash_core::BackgroundTaskInput::SessionTurn {
+        create_request: Box::new(task_create_request),
+        turn_input: Box::new(turn_input.clone()),
+        output_contract: lash_core::ToolOutputContract::from_input_schema("output", None),
+    };
+
+    let task_sessions = context.sessions();
+    let executor_child_session_id = child_session_id.clone();
+    let executor_turn_input = turn_input.clone();
+    let executor = lash_core::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
+        let sessions = task_sessions.clone();
+        let turn = match sessions
+            .start_turn_stream(&executor_child_session_id, executor_turn_input)
+            .await
+        {
+            Ok(turn) => turn,
+            Err(err) => {
+                close_child_session(&sessions, &executor_child_session_id, None).await;
+                return lash_core::BackgroundTaskCompletion {
+                    state: BackgroundTaskState::Failed,
+                    summary: Some(format!("failed to start child turn: {err}")),
+                    output: Some(lash_core::ToolCallOutput::failure(
+                        lash_core::ToolFailure::tool(
+                            lash_core::ToolFailureClass::Execution,
+                            "subagent_start_failed",
+                            err.to_string(),
+                        ),
+                    )),
+                };
+            }
+        };
+        let turn_id = turn.turn_id.clone();
+        drop(turn.events);
+
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let _ = sessions.cancel_turn(&turn_id).await;
+                sessions.await_turn(&turn_id).await
+            }
+            outcome = sessions.await_turn(&turn_id) => outcome,
+        };
+        let terminal_state = if cancellation.is_cancelled()
+            && outcome
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("unknown turn"))
+        {
+            BackgroundTaskState::Cancelled
+        } else {
+            task_terminal_state(&outcome)
+        };
+        close_child_session(&sessions, &executor_child_session_id, None).await;
+        lash_core::BackgroundTaskCompletion {
+            state: terminal_state,
+            summary: completion_summary(&outcome, terminal_state),
+            output: Some(output_from_child_outcome(&outcome, terminal_state)),
+        }
+    });
+
     if let Err(err) = context
         .tasks()
-        .register_background_task(
-            BackgroundTaskRegistration {
-                id: task_id.clone(),
-                kind: BackgroundTaskKind::Subagent,
-                producer: "subagent",
-                child_session_id: Some(child_session_id.clone()),
-                parent_task_id: context.async_task_id().map(str::to_string),
-            },
-            Some(cancel),
+        .start_background_task(
+            BackgroundTaskRegistration::new(
+                task_id.clone(),
+                BackgroundTaskKind::SessionTurn,
+                "subagent",
+                lash_core::BackgroundTaskScope {
+                    session_id: context.session_id().to_string(),
+                },
+                registration_input,
+            )
+            .with_child_session_id(child_session_id.clone())
+            .with_close_policy(lash_core::BackgroundClosePolicy::Cancel)
+            .with_optional_parent_task_id(context.async_task_id().map(str::to_string)),
+            executor,
         )
         .await
     {
@@ -108,116 +173,88 @@ async fn run_child_session(
         ));
     }
 
-    let turn = match context
-        .sessions()
-        .start_turn_stream(&child_session_id, turn_input)
+    let completion = context
+        .tasks()
+        .await_background_task(&task_id)
         .await
-    {
-        Ok(turn) => turn,
-        Err(err) => {
-            cleanup_child_session(
-                context,
-                &child_session_id,
-                &task_id,
-                None,
-                BackgroundTaskState::Failed,
-            )
-            .await;
-            return Err(format!("failed to start child turn: {err}"));
-        }
-    };
-    let turn_id = turn.turn_id.clone();
-    drop(turn.events);
-    *active_turn_id.lock().expect("active turn lock") = Some(turn_id.clone());
-
-    let sessions = context.sessions();
-    let cancellation = context.cancellation_token().cloned();
-    let outcome = if let Some(token) = cancellation {
-        tokio::select! {
-            biased;
-            _ = token.cancelled() => {
-                let _ = sessions.cancel_turn(&turn_id).await;
-                sessions.await_turn(&turn_id).await
-            }
-            outcome = sessions.await_turn(&turn_id) => outcome,
-        }
-    } else {
-        sessions.await_turn(&turn_id).await
-    };
-    *active_turn_id.lock().expect("active turn lock") = None;
-
-    let terminal_state = task_terminal_state(&outcome);
-    cleanup_child_session(context, &child_session_id, &task_id, None, terminal_state).await;
-
-    if let Err(err) = &outcome
-        && err.to_string().contains("unknown turn")
-    {
+        .map_err(|err| format!("subagent failed while executing its task: {err}"))?;
+    if completion.state == BackgroundTaskState::Cancelled {
         return Err("spawn_agent was cancelled".to_string());
     }
-    let turn = outcome.map_err(|err| format!("subagent failed while executing its task: {err}"))?;
-    if let Some(error) = terminal_error_message(&turn.outcome) {
-        return Err(error);
+    if completion.state == BackgroundTaskState::Failed {
+        return Err(completion
+            .summary
+            .unwrap_or_else(|| "subagent failed".to_string()));
     }
-    if terminal_state == BackgroundTaskState::Cancelled {
-        return Err("spawn_agent was cancelled".to_string());
-    }
-    if terminal_state == BackgroundTaskState::Failed {
-        return Err("subagent failed".to_string());
-    }
-    Ok(task_result_value(&turn))
+    completion_value(completion)
 }
 
-fn child_cancel_callback(
-    context: &ToolContext,
-    child_session_id: String,
-    task_id: String,
-    active_turn_id: Arc<Mutex<Option<String>>>,
-) -> lash_core::LocalBackgroundTaskCancel {
-    let sessions = context.sessions();
-    let tasks = context.tasks();
-    Arc::new(move || {
-        let sessions = sessions.clone();
-        let tasks = tasks.clone();
-        let child_session_id = child_session_id.clone();
-        let task_id = task_id.clone();
-        let active_turn_id = Arc::clone(&active_turn_id);
-        Box::pin(async move {
-            let turn_id = active_turn_id.lock().expect("active turn lock").clone();
-            if let Some(turn_id) = turn_id {
-                let _ = sessions.cancel_turn(&turn_id).await;
-                let _ = sessions.await_turn(&turn_id).await;
-            }
-            let _ = tasks
-                .cancel_all_background_tasks_for_session(&child_session_id)
-                .await;
-            let _ = sessions.close_session(&child_session_id).await;
-            tasks
-                .complete_background_task(&task_id, BackgroundTaskState::Cancelled)
-                .await;
-        })
-    })
-}
-
-async fn cleanup_child_session(
-    context: &ToolContext,
+async fn close_child_session(
+    sessions: &lash_core::ToolSessionControl,
     child_session_id: &str,
-    task_id: &str,
     turn_id: Option<&str>,
-    terminal_state: BackgroundTaskState,
 ) {
     if let Some(turn_id) = turn_id {
-        let _ = context.sessions().cancel_turn(turn_id).await;
-        let _ = context.sessions().await_turn(turn_id).await;
+        let _ = sessions.cancel_turn(turn_id).await;
+        let _ = sessions.await_turn(turn_id).await;
     }
-    let _ = context
-        .tasks()
-        .cancel_all_background_tasks_for_session(child_session_id)
-        .await;
-    let _ = context.sessions().close_session(child_session_id).await;
-    context
-        .tasks()
-        .complete_background_task(task_id, terminal_state)
-        .await;
+    let _ = sessions.close_session(child_session_id).await;
+}
+
+fn completion_summary(
+    outcome: &Result<lash_core::AssembledTurn, lash_core::PluginError>,
+    terminal_state: BackgroundTaskState,
+) -> Option<String> {
+    match outcome {
+        Ok(turn) if terminal_state == BackgroundTaskState::Failed => {
+            terminal_error_message(&turn.outcome).or_else(|| Some("subagent failed".to_string()))
+        }
+        Ok(_) => None,
+        Err(err) => Some(err.to_string()),
+    }
+}
+
+fn output_from_child_outcome(
+    outcome: &Result<lash_core::AssembledTurn, lash_core::PluginError>,
+    terminal_state: BackgroundTaskState,
+) -> lash_core::ToolCallOutput {
+    match outcome {
+        Ok(turn) if terminal_state == BackgroundTaskState::Completed => {
+            lash_core::ToolCallOutput::success(task_result_value(turn))
+        }
+        Ok(turn) if terminal_state == BackgroundTaskState::Cancelled => {
+            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
+                terminal_error_message(&turn.outcome)
+                    .unwrap_or_else(|| "spawn_agent was cancelled".to_string()),
+            ))
+        }
+        Ok(turn) => lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
+            lash_core::ToolFailureClass::Execution,
+            "subagent_failed",
+            terminal_error_message(&turn.outcome).unwrap_or_else(|| "subagent failed".to_string()),
+        )),
+        Err(err) if terminal_state == BackgroundTaskState::Cancelled => {
+            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
+                err.to_string(),
+            ))
+        }
+        Err(err) => lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
+            lash_core::ToolFailureClass::Execution,
+            "subagent_failed",
+            err.to_string(),
+        )),
+    }
+}
+
+fn completion_value(completion: lash_core::BackgroundTaskCompletion) -> Result<Value, String> {
+    let output = completion
+        .output
+        .ok_or_else(|| "subagent completed without output".to_string())?;
+    match output.outcome {
+        lash_core::ToolCallOutcome::Success(value) => Ok(value.to_json_value()),
+        lash_core::ToolCallOutcome::Failure(failure) => Err(failure.message),
+        lash_core::ToolCallOutcome::Cancelled(cancellation) => Err(cancellation.message),
+    }
 }
 
 #[async_trait]

@@ -12,7 +12,6 @@ mod execution_context;
 mod monitor_handles;
 mod tool_execution;
 
-pub(crate) use async_handles::AsyncToolHandleMap;
 pub use execution_context::ModeExecutionContext;
 pub use tool_execution::{ModeToolBatchItem, ModeToolReply};
 
@@ -154,7 +153,6 @@ pub struct Session {
     /// and we skip the section/Vec-join work in
     /// `lash_sansio::PromptTemplate::render`.
     prompt_cache: Arc<lash_sansio::PromptCache>,
-    async_tool_handles: AsyncToolHandleMap,
 }
 
 impl Session {
@@ -174,7 +172,6 @@ impl Session {
             message_tx: None,
             tool_surface_cache: std::sync::Mutex::new(Vec::new()),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
-            async_tool_handles: Default::default(),
         };
 
         let mode_session = Arc::clone(session.plugins().mode_session());
@@ -275,7 +272,7 @@ impl Session {
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> ToolSurfaceHandle {
+    ) -> Result<ToolSurfaceHandle, crate::PluginError> {
         let provider = self.tools();
         let mut tools = provider.tool_manifests();
         let contract_provider = Arc::clone(&provider);
@@ -292,33 +289,16 @@ impl Session {
             let native_tools = self.plugins().mode_native_tool_manifests();
             tools.extend(native_tools);
         }
-        let surface = match self
-            .plugins()
-            .resolve_tool_surface(crate::plugin::ToolSurfaceContext {
+        let surface = Arc::new(self.plugins().resolve_tool_surface(
+            crate::plugin::ToolSurfaceContext {
                 session_id: session_id.to_string(),
                 mode: mode.clone(),
                 tools,
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
                 subagent: self.plugins().subagent_context().cloned(),
-            }) {
-            Ok(surface) => Arc::new(surface),
-            Err(err) => {
-                tracing::warn!("failed to resolve tool surface: {err}");
-                let provider = self.tools();
-                let mut fallback_tools = provider.tool_manifests();
-                if self.include_base_tools && mode == self.plugins().execution_mode() {
-                    let native_tools = self.plugins().mode_native_tool_manifests();
-                    fallback_tools.extend(native_tools);
-                }
-                Arc::new(crate::build_tool_surface(crate::ToolSurfaceBuildInput {
-                    tools: fallback_tools,
-                    mode: mode.clone(),
-                    resolve_contract: Some(resolve_contract),
-                    contributions: Vec::new(),
-                }))
-            }
-        };
+            },
+        )?);
         let input = crate::ModeBuildInput {
             mode: mode.clone(),
             tool_surface: Arc::clone(&surface),
@@ -341,98 +321,102 @@ impl Session {
             mode.plugin_id(),
         );
         let preamble = driver.build_preamble(input);
-        ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
+        Ok(ToolSurfaceHandle(Arc::new(ToolSurfaceArtifact {
             surface,
             preamble: Arc::new(preamble),
             derived: ToolSurfaceDerived::default(),
-        }))
+        })))
     }
 
     fn tool_surface_cache_entry(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> ToolSurfaceHandle {
+    ) -> Result<ToolSurfaceHandle, crate::PluginError> {
         let key = self.tool_surface_cache_key(&mode);
         let mut cache = self
             .tool_surface_cache
             .lock()
             .expect("tool surface cache lock");
         if let Some((_, entry)) = cache.iter().find(|(entry_key, _)| *entry_key == key) {
-            return entry.clone();
+            return Ok(entry.clone());
         }
-        let entry = self.build_tool_surface_entry(session_id, mode);
+        let entry = self.build_tool_surface_entry(session_id, mode)?;
         cache.push((key, entry.clone()));
-        entry
+        Ok(entry)
     }
 
     pub fn tool_surface(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> Arc<crate::ToolSurface> {
-        self.tool_surface_cache_entry(session_id, mode).surface()
+    ) -> Result<Arc<crate::ToolSurface>, crate::PluginError> {
+        Ok(self.tool_surface_cache_entry(session_id, mode)?.surface())
     }
 
     pub(crate) fn mode_preamble(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> Arc<crate::ModePreamble> {
-        self.tool_surface_cache_entry(session_id, mode).preamble()
+    ) -> Result<Arc<crate::ModePreamble>, crate::PluginError> {
+        Ok(self.tool_surface_cache_entry(session_id, mode)?.preamble())
     }
 
     pub(crate) fn shared_tool_catalog(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> Arc<Vec<serde_json::Value>> {
-        self.tool_surface_cache_entry(session_id, mode).catalog()
+    ) -> Result<Arc<Vec<serde_json::Value>>, crate::PluginError> {
+        Ok(self.tool_surface_cache_entry(session_id, mode)?.catalog())
     }
 
     pub fn tool_catalog(
         &self,
         session_id: &str,
         mode: crate::ExecutionMode,
-    ) -> Vec<serde_json::Value> {
-        self.shared_tool_catalog(session_id, mode).as_ref().clone()
+    ) -> Result<Vec<serde_json::Value>, crate::PluginError> {
+        Ok(self.shared_tool_catalog(session_id, mode)?.as_ref().clone())
     }
 
     #[allow(
         clippy::too_many_arguments,
         reason = "mode execution bridge carries explicit per-turn runtime dependencies"
     )]
-    pub(crate) fn mode_execution_context(
+    pub(crate) fn mode_execution_context<'run>(
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+        detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
+        direct_completions: crate::DirectCompletionClient<'run>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
         turn_context: crate::TurnContext,
-    ) -> ModeExecutionContext {
+    ) -> Result<ModeExecutionContext<'run>, crate::PluginError> {
         let dispatch = Arc::new(ToolDispatchContext {
             plugins: Arc::clone(self.plugins()),
             tools: self.tools(),
-            surface: self.tool_surface(session_id, self.execution_mode.clone()),
+            surface: self.tool_surface(session_id, self.execution_mode.clone())?,
             host,
+            effect_controller,
+            direct_completions: direct_completions.clone(),
             session_id: session_id.to_string(),
             event_tx,
             turn_injection_bridge: self.turn_injection_bridge().clone(),
             attachment_store: Arc::clone(&self.services.attachment_store),
             turn_context: turn_context.clone(),
         });
-        ModeExecutionContext::new(
+        Ok(ModeExecutionContext::new(
             session_id.to_string(),
             self.execution_mode.clone(),
             dispatch,
-            Arc::clone(&self.async_tool_handles),
-            self.message_tx.clone(),
+            detached_effect_controller,
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             mode_extension,
             turn_context,
-        )
+        ))
     }
 
     pub fn turn_injection_bridge(&self) -> &TurnInjectionBridge {
@@ -454,10 +438,6 @@ impl Session {
     }
 
     pub async fn reset(&mut self) -> Result<(), SessionError> {
-        self.async_tool_handles
-            .lock()
-            .expect("async tool handle map lock")
-            .clear();
         self.tool_surface_cache
             .lock()
             .expect("tool surface cache lock")

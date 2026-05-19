@@ -109,19 +109,9 @@ where
     buffer.finish(on_event)
 }
 
-pub fn emit_progress(
+pub fn emit_stream_progress(
     tx: Option<&LlmEventSender>,
-    deltas: &[String],
-    prev_len: usize,
-    usage: &LlmUsage,
-    prev_usage: &LlmUsage,
-) {
-    emit_delta_progress(tx, &deltas[prev_len..], usage, prev_usage);
-}
-
-fn emit_delta_progress(
-    tx: Option<&LlmEventSender>,
-    added_deltas: &[String],
+    added_deltas: impl IntoIterator<Item = String>,
     usage: &LlmUsage,
     prev_usage: &LlmUsage,
 ) {
@@ -132,6 +122,6 @@ fn emit_delta_progress(
         tx.send(LlmStreamEvent::Usage(usage.clone()));
     }
     for piece in added_deltas {
-        tx.send(LlmStreamEvent::Delta(piece.clone()));
+        tx.send(LlmStreamEvent::Delta(piece));
     }
 }

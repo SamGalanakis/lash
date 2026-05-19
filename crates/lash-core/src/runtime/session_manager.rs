@@ -11,6 +11,7 @@ mod monitor;
 mod turns;
 mod usage;
 
+pub use direct::DirectCompletionClient;
 pub(in crate::runtime) use usage::ChildUsageEventRelay;
 pub(in crate::runtime::session_manager) use usage::{
     ChannelEventSink, LiveChildUsageForwarder, subtract_usage,
@@ -57,7 +58,6 @@ pub(in crate::runtime) struct CurrentSessionCapability {
     pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
-    async_tool_handles: Option<crate::session::AsyncToolHandleMap>,
 }
 
 #[derive(Clone)]
@@ -156,10 +156,6 @@ impl CurrentSessionCapability {
             host: runtime.host.clone(),
             plugins,
             store: runtime.services.store.clone(),
-            async_tool_handles: runtime
-                .session
-                .as_ref()
-                .map(|session| session.async_tool_handle_map()),
         }
     }
 }
@@ -201,6 +197,15 @@ impl UsageCapability {
 }
 
 impl RuntimeSessionManager {
+    pub(super) fn direct_completion_client<'run>(
+        self: &Arc<Self>,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+        turn_id: Option<String>,
+        turn_lease: Option<crate::RuntimeTurnLease>,
+    ) -> DirectCompletionClient<'run> {
+        DirectCompletionClient::runtime(Arc::clone(self), effect_controller, turn_id, turn_lease)
+    }
+
     pub(super) fn new(
         runtime: &LashRuntime,
         persist_usage_to_store: bool,

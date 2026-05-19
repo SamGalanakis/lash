@@ -141,7 +141,7 @@ pub(crate) trait ToolSourceExecutor: Send + Sync + 'static {
         &self,
         tool: &str,
         args: &serde_json::Value,
-        context: &ToolContext,
+        context: &ToolContext<'_>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult;
 }
@@ -182,7 +182,7 @@ impl ToolSourceExecutor for ToolProviderSource {
         &self,
         tool: &str,
         args: &serde_json::Value,
-        context: &ToolContext,
+        context: &ToolContext<'_>,
         progress: Option<&ProgressSender>,
     ) -> ToolResult {
         self.provider
@@ -696,7 +696,7 @@ mod tests {
             &self,
             tool: &str,
             args: &serde_json::Value,
-            _context: &ToolContext,
+            _context: &ToolContext<'_>,
             _progress: Option<&ProgressSender>,
         ) -> ToolResult {
             ToolResult::ok(json!({
@@ -744,7 +744,7 @@ mod tests {
             &self,
             tool: &str,
             _args: &serde_json::Value,
-            _context: &ToolContext,
+            _context: &ToolContext<'_>,
             _progress: Option<&ProgressSender>,
         ) -> ToolResult {
             self.executions.fetch_add(1, Ordering::SeqCst);
@@ -850,6 +850,9 @@ mod tests {
             Arc::new(crate::testing::MockSessionManager::default()),
             crate::TurnContext::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             None,
         );
         let args = json!({});
@@ -889,6 +892,9 @@ mod tests {
             Arc::new(crate::testing::MockSessionManager::default()),
             crate::TurnContext::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
+            crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             None,
         );
         let args = json!({ "query": "hello" });

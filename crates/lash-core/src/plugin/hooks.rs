@@ -66,6 +66,7 @@ pub struct SessionStateChangedContext {
     pub session_id: String,
     pub state: SessionReadView,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub direct_completions: crate::DirectCompletionClient<'static>,
 }
 
 #[derive(Clone)]

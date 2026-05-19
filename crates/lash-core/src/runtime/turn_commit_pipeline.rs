@@ -256,6 +256,7 @@ impl TurnCommitPipeline {
         returned_turn: &mut AssembledTurn,
         session: Option<&mut Session>,
         usage_deltas: &[crate::TokenLedgerEntry],
+        completed_turn: Option<crate::RuntimeTurnCompletion>,
     ) -> Result<(), RuntimeError> {
         let (store, plugins, execution_state_snapshot) = match session {
             Some(session) => {
@@ -273,6 +274,7 @@ impl TurnCommitPipeline {
             store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
             &returned_turn.outcome,
+            completed_turn,
         )
         .await
         .map_err(|err| RuntimeError {
@@ -328,7 +330,7 @@ impl TurnCommitPipeline {
         let draft = self.draft_mut();
         let state = draft.state();
         let graph = draft.graph_commit(state.graph_replace_required);
-        self.apply_commit(store, graph, usage_deltas).await
+        self.apply_commit(store, graph, usage_deltas, None).await
     }
 
     async fn final_commit_with_snapshots(
@@ -339,6 +341,7 @@ impl TurnCommitPipeline {
         store: Option<&(dyn RuntimePersistence + '_)>,
         usage_deltas: &[crate::TokenLedgerEntry],
         outcome: &TurnOutcome,
+        completed_turn: Option<crate::RuntimeTurnCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.final_state_mut();
         state.apply_exported_state(returned_state);
@@ -385,7 +388,8 @@ impl TurnCommitPipeline {
                     },
                 }
             };
-            self.apply_commit(store, graph, usage_deltas).await
+            self.apply_commit(store, graph, usage_deltas, completed_turn)
+                .await
         } else {
             state.discard_runtime_snapshots();
             Ok(())
@@ -397,10 +401,13 @@ impl TurnCommitPipeline {
         store: &(dyn RuntimePersistence + '_),
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
+        completed_turn: Option<crate::RuntimeTurnCompletion>,
     ) -> Result<(), StoreError> {
         let state = self.state_mut();
         let mark = PersistedGraphMark::from_graph_commit(&graph);
-        let commit = RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
+        let mut commit =
+            RuntimeCommit::persisted_state_with_graph_commit(state, graph, usage_deltas);
+        commit.completed_turn = completed_turn;
         let result = store.commit_runtime_state(commit).await?;
         state.apply_persisted_commit_result(result);
         if let Some(draft) = self.draft.as_mut() {
@@ -622,6 +629,76 @@ mod tests {
                 checkpoint_ref,
                 manifest,
             })
+        }
+
+        async fn claim_runtime_turn_lease(
+            &self,
+            session_id: &str,
+            turn_id: &str,
+            owner_id: &str,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::RuntimeTurnLease, StoreError> {
+            Ok(crate::RuntimeTurnLease {
+                schema_version: crate::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                owner_id: owner_id.to_string(),
+                lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
+                fencing_token: 1,
+                claimed_at_epoch_ms: 0,
+                expires_at_epoch_ms: lease_ttl_ms,
+            })
+        }
+
+        async fn renew_runtime_turn_lease(
+            &self,
+            lease: &crate::RuntimeTurnLease,
+            lease_ttl_ms: u64,
+        ) -> Result<crate::RuntimeTurnLease, StoreError> {
+            Ok(crate::RuntimeTurnLease {
+                expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
+                ..lease.clone()
+            })
+        }
+
+        async fn abandon_runtime_turn_lease(
+            &self,
+            _lease: &crate::RuntimeTurnLease,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn save_runtime_turn_checkpoint(
+            &self,
+            _lease: &crate::RuntimeTurnLease,
+            _checkpoint: crate::RuntimeTurnCheckpoint,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn load_runtime_turn_checkpoint(
+            &self,
+            _session_id: &str,
+            _turn_id: &str,
+        ) -> Result<Option<crate::RuntimeTurnCheckpoint>, StoreError> {
+            Ok(None)
+        }
+
+        async fn save_runtime_effect_outcome(
+            &self,
+            _lease: &crate::RuntimeTurnLease,
+            _record: crate::RuntimeEffectJournalRecord,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn load_runtime_effect_outcome(
+            &self,
+            _session_id: &str,
+            _turn_id: &str,
+            _idempotency_key: &str,
+        ) -> Result<Option<crate::RuntimeEffectJournalRecord>, StoreError> {
+            Ok(None)
         }
 
         async fn save_session_meta(
@@ -904,6 +981,7 @@ mod tests {
                 Some(&store),
                 &usage,
                 &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                None,
             )
             .await
             .expect("commit");
@@ -940,6 +1018,7 @@ mod tests {
                 None,
                 &[],
                 &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                None,
             )
             .await
             .expect("no-store commit");

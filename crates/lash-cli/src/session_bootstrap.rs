@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
 use lash_core::{
-    AttachmentStore, BackgroundTaskHost, PersistedSessionConfig, PersistedSessionState,
+    AttachmentStore, BackgroundTaskRegistry, PersistedSessionConfig, PersistedSessionState,
     RuntimePersistence, SessionGraph, SessionHead, SessionPolicy,
 };
 use lash_sqlite_store::Store;
@@ -40,7 +40,7 @@ pub(crate) struct CliSessionOpener {
     attachment_store: Arc<dyn AttachmentStore>,
     trace_jsonl_path: Option<PathBuf>,
     trace_level: lash::tracing::TraceLevel,
-    background_task_host: Arc<dyn BackgroundTaskHost>,
+    background_task_registry: Arc<dyn BackgroundTaskRegistry>,
 }
 
 fn policy_with_persisted_config(
@@ -193,7 +193,7 @@ impl CliSessionOpener {
         attachment_store: Arc<dyn AttachmentStore>,
         trace_jsonl_path: Option<PathBuf>,
         trace_level: lash::tracing::TraceLevel,
-        background_task_host: Arc<dyn BackgroundTaskHost>,
+        background_task_registry: Arc<dyn BackgroundTaskRegistry>,
     ) -> Self {
         Self {
             plugin_stack,
@@ -201,7 +201,7 @@ impl CliSessionOpener {
             attachment_store,
             trace_jsonl_path,
             trace_level,
-            background_task_host,
+            background_task_registry,
         }
     }
 
@@ -241,7 +241,7 @@ impl CliSessionOpener {
             .attachment_store(Arc::clone(&self.attachment_store))
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
-            .background_task_host(Arc::clone(&self.background_task_host));
+            .background_task_registry(Arc::clone(&self.background_task_registry));
         if let Some(max_context_tokens) = policy.max_context_tokens {
             core_builder = core_builder.max_context_tokens(max_context_tokens);
         }

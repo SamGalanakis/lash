@@ -701,7 +701,7 @@ pub(crate) struct ResponsesStreamingToolCall {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResponsesStreamState {
     pub(crate) full_text: String,
-    pub(crate) deltas: Vec<String>,
+    pub(crate) pending_text_deltas: Vec<String>,
     pub(crate) parts: Vec<LlmOutputPart>,
     pub(crate) usage: LlmUsage,
     pub(crate) provider_usage: Option<Value>,
@@ -751,7 +751,7 @@ impl ResponsesStreamState {
         if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(index) {
             text.push_str(piece);
         }
-        self.deltas.push(piece.to_string());
+        self.pending_text_deltas.push(piece.to_string());
         self.recompute_full_text();
     }
 
@@ -918,6 +918,10 @@ impl ResponsesStreamState {
 
     pub(crate) fn take_reasoning_deltas(&mut self) -> Vec<String> {
         std::mem::take(&mut self.reasoning_deltas)
+    }
+
+    pub(crate) fn take_text_deltas(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_text_deltas)
     }
 
     pub(crate) fn response_parts(&self) -> Vec<LlmOutputPart> {

@@ -15,14 +15,14 @@ pub(crate) use tokio_util::sync::CancellationToken;
 
 pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
-    AssembledTurn, AttachmentStore, BackgroundTaskHost, BackgroundTaskRecord, EventSink,
-    ExecutionSummary, LocalBackgroundTaskHost, Message, ModeTurnOptions, PluginFactory,
-    PluginMessage, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectHost,
-    RuntimePersistence, SessionCreateRequest, SessionError, SessionHandle, SessionReadView,
-    SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionTurnHandle,
-    SessionUsageReport, StandardContextApproach, TerminationPolicy, ToolAvailability,
-    ToolCallRecord, ToolManifest, ToolProvider, ToolResult, ToolSourceHandle, TurnActivitySink,
-    TurnOutcome,
+    AssembledTurn, AttachmentStore, BackgroundTaskRecord, BackgroundTaskRegistry, EventSink,
+    ExecutionSummary, LocalBackgroundTaskRegistry, Message, ModeTurnOptions, PluginFactory,
+    PluginMessage, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
+    RuntimeEffectControllerScope, RuntimePersistence, SessionCreateRequest, SessionError,
+    SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
+    SessionStoreFactory, SessionTurnHandle, SessionUsageReport, StandardContextApproach,
+    TerminationPolicy, ToolAvailability, ToolCallRecord, ToolManifest, ToolProvider, ToolResult,
+    ToolSourceHandle, TurnActivitySink, TurnOutcome,
 };
 pub(crate) use lash_core::{InputItem, TokenLedgerEntry, TokenUsage};
 pub(crate) use lash_core::{PromptContribution, PromptLayer, PromptSlot, PromptTemplate};

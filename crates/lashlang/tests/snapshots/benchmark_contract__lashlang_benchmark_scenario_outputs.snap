@@ -23,6 +23,20 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   },
   "direct_unwrap": "alpha,alpha:beta",
   "general_parallel": "alpha:3|beta:3",
+  "image_surface": {
+    "descriptor_has_id": true,
+    "descriptor_has_type": true,
+    "dims": "640x480",
+    "metadata": {
+      "height": 480,
+      "id": "img-1",
+      "label": "chart.png",
+      "missing": null,
+      "size": 1234,
+      "width": 640
+    },
+    "size_bucket": 12
+  },
   "indexed_assignment": {
     "counts": {
       "alpha": 3,
@@ -47,6 +61,79 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
       }
     },
     "summary": "alpha:3,beta:2,gamma:2,delta:1"
+  },
+  "integer_range_surface": {
+    "backward": [
+      7,
+      5,
+      3,
+      1,
+      -1
+    ],
+    "ceil_neg": -3,
+    "count": 17,
+    "first": -8,
+    "first_beta": 6,
+    "floor_neg": -4,
+    "forward": [
+      0,
+      3,
+      6,
+      9
+    ],
+    "head": "alpha",
+    "last": 8,
+    "mid": [
+      -6,
+      -5,
+      -4,
+      -3,
+      -2,
+      -1,
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "second_beta": 17,
+    "starts": [
+      0,
+      5,
+      10,
+      15
+    ],
+    "stride": 5,
+    "tail": "delta",
+    "windows": [
+      [
+        -8,
+        -7,
+        -6,
+        -5,
+        -4
+      ],
+      [
+        -3,
+        -2,
+        -1,
+        0,
+        1
+      ],
+      [
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      [
+        7,
+        8
+      ]
+    ]
   },
   "language_surface": {
     "awaited": "awaited",
@@ -148,6 +235,19 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "outer": "restored",
     "skipped": 32
   },
+  "parallel_statement_surface": {
+    "batched_computed": 42,
+    "computed": 42,
+    "discarded": [
+      "branch_a",
+      42,
+      3
+    ],
+    "first": "left",
+    "left": "left",
+    "right": "right",
+    "second": "right"
+  },
   "projected_operations": {
     "as_float": 4,
     "as_int": 4,
@@ -224,6 +324,19 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "nested_head": "Nested Projection",
     "normal_title": "Snapshot Rules",
     "tags": "snapshot,projected,mixed"
+  },
+  "syntax_text_surface": {
+    "patch_head": "*** Begin Patch",
+    "pieces": [
+      109,
+      true,
+      true,
+      true,
+      3,
+      "first"
+    ],
+    "plain_lines": 3,
+    "script_head": "python3"
   },
   "tool_control_surface": {
     "first": "done:inspect auth",

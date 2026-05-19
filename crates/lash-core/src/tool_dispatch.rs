@@ -17,11 +17,13 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct ToolDispatchContext {
+pub struct ToolDispatchContext<'run> {
     pub plugins: Arc<PluginSession>,
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+    pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
@@ -48,7 +50,7 @@ pub struct ParallelToolCallOutcome {
 }
 
 pub(crate) async fn dispatch_tool_call(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
@@ -58,18 +60,19 @@ pub(crate) async fn dispatch_tool_call(
         Arc::clone(&context.host),
         context.turn_context.clone(),
         Arc::clone(&context.attachment_store),
+        context.direct_completions.clone(),
         None,
     );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
         .await
 }
 
-pub(crate) async fn dispatch_tool_call_with_execution_context(
-    context: &ToolDispatchContext,
+pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
+    context: &ToolDispatchContext<'run>,
     tool_name: String,
     args: serde_json::Value,
     progress: Option<&ProgressSender>,
-    tool_context: ToolContext,
+    tool_context: ToolContext<'run>,
 ) -> ToolDispatchOutcome {
     let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
         return outcome(
@@ -300,7 +303,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context(
 }
 
 fn resolve_callable_manifest(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> Option<ToolManifest> {
     if let Some(entry) = context
@@ -342,7 +345,7 @@ fn resolve_callable_manifest(
 }
 
 pub(crate) async fn dispatch_parallel_tool_call(
-    context: Arc<ToolDispatchContext>,
+    context: Arc<ToolDispatchContext<'_>>,
     spec: ParallelToolCallSpec,
     progress: Option<ProgressSender>,
 ) -> ParallelToolCallOutcome {
@@ -357,7 +360,7 @@ pub(crate) async fn dispatch_parallel_tool_call(
 /// tool names default to [`ToolExecutionMode::Parallel`] — the dispatcher
 /// will still surface an "unknown tool" error via the normal path.
 pub(crate) fn resolve_tool_execution_mode(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> ToolExecutionMode {
     context
@@ -370,7 +373,7 @@ pub(crate) fn resolve_tool_execution_mode(
 }
 
 pub(crate) fn resolve_tool_argument_projection_policy(
-    context: &ToolDispatchContext,
+    context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> crate::ToolArgumentProjectionPolicy {
     context
@@ -433,7 +436,7 @@ where
 
 /// Dispatch a batch of tool calls produced by one model response.
 pub async fn dispatch_parallel_tool_calls(
-    context: Arc<ToolDispatchContext>,
+    context: Arc<ToolDispatchContext<'_>>,
     specs: Vec<ParallelToolCallSpec>,
     progress: Option<&ProgressSender>,
 ) -> Vec<ParallelToolCallOutcome> {
@@ -478,6 +481,7 @@ fn runtime_failure(
 mod tests {
     use super::*;
     use crate::plugin::{PluginHost, StaticPluginFactory};
+    use crate::runtime::RuntimeEffectControllerHandle;
     use crate::{
         ExecutionMode, ToolCall, ToolCallOutcome, ToolProvider, ToolRetryDisposition,
         ToolRetryPolicy,
@@ -766,16 +770,24 @@ mod tests {
         )
     }
 
-    fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext {
+    fn strict_mcp_dispatch_context(executed: Arc<AtomicUsize>) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(StrictMcpTools { executed }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -795,16 +807,24 @@ mod tests {
 
     use crate::testing::MockSessionManager;
 
-    fn dispatch_context() -> ToolDispatchContext {
+    fn dispatch_context() -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(MockTools));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -815,7 +835,7 @@ mod tests {
 
     fn projection_policy_dispatch_context(
         captured: Arc<std::sync::Mutex<Option<crate::ToolArgumentProjectionPolicy>>>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let provider: Arc<dyn ToolProvider> = Arc::new(ProjectionPolicyTools);
         let hook_captured = Arc::clone(&captured);
@@ -836,12 +856,20 @@ mod tests {
         .build_standard_session("root", None)
         .expect("plugin session");
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -872,6 +900,7 @@ mod tests {
         successes_after: usize,
         cancel_on_first: bool,
         observed_attempts: SharedAttemptObservations,
+        retry_after_ms: Option<u64>,
     }
 
     #[async_trait::async_trait]
@@ -959,7 +988,7 @@ mod tests {
                 crate::ToolFailureClass::External,
                 "transient",
                 "transient failure",
-                Some(0),
+                self.retry_after_ms,
             )
         }
     }
@@ -967,7 +996,7 @@ mod tests {
     fn lazy_contract_dispatch_context(
         contracts_resolved: Arc<AtomicUsize>,
         executed: Arc<AtomicUsize>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let provider: Arc<dyn ToolProvider> = Arc::new(CountingContractTools {
             contracts_resolved,
@@ -984,6 +1013,12 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -992,16 +1027,24 @@ mod tests {
         }
     }
 
-    fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext {
+    fn exact_dispatch_context(provider: Arc<dyn ToolProvider>) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::clone(&provider));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1022,29 +1065,38 @@ mod tests {
         successes_after: usize,
         cancel_on_first: bool,
         observed_attempts: SharedAttemptObservations,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         exact_dispatch_context(Arc::new(RetryProbeTools {
             definition: retry_tool("retry_probe", retry_policy),
             attempts,
             successes_after,
             cancel_on_first,
             observed_attempts,
+            retry_after_ms: Some(0),
         }))
     }
 
     fn parallel_dispatch_context(
         barrier: Arc<Barrier>,
         started: Arc<AtomicUsize>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(ParallelProbeTools { barrier, started }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1250,6 +1302,165 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct SleepRecordingEffectController {
+        sleeps: Arc<std::sync::Mutex<Vec<crate::EffectInvocationMetadata>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeEffectController for SleepRecordingEffectController {
+        async fn execute_effect(
+            &self,
+            envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
+            self.sleeps
+                .lock()
+                .expect("sleep records")
+                .push(envelope.metadata);
+            Ok(crate::RuntimeEffectOutcome::Sleep)
+        }
+
+        async fn start_background_task(
+            &self,
+            _registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            registration: crate::BackgroundTaskRegistration,
+            _local_executor: crate::BackgroundTaskLocalExecutor,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            Err(crate::PluginError::Session(format!(
+                "sleep recording controller cannot start background task `{}`",
+                registration.id
+            )))
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            registry.request_cancel(task_id, reason).await
+        }
+    }
+
+    struct FailingSleepEffectController;
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeEffectController for FailingSleepEffectController {
+        async fn execute_effect(
+            &self,
+            envelope: crate::RuntimeEffectEnvelope,
+            _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<crate::RuntimeEffectOutcome, crate::RuntimeEffectControllerError> {
+            Err(crate::RuntimeEffectControllerError::new(
+                "test_sleep_rejected",
+                format!("rejected {}", envelope.command.kind().as_str()),
+            ))
+        }
+
+        async fn start_background_task(
+            &self,
+            _registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            registration: crate::BackgroundTaskRegistration,
+            _local_executor: crate::BackgroundTaskLocalExecutor,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            Err(crate::PluginError::Session(format!(
+                "failing controller cannot start background task `{}`",
+                registration.id
+            )))
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn crate::BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
+            registry.request_cancel(task_id, reason).await
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_delay_crosses_effect_controller_as_sleep_effect() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = Arc::new(SleepRecordingEffectController::default());
+        let mut context = exact_dispatch_context(Arc::new(RetryProbeTools {
+            definition: retry_tool("retry_probe", ToolRetryPolicy::safe(3, 25, 25)),
+            attempts: Arc::clone(&attempts),
+            successes_after: 2,
+            cancel_on_first: false,
+            observed_attempts: Arc::clone(&observed),
+            retry_after_ms: Some(25),
+        }));
+        context.effect_controller = RuntimeEffectControllerHandle::shared(recorder.clone());
+        let tool_context = ToolContext::new(
+            context.session_id.clone(),
+            Arc::clone(&context.host),
+            context.turn_context.clone(),
+            Arc::clone(&context.attachment_store),
+            context.direct_completions.clone(),
+            Some("call-1".to_string()),
+        );
+
+        let outcome = dispatch_tool_call_with_execution_context(
+            &context,
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+            tool_context,
+        )
+        .await;
+
+        assert!(outcome.record.output.is_success());
+        let sleeps = recorder.sleeps.lock().expect("sleep records");
+        assert_eq!(sleeps.len(), 1);
+        assert_eq!(sleeps[0].effect_kind, crate::RuntimeEffectKind::Sleep);
+        assert_eq!(
+            sleeps[0].idempotency_key,
+            "lash-tool:session:call-1:retry_probe:attempt:1:sleep"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_sleep_controller_rejection_returns_explicit_tool_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut context = exact_dispatch_context(Arc::new(RetryProbeTools {
+            definition: retry_tool("retry_probe", ToolRetryPolicy::safe(3, 25, 25)),
+            attempts: Arc::clone(&attempts),
+            successes_after: 2,
+            cancel_on_first: false,
+            observed_attempts: Arc::clone(&observed),
+            retry_after_ms: Some(25),
+        }));
+        context.effect_controller =
+            RuntimeEffectControllerHandle::shared(Arc::new(FailingSleepEffectController));
+        let tool_context = ToolContext::new(
+            context.session_id.clone(),
+            Arc::clone(&context.host),
+            context.turn_context.clone(),
+            Arc::clone(&context.attachment_store),
+            context.direct_completions.clone(),
+            Some("call-1".to_string()),
+        );
+
+        let outcome = dispatch_tool_call_with_execution_context(
+            &context,
+            "retry_probe".to_string(),
+            json!({ "value": "ok" }),
+            None,
+            tool_context,
+        )
+        .await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let ToolCallOutcome::Failure(failure) = outcome.record.output.outcome else {
+            panic!("expected failure");
+        };
+        assert_eq!(failure.code, "tool_retry_sleep_failed");
+    }
+
     #[tokio::test]
     async fn safe_retry_policy_marks_exhausted_after_final_attempt() {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1321,6 +1532,7 @@ mod tests {
             Arc::clone(&context.host),
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
+            context.direct_completions.clone(),
             Some("call-1".to_string()),
         );
         let outcome = dispatch_tool_call_with_execution_context(
@@ -1544,16 +1756,24 @@ mod tests {
 
     fn serial_dispatch_context(
         log: Arc<std::sync::Mutex<Vec<(String, Instant, Instant)>>>,
-    ) -> ToolDispatchContext {
+    ) -> ToolDispatchContext<'static> {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(Arc::new(SerialProbeTools { log }));
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1684,12 +1904,20 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(8);
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1806,12 +2034,20 @@ mod tests {
         });
         let plugins = test_plugins(provider);
         let tools = plugins.tools();
-        let surface = plugins.tool_surface("session", ExecutionMode::standard());
+        let surface = plugins
+            .tool_surface("session", ExecutionMode::standard())
+            .expect("tool surface");
         let context = Arc::new(ToolDispatchContext {
             plugins,
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),

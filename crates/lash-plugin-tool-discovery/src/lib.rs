@@ -250,26 +250,6 @@ mod tests {
                 .extend(tool_names.iter().cloned());
             Ok(2)
         }
-        async fn direct_completion(
-            &self,
-            request: lash_core::DirectRequest,
-            _usage_source: &str,
-        ) -> Result<DirectCompletion, PluginError> {
-            self.direct_requests
-                .lock()
-                .expect("direct requests lock poisoned")
-                .push(request);
-            let text = self
-                .direct_response
-                .lock()
-                .expect("direct response lock poisoned")
-                .clone()
-                .unwrap_or_else(|| "{\"tool_names\":[]}".to_string());
-            Ok(DirectCompletion {
-                text,
-                usage: TokenUsage::default(),
-            })
-        }
         async fn create_session(
             &self,
             _request: lash_core::plugin::SessionCreateRequest,
@@ -295,6 +275,30 @@ mod tests {
         async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
+    }
+
+    fn discovery_context(host: Arc<FakeSessionManager>) -> lash_core::ToolContext<'static> {
+        let direct_host = Arc::clone(&host);
+        lash_core::testing::mock_tool_context_with_host_and_direct_completions(
+            host,
+            lash_core::DirectCompletionClient::from_fn(move |request, _usage_source| {
+                direct_host
+                    .direct_requests
+                    .lock()
+                    .expect("direct requests lock poisoned")
+                    .push(request);
+                let text = direct_host
+                    .direct_response
+                    .lock()
+                    .expect("direct response lock poisoned")
+                    .clone()
+                    .unwrap_or_else(|| "{\"tool_names\":[]}".to_string());
+                Ok(DirectCompletion {
+                    text,
+                    usage: TokenUsage::default(),
+                })
+            }),
+        )
     }
 
     fn catalog_tool_with_metadata(
@@ -1204,7 +1208,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash_core::testing::mock_tool_context_with_host(host);
+        let context = discovery_context(host);
 
         let args = json!({
             "query": "cat",
@@ -1279,7 +1283,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash_core::testing::mock_tool_context_with_host(host);
+        let context = discovery_context(host);
 
         let spawn_args = json!({ "query": "spawn_agent", "limit": 1 });
         let result = provider
@@ -1419,7 +1423,7 @@ mod tests {
             ..Default::default()
         });
         let provider = ToolDiscoveryToolsProvider::new();
-        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
+        let context = discovery_context(host.clone());
 
         let args = json!({
             "query": "",

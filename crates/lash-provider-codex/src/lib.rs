@@ -18,7 +18,7 @@ use lash_core::provider::{
     ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
     VariantRequestConfig,
 };
-use lash_llm_transport::streaming::{drive_sse_response, emit_progress};
+use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
     build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
     send_request,
@@ -69,7 +69,7 @@ struct CodexStreamingToolCall {
 #[derive(Clone, Debug, Default)]
 struct CodexStreamState {
     full_text: String,
-    deltas: Vec<String>,
+    pending_text_deltas: Vec<String>,
     parts: Vec<LlmOutputPart>,
     usage: LlmUsage,
     final_response: Option<Value>,
@@ -296,7 +296,7 @@ impl CodexStreamState {
         if let Some(LlmOutputPart::Text { text, .. }) = self.parts.get_mut(part_index) {
             text.push_str(piece);
         }
-        self.deltas.push(piece.to_string());
+        self.pending_text_deltas.push(piece.to_string());
         self.recompute_full_text();
     }
 
@@ -391,6 +391,10 @@ impl CodexStreamState {
 
     fn take_reasoning_deltas(&mut self) -> Vec<String> {
         std::mem::take(&mut self.reasoning_deltas)
+    }
+
+    fn take_text_deltas(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_text_deltas)
     }
 
     fn update_tool_call_from_item(&mut self, item: &Value) -> Option<String> {
@@ -1343,7 +1347,6 @@ impl CodexProvider {
         let full_text = state.response_full_text(&parts);
         let terminal_reason = state.terminal_reason(&parts);
         LlmResponse {
-            deltas: state.deltas,
             full_text,
             parts,
             usage: state.usage,
@@ -1382,7 +1385,7 @@ impl CodexProvider {
         }
 
         let had_final_response = event.get("response").is_some();
-        let prev_delta_len = state.deltas.len();
+        let pending_text_delta_count = state.pending_text_deltas.len();
 
         if let Some(resp_value) = event.get("response") {
             state.final_response = Some(resp_value.clone());
@@ -1504,7 +1507,7 @@ impl CodexProvider {
         Self::log_sse_event(
             &event_type,
             raw,
-            &state.deltas[prev_delta_len..],
+            &state.pending_text_deltas[pending_text_delta_count..],
             state.full_text.len(),
             &state.usage,
             had_final_response,
@@ -1982,8 +1985,12 @@ impl ProviderTransport for CodexProvider {
                     if response.usage != LlmUsage::default() {
                         tx.send(LlmStreamEvent::Usage(response.usage.clone()));
                     }
-                    for piece in &response.deltas {
-                        tx.send(LlmStreamEvent::Delta(piece.clone()));
+                    for part in &response.parts {
+                        if let LlmOutputPart::Text { text, .. } = part
+                            && !text.is_empty()
+                        {
+                            tx.send(LlmStreamEvent::Delta(text.clone()));
+                        }
                     }
                     for part in &response.parts {
                         match part {
@@ -2024,7 +2031,6 @@ impl ProviderTransport for CodexProvider {
             }
             let terminal_reason = Self::terminal_reason_from_response_value(&value, &parts);
             return Ok(LlmResponse {
-                deltas: vec![content.clone()],
                 full_text: content,
                 parts,
                 usage,
@@ -2053,14 +2059,12 @@ impl ProviderTransport for CodexProvider {
             "Codex stream chunk timed out",
             |raw| {
                 emit_provider_trace(provider_trace.as_ref(), "codex", raw);
-                let prev_len = state.deltas.len();
                 let prev_usage = state.usage.clone();
                 let mut emitted_parts = Vec::new();
                 Self::process_sse_event(raw, &mut state, Some(&mut emitted_parts))?;
-                emit_progress(
+                emit_stream_progress(
                     stream_events.as_ref(),
-                    &state.deltas,
-                    prev_len,
+                    state.take_text_deltas(),
                     &state.usage,
                     &prev_usage,
                 );
@@ -2082,7 +2086,10 @@ impl ProviderTransport for CodexProvider {
         )
         .await?;
 
-        if state.final_response.is_none() && state.parts.is_empty() && state.deltas.is_empty() {
+        if state.final_response.is_none()
+            && state.parts.is_empty()
+            && state.pending_text_deltas.is_empty()
+        {
             return Err(LlmTransportError::new(format!(
                 "Codex stream ended without SSE events (HTTP {}{})",
                 status.as_u16(),
@@ -2349,7 +2356,6 @@ mod tests {
 
         let response = response_from_state(state);
         assert_eq!(response.full_text, "Hello");
-        assert_eq!(response.deltas, ["Hel", "lo"]);
         assert_eq!(response.parts.len(), 1);
         assert_eq!(
             response.parts[0],
@@ -2406,7 +2412,6 @@ mod tests {
         let response = response_from_state(state);
         assert_eq!(response.full_text, "Final answer.");
         assert_eq!(response.parts.len(), 1);
-        assert_eq!(response.deltas, ["Final answer."]);
     }
 
     #[test]
@@ -2426,7 +2431,6 @@ mod tests {
 
         let response = response_from_state(state);
         assert_eq!(response.full_text, "One.Two.");
-        assert_eq!(response.deltas, ["One.", "Two."]);
         assert_eq!(response.parts.len(), 2);
         assert_eq!(
             response.parts,

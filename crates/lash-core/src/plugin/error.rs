@@ -1,4 +1,5 @@
-#[derive(Debug, thiserror::Error, Clone)]
+#[derive(Debug, thiserror::Error, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "message", rename_all = "snake_case")]
 pub enum PluginError {
     #[error("plugin registration error: {0}")]
     Registration(String),
