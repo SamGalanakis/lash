@@ -10,9 +10,9 @@ async-trait = { workspace = true }
 axum = "0.8"
 bytes = { workspace = true }
 chrono = { workspace = true }
-lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.3" }
-lash-runtime = { path = "../../crates/lash", version = "=0.1.0-alpha.3" }
-lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.3" }
+lash-sqlite-store = { path = "../../crates/lash-sqlite-store", version = "=0.1.0-alpha.4" }
+lash-runtime = { path = "../../crates/lash", version = "=0.1.0-alpha.4" }
+lash-provider-openai = { path = "../../crates/lash-provider-openai", version = "=0.1.0-alpha.4" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
