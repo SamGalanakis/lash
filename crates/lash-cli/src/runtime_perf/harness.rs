@@ -276,16 +276,20 @@ pub(crate) async fn build_runtime_with_store(
             PluginSpec::new().with_tool_provider(Arc::new(BenchmarkLargeToolSurface::default())),
         )));
     }
-    let builder = LashCore::builder()
+    let mut builder = LashCore::builder()
         .install_mode(mode_preset(&mode_id, standard_context_approach)?)
         .default_mode(mode_id.clone())
         .provider(provider)
         .model("mock-model", None)
         .max_context_tokens(200_000)
-        .store_factory(Arc::new(RuntimePerfStoreFactory {
-            store: Arc::clone(&store),
-        }))
         .plugins(plugin_stack);
+    // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
+    // reject live mode extensions because they cannot be checkpointed/resumed.
+    if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
+        builder = builder.store_factory(Arc::new(RuntimePerfStoreFactory {
+            store: Arc::clone(&store),
+        }));
+    }
     let core = if matches!(scenario, RuntimePerfScenario::StoreReopen) {
         builder
             .advanced()
