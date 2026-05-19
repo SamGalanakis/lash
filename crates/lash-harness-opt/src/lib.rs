@@ -473,7 +473,6 @@ pub trait HarnessOptStore: Send + Sync {
     async fn stats(&self) -> Result<StoreStats>;
 }
 
-
 #[async_trait]
 pub trait HarnessProject: Send + Sync {
     async fn seed_candidate(&self) -> Result<Candidate>;

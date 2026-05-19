@@ -1,5 +1,4 @@
 use serde::Serialize;
-use sha2::Digest;
 
 use crate::sansio::EffectId;
 
@@ -97,13 +96,12 @@ where
             None => format!("request:{explicit_key}"),
         });
     }
-    let bytes = serde_json::to_vec(request).map_err(|err| {
+    let digest = crate::stable_hash::stable_json_sha256_hex(request).map_err(|err| {
         RuntimeEffectControllerError::new(
             "runtime_effect_discriminator",
             format!("failed to serialize runtime effect discriminator: {err}"),
         )
     })?;
-    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
     Ok(match parent_tool_call_id.filter(|id| !id.is_empty()) {
         Some(parent) => format!("tool:{parent}:sha256:{digest}"),
         None => format!("sha256:{digest}"),

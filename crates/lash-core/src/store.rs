@@ -1,5 +1,3 @@
-use sha2::Digest;
-
 fn default_root_session_id() -> String {
     "root".to_string()
 }
@@ -314,7 +312,6 @@ pub struct RuntimeTurnCheckpoint {
     pub updated_at_epoch_ms: u64,
 }
 
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnLease {
     pub schema_version: u32,
@@ -359,10 +356,8 @@ pub struct RuntimeEffectJournalRecord {
 pub fn runtime_turn_checkpoint_hash(
     checkpoint: &lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
 ) -> Result<String, StoreError> {
-    let bytes = serde_json::to_vec(checkpoint).map_err(|err| {
-        StoreError::Backend(format!("failed to serialize turn checkpoint: {err}"))
-    })?;
-    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+    crate::stable_hash::stable_json_sha256_hex(checkpoint)
+        .map_err(|err| StoreError::Backend(format!("failed to serialize turn checkpoint: {err}")))
 }
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {

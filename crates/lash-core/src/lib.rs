@@ -13,6 +13,7 @@ pub mod search;
 pub mod session;
 pub mod session_graph;
 pub mod session_model;
+mod stable_hash;
 pub mod standard_context_approach;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
