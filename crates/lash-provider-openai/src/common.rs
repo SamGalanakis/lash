@@ -26,6 +26,9 @@ pub(crate) fn emit_provider_request_trace(
     endpoint: &str,
     body: &Value,
 ) {
+    if provider_trace.is_none() {
+        return;
+    }
     let raw = json!({
         "type": "openai_compatible.request_body",
         "endpoint": endpoint,

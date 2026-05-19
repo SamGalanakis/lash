@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+use lash_core::PreparedContext;
 use lash_core::plugin::{
     DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES, HistoryError,
     HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory, PluginRegistrar,
@@ -24,7 +25,6 @@ use lash_core::plugin::{
     SessionCreateRequest, SessionPlugin, SessionStartPoint, TurnContextTransform,
     TurnTransformContext,
 };
-use lash_core::session_model::context::PreparedContext;
 use lash_core::{
     ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
     RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,

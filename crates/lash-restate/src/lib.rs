@@ -35,8 +35,7 @@
 //!         ctx: WorkflowContext<'_>,
 //!         Json(req): Json<TurnRequest>,
 //!     ) -> HandlerResult<Json<TurnResponse>> {
-//!         # let hooks = todo!();
-//!         let effect_controller = RestateRuntimeEffectController::new(ctx, hooks);
+//!         let effect_controller = RestateRuntimeEffectController::new(ctx);
 //!         let turn_id = req.turn_id.clone();
 //!         let effect_scope = effect_controller
 //!             .effect_scope(&turn_id)
@@ -65,16 +64,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    BackgroundTaskLocalExecutor, BackgroundTaskRecord, BackgroundTaskRegistration,
-    BackgroundTaskRegistry, BackgroundTaskStartReceipt, EffectInvocationMetadata, PluginError,
+    BackgroundTaskCompletion, BackgroundTaskExternalRef, BackgroundTaskLocalExecutor,
+    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry,
+    BackgroundTaskStartReceipt, BackgroundTaskState, EffectInvocationMetadata, PluginError,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
-    RuntimeError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
     SharedWorkflowContext, WorkflowContext,
 };
+use restate_sdk::context::{ContextClient, InvocationHandle, RequestTarget};
 use restate_sdk::errors::{HandlerResult, TerminalError};
 use restate_sdk::serde::Json;
 use serde::{Serialize, de::DeserializeOwned};
@@ -83,14 +84,6 @@ pub use restate_sdk;
 
 type RestateHandlerFuture<'a, T> =
     Pin<Box<dyn Future<Output = HandlerResult<Json<T>>> + Send + 'a>>;
-
-pub type RestateEffectFuture = Pin<
-    Box<
-        dyn Future<Output = Result<RuntimeEffectOutcome, RuntimeEffectControllerError>>
-            + Send
-            + 'static,
-    >,
->;
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 struct JournaledRuntimeEffect {
@@ -116,52 +109,89 @@ impl RestateEffectError {
     }
 }
 
-/// Application hooks for executing Lash's serialized durable requests.
-///
-/// Background scheduling should submit or signal a Restate service/workflow
-/// using the stable `registration.id` as the Restate workflow/object key.
-/// Durable task runners reconstruct work from
-/// [`BackgroundTaskRegistration::input`](lash_core::BackgroundTaskRegistration::input).
-#[async_trait::async_trait]
-pub trait RestateRuntimeHooks: Send + Sync {
-    fn execute_effect(&self, envelope: RuntimeEffectEnvelope) -> RestateEffectFuture;
-
-    async fn start_background_task(
-        &self,
-        registration: lash_core::BackgroundTaskRegistration,
-    ) -> Result<BackgroundTaskStartReceipt, RestateEffectError>;
-
-    async fn request_background_task_cancel(
-        &self,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<(), RestateEffectError>;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RestateBackgroundTaskCancelRequest {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[async_trait::async_trait]
-impl<T> RestateRuntimeHooks for std::sync::Arc<T>
-where
-    T: RestateRuntimeHooks + ?Sized + 'static,
-{
-    fn execute_effect(&self, envelope: RuntimeEffectEnvelope) -> RestateEffectFuture {
-        self.as_ref().execute_effect(envelope)
-    }
-
-    async fn start_background_task(
+pub trait RestateBackgroundTaskRunner: Send + Sync + 'static {
+    async fn run_background_task(
         &self,
-        registration: lash_core::BackgroundTaskRegistration,
-    ) -> Result<BackgroundTaskStartReceipt, RestateEffectError> {
-        self.as_ref().start_background_task(registration).await
-    }
+        registration: BackgroundTaskRegistration,
+    ) -> Result<BackgroundTaskCompletion, PluginError>;
 
     async fn request_background_task_cancel(
         &self,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<(), RestateEffectError> {
-        self.as_ref()
-            .request_background_task_cancel(task_id, reason)
+        request: RestateBackgroundTaskCancelRequest,
+    ) -> Result<(), PluginError>;
+}
+
+#[restate_sdk::workflow]
+pub trait LashBackgroundTaskWorkflow {
+    async fn run(
+        registration: Json<BackgroundTaskRegistration>,
+    ) -> HandlerResult<Json<BackgroundTaskCompletion>>;
+
+    #[shared]
+    async fn cancel(request: Json<RestateBackgroundTaskCancelRequest>) -> HandlerResult<Json<()>>;
+}
+
+pub struct LashBackgroundTaskWorkflowImpl<R> {
+    runner: Arc<R>,
+}
+
+impl<R> LashBackgroundTaskWorkflowImpl<R> {
+    pub fn new(runner: Arc<R>) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R> LashBackgroundTaskWorkflowImpl<R>
+where
+    R: RestateBackgroundTaskRunner,
+{
+    async fn run_registration(
+        &self,
+        registration: BackgroundTaskRegistration,
+    ) -> Result<BackgroundTaskCompletion, PluginError> {
+        self.runner.run_background_task(registration).await
+    }
+
+    async fn cancel_registration(
+        &self,
+        request: RestateBackgroundTaskCancelRequest,
+    ) -> Result<(), PluginError> {
+        self.runner.request_background_task_cancel(request).await
+    }
+}
+
+impl<R> LashBackgroundTaskWorkflow for LashBackgroundTaskWorkflowImpl<R>
+where
+    R: RestateBackgroundTaskRunner,
+{
+    async fn run(
+        &self,
+        _ctx: WorkflowContext<'_>,
+        Json(registration): Json<BackgroundTaskRegistration>,
+    ) -> HandlerResult<Json<BackgroundTaskCompletion>> {
+        self.run_registration(registration)
             .await
+            .map(Json)
+            .map_err(|err| TerminalError::from_error(err).into())
+    }
+
+    async fn cancel(
+        &self,
+        _ctx: SharedWorkflowContext<'_>,
+        Json(request): Json<RestateBackgroundTaskCancelRequest>,
+    ) -> HandlerResult<Json<()>> {
+        self.cancel_registration(request)
+            .await
+            .map(Json)
+            .map_err(|err| TerminalError::from_error(err).into())
     }
 }
 
@@ -213,7 +243,21 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     where
         'ctx: 'run,
         T: Serialize + DeserializeOwned + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static;
+        Fut: Future<Output = T> + Send + 'run;
+
+    fn start_background_workflow<'run>(
+        &'run self,
+        registration: BackgroundTaskRegistration,
+    ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
+
+    fn request_background_workflow_cancel<'run>(
+        &'run self,
+        request: RestateBackgroundTaskCancelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+    where
+        'ctx: 'run;
 }
 
 macro_rules! impl_restate_controller_context {
@@ -241,9 +285,9 @@ macro_rules! impl_restate_controller_context {
                 where
                     'ctx: 'run,
                     T: Serialize + DeserializeOwned + Send + 'static,
-                    Fut: Future<Output = T> + Send + 'static,
+                    Fut: Future<Output = T> + Send + 'run,
                 {
-                    let future: RestateHandlerFuture<'ctx, T> =
+                    let future: RestateHandlerFuture<'run, T> =
                         Box::pin(async move { Ok(Json(future.await)) });
                     let run = restate_sdk::context::ContextSideEffects::run(self, move || future);
                     let run = restate_sdk::context::RunFuture::name(run, effect_name);
@@ -251,7 +295,62 @@ macro_rules! impl_restate_controller_context {
                         Some(policy) => restate_sdk::context::RunFuture::retry_policy(run, policy),
                         None => run,
                     };
-                    Box::pin(async move { run.await })
+                    Box::pin(run)
+                }
+
+                fn start_background_workflow<'run>(
+                    &'run self,
+                    registration: BackgroundTaskRegistration,
+                ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let workflow_key = registration.id.clone();
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<BackgroundTaskRegistration>,
+                        Json<BackgroundTaskCompletion>,
+                    > = ContextClient::request(
+                        self,
+                        RequestTarget::workflow(
+                            "LashBackgroundTaskWorkflow",
+                            workflow_key.clone(),
+                            "run",
+                        ),
+                        Json(registration),
+                    )
+                    .idempotency_key(format!("lash-background-task:{workflow_key}:run"));
+                    let handle = request.send();
+                    Box::pin(async move { handle.invocation_id().await })
+                }
+
+                fn request_background_workflow_cancel<'run>(
+                    &'run self,
+                    request: RestateBackgroundTaskCancelRequest,
+                ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+                where
+                    'ctx: 'run,
+                {
+                    let workflow_key = request.task_id.clone();
+                    let request: restate_sdk::context::Request<
+                        '_,
+                        Json<RestateBackgroundTaskCancelRequest>,
+                        Json<()>,
+                    > = ContextClient::request(
+                        self,
+                        RequestTarget::workflow(
+                            "LashBackgroundTaskWorkflow",
+                            workflow_key.clone(),
+                            "cancel",
+                        ),
+                        Json(request),
+                    )
+                    .idempotency_key(format!("lash-background-task:{workflow_key}:cancel"));
+                    let call = request.call();
+                    Box::pin(async move {
+                        let Json(()) = call.await?;
+                        Ok(())
+                    })
                 }
             }
         )+
@@ -271,23 +370,21 @@ impl_restate_controller_context!(
 /// This type is intentionally handler-scoped. Create one inside the Restate
 /// handler that owns the Lash turn, then pass [`RestateRuntimeEffectController::effect_scope`]
 /// to Lash's scoped turn API with a stable turn ID.
-pub struct RestateRuntimeEffectController<'ctx, C, H> {
+pub struct RestateRuntimeEffectController<'ctx, C> {
     context: C,
     options: RestateEffectControllerOptions,
-    hooks: H,
     _ctx: PhantomData<&'ctx ()>,
 }
 
-impl<'ctx, C, H> RestateRuntimeEffectController<'ctx, C, H> {
-    pub fn new(context: C, hooks: H) -> Self {
-        Self::with_options(context, hooks, RestateEffectControllerOptions::default())
+impl<'ctx, C> RestateRuntimeEffectController<'ctx, C> {
+    pub fn new(context: C) -> Self {
+        Self::with_options(context, RestateEffectControllerOptions::default())
     }
 
-    pub fn with_options(context: C, hooks: H, options: RestateEffectControllerOptions) -> Self {
+    pub fn with_options(context: C, options: RestateEffectControllerOptions) -> Self {
         Self {
             context,
             options,
-            hooks,
             _ctx: PhantomData,
         }
     }
@@ -301,10 +398,9 @@ impl<'ctx, C, H> RestateRuntimeEffectController<'ctx, C, H> {
     }
 }
 
-impl<'ctx, C, H> RestateRuntimeEffectController<'ctx, C, H>
+impl<'ctx, C> RestateRuntimeEffectController<'ctx, C>
 where
     C: RestateControllerContext<'ctx>,
-    H: RestateRuntimeHooks + Send + Sync + 'static,
 {
     pub fn effect_scope<'run>(
         &'run self,
@@ -321,7 +417,7 @@ where
     where
         'ctx: 'run,
         T: Serialize + DeserializeOwned + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
+        Fut: Future<Output = T> + Send + 'run,
     {
         let effect_name = restate_effect_name(&metadata);
         let run_retry_policy = self.options.run_retry_policy.clone();
@@ -337,23 +433,18 @@ where
     }
 }
 
-impl<C, H> fmt::Debug for RestateRuntimeEffectController<'_, C, H>
-where
-    H: fmt::Debug,
-{
+impl<C> fmt::Debug for RestateRuntimeEffectController<'_, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RestateRuntimeEffectController")
             .field("options", &self.options)
-            .field("hooks", &self.hooks)
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
-impl<'ctx, C, H> RuntimeEffectController for RestateRuntimeEffectController<'ctx, C, H>
+impl<'ctx, C> RuntimeEffectController for RestateRuntimeEffectController<'ctx, C>
 where
     C: RestateControllerContext<'ctx>,
-    H: RestateRuntimeHooks + Send + Sync + 'static,
 {
     fn requires_durable_attachment_store(&self) -> bool {
         true
@@ -362,7 +453,7 @@ where
     async fn execute_effect(
         &self,
         envelope: RuntimeEffectEnvelope,
-        _local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match restate_effect_execution(&envelope.command) {
             RestateEffectExecution::Timer => {
@@ -383,12 +474,12 @@ where
                 let current_hash = envelope.stable_hash()?;
                 let metadata = envelope.metadata.clone();
                 let journal_hash = current_hash.clone();
-                let effect = self.hooks.execute_effect(envelope);
                 let journaled = self
                     .journal_effect(metadata, async move {
+                        let outcome = local_executor.execute(envelope).await;
                         JournaledRuntimeEffect {
                             envelope_hash: journal_hash,
-                            outcome: effect.await,
+                            outcome,
                         }
                     })
                     .await
@@ -409,7 +500,7 @@ where
         registration: BackgroundTaskRegistration,
         _local_executor: BackgroundTaskLocalExecutor,
     ) -> Result<BackgroundTaskRecord, PluginError> {
-        schedule_restate_background_task(registry, registration, &self.hooks).await
+        schedule_restate_background_task(registry, registration, &self.context).await
     }
 
     async fn request_background_task_cancel(
@@ -419,26 +510,44 @@ where
         reason: Option<String>,
     ) -> Result<BackgroundTaskRecord, PluginError> {
         let record = registry.request_cancel(task_id, reason.clone()).await?;
-        self.hooks
-            .request_background_task_cancel(task_id, reason)
+        self.context
+            .request_background_workflow_cancel(RestateBackgroundTaskCancelRequest {
+                task_id: task_id.to_string(),
+                reason,
+            })
             .await
-            .map_err(RestateEffectError::into_plugin_error)?;
+            .map_err(|err| {
+                RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
+            })?;
         Ok(record)
     }
 }
 
-async fn schedule_restate_background_task<H>(
+async fn schedule_restate_background_task<'ctx, C>(
     registry: Arc<dyn BackgroundTaskRegistry>,
     registration: lash_core::BackgroundTaskRegistration,
-    hooks: &H,
+    context: &C,
 ) -> Result<BackgroundTaskRecord, PluginError>
 where
-    H: RestateRuntimeHooks + ?Sized,
+    C: RestateControllerContext<'ctx> + ?Sized,
 {
-    let receipt = hooks
-        .start_background_task(registration)
+    let task_id = registration.id.clone();
+    let invocation_id = context
+        .start_background_workflow(registration)
         .await
-        .map_err(RestateEffectError::into_plugin_error)?;
+        .map_err(|err| {
+            RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
+        })?;
+    let receipt = BackgroundTaskStartReceipt {
+        task_id: task_id.clone(),
+        state: BackgroundTaskState::Scheduled,
+        external_ref: Some(BackgroundTaskExternalRef {
+            backend: "restate".to_string(),
+            id: format!("LashBackgroundTaskWorkflow/{task_id}"),
+            metadata: Some(serde_json::json!({ "invocation_id": invocation_id })),
+        }),
+        message: Some("submitted to Restate".to_string()),
+    };
     registry.mark_scheduled(receipt).await
 }
 
@@ -504,10 +613,13 @@ fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError)
 mod tests {
     use super::*;
     use futures_util::{StreamExt, stream};
+    use http_body_util::{BodyExt, Empty};
     use lash_core::{
         BackgroundCancelPolicy, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskScope,
         BackgroundTaskState,
     };
+    use restate_sdk::prelude::Endpoint;
+    use restate_sdk::service::Discoverable;
     use std::sync::Mutex;
     use std::time::SystemTime;
 
@@ -653,64 +765,138 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingHooks {
+    struct RecordingContext {
+        sleeps: Mutex<Vec<u64>>,
+        runs: Mutex<Vec<String>>,
         started: Mutex<Vec<String>>,
         cancelled: Mutex<Vec<(String, Option<String>)>>,
     }
 
-    #[async_trait::async_trait]
-    impl RestateRuntimeHooks for RecordingHooks {
-        fn execute_effect(&self, envelope: RuntimeEffectEnvelope) -> RestateEffectFuture {
-            Box::pin(async move {
-                Err(RuntimeEffectControllerError::new(
-                    "test_restate_hooks_unsupported",
-                    format!(
-                        "test hooks cannot execute {}",
-                        envelope.command.kind().as_str()
-                    ),
-                ))
-            })
+    impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
+        fn sleep_send<'run>(
+            &'run self,
+            duration: Duration,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+        where
+            'ctx: 'run,
+        {
+            self.sleeps
+                .lock()
+                .expect("sleeps lock")
+                .push(duration.as_millis() as u64);
+            Box::pin(async { Ok(()) })
         }
 
-        async fn start_background_task(
-            &self,
-            registration: lash_core::BackgroundTaskRegistration,
-        ) -> Result<BackgroundTaskStartReceipt, RestateEffectError> {
+        fn run_json_send<'run, T, Fut>(
+            &'run self,
+            _effect_name: String,
+            _retry_policy: Option<RunRetryPolicy>,
+            future: Fut,
+        ) -> Pin<Box<dyn Future<Output = Result<Json<T>, TerminalError>> + Send + 'run>>
+        where
+            'ctx: 'run,
+            T: Serialize + DeserializeOwned + Send + 'static,
+            Fut: Future<Output = T> + Send + 'run,
+        {
+            self.runs.lock().expect("runs lock").push(_effect_name);
+            Box::pin(async move { Ok(Json(future.await)) })
+        }
+
+        fn start_background_workflow<'run>(
+            &'run self,
+            registration: BackgroundTaskRegistration,
+        ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
+        where
+            'ctx: 'run,
+        {
             self.started
                 .lock()
                 .expect("started lock")
                 .push(registration.id.clone());
-            Ok(BackgroundTaskStartReceipt {
-                task_id: registration.id,
-                state: BackgroundTaskState::Scheduled,
-                external_ref: Some(lash_core::BackgroundTaskExternalRef {
-                    backend: "restate".to_string(),
-                    id: "workflow/task-1".to_string(),
-                    metadata: Some(serde_json::json!({"service": "tasks"})),
-                }),
-                message: Some("submitted to Restate".to_string()),
-            })
+            Box::pin(async move { Ok(format!("invocation-{}", registration.id)) })
         }
 
-        async fn request_background_task_cancel(
-            &self,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<(), RestateEffectError> {
+        fn request_background_workflow_cancel<'run>(
+            &'run self,
+            request: RestateBackgroundTaskCancelRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
+        where
+            'ctx: 'run,
+        {
             self.cancelled
                 .lock()
                 .expect("cancelled lock")
-                .push((task_id.to_string(), reason));
-            Ok(())
+                .push((request.task_id, request.reason));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn effect_metadata(kind: RuntimeEffectKind, effect_id: &str) -> EffectInvocationMetadata {
+        EffectInvocationMetadata {
+            session_id: "session".to_string(),
+            origin: lash_core::EffectOrigin::Turn,
+            turn_id: Some("turn".to_string()),
+            turn_index: Some(1),
+            mode_iteration: Some(0),
+            effect_id: effect_id.to_string(),
+            effect_kind: kind,
+            idempotency_key: format!("session:turn:1:0:{}:{effect_id}", kind.as_str()),
+            turn_checkpoint_hash: Some("0".repeat(64)),
         }
     }
 
     #[tokio::test]
-    async fn restate_hooks_schedule_serialized_registration_without_running_executor() {
-        let hooks = Arc::new(RecordingHooks::default());
-        let host = TestBackgroundHost {
-            hooks: hooks.clone(),
-        };
+    async fn restate_controller_executes_non_sleep_effect_inside_run() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let err = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::ExecCode, "exec"),
+                    RuntimeEffectCommand::ExecCode {
+                        code: "1 + 1".to_string(),
+                    },
+                ),
+                RuntimeEffectLocalExecutor::unavailable(),
+            )
+            .await
+            .expect_err("unavailable local executor should be returned from ctx.run");
+
+        assert_eq!(err.code, "runtime_effect_local_executor_unavailable");
+        assert_eq!(
+            context.runs.lock().expect("runs lock").as_slice(),
+            &["lash:session:turn:1:0:exec_code:exec".to_string()]
+        );
+        assert!(context.sleeps.lock().expect("sleeps lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn restate_controller_routes_sleep_only_through_timer() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Sleep, "sleep"),
+                    RuntimeEffectCommand::Sleep { duration_ms: 42 },
+                ),
+                RuntimeEffectLocalExecutor::unavailable(),
+            )
+            .await
+            .expect("sleep");
+
+        assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
+        assert_eq!(
+            context.sleeps.lock().expect("sleeps lock").as_slice(),
+            &[42]
+        );
+        assert!(context.runs.lock().expect("runs lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn restate_controller_schedules_background_workflow_without_running_executor() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
         let registry = Arc::new(MemoryRegistry::default());
         let registration = lash_core::BackgroundTaskRegistration {
             id: "task-1".to_string(),
@@ -750,7 +936,7 @@ mod tests {
                 .external_ref
                 .as_ref()
                 .map(|external| external.id.as_str()),
-            Some("workflow/task-1")
+            Some("LashBackgroundTaskWorkflow/task-1")
         );
         assert_eq!(
             registry
@@ -767,57 +953,232 @@ mod tests {
                 .await
                 .into_iter()
                 .next()
-                .and_then(|record| record.external_ref.map(|external| external.backend)),
-            Some("restate".to_string())
+                .and_then(|record| record.external_ref)
+                .map(|external| (
+                    external.backend,
+                    external
+                        .metadata
+                        .and_then(|metadata| metadata.get("invocation_id").cloned())
+                )),
+            Some((
+                "restate".to_string(),
+                Some(serde_json::json!("invocation-task-1"))
+            ))
         );
         assert_eq!(
-            hooks.started.lock().expect("started lock").as_slice(),
+            context.started.lock().expect("started lock").as_slice(),
             &["task-1".to_string()]
         );
     }
 
-    struct TestBackgroundHost {
-        hooks: Arc<RecordingHooks>,
+    #[tokio::test]
+    async fn restate_controller_cancel_requests_call_workflow_cancel() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let registry = Arc::new(MemoryRegistry::default());
+        let registration = lash_core::BackgroundTaskRegistration {
+            id: "task-cancel".to_string(),
+            kind: BackgroundTaskKind::External,
+            producer: "test".to_string(),
+            scope: BackgroundTaskScope {
+                session_id: "session".to_string(),
+            },
+            child_session_id: None,
+            parent_task_id: None,
+            input: BackgroundTaskInput::External {
+                metadata: serde_json::Value::Null,
+            },
+            attempt: Default::default(),
+            cancel_policy: BackgroundCancelPolicy::Cooperative,
+            close_policy: Default::default(),
+        };
+        registry.register(registration).await.expect("register");
+
+        let record = host
+            .request_background_task_cancel(
+                registry,
+                "task-cancel",
+                Some("user requested".to_string()),
+            )
+            .await
+            .expect("cancel");
+
+        assert_eq!(record.state, BackgroundTaskState::CancelRequested);
+        assert_eq!(
+            context.cancelled.lock().expect("cancelled lock").as_slice(),
+            &[(
+                "task-cancel".to_string(),
+                Some("user requested".to_string())
+            )]
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        ran: Mutex<Vec<String>>,
+        cancelled: Mutex<Vec<RestateBackgroundTaskCancelRequest>>,
     }
 
     #[async_trait::async_trait]
-    impl RuntimeEffectController for TestBackgroundHost {
-        async fn execute_effect(
+    impl RestateBackgroundTaskRunner for RecordingRunner {
+        async fn run_background_task(
             &self,
-            envelope: RuntimeEffectEnvelope,
-            _local_executor: lash_core::RuntimeEffectLocalExecutor<'_>,
-        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-            Err(RuntimeEffectControllerError::new(
-                "test_background_host_unsupported",
-                format!(
-                    "test background controller cannot execute {}",
-                    envelope.command.kind().as_str()
-                ),
-            ))
-        }
-
-        async fn start_background_task(
-            &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
             registration: BackgroundTaskRegistration,
-            _local_executor: BackgroundTaskLocalExecutor,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            schedule_restate_background_task(registry, registration, self.hooks.as_ref()).await
+        ) -> Result<BackgroundTaskCompletion, PluginError> {
+            self.ran
+                .lock()
+                .expect("runner ran lock")
+                .push(registration.id);
+            Ok(BackgroundTaskCompletion {
+                state: BackgroundTaskState::Completed,
+                summary: Some("done".to_string()),
+                output: Some(lash_core::ToolCallOutput::success(
+                    serde_json::json!({"ok": true}),
+                )),
+            })
         }
 
         async fn request_background_task_cancel(
             &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            let record = registry.request_cancel(task_id, reason.clone()).await?;
-            self.hooks
-                .request_background_task_cancel(task_id, reason)
-                .await
-                .map_err(RestateEffectError::into_plugin_error)?;
-            Ok(record)
+            request: RestateBackgroundTaskCancelRequest,
+        ) -> Result<(), PluginError> {
+            self.cancelled
+                .lock()
+                .expect("runner cancelled lock")
+                .push(request);
+            Ok(())
         }
+    }
+
+    fn discover_service<S: Discoverable>(_: &S) -> restate_sdk::discovery::Service {
+        S::discover()
+    }
+
+    #[tokio::test]
+    async fn background_task_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
+        let runner = Arc::new(RecordingRunner::default());
+        let service = LashBackgroundTaskWorkflowImpl::new(runner).serve();
+        let discovery = discover_service(&service);
+        let endpoint = Endpoint::builder().bind(service).build();
+
+        assert_eq!(discovery.name.to_string(), "LashBackgroundTaskWorkflow");
+        assert_eq!(
+            discovery.ty.to_string(),
+            restate_sdk::discovery::ServiceType::Workflow.to_string()
+        );
+        assert_eq!(discovery.handlers.len(), 2);
+
+        let run = discovery
+            .handlers
+            .iter()
+            .find(|handler| handler.name.to_string() == "run")
+            .expect("run handler discovery");
+        let cancel = discovery
+            .handlers
+            .iter()
+            .find(|handler| handler.name.to_string() == "cancel")
+            .expect("cancel handler discovery");
+
+        assert_eq!(
+            run.ty.as_ref().map(ToString::to_string).as_deref(),
+            Some("WORKFLOW")
+        );
+        assert_eq!(
+            cancel.ty.as_ref().map(ToString::to_string).as_deref(),
+            Some("SHARED")
+        );
+
+        let response = endpoint.handle(
+            http::Request::builder()
+                .uri("/discover")
+                .header("accept", "application/vnd.restate.endpointmanifest.v3+json")
+                .body(Empty::<bytes::Bytes>::new())
+                .expect("discover request"),
+        );
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/vnd.restate.endpointmanifest.v3+json")
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("discover response body")
+            .to_bytes();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&body).expect("discover response json");
+        let workflow = manifest["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .find(|service| service["name"] == "LashBackgroundTaskWorkflow")
+            .expect("workflow service");
+        let handlers = workflow["handlers"].as_array().expect("handlers array");
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["name"] == "run" && handler["ty"] == "WORKFLOW")
+        );
+        assert!(
+            handlers
+                .iter()
+                .any(|handler| handler["name"] == "cancel" && handler["ty"] == "SHARED")
+        );
+    }
+
+    #[tokio::test]
+    async fn background_task_workflow_impl_runs_and_cancels_through_runner() {
+        let runner = Arc::new(RecordingRunner::default());
+        let workflow = LashBackgroundTaskWorkflowImpl::new(runner.clone());
+        let registration = lash_core::BackgroundTaskRegistration {
+            id: "task-workflow".to_string(),
+            kind: BackgroundTaskKind::External,
+            producer: "test".to_string(),
+            scope: BackgroundTaskScope {
+                session_id: "session".to_string(),
+            },
+            child_session_id: None,
+            parent_task_id: None,
+            input: BackgroundTaskInput::External {
+                metadata: serde_json::Value::Null,
+            },
+            attempt: Default::default(),
+            cancel_policy: BackgroundCancelPolicy::Cooperative,
+            close_policy: Default::default(),
+        };
+
+        let completion = workflow
+            .run_registration(registration)
+            .await
+            .expect("workflow run");
+        workflow
+            .cancel_registration(RestateBackgroundTaskCancelRequest {
+                task_id: "task-workflow".to_string(),
+                reason: Some("stop".to_string()),
+            })
+            .await
+            .expect("workflow cancel");
+
+        assert_eq!(completion.state, BackgroundTaskState::Completed);
+        assert_eq!(
+            runner.ran.lock().expect("runner ran lock").as_slice(),
+            &["task-workflow".to_string()]
+        );
+        assert_eq!(
+            runner
+                .cancelled
+                .lock()
+                .expect("runner cancelled lock")
+                .as_slice(),
+            &[RestateBackgroundTaskCancelRequest {
+                task_id: "task-workflow".to_string(),
+                reason: Some("stop".to_string()),
+            }]
+        );
     }
 
     #[derive(Default)]

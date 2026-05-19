@@ -51,9 +51,10 @@
             </article>
             <article class="panel">
               <h3><code>ToolProvider</code></h3>
-              <p>If your plugin exposes tools, implement this on a struct and hand it to <code>reg.tools().provider(...)</code>. <code>definitions()</code> is sync and called often; cache the result. <code>execute()</code> is async and runs the actual tool work.</p>
+              <p>If your plugin exposes tools, implement this on a struct and hand it to <code>reg.tools().provider(...)</code>. <code>tool_manifests()</code> advertises cheap prompt/search metadata, <code>resolve_contract()</code> loads the full contract for a named tool, and <code>execute()</code> is async and runs the actual tool work. Cache manifest and contract construction when the surface is large.</p>
               <pre><code>pub trait ToolProvider: Send + Sync + 'static {
-    fn definitions(&amp;self) -&gt; Vec&lt;ToolDefinition&gt;;
+    fn tool_manifests(&amp;self) -&gt; Vec&lt;ToolManifest&gt;;
+    fn resolve_contract(&amp;self, name: &amp;str) -&gt; Option&lt;Arc&lt;ToolContract&gt;&gt;;
     async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult;
 }</code></pre>
             </article>
@@ -114,7 +115,9 @@ let core = LashCore::builder()
 use lash::plugins::{
     PluginError, PluginFactory, PluginRegistrar, PluginSessionContext, SessionPlugin,
 };
-use lash::tools::{ToolCall, ToolDefinition, ToolProvider, ToolResult};
+use lash::tools::{
+    ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult,
+};
 
 const PLUGIN_ID: &amp;str = "update_plan";
 
@@ -154,24 +157,32 @@ impl SessionPlugin for UpdatePlanPlugin {
     }
 }
 
-// 3. ToolProvider — definitions() advertises, execute() runs.
+// 3. ToolProvider — manifests advertise, contracts validate, execute() runs.
 struct UpdatePlanTool { state: Arc&lt;Mutex&lt;PlanState&gt;&gt; }
 
 #[async_trait::async_trait]
 impl ToolProvider for UpdatePlanTool {
-    fn definitions(&amp;self) -&gt; Vec&lt;ToolDefinition&gt; {
-        vec![ToolDefinition::raw(
-            "update_plan",
-            "Publish or replace the current plan.",
-            serde_json::json!({ "type": "object", "properties": { /* … */ } }),
-            serde_json::json!({}),
-        )]
+    fn tool_manifests(&amp;self) -&gt; Vec&lt;ToolManifest&gt; {
+        vec![update_plan_definition().manifest()]
+    }
+
+    fn resolve_contract(&amp;self, name: &amp;str) -&gt; Option&lt;Arc&lt;ToolContract&gt;&gt; {
+        (name == "update_plan").then(|| Arc::new(update_plan_definition().contract()))
     }
 
     async fn execute(&amp;self, call: ToolCall&lt;'_&gt;) -&gt; ToolResult {
         // Read call.args, validate, mutate self.state, emit ToolResult::ok(...).
         ToolResult::ok(serde_json::json!({ "generation": 1 }))
     }
+}
+
+fn update_plan_definition() -&gt; ToolDefinition {
+    ToolDefinition::raw(
+            "update_plan",
+            "Publish or replace the current plan.",
+            serde_json::json!({ "type": "object", "properties": { /* … */ } }),
+            serde_json::json!({}),
+    )
 }</code></pre>
           <p>Real plugins typically register multiple hooks in the same <code>register()</code> call (e.g. a tool plus an after-tool hook that emits a UI event, plus a prompt contribution describing the tool). See <code>crates/lash-plugin-plan-mode/src/update_plan.rs:280-330</code> for the full version.</p>
         </div>

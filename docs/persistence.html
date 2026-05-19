@@ -13,7 +13,7 @@
 <script src="./docs.js" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-core/src/store.rs</code>, <code>crates/lash-core/src/runtime/mod.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-sqlite-store/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-core/src/store.rs</code>, <code>crates/lash-core/src/runtime/mod.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash/src/session.rs</code>, <code>crates/lash-sqlite-store/src/lib.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>examples/agent-service/src/state.rs</code>, <code>examples/agent-service/src/db.rs</code>.">
 <section class="opener">
     <h1 class="opener__title">session<span class="slash">/</span>persistence</h1>
     <p class="opener__lede">Runtime state is persisted through <code>RuntimePersistence</code>. The default impl is <code>lash-sqlite-store</code>. Install a <code>SessionStoreFactory</code> on the core, or pass a store per session.</p>
@@ -33,6 +33,41 @@ pub trait RuntimePersistence: Send + Sync {
         -&gt; Result&lt;Option&lt;SessionNodeRecord&gt;, StoreError&gt;;
     async fn commit_runtime_state(&amp;self, commit: RuntimeCommit)
         -&gt; Result&lt;RuntimeCommitResult, StoreError&gt;;
+    async fn claim_runtime_turn_lease(
+        &amp;self,
+        session_id: &amp;str,
+        turn_id: &amp;str,
+        owner_id: &amp;str,
+        lease_ttl_ms: u64,
+    ) -&gt; Result&lt;RuntimeTurnLease, StoreError&gt;;
+    async fn renew_runtime_turn_lease(
+        &amp;self,
+        lease: &amp;RuntimeTurnLease,
+        lease_ttl_ms: u64,
+    ) -&gt; Result&lt;RuntimeTurnLease, StoreError&gt;;
+    async fn abandon_runtime_turn_lease(&amp;self, lease: &amp;RuntimeTurnLease)
+        -&gt; Result&lt;(), StoreError&gt;;
+    async fn save_runtime_turn_checkpoint(
+        &amp;self,
+        lease: &amp;RuntimeTurnLease,
+        checkpoint: RuntimeTurnCheckpoint,
+    ) -&gt; Result&lt;(), StoreError&gt;;
+    async fn load_runtime_turn_checkpoint(
+        &amp;self,
+        session_id: &amp;str,
+        turn_id: &amp;str,
+    ) -&gt; Result&lt;Option&lt;RuntimeTurnCheckpoint&gt;, StoreError&gt;;
+    async fn save_runtime_effect_outcome(
+        &amp;self,
+        lease: &amp;RuntimeTurnLease,
+        record: RuntimeEffectJournalRecord,
+    ) -&gt; Result&lt;(), StoreError&gt;;
+    async fn load_runtime_effect_outcome(
+        &amp;self,
+        session_id: &amp;str,
+        turn_id: &amp;str,
+        idempotency_key: &amp;str,
+    ) -&gt; Result&lt;Option&lt;RuntimeEffectJournalRecord&gt;, StoreError&gt;;
     async fn save_session_meta(&amp;self, meta: SessionMeta) -&gt; Result&lt;(), StoreError&gt;;
     async fn load_session_meta(&amp;self) -&gt; Result&lt;Option&lt;SessionMeta&gt;, StoreError&gt;;
     async fn tombstone_nodes(&amp;self, ids: &amp;[String]) -&gt; Result&lt;(), StoreError&gt;;
@@ -67,7 +102,7 @@ pub trait RuntimePersistence: Send + Sync {
 }</code></pre>
           <p>Conflicts surface as a turn-level <code>Err</code> with <code>RuntimeError { code: "store_commit_failed", .. }</code> — not a <code>TurnStop</code> variant. The next read is identical to the read before the failed call. Hosts expecting concurrent access (multi-tab UIs, agent fleets) should serialize at their own layer or re-open against the refreshed head.</p>
           <p>In-memory sessions (no <code>store_factory</code>) enforce the same CAS against an in-process counter.</p>
-          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectController</code>; see <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
+          <p>For per-effect durability under an external workflow runtime, install a custom <code>RuntimeEffectController</code>; the same store owns the runtime turn lease, checkpoint, and effect journal rows used during resume. See <a href="./architecture/durability.html">Architecture → Durability</a>.</p>
         </div>
 
         <div class="section" id="wiring">
@@ -115,6 +150,10 @@ let core = LashCore::builder()
             <article class="panel">
               <h3>Checkpoint blobs</h3>
               <p>Compressed snapshots of tool, plugin, execution, and prompt state, content-hashed and deduplicated across resumes.</p>
+            </article>
+            <article class="panel">
+              <h3>Turn leases and effect journal</h3>
+              <p>Lease-fenced in-flight turn checkpoints plus journaled runtime effect outcomes. External workflow adapters use these rows to resume a turn without re-running completed effects.</p>
             </article>
             <article class="panel">
               <h3>Usage deltas</h3>
@@ -169,7 +208,7 @@ let core = LashCore::builder()
 
 // Per request: open a session keyed by the app's chat id.
 let session = core.session(chat_id).rlm().open().await?;</code></pre>
-          <p>Full source: <code>examples/agent-service/src/main.rs</code>.</p>
+          <p>Full source: <code>examples/agent-service/src/main.rs</code> for process bootstrap, <code>examples/agent-service/src/state.rs</code> for session opening, and <code>examples/agent-service/src/db.rs</code> for product persistence.</p>
         </div>
   </main>
 

@@ -522,10 +522,164 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
         .await
         .expect_err("controller failure should abort durable turn");
 
-    assert_eq!(err.code, "controller_failed");
+    assert_eq!(
+        err.code,
+        crate::RuntimeErrorCode::Other("controller_failed".to_string())
+    );
     assert_eq!(store.runtime_turn_lease_abandon_count(), 1);
     assert!(store.runtime_turn_checkpoint_count() >= 1);
     assert!(store.runtime_effect_journal_count() >= 1);
+}
+
+#[tokio::test]
+async fn durable_finalize_error_abandons_lease_and_preserves_resume_state() {
+    let store = Arc::new(RecordingStore::default());
+    let transport = mock_provider(vec![MockCall {
+        stream_events: Vec::new(),
+        response: Ok(LlmResponse {
+            full_text: "Done".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "Done".to_string(),
+                response_meta: None,
+            }],
+            usage: LlmUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            ..LlmResponse::default()
+        }),
+    }]);
+    let plugin = Arc::new(StaticPluginFactory::new(
+        "bad_after_turn",
+        crate::PluginSpec::new().with_after_turn(Arc::new(|_| {
+            Box::pin(async {
+                Ok(vec![crate::PluginDirective::AbortTurn {
+                    code: "after_turn_abort".to_string(),
+                    message: "after turn abort is invalid during finalization".to_string(),
+                }])
+            })
+        })),
+    ));
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        vec![plugin],
+        Arc::new(EmptyTools),
+        transport,
+        test_host_config(),
+        store.clone(),
+    )
+    .await;
+
+    let err = runtime
+        .run_turn_assembled(
+            TurnInput::text("hello").with_trace_turn_id("finalize-error-turn"),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("after_turn abort should fail finalization");
+
+    assert_eq!(err.code, crate::RuntimeErrorCode::PluginFinalizeTurn);
+    assert_eq!(store.runtime_turn_lease_abandon_count(), 1);
+    assert!(store.runtime_turn_checkpoint_count() >= 1);
+    assert!(store.runtime_effect_journal_count() >= 1);
+}
+
+#[tokio::test]
+async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
+    #[derive(Clone)]
+    struct FailToolCallController {
+        inner: RecordingEffectController,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeEffectController for FailToolCallController {
+        async fn execute_effect(
+            &self,
+            envelope: RuntimeEffectEnvelope,
+            local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+            if envelope.metadata.effect_kind == RuntimeEffectKind::ToolCall {
+                return Err(RuntimeEffectControllerError::new(
+                    "controller_failed",
+                    "tool call controller failed",
+                ));
+            }
+            self.inner.execute_effect(envelope, local_executor).await
+        }
+
+        async fn start_background_task(
+            &self,
+            registry: Arc<dyn BackgroundTaskRegistry>,
+            registration: BackgroundTaskRegistration,
+            local_executor: crate::BackgroundTaskLocalExecutor,
+        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
+            self.inner
+                .start_background_task(registry, registration, local_executor)
+                .await
+        }
+
+        async fn request_background_task_cancel(
+            &self,
+            registry: Arc<dyn BackgroundTaskRegistry>,
+            task_id: &str,
+            reason: Option<String>,
+        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
+            self.inner
+                .request_background_task_cancel(registry, task_id, reason)
+                .await
+        }
+    }
+
+    let turn_id = "resume-shared-finisher-turn";
+    let store = Arc::new(RecordingStore::default());
+    let first_recorder = RecordingEffectController::default();
+    let failing_host = EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default().with_effect_controller(Arc::new(FailToolCallController {
+            inner: first_recorder,
+        })),
+    );
+    let mut failing_runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EchoTool),
+        mock_provider(Vec::new()),
+        failing_host,
+        store.clone(),
+    )
+    .await;
+
+    failing_runtime
+        .run_turn_assembled(
+            TurnInput::text("use the tool").with_trace_turn_id(turn_id),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("first turn should stop before final commit");
+    assert!(store.runtime_turn_checkpoint_count() >= 1);
+    assert!(store.runtime_effect_journal_count() >= 1);
+
+    let resume_recorder = RecordingEffectController::default();
+    let resume_host = EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default().with_effect_controller(Arc::new(resume_recorder.clone())),
+    );
+    let mut resume_runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(EchoTool),
+        mock_provider(Vec::new()),
+        resume_host,
+        store.clone(),
+    )
+    .await;
+
+    let resumed = resume_runtime
+        .resume_turn(turn_id, &NoopEventSink, CancellationToken::new())
+        .await
+        .expect("resume turn");
+
+    assert!(matches!(resumed.outcome, TurnOutcome::Finished(_)));
+    assert_eq!(store.runtime_turn_checkpoint_count(), 0);
+    assert_eq!(store.runtime_effect_journal_count(), 0);
+    assert!(resume_recorder.count_kind(RuntimeEffectKind::ToolCall) >= 1);
 }
 
 #[tokio::test]
@@ -815,7 +969,10 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         .await
         .expect_err("ephemeral attachment store should be rejected");
 
-    assert_eq!(err.code, "durable_attachment_store_required");
+    assert_eq!(
+        err.code,
+        crate::RuntimeErrorCode::DurableAttachmentStoreRequired
+    );
 }
 
 #[tokio::test]

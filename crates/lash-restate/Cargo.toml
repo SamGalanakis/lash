@@ -20,3 +20,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+http = "1"
+http-body-util = "0.1"

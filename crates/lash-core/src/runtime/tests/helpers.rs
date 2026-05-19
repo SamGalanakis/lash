@@ -1,11 +1,11 @@
 use super::*;
 
-pub(super) fn default_state() -> PersistedSessionState {
+pub(crate) fn default_state() -> PersistedSessionState {
     PersistedSessionState::default()
 }
 
 #[test]
-pub(super) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
+pub(crate) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
     let mut accumulator = StandardStreamAccumulator::default();
     accumulator.push_reasoning("I'll".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(" check".to_string(), None, Vec::new(), None);
@@ -19,7 +19,7 @@ pub(super) fn stream_accumulator_merges_adjacent_display_reasoning_chunks() {
 }
 
 #[test]
-pub(super) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
+pub(crate) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_payload() {
     let mut accumulator = StandardStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_reasoning(
@@ -43,7 +43,7 @@ pub(super) fn stream_accumulator_enriches_reasoning_delta_with_later_roundtrip_p
 }
 
 #[test]
-pub(super) fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
+pub(crate) fn stream_accumulator_preserves_reasoning_when_final_response_has_tool_call() {
     let mut accumulator = StandardStreamAccumulator::default();
     accumulator.push_reasoning("I'll check the time.".to_string(), None, Vec::new(), None);
     accumulator.push_tool_call(
@@ -84,7 +84,7 @@ pub(super) fn stream_accumulator_preserves_reasoning_when_final_response_has_too
 }
 
 #[test]
-pub(super) fn stream_accumulator_does_not_duplicate_complete_final_response() {
+pub(crate) fn stream_accumulator_does_not_duplicate_complete_final_response() {
     let mut accumulator = StandardStreamAccumulator::default();
     accumulator.push_reasoning("I'll answer.".to_string(), None, Vec::new(), None);
     accumulator.push_text("Done.");
@@ -117,7 +117,7 @@ pub(super) fn stream_accumulator_does_not_duplicate_complete_final_response() {
     ));
 }
 
-pub(super) trait ReadModelState {
+pub(crate) trait ReadModelState {
     fn read_model(&self) -> crate::session_graph::SessionReadModel;
 }
 
@@ -133,7 +133,7 @@ impl ReadModelState for PersistedSessionState {
     }
 }
 
-pub(super) trait ReadModelStateMut: ReadModelState {
+pub(crate) trait ReadModelStateMut: ReadModelState {
     fn append_message(&mut self, message: Message);
 }
 
@@ -149,21 +149,21 @@ impl ReadModelStateMut for PersistedSessionState {
     }
 }
 
-pub(super) fn active_conversation_messages(state: &impl ReadModelState) -> Vec<Message> {
+pub(crate) fn active_conversation_messages(state: &impl ReadModelState) -> Vec<Message> {
     state.read_model().messages.as_ref().clone()
 }
 
-pub(super) fn active_tool_calls(state: &impl ReadModelState) -> Vec<ToolCallRecord> {
+pub(crate) fn active_tool_calls(state: &impl ReadModelState) -> Vec<ToolCallRecord> {
     state.read_model().tool_calls.as_ref().clone()
 }
 
-pub(super) fn append_message(state: &mut impl ReadModelStateMut, message: Message) {
+pub(crate) fn append_message(state: &mut impl ReadModelStateMut, message: Message) {
     state.append_message(message);
 }
 
 #[derive(Clone, Default)]
-pub(super) struct RecordingSink {
-    pub(super) events: Arc<Mutex<Vec<SessionEvent>>>,
+pub(crate) struct RecordingSink {
+    pub(crate) events: Arc<Mutex<Vec<SessionEvent>>>,
 }
 
 #[async_trait::async_trait]
@@ -174,14 +174,14 @@ impl EventSink for RecordingSink {
 }
 
 impl RecordingSink {
-    pub(super) fn snapshot(&self) -> Vec<SessionEvent> {
+    pub(crate) fn snapshot(&self) -> Vec<SessionEvent> {
         self.events.lock().expect("lock sink").clone()
     }
 }
 
 #[derive(Clone, Default)]
-pub(super) struct RecordingTurnEvents {
-    pub(super) events: Arc<Mutex<Vec<TurnActivity>>>,
+pub(crate) struct RecordingTurnEvents {
+    pub(crate) events: Arc<Mutex<Vec<TurnActivity>>>,
 }
 
 #[async_trait::async_trait]
@@ -192,18 +192,19 @@ impl TurnActivitySink for RecordingTurnEvents {
 }
 
 impl RecordingTurnEvents {
-    pub(super) fn snapshot(&self) -> Vec<TurnActivity> {
+    pub(crate) fn snapshot(&self) -> Vec<TurnActivity> {
         self.events.lock().expect("lock turn events").clone()
     }
 }
 
 #[derive(Default)]
-pub(super) struct RecordingStore {
-    session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
-    session_meta: Mutex<Option<crate::SessionMeta>>,
-    session_graph: Mutex<crate::SessionGraph>,
-    pub(super) checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
-    usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
+pub(crate) struct RecordingStore {
+    pub(crate) session_head_meta: Mutex<Option<crate::SessionHeadMeta>>,
+    pub(crate) session_meta: Mutex<Option<crate::SessionMeta>>,
+    pub(crate) session_graph: Mutex<crate::SessionGraph>,
+    pub(crate) checkpoint: Mutex<Option<crate::HydratedSessionCheckpoint>>,
+    pub(crate) usage_deltas: Mutex<Vec<crate::TokenLedgerEntry>>,
+    pub(crate) runtime_commit_count: Mutex<usize>,
     runtime_turn_checkpoints:
         Mutex<std::collections::HashMap<(String, String), crate::RuntimeTurnCheckpoint>>,
     runtime_turn_leases:
@@ -279,6 +280,24 @@ impl crate::store::RuntimePersistence for RecordingStore {
                 actual,
             });
         }
+        if let Some(completed) = &commit.completed_turn {
+            let lease_key = (completed.session_id.clone(), completed.turn_id.clone());
+            let lease_matches = self
+                .runtime_turn_leases
+                .lock()
+                .expect("lock runtime turn leases")
+                .get(&lease_key)
+                .is_some_and(|lease| {
+                    lease.lease_token == completed.lease_token
+                        && lease.expires_at_epoch_ms > current_epoch_ms()
+                });
+            if !lease_matches {
+                return Err(crate::store::StoreError::RuntimeTurnLeaseExpired {
+                    session_id: completed.session_id.clone(),
+                    turn_id: completed.turn_id.clone(),
+                });
+            }
+        }
         let mut graph = self.session_graph.lock().expect("lock graph");
         let leaf_node_id = match &commit.graph {
             crate::store::GraphCommitDelta::Unchanged { leaf_node_id } => leaf_node_id.clone(),
@@ -342,6 +361,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             graph_node_count: graph.nodes.len(),
             token_ledger: Vec::new(),
         });
+        *self
+            .runtime_commit_count
+            .lock()
+            .expect("lock runtime commit count") += 1;
         Ok(crate::store::RuntimeCommitResult {
             head_revision,
             checkpoint_ref,
@@ -363,8 +386,8 @@ impl crate::store::RuntimePersistence for RecordingStore {
             owner_id: owner_id.to_string(),
             lease_token: format!("{session_id}:{turn_id}:{owner_id}"),
             fencing_token: 1,
-            claimed_at_epoch_ms: 0,
-            expires_at_epoch_ms: lease_ttl_ms,
+            claimed_at_epoch_ms: current_epoch_ms(),
+            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
         };
         self.runtime_turn_leases
             .lock()
@@ -378,8 +401,20 @@ impl crate::store::RuntimePersistence for RecordingStore {
         lease: &crate::RuntimeTurnLease,
         lease_ttl_ms: u64,
     ) -> Result<crate::RuntimeTurnLease, crate::store::StoreError> {
+        self.runtime_turn_leases
+            .lock()
+            .expect("lock runtime turn leases")
+            .get(&(lease.session_id.clone(), lease.turn_id.clone()))
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
+            .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
+                session_id: lease.session_id.clone(),
+                turn_id: lease.turn_id.clone(),
+            })?;
         let renewed = crate::RuntimeTurnLease {
-            expires_at_epoch_ms: lease.expires_at_epoch_ms.saturating_add(lease_ttl_ms),
+            expires_at_epoch_ms: current_epoch_ms().saturating_add(lease_ttl_ms),
             ..lease.clone()
         };
         self.runtime_turn_leases
@@ -428,7 +463,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .lock()
             .expect("lock runtime turn leases")
             .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| current.lease_token == lease.lease_token)
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
             .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
                 session_id: lease.session_id.clone(),
                 turn_id: lease.turn_id.clone(),
@@ -469,7 +507,10 @@ impl crate::store::RuntimePersistence for RecordingStore {
             .lock()
             .expect("lock runtime turn leases")
             .get(&(lease.session_id.clone(), lease.turn_id.clone()))
-            .filter(|current| current.lease_token == lease.lease_token)
+            .filter(|current| {
+                current.lease_token == lease.lease_token
+                    && current.expires_at_epoch_ms > current_epoch_ms()
+            })
             .ok_or_else(|| crate::store::StoreError::RuntimeTurnLeaseExpired {
                 session_id: lease.session_id.clone(),
                 turn_id: lease.turn_id.clone(),
@@ -537,47 +578,54 @@ impl crate::store::RuntimePersistence for RecordingStore {
     }
 }
 
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 impl RecordingStore {
-    pub(super) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
+    pub(crate) async fn save_session_head_meta(&self, meta: crate::SessionHeadMeta) {
         *self.session_head_meta.lock().expect("lock store") = Some(meta);
     }
 
-    pub(super) fn runtime_turn_checkpoint_count(&self) -> usize {
+    pub(crate) fn runtime_turn_checkpoint_count(&self) -> usize {
         self.runtime_turn_checkpoints
             .lock()
             .expect("lock runtime turn checkpoints")
             .len()
     }
 
-    pub(super) fn runtime_effect_journal_count(&self) -> usize {
+    pub(crate) fn runtime_effect_journal_count(&self) -> usize {
         self.runtime_effect_journal
             .lock()
             .expect("lock runtime effect journal")
             .len()
     }
 
-    pub(super) fn runtime_turn_checkpoint_save_count(&self) -> usize {
+    pub(crate) fn runtime_turn_checkpoint_save_count(&self) -> usize {
         *self
             .runtime_turn_checkpoint_save_count
             .lock()
             .expect("lock runtime turn checkpoint save count")
     }
 
-    pub(super) fn runtime_effect_journal_save_count(&self) -> usize {
+    pub(crate) fn runtime_effect_journal_save_count(&self) -> usize {
         *self
             .runtime_effect_journal_save_count
             .lock()
             .expect("lock runtime effect journal save count")
     }
 
-    pub(super) fn runtime_turn_lease_renew_count(&self) -> usize {
+    pub(crate) fn runtime_turn_lease_renew_count(&self) -> usize {
         *self
             .runtime_turn_lease_renew_count
             .lock()
             .expect("lock runtime turn lease renew count")
     }
 
-    pub(super) fn runtime_turn_lease_abandon_count(&self) -> usize {
+    pub(crate) fn runtime_turn_lease_abandon_count(&self) -> usize {
         *self
             .runtime_turn_lease_abandon_count
             .lock()
@@ -586,12 +634,12 @@ impl RecordingStore {
 }
 
 #[derive(Debug)]
-pub(super) struct MockCall {
-    pub(super) stream_events: Vec<LlmStreamEvent>,
-    pub(super) response: Result<LlmResponse, LlmTransportError>,
+pub(crate) struct MockCall {
+    pub(crate) stream_events: Vec<LlmStreamEvent>,
+    pub(crate) response: Result<LlmResponse, LlmTransportError>,
 }
 
-pub(super) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
+pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
     let calls = Arc::new(Mutex::new(calls));
     TestProvider::builder()
         .kind("mock")
@@ -612,7 +660,7 @@ pub(super) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
         .build()
 }
 
-pub(super) fn standard_test_policy() -> SessionPolicy {
+pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         execution_mode: ExecutionMode::standard(),
         provider: mock_provider(Vec::new()).into_handle(),
@@ -622,15 +670,15 @@ pub(super) fn standard_test_policy() -> SessionPolicy {
     }
 }
 
-pub(super) fn test_host_config() -> EmbeddedRuntimeHost {
+pub(crate) fn test_host_config() -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(RuntimeCoreConfig::default())
 }
 
-pub(super) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
+pub(crate) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_trace_jsonl_path(Some(path)))
 }
 
-pub(super) fn test_host_config_with_trace_path_and_stream_events(
+pub(crate) fn test_host_config_with_trace_path_and_stream_events(
     path: PathBuf,
 ) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(
@@ -641,12 +689,12 @@ pub(super) fn test_host_config_with_trace_path_and_stream_events(
 }
 
 #[derive(Clone, Default)]
-pub(super) struct RecordingSessionStoreFactory {
+pub(crate) struct RecordingSessionStoreFactory {
     stores: Arc<StdMutex<Vec<Arc<RecordingStore>>>>,
 }
 
 impl RecordingSessionStoreFactory {
-    pub(super) fn stores(&self) -> Vec<Arc<RecordingStore>> {
+    pub(crate) fn stores(&self) -> Vec<Arc<RecordingStore>> {
         self.stores.lock().expect("store factory").clone()
     }
 }
@@ -674,7 +722,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
     }
 }
 
-pub(super) fn plugin_session_with_tools(
+pub(crate) fn plugin_session_with_tools(
     session_id: &str,
     mode: ExecutionMode,
     tools: Arc<dyn crate::ToolProvider>,
@@ -694,7 +742,7 @@ pub(super) fn plugin_session_with_tools(
         .expect("plugins")
 }
 
-pub(super) struct EmptyTools;
+pub(crate) struct EmptyTools;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for EmptyTools {
@@ -711,7 +759,7 @@ impl crate::ToolProvider for EmptyTools {
     }
 }
 
-pub(super) async fn standard_runtime_with_transport(transport: TestProvider) -> LashRuntime {
+pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let mut runtime = LashRuntime::from_embedded_state(
         standard_test_policy(),
@@ -728,14 +776,14 @@ pub(super) async fn standard_runtime_with_transport(transport: TestProvider) -> 
     runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
-pub(super) type RuntimeTestPluginBuilder = dyn Fn(&crate::PluginSessionContext) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError>
+pub(crate) type RuntimeTestPluginBuilder = dyn Fn(&crate::PluginSessionContext) -> Result<Arc<dyn crate::SessionPlugin>, crate::PluginError>
     + Send
     + Sync;
-pub(super) type RuntimeExternalRegistrar =
+pub(crate) type RuntimeExternalRegistrar =
     dyn Fn(&mut crate::PluginRegistrar) -> Result<(), crate::PluginError> + Send + Sync;
 
-pub(super) struct RuntimeTestPluginFactory {
-    pub(super) build: Arc<RuntimeTestPluginBuilder>,
+pub(crate) struct RuntimeTestPluginFactory {
+    pub(crate) build: Arc<RuntimeTestPluginBuilder>,
 }
 
 impl crate::PluginFactory for RuntimeTestPluginFactory {
@@ -751,12 +799,12 @@ impl crate::PluginFactory for RuntimeTestPluginFactory {
     }
 }
 
-pub(super) struct RuntimeTestPlugin {
-    pub(super) before_turn: Option<crate::plugin::BeforeTurnHook>,
-    pub(super) checkpoint: Option<crate::plugin::CheckpointHook>,
-    pub(super) tool_result_projector: Option<crate::plugin::ToolResultProjector>,
-    pub(super) runtime_event: Option<crate::plugin::PluginLifecycleEventHook>,
-    pub(super) external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
+pub(crate) struct RuntimeTestPlugin {
+    pub(crate) before_turn: Option<crate::plugin::BeforeTurnHook>,
+    pub(crate) checkpoint: Option<crate::plugin::CheckpointHook>,
+    pub(crate) tool_result_projector: Option<crate::plugin::ToolResultProjector>,
+    pub(crate) runtime_event: Option<crate::plugin::PluginLifecycleEventHook>,
+    pub(crate) external_registrar: Option<Arc<RuntimeExternalRegistrar>>,
 }
 
 impl crate::SessionPlugin for RuntimeTestPlugin {
@@ -784,7 +832,7 @@ impl crate::SessionPlugin for RuntimeTestPlugin {
     }
 }
 
-pub(super) async fn runtime_with_plugins(
+pub(crate) async fn runtime_with_plugins(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     transport: TestProvider,
 ) -> LashRuntime {
@@ -797,7 +845,7 @@ pub(super) async fn runtime_with_plugins(
     .await
 }
 
-pub(super) async fn runtime_with_plugins_and_tools(
+pub(crate) async fn runtime_with_plugins_and_tools(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
     transport: TestProvider,
@@ -805,7 +853,7 @@ pub(super) async fn runtime_with_plugins_and_tools(
     runtime_with_plugins_and_tools_and_host(plugins, tools, transport, test_host_config()).await
 }
 
-pub(super) async fn runtime_with_plugins_and_tools_and_host(
+pub(crate) async fn runtime_with_plugins_and_tools_and_host(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
     transport: TestProvider,
@@ -833,7 +881,7 @@ pub(super) async fn runtime_with_plugins_and_tools_and_host(
     runtime
 }
 
-pub(super) async fn runtime_with_plugins_and_tools_and_host_and_store(
+pub(crate) async fn runtime_with_plugins_and_tools_and_host_and_store(
     plugins: Vec<Arc<dyn crate::PluginFactory>>,
     tools: Arc<dyn crate::ToolProvider>,
     transport: TestProvider,
@@ -864,7 +912,7 @@ pub(super) async fn runtime_with_plugins_and_tools_and_host_and_store(
     runtime
 }
 
-pub(super) struct EchoTool;
+pub(crate) struct EchoTool;
 
 fn echo_tool_definition() -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
@@ -903,8 +951,8 @@ impl crate::ToolProvider for EchoTool {
     }
 }
 
-pub(super) struct TerminalControlTool {
-    pub(super) controls: Vec<crate::ToolControl>,
+pub(crate) struct TerminalControlTool {
+    pub(crate) controls: Vec<crate::ToolControl>,
 }
 
 #[async_trait::async_trait]
@@ -950,8 +998,8 @@ fn terminal_tool_definition(index: usize) -> crate::ToolDefinition {
 /// Tool that sleeps for 10 seconds unless its future is aborted or the
 /// execution-context cancellation token fires. Used to verify that turn
 /// cancellation unwinds in-flight tool tasks promptly.
-pub(super) struct SlowTool {
-    pub(super) observed_cancel: Arc<AtomicBool>,
+pub(crate) struct SlowTool {
+    pub(crate) observed_cancel: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -993,7 +1041,7 @@ fn slow_tool_definition() -> crate::ToolDefinition {
     )
 }
 
-pub(super) struct MemoryProbeTool;
+pub(crate) struct MemoryProbeTool;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for MemoryProbeTool {
@@ -1019,7 +1067,7 @@ fn memory_probe_tool_definition() -> crate::ToolDefinition {
     )
 }
 
-pub(super) struct ChildSessionTool;
+pub(crate) struct ChildSessionTool;
 
 #[async_trait::async_trait]
 impl crate::ToolProvider for ChildSessionTool {
@@ -1099,7 +1147,7 @@ fn child_session_tool_definition() -> crate::ToolDefinition {
     )
 }
 
-pub(super) async fn standard_runtime_with_transport_and_background(
+pub(crate) async fn standard_runtime_with_transport_and_background(
     transport: TestProvider,
 ) -> LashRuntime {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
@@ -1123,7 +1171,7 @@ pub(super) async fn standard_runtime_with_transport_and_background(
     runtime
 }
 
-pub(super) async fn standard_runtime_with_shared_background_executor(
+pub(crate) async fn standard_runtime_with_shared_background_executor(
     transport: TestProvider,
     executor: Arc<dyn BackgroundTaskRegistry>,
 ) -> LashRuntime {
@@ -1145,7 +1193,7 @@ pub(super) async fn standard_runtime_with_shared_background_executor(
     runtime
 }
 
-pub(super) async fn standard_runtime_with_transport_and_host(
+pub(crate) async fn standard_runtime_with_transport_and_host(
     transport: TestProvider,
     host: EmbeddedRuntimeHost,
 ) -> LashRuntime {
@@ -1166,7 +1214,7 @@ pub(super) async fn standard_runtime_with_transport_and_host(
     runtime
 }
 
-pub(super) async fn standard_runtime_with_bridge(
+pub(crate) async fn standard_runtime_with_bridge(
     transport: TestProvider,
     turn_injection_bridge: crate::TurnInjectionBridge,
 ) -> LashRuntime {
@@ -1187,7 +1235,7 @@ pub(super) async fn standard_runtime_with_bridge(
     runtime
 }
 
-pub(super) async fn standard_runtime_with_input_bridge(
+pub(crate) async fn standard_runtime_with_input_bridge(
     transport: TestProvider,
     turn_input_injection_bridge: crate::TurnInputInjectionBridge,
 ) -> LashRuntime {

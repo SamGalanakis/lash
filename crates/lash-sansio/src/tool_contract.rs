@@ -1449,6 +1449,209 @@ fn doc_signature_from_value(
     out
 }
 
+fn schema_type_label(schema: &serde_json::Value) -> String {
+    schema_type_label_and_nullability(schema).0
+}
+
+fn compact_schema_label(schema: &serde_json::Value) -> String {
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let labels = any_of
+            .iter()
+            .map(compact_schema_label)
+            .collect::<std::collections::BTreeSet<_>>();
+        let joined = labels.into_iter().collect::<Vec<_>>().join(" | ");
+        return if joined.is_empty() {
+            "any".to_string()
+        } else {
+            joined
+        };
+    }
+
+    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
+        let labels = types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|ty| *ty != "null")
+            .map(|ty| compact_schema_label(&serde_json::json!({ "type": ty })))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut out = if labels.is_empty() {
+            "any".to_string()
+        } else {
+            labels.into_iter().collect::<Vec<_>>().join(" | ")
+        };
+        if types.iter().any(|value| value.as_str() == Some("null")) {
+            out.push_str(" | null");
+        }
+        return out;
+    }
+
+    match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("array") => schema
+            .get("items")
+            .map(compact_schema_label)
+            .filter(|value| !value.is_empty())
+            .map(|item| format!("list[{item}]"))
+            .unwrap_or_else(|| "list[any]".to_string()),
+        Some("object") => compact_record_label(schema),
+        _ => schema_type_label(schema),
+    }
+}
+
+fn compact_record_label(schema: &serde_json::Value) -> String {
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return "record".to_string();
+    };
+    if properties.is_empty() {
+        return "record".to_string();
+    }
+
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let fields = properties
+        .iter()
+        .map(|(name, field_schema)| {
+            let suffix = if required.contains(name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
+            format!("{name}{suffix}: {}", compact_schema_label(field_schema))
+        })
+        .collect::<Vec<_>>();
+    format!("record{{{}}}", fields.join(", "))
+}
+
+fn compact_examples(examples: &[String], limit: usize) -> Vec<String> {
+    examples
+        .iter()
+        .map(|example| example.trim())
+        .filter(|example| !example.is_empty())
+        .take(limit)
+        .map(|example| {
+            if example.chars().count() <= COMPACT_TOOL_EXAMPLE_CHAR_LIMIT {
+                return example.to_string();
+            }
+            let mut out = example
+                .chars()
+                .take(COMPACT_TOOL_EXAMPLE_CHAR_LIMIT.saturating_sub(3))
+                .collect::<String>();
+            out.push_str("...");
+            out
+        })
+        .collect()
+}
+
+fn schema_type_label_and_nullability(schema: &serde_json::Value) -> (String, bool) {
+    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
+        let variants = values
+            .iter()
+            .filter(|value| !value.is_null())
+            .map(display_default_value)
+            .collect::<Vec<_>>();
+        let nullable = values.iter().any(serde_json::Value::is_null);
+        if !variants.is_empty() {
+            let mut label = format!("enum[{}]", variants.join(", "));
+            if nullable {
+                label.push_str(" | null");
+            }
+            return (label, nullable);
+        }
+    }
+
+    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
+        let nullable = types.iter().any(|value| value.as_str() == Some("null"));
+        let non_null = types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|ty| *ty != "null")
+            .map(schema_type_name)
+            .collect::<Vec<_>>();
+        let mut label = if non_null.is_empty() {
+            "any".to_string()
+        } else {
+            non_null.join(" | ")
+        };
+        if nullable {
+            label.push_str(" | null");
+        }
+        return (label, nullable);
+    }
+
+    if let Some(any_of) = schema
+        .get("anyOf")
+        .or_else(|| schema.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut nullable = false;
+        let mut labels = Vec::new();
+        for subschema in any_of {
+            let (label, is_nullable) = schema_type_label_and_nullability(subschema);
+            nullable |= is_nullable || label == "null";
+            if label != "null" && !labels.iter().any(|existing| existing == &label) {
+                labels.push(label);
+            }
+        }
+        let mut label = if labels.is_empty() {
+            "any".to_string()
+        } else {
+            labels.join(" | ")
+        };
+        if nullable {
+            label.push_str(" | null");
+        }
+        return (label, nullable);
+    }
+
+    let nullable = schema.get("type").and_then(serde_json::Value::as_str) == Some("null");
+    let label = match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("array") => {
+            let item = schema
+                .get("items")
+                .map(schema_type_label)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "any".to_string());
+            format!("list[{item}]")
+        }
+        Some(ty) => schema_type_name(ty),
+        None => "any".to_string(),
+    };
+    (label, nullable)
+}
+
+fn schema_type_name(ty: &str) -> String {
+    match ty {
+        "string" => "str".to_string(),
+        "integer" => "int".to_string(),
+        "number" => "float".to_string(),
+        "boolean" => "bool".to_string(),
+        "object" => "record".to_string(),
+        "array" => "list".to_string(),
+        "null" => "null".to_string(),
+        _ => "any".to_string(),
+    }
+}
+
+fn display_default_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(v) => v.to_string(),
+        serde_json::Value::Number(v) => v.to_string(),
+        serde_json::Value::String(v) => format!("{v:?}"),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2343,209 +2546,5 @@ mod tests {
             ToolDefinition::format_tool_docs(&[with_metadata]),
             ToolDefinition::format_tool_docs(&[without_metadata])
         );
-    }
-}
-
-fn schema_type_label(schema: &serde_json::Value) -> String {
-    schema_type_label_and_nullability(schema).0
-}
-
-fn compact_schema_label(schema: &serde_json::Value) -> String {
-    if let Some(any_of) = schema
-        .get("anyOf")
-        .or_else(|| schema.get("oneOf"))
-        .and_then(serde_json::Value::as_array)
-    {
-        let labels = any_of
-            .iter()
-            .map(compact_schema_label)
-            .collect::<std::collections::BTreeSet<_>>();
-        let joined = labels.into_iter().collect::<Vec<_>>().join(" | ");
-        return if joined.is_empty() {
-            "any".to_string()
-        } else {
-            joined
-        };
-    }
-
-    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
-        let labels = types
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|ty| *ty != "null")
-            .map(|ty| compact_schema_label(&serde_json::json!({ "type": ty })))
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut out = if labels.is_empty() {
-            "any".to_string()
-        } else {
-            labels.into_iter().collect::<Vec<_>>().join(" | ")
-        };
-        if types.iter().any(|value| value.as_str() == Some("null")) {
-            out.push_str(" | null");
-        }
-        return out;
-    }
-
-    match schema.get("type").and_then(serde_json::Value::as_str) {
-        Some("array") => schema
-            .get("items")
-            .map(compact_schema_label)
-            .filter(|value| !value.is_empty())
-            .map(|item| format!("list[{item}]"))
-            .unwrap_or_else(|| "list[any]".to_string()),
-        Some("object") => compact_record_label(schema),
-        _ => schema_type_label(schema),
-    }
-}
-
-fn compact_record_label(schema: &serde_json::Value) -> String {
-    let Some(properties) = schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return "record".to_string();
-    };
-    if properties.is_empty() {
-        return "record".to_string();
-    }
-
-    let required = schema
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    let fields = properties
-        .iter()
-        .map(|(name, field_schema)| {
-            let suffix = if required.contains(name.as_str()) {
-                ""
-            } else {
-                "?"
-            };
-            format!("{name}{suffix}: {}", compact_schema_label(field_schema))
-        })
-        .collect::<Vec<_>>();
-    format!("record{{{}}}", fields.join(", "))
-}
-
-fn compact_examples(examples: &[String], limit: usize) -> Vec<String> {
-    examples
-        .iter()
-        .map(|example| example.trim())
-        .filter(|example| !example.is_empty())
-        .take(limit)
-        .map(|example| {
-            if example.chars().count() <= COMPACT_TOOL_EXAMPLE_CHAR_LIMIT {
-                return example.to_string();
-            }
-            let mut out = example
-                .chars()
-                .take(COMPACT_TOOL_EXAMPLE_CHAR_LIMIT.saturating_sub(3))
-                .collect::<String>();
-            out.push_str("...");
-            out
-        })
-        .collect()
-}
-
-fn schema_type_label_and_nullability(schema: &serde_json::Value) -> (String, bool) {
-    if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
-        let variants = values
-            .iter()
-            .filter(|value| !value.is_null())
-            .map(display_default_value)
-            .collect::<Vec<_>>();
-        let nullable = values.iter().any(serde_json::Value::is_null);
-        if !variants.is_empty() {
-            let mut label = format!("enum[{}]", variants.join(", "));
-            if nullable {
-                label.push_str(" | null");
-            }
-            return (label, nullable);
-        }
-    }
-
-    if let Some(types) = schema.get("type").and_then(serde_json::Value::as_array) {
-        let nullable = types.iter().any(|value| value.as_str() == Some("null"));
-        let non_null = types
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|ty| *ty != "null")
-            .map(schema_type_name)
-            .collect::<Vec<_>>();
-        let mut label = if non_null.is_empty() {
-            "any".to_string()
-        } else {
-            non_null.join(" | ")
-        };
-        if nullable {
-            label.push_str(" | null");
-        }
-        return (label, nullable);
-    }
-
-    if let Some(any_of) = schema
-        .get("anyOf")
-        .or_else(|| schema.get("oneOf"))
-        .and_then(serde_json::Value::as_array)
-    {
-        let mut nullable = false;
-        let mut labels = Vec::new();
-        for subschema in any_of {
-            let (label, is_nullable) = schema_type_label_and_nullability(subschema);
-            nullable |= is_nullable || label == "null";
-            if label != "null" && !labels.iter().any(|existing| existing == &label) {
-                labels.push(label);
-            }
-        }
-        let mut label = if labels.is_empty() {
-            "any".to_string()
-        } else {
-            labels.join(" | ")
-        };
-        if nullable {
-            label.push_str(" | null");
-        }
-        return (label, nullable);
-    }
-
-    let nullable = schema.get("type").and_then(serde_json::Value::as_str) == Some("null");
-    let label = match schema.get("type").and_then(serde_json::Value::as_str) {
-        Some("array") => {
-            let item = schema
-                .get("items")
-                .map(schema_type_label)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "any".to_string());
-            format!("list[{item}]")
-        }
-        Some(ty) => schema_type_name(ty),
-        None => "any".to_string(),
-    };
-    (label, nullable)
-}
-
-fn schema_type_name(ty: &str) -> String {
-    match ty {
-        "string" => "str".to_string(),
-        "integer" => "int".to_string(),
-        "number" => "float".to_string(),
-        "boolean" => "bool".to_string(),
-        "object" => "record".to_string(),
-        "array" => "list".to_string(),
-        "null" => "null".to_string(),
-        _ => "any".to_string(),
-    }
-}
-
-fn display_default_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(v) => v.to_string(),
-        serde_json::Value::Number(v) => v.to_string(),
-        serde_json::Value::String(v) => format!("{v:?}"),
-        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
     }
 }

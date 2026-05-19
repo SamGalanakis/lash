@@ -1,7 +1,8 @@
 # Agent Service
 
-SQLite-backed localhost chat example for `lash`, RLM mode, and typed
-session plugins.
+SQLite-backed localhost chat example for `lash`, RLM mode, typed session
+plugin activation, app-owned board tools, semantic streaming, and optional
+Restate turn durability.
 
 Run it:
 
@@ -20,8 +21,55 @@ AGENT_SERVICE_TRACE=.agent-service/trace.jsonl
 AGENT_SERVICE_DURABILITY=local
 ```
 
-The durability mode can also be passed as `--durability local`. The `restate`
-mode is reserved for builds that link a Restate `RuntimeEffectController` adapter.
+The durability mode can also be passed as `--durability local`. Restate mode is
+feature-gated and uses these local defaults:
+
+| Path | App | Restate endpoint | Ingress | Admin |
+| --- | --- | --- | --- | --- |
+| App run | `127.0.0.1:3000` | `127.0.0.1:9080` | `127.0.0.1:8080` | `127.0.0.1:9070` |
+| Live E2E | in-process test | `127.0.0.1:19080` | `127.0.0.1:18080` | `127.0.0.1:19070` |
+
+For the app run, start Restate, run the feature-gated binary, then register the
+endpoint:
+
+```bash
+docker run --rm -p 8080:8080 -p 9070:9070 -p 9071:9071 restatedev/restate:latest
+OPENROUTER_API_KEY=... \
+AGENT_SERVICE_DURABILITY=restate \
+AGENT_SERVICE_RESTATE_ADDR=127.0.0.1:9080 \
+RESTATE_INGRESS_URL=http://127.0.0.1:8080 \
+cargo run -p agent-service --features restate -- --durability restate
+
+restate deployments register http://host.docker.internal:9080
+```
+
+For the live E2E, use the one-command recipe. It starts the agent-service
+Restate endpoint in-process, registers it through the Restate Admin API, submits
+a turn through Restate ingress, verifies app outbox/message persistence, and
+removes the container on exit:
+
+```bash
+just agent-service-restate-e2e
+```
+
+The recipe starts `restatedev/restate:latest` with host networking on admin
+`19070`, ingress `18080`, and node `15122`. Override
+`AGENT_SERVICE_RESTATE_IMAGE`, `AGENT_SERVICE_RESTATE_CONTAINER`,
+`RESTATE_ADMIN_PORT`, `RESTATE_INGRESS_PORT`, `RESTATE_NODE_PORT`,
+`AGENT_SERVICE_E2E_ENDPOINT_BIND`, or `AGENT_SERVICE_E2E_ENDPOINT_URL` if your
+local Docker networking needs different addresses.
+
+In Restate mode the Axum app still serves `AGENT_SERVICE_ADDR`, the same process
+also serves a Restate endpoint on `AGENT_SERVICE_RESTATE_ADDR`, and browser
+turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run` through
+`RESTATE_INGRESS_URL`. `AgentServiceTurnWorkflowRequest` carries only stable
+turn, chat, text, model, and model-variant data; board state stays in the app
+database. The workflow creates a `RestateRuntimeEffectController`, first attempts
+`session.resume_turn(turn_id).stream_with_effect_scope(...)`, and falls back to
+a fresh `session.turn(...).stream_with_effect_scope(...)` only when Lash has no
+checkpoint for that turn id yet. Turn progress is written to an app-owned
+SQLite outbox keyed by `turn_id`, so the NDJSON route can stream progress after
+route restart or while the workflow is running in the Restate handler.
 
 Then open `http://127.0.0.1:3000`.
 
@@ -43,14 +91,12 @@ its fixed app tools through the normal `ToolProvider` hook.
 The plugin demonstrates:
 
 - Typed session activation through `PluginBinding::SessionConfig`.
-- Typed per-turn UI input through `DemoTurnInput`.
-- A required tic-tac-toe board input validated before the turn runs.
-- A plugin-authored `BoardTurnExt` trait so route code uses `.with_board(...)`
-  instead of the generic `with_plugin_input::<DemoPlugin>(...)` primitive.
+- App-owned tic-tac-toe board state in the `chat_boards` SQLite table.
+- User message payload board snapshots for browser replay only.
 - `read_board` and `play_move` app tools provided by the plugin's
-  `ToolProvider`. Their handlers read the same typed turn input used by the
-  prompt hook.
-- Prompt contribution that reflects the current board state.
+  `ToolProvider`. `read_board` reads the canonical board from SQLite;
+  `play_move` validates and mutates that canonical board.
+- Prompt contribution that reflects the current canonical board state.
 - Additive semantic streaming: thinking is shown live from
   `TurnEvent::ReasoningDelta`, assistant prose as
   `TurnEvent::AssistantProseDelta`, code/tool activity as structured cards, and
@@ -59,9 +105,9 @@ The plugin demonstrates:
   opens the Lash session from the chat id and store instead of keeping runtime
   sessions in a process-global map.
 - Product persistence is app-owned: chat rows, board snapshots, reasoning, code
-  blocks, tool cards, and titles stay in the app database. The final assistant
-  row is derived from `TurnOutput` terminal semantics, preferring `submit` /
-  tool terminal values over streamed prose.
+  blocks, tool cards, tool outbox events, and titles stay in the app database.
+  The final assistant row is derived from `TurnOutput` terminal semantics,
+  preferring `submit` / tool terminal values over streamed prose.
 - The app database uses `rusqlite` on `tokio::task::spawn_blocking`, keeping the
   example dependency-light without blocking Axum worker tasks on SQLite calls.
 

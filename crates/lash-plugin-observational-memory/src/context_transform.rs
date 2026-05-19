@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
+use lash_core::PreparedContext;
 use lash_core::plugin::{HistoryError, TurnContextTransform, TurnTransformContext};
-use lash_core::session_model::context::PreparedContext;
 use lash_core::{Message, MessageOrigin, MessageRole, ObservationalMemoryConfig, Part, PartKind};
 
 use crate::constants::{

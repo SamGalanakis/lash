@@ -20,8 +20,6 @@ otel-trace = ["lash-trace/otel"]
 # Expose `lash::testing` for downstream plugin crates to share mock
 # session-manager/turn fixtures with lash's own tests.
 testing = []
-# Convenience umbrella for first-party consumers (e.g. lash-cli).
-full = []
 
 [dependencies]
 lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.4" }

@@ -12,7 +12,7 @@ Most agent stacks treat the LLM as the runtime and stitch state around it — a 
 
 ### Durable per-turn commits
 
-Every completed turn lands as one `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through the final commit transaction.
+Every completed turn lands as one lease-fenced `RuntimeCommit` against a `SessionGraph` — graph delta, checkpoint blobs, usage deltas, and head revision in one SQLite transaction with optimistic CAS. In-flight turns persist separately as a lease-guarded `RuntimeTurnCheckpoint` plus effect-journal records. Scoped durable turns renew the same `RuntimeTurnLease` before checkpoint and journal writes, abandon ownership on non-commit exits while preserving resumable state, and clear the turn's checkpoint and journal only through a final commit that still owns an active, unexpired lease.
 
 ### Sans-IO state machine for workflow integration
 
@@ -57,8 +57,8 @@ the explicit pre-release tag:
 
 ```toml
 [dependencies]
-lash-runtime         = "=0.1.0-alpha.1"
-lash-provider-openai = "=0.1.0-alpha.1"
+lash-runtime         = "=0.1.0-alpha.4"
+lash-provider-openai = "=0.1.0-alpha.4"
 anyhow               = "1"
 tokio                = { version = "1", features = ["full"] }
 ```
@@ -98,13 +98,13 @@ See [`docs/quickstart.html`](https://lash.run/quickstart.html) for the full walk
 
 ## Run the example
 
-`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM mode, typed plugin input, app tools, semantic streaming, and per-chat model selection.
+`examples/agent-service` is a localhost SQLite-backed chat app that exercises the `lash` facade end-to-end: RLM mode, typed session plugin activation, app-owned board tools, semantic streaming, per-chat model selection, SQLite runtime persistence, and optional Restate turn durability.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... cargo run -p agent-service
 ```
 
-Then open <http://127.0.0.1:3000>. See [`examples/agent-service/README.md`](examples/agent-service/README.md) for the optional environment knobs (`OPENROUTER_MODEL`, `AGENT_SERVICE_ADDR`, `AGENT_SERVICE_DATA_DIR`, `AGENT_SERVICE_TRACE`, …).
+Then open <http://127.0.0.1:3000>. See [`examples/agent-service/README.md`](examples/agent-service/README.md) for the optional environment knobs (`OPENROUTER_MODEL`, `AGENT_SERVICE_ADDR`, `AGENT_SERVICE_DATA_DIR`, `AGENT_SERVICE_TRACE`, `AGENT_SERVICE_DURABILITY`, …) and the one-command Restate E2E recipe.
 
 ## The CLI
 
@@ -135,10 +135,17 @@ The CI runtime-performance gate uses the quick synthetic profile:
 python3 scripts/profile_runtime.py --profile quick --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/ci.json
 ```
 
-That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, embed paths, streaming, and durable turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full profile:
+That default matrix covers standard mode, RLM, RLM tool batches, large tool surfaces, observational-memory prompt and maintenance paths, embed paths, streaming, scoped effect controllers, store reopen, and durable turn-checkpoint round trips. The nightly / manual `Performance` workflow runs the full runtime profile:
 
 ```bash
 python3 scripts/profile_runtime.py --profile full --release --cargo-feature fff-zlob --out .benchmarks/runtime-perf/full.json
+```
+
+It also runs the full UI profile and the Lashlang scenario sweep:
+
+```bash
+python3 scripts/profile_ui.py --profile full --release --cargo-feature fff-zlob --runs 5 --warmups 1 --out .benchmarks/ui-perf/full.json
+python3 scripts/profile_lashlang.py --iterations 2500 --profile-iterations 2500 --out .benchmarks/lashlang-perf/full.json
 ```
 
 ## Contributing

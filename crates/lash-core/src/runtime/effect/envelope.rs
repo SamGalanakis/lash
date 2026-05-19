@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 
 use crate::CheckpointKind;
 use crate::plugin::PluginMessage;
@@ -75,13 +74,12 @@ impl RuntimeEffectEnvelope {
     }
 
     pub fn stable_hash(&self) -> Result<String, RuntimeEffectControllerError> {
-        let bytes = serde_json::to_vec(self).map_err(|err| {
+        crate::stable_hash::stable_json_sha256_hex(self).map_err(|err| {
             RuntimeEffectControllerError::new(
                 "runtime_effect_envelope_hash",
                 format!("failed to serialize runtime effect envelope: {err}"),
             )
-        })?;
-        Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+        })
     }
 }
 

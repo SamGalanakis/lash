@@ -13,7 +13,7 @@
 <script src="./docs.js" defer></script>
 <script src="./syntax.js" defer></script>
 </head>
-<body class="docs-page" data-cover-source="<code>crates/lash-trace/src/lib.rs</code>, <code>crates/lash-trace/src/otel.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash-trace-viewer/src/main.rs</code>, <code>examples/agent-service/src/main.rs</code>.">
+<body class="docs-page" data-cover-source="<code>crates/lash-trace/src/lib.rs</code>, <code>crates/lash-trace/src/otel.rs</code>, <code>crates/lash/src/core.rs</code>, <code>crates/lash-trace-viewer/src/main.rs</code>, <code>examples/agent-service/src/main.rs</code>, <code>examples/agent-service/src/routes.rs</code>.">
 <section class="opener">
     <h1 class="opener__title">tracing<span class="slash">/</span>observability</h1>
     <p class="opener__lede">Structured trace records emit through <code>TraceSink</code>. The bundled <code>JsonlTraceSink</code> writes one record per line; fan-out, OTel, and custom sinks are wrappers. <code>lash-trace-viewer</code> renders JSONL to a self-contained HTML page.</p>
@@ -158,8 +158,8 @@ $ cargo run -p lash-trace-viewer -- trace.jsonl \
           </div>
           <pre><code># In your downstream Cargo.toml — pull in lash-core with the otel-trace
 # feature alongside the lash-runtime facade.
-lash-runtime = "=0.1.0-alpha.1"
-lash-core    = { version = "=0.1.0-alpha.1", features = ["otel-trace"] }</code></pre>
+lash-runtime = "=0.1.0-alpha.4"
+lash-core    = { version = "=0.1.0-alpha.4", features = ["otel-trace"] }</code></pre>
           <p><code>lash_core::OtelTraceSink</code> wraps an <code>opentelemetry</code> tracer and converts every event to a span with payload attributes. Use in place of (or alongside) <code>JsonlTraceSink</code>:</p>
           <pre><code>use lash::{LashCore, tracing::{TraceLevel, TraceSink}};
 use lash_core::OtelTraceSink;

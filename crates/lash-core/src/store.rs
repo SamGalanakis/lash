@@ -1,5 +1,3 @@
-use sha2::Digest;
-
 fn default_root_session_id() -> String {
     "root".to_string()
 }
@@ -314,41 +312,6 @@ pub struct RuntimeTurnCheckpoint {
     pub updated_at_epoch_ms: u64,
 }
 
-impl RuntimeTurnCheckpoint {
-    pub fn new(
-        session_id: impl Into<String>,
-        turn_id: impl Into<String>,
-        turn_index: usize,
-        mode_iteration: usize,
-        checkpoint: lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
-        machine_config: RuntimeTurnMachineConfigSnapshot,
-        mode_turn_options: crate::ModeTurnOptions,
-        turn_prompt_layer: crate::PromptLayer,
-        provider_id: impl Into<String>,
-        model: impl Into<String>,
-        model_variant: Option<String>,
-        updated_at_epoch_ms: u64,
-    ) -> Result<Self, StoreError> {
-        let checkpoint_hash = runtime_turn_checkpoint_hash(&checkpoint)?;
-        Ok(Self {
-            schema_version: RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-            session_id: session_id.into(),
-            turn_id: turn_id.into(),
-            turn_index,
-            mode_iteration,
-            checkpoint_hash,
-            machine_config,
-            checkpoint,
-            mode_turn_options,
-            turn_prompt_layer,
-            provider_id: provider_id.into(),
-            model: model.into(),
-            model_variant,
-            updated_at_epoch_ms,
-        })
-    }
-}
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnLease {
     pub schema_version: u32,
@@ -393,10 +356,8 @@ pub struct RuntimeEffectJournalRecord {
 pub fn runtime_turn_checkpoint_hash(
     checkpoint: &lash_sansio::TurnCheckpoint<crate::HostModeProtocol>,
 ) -> Result<String, StoreError> {
-    let bytes = serde_json::to_vec(checkpoint).map_err(|err| {
-        StoreError::Backend(format!("failed to serialize turn checkpoint: {err}"))
-    })?;
-    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+    crate::stable_hash::stable_json_sha256_hex(checkpoint)
+        .map_err(|err| StoreError::Backend(format!("failed to serialize turn checkpoint: {err}")))
 }
 
 fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
@@ -547,6 +508,12 @@ impl Default for SessionHeadMeta {
 }
 
 /// Exact persistence protocol required by the runtime.
+///
+/// This is intentionally the runtime's atomic transaction facade: one backend
+/// owns session graph/head commits, durable turn leases, turn checkpoints, and
+/// effect-journal rows together. Keep this monolithic until a second real
+/// backend proves that splitting store facets removes more complexity than it
+/// adds.
 #[async_trait::async_trait]
 pub trait RuntimePersistence: Send + Sync {
     async fn load_session(

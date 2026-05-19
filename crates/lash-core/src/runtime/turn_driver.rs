@@ -761,18 +761,17 @@ impl<'run> RuntimeTurnDriver<'run> {
         checkpoint_record: crate::RuntimeTurnCheckpoint,
     ) -> Result<TurnMachine, RuntimeError> {
         let checkpoint_hash = crate::runtime_turn_checkpoint_hash(&checkpoint_record.checkpoint)
-            .map_err(|err| RuntimeError {
-                code: "runtime_turn_checkpoint_hash".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::RuntimeTurnCheckpointHash, err.to_string())
             })?;
         if checkpoint_hash != checkpoint_record.checkpoint_hash {
-            return Err(RuntimeError {
-                code: "runtime_turn_checkpoint_hash_mismatch".to_string(),
-                message: format!(
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::RuntimeTurnCheckpointHashMismatch,
+                format!(
                     "persisted checkpoint hash `{}` does not match decoded checkpoint hash `{}`",
                     checkpoint_record.checkpoint_hash, checkpoint_hash
                 ),
-            });
+            ));
         }
         let mode_preamble = self
             .session
@@ -780,9 +779,11 @@ impl<'run> RuntimeTurnDriver<'run> {
                 &self.session_id,
                 checkpoint_record.machine_config.execution_mode.clone(),
             )
-            .map_err(|err| RuntimeError {
-                code: "runtime_turn_restore_mode_preamble".to_string(),
-                message: err.to_string(),
+            .map_err(|err| {
+                RuntimeError::new(
+                    RuntimeErrorCode::RuntimeTurnRestoreModePreamble,
+                    err.to_string(),
+                )
             })?;
         self.machine_config_snapshot = Some(checkpoint_record.machine_config.clone());
         self.mode_turn_options = checkpoint_record.mode_turn_options.clone();
@@ -868,10 +869,10 @@ impl<'run> RuntimeTurnDriver<'run> {
                         Err(err) => {
                             let err_string = err.to_string();
                             if self.should_abort_for_runtime_effect_error() {
-                                return Err(RuntimeError {
-                                    code: "mode_before_llm_call".to_string(),
-                                    message: err_string,
-                                });
+                                return Err(RuntimeError::new(
+                                    RuntimeErrorCode::ModeBeforeLlmCall,
+                                    err_string,
+                                ));
                             }
                             machine.fail_turn(make_error_event(
                                 "mode_before_llm_call",

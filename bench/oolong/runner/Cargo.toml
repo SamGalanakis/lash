@@ -10,7 +10,7 @@ name = "bench-oolong"
 path = "src/main.rs"
 
 [dependencies]
-lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.4", default-features = false, features = ["full"] }
+lash-core = { path = "../../../crates/lash-core", version = "=0.1.0-alpha.4", default-features = false }
 lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.4" }
 lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.4" }
 lash-export = { path = "../../../crates/lash-export", version = "=0.1.0-alpha.4" }

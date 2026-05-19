@@ -11,7 +11,7 @@ use crate::plugin::StaticPluginFactory;
 use crate::testing::TestProvider;
 use tokio_util::sync::CancellationToken;
 
-mod helpers;
+pub(crate) mod helpers;
 
 use helpers::*;
 

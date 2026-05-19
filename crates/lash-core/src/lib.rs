@@ -13,6 +13,7 @@ pub mod search;
 pub mod session;
 pub mod session_graph;
 pub mod session_model;
+mod stable_hash;
 pub mod standard_context_approach;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
@@ -199,7 +200,7 @@ pub use runtime::{
     Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-    RuntimeEnvironmentBuilder, RuntimeError, RuntimeHandle, RuntimeObservation,
+    RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,

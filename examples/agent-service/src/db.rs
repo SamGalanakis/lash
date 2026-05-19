@@ -1,0 +1,771 @@
+use std::path::Path;
+
+use axum::http::StatusCode;
+use lash::TurnEvent;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
+use serde_json::json;
+
+use crate::board::{BoardState, apply_agent_move, default_board};
+use crate::state::{AppError, AppResult};
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ChatSummary {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) model: String,
+    pub(crate) model_variant: Option<String>,
+    pub(crate) model_label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ChatMessage {
+    pub(crate) id: i64,
+    pub(crate) chat_id: String,
+    pub(crate) kind: String,
+    pub(crate) role: String,
+    pub(crate) text: String,
+    pub(crate) payload: Option<serde_json::Value>,
+    pub(crate) created_at: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChatModelSelection {
+    pub(crate) model: String,
+    pub(crate) model_variant: Option<String>,
+}
+
+#[cfg(feature = "restate")]
+#[derive(Debug)]
+pub(crate) struct TurnOutboxEvent {
+    pub(crate) id: i64,
+    pub(crate) item_json: String,
+    pub(crate) is_done: bool,
+}
+
+pub(crate) struct AppDb {
+    conn: Connection,
+}
+
+impl AppDb {
+    pub(crate) fn open(path: &Path) -> rusqlite::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                model TEXT NOT NULL,
+                model_variant TEXT
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL DEFAULT 'message',
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
+                ON messages(chat_id, id);
+            CREATE TABLE IF NOT EXISTS chat_boards (
+                chat_id TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+                board_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS code_block_tool_calls (
+                code_block_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                tool_call_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+                call_id TEXT NOT NULL,
+                PRIMARY KEY (code_block_message_id, call_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_block_tool_calls_tool_message
+                ON code_block_tool_calls(tool_call_message_id);
+            CREATE TABLE IF NOT EXISTS turn_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id TEXT NOT NULL,
+                item_json TEXT NOT NULL,
+                is_done INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turn_events_turn_id_id
+                ON turn_events(turn_id, id);
+            ",
+        )?;
+        add_column_if_missing(&conn, "chats", "model_variant", "TEXT")?;
+        add_column_if_missing(&conn, "messages", "kind", "TEXT NOT NULL DEFAULT 'message'")?;
+        add_column_if_missing(&conn, "messages", "payload", "TEXT")?;
+        let mut db = Self { conn };
+        db.migrate_legacy_chat_model_labels()?;
+        Ok(db)
+    }
+
+    pub(crate) fn insert_turn_event<T: Serialize>(
+        &mut self,
+        turn_id: &str,
+        item: &T,
+        is_done: bool,
+    ) -> AppResult<()> {
+        let item_json =
+            serde_json::to_string(item).map_err(|err| AppError::internal(err.to_string()))?;
+        self.conn.execute(
+            "INSERT INTO turn_events (turn_id, item_json, is_done, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            params![turn_id, item_json, is_done as i64],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "restate")]
+    pub(crate) fn list_turn_events_after(
+        &mut self,
+        turn_id: &str,
+        last_id: i64,
+    ) -> AppResult<Vec<TurnOutboxEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, item_json, is_done
+             FROM turn_events
+             WHERE turn_id = ?1 AND id > ?2
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![turn_id, last_id], |row| {
+            Ok(TurnOutboxEvent {
+                id: row.get(0)?,
+                item_json: row.get(1)?,
+                is_done: row.get::<_, i64>(2)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)
+    }
+
+    pub(crate) fn list_chats(&mut self) -> AppResult<Vec<ChatSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, created_at, updated_at, model, model_variant
+             FROM chats ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], chat_summary_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)
+    }
+
+    pub(crate) fn create_chat(
+        &mut self,
+        title: &str,
+        model: &str,
+        model_variant: Option<&str>,
+    ) -> AppResult<ChatSummary> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now();
+        self.conn.execute(
+            "INSERT INTO chats (id, title, created_at, updated_at, model, model_variant)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, title, now, now, model, model_variant],
+        )?;
+        Ok(self.chat(&id)?)
+    }
+
+    pub(crate) fn require_chat(&mut self, chat_id: &str) -> AppResult<()> {
+        if self.chat(chat_id).optional()?.is_some() {
+            return Ok(());
+        }
+        Err(AppError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("chat `{chat_id}` not found"),
+        })
+    }
+
+    fn chat(&mut self, chat_id: &str) -> rusqlite::Result<ChatSummary> {
+        self.conn.query_row(
+            "SELECT id, title, created_at, updated_at, model, model_variant FROM chats WHERE id = ?1",
+            params![chat_id],
+            chat_summary_from_row,
+        )
+    }
+
+    pub(crate) fn update_chat_model(
+        &mut self,
+        chat_id: &str,
+        model: &str,
+        model_variant: Option<&str>,
+    ) -> AppResult<ChatSummary> {
+        let changed = self.conn.execute(
+            "UPDATE chats SET model = ?1, model_variant = ?2, updated_at = ?3 WHERE id = ?4",
+            params![model, model_variant, now(), chat_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("chat `{chat_id}` not found"),
+            });
+        }
+        Ok(self.chat(chat_id)?)
+    }
+
+    pub(crate) fn chat_model_selection(&mut self, chat_id: &str) -> AppResult<ChatModelSelection> {
+        self.conn
+            .query_row(
+                "SELECT model, model_variant FROM chats WHERE id = ?1",
+                params![chat_id],
+                |row| {
+                    Ok(ChatModelSelection {
+                        model: row.get(0)?,
+                        model_variant: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(AppError::from)
+    }
+
+    fn migrate_legacy_chat_model_labels(&mut self) -> rusqlite::Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, model, model_variant FROM chats")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let updates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for (id, model, variant) in updates {
+            if variant.is_some() {
+                continue;
+            }
+            if let Some((model, variant)) = split_legacy_model_label(&model) {
+                self.conn.execute(
+                    "UPDATE chats SET model = ?1, model_variant = ?2 WHERE id = ?3",
+                    params![model, variant, id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn maybe_title_from_first_message(
+        &mut self,
+        chat_id: &str,
+        text: &str,
+    ) -> AppResult<()> {
+        let title: String = self.conn.query_row(
+            "SELECT title FROM chats WHERE id = ?1",
+            params![chat_id],
+            |row| row.get(0),
+        )?;
+        if title != "New chat" {
+            return Ok(());
+        }
+        let message_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get(0),
+        )?;
+        if message_count == 0 {
+            self.conn.execute(
+                "UPDATE chats SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![compact_title(text), now(), chat_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn upsert_chat_board(&mut self, chat_id: &str, board: &BoardState) -> AppResult<()> {
+        let board_json =
+            serde_json::to_string(board).map_err(|err| AppError::internal(err.to_string()))?;
+        self.conn.execute(
+            "INSERT INTO chat_boards (chat_id, board_json, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(chat_id) DO UPDATE SET
+                board_json = excluded.board_json,
+                updated_at = excluded.updated_at",
+            params![chat_id, board_json],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn chat_board(&mut self, chat_id: &str) -> AppResult<BoardState> {
+        let board_json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT board_json FROM chat_boards WHERE chat_id = ?1",
+                params![chat_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(board_json) = board_json else {
+            return Ok(default_board());
+        };
+        serde_json::from_str(&board_json).map_err(|err| AppError::internal(err.to_string()))
+    }
+
+    pub(crate) fn apply_agent_move(
+        &mut self,
+        chat_id: &str,
+        cell: usize,
+    ) -> AppResult<serde_json::Value> {
+        let board = self.chat_board(chat_id)?;
+        let output = apply_agent_move(&board, cell);
+        if output
+            .get("accepted")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            let next_board_value = output
+                .get("board")
+                .ok_or_else(|| AppError::internal("accepted move missing board"))?;
+            let next_board: BoardState = serde_json::from_value(next_board_value.clone())
+                .map_err(|err| AppError::internal(err.to_string()))?;
+            self.upsert_chat_board(chat_id, &next_board)?;
+        }
+        Ok(output)
+    }
+
+    pub(crate) fn insert_message(
+        &mut self,
+        chat_id: &str,
+        role: &str,
+        text: &str,
+    ) -> AppResult<ChatMessage> {
+        self.insert_message_with_payload(chat_id, role, text, None)
+    }
+
+    pub(crate) fn insert_message_with_payload(
+        &mut self,
+        chat_id: &str,
+        role: &str,
+        text: &str,
+        payload: Option<serde_json::Value>,
+    ) -> AppResult<ChatMessage> {
+        let created_at = now();
+        let payload_text = payload.as_ref().map(serde_json::Value::to_string);
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
+             VALUES (?1, 'message', ?2, ?3, ?4, ?5)",
+            params![chat_id, role, text, payload_text, created_at],
+        )?;
+        self.conn.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now(), chat_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(ChatMessage {
+            id,
+            chat_id: chat_id.to_string(),
+            kind: "message".to_string(),
+            role: role.to_string(),
+            text: text.to_string(),
+            payload,
+            created_at,
+        })
+    }
+
+    pub(crate) fn insert_reasoning(&mut self, chat_id: &str, text: &str) -> AppResult<ChatMessage> {
+        let created_at = now();
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
+             VALUES (?1, 'reasoning', 'assistant', ?2, NULL, ?3)",
+            params![chat_id, text, created_at],
+        )?;
+        self.conn.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now(), chat_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(ChatMessage {
+            id,
+            chat_id: chat_id.to_string(),
+            kind: "reasoning".to_string(),
+            role: "assistant".to_string(),
+            text: text.to_string(),
+            payload: None,
+            created_at,
+        })
+    }
+
+    pub(crate) fn update_reasoning(&mut self, id: i64, text: &str) -> AppResult<ChatMessage> {
+        self.conn.execute(
+            "UPDATE messages SET text = ?1 WHERE id = ?2 AND kind = 'reasoning'",
+            params![text, id],
+        )?;
+        self.message_by_id(id)
+    }
+
+    pub(crate) fn insert_tool_call(
+        &mut self,
+        chat_id: &str,
+        event: TurnEvent,
+    ) -> AppResult<ChatMessage> {
+        let payload = tool_payload(event)?;
+        let created_at = now();
+        let tool_name = payload["name"].as_str().unwrap_or("tool").to_string();
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
+             VALUES (?1, 'tool_call', 'tool', ?2, ?3, ?4)",
+            params![chat_id, tool_name, payload.to_string(), created_at],
+        )?;
+        self.conn.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now(), chat_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        Ok(ChatMessage {
+            id,
+            chat_id: chat_id.to_string(),
+            kind: "tool_call".to_string(),
+            role: "tool".to_string(),
+            text: tool_name,
+            payload: Some(payload),
+            created_at,
+        })
+    }
+
+    pub(crate) fn update_tool_call(&mut self, id: i64, event: TurnEvent) -> AppResult<ChatMessage> {
+        let payload = tool_payload(event)?;
+        let tool_name = payload["name"].as_str().unwrap_or("tool").to_string();
+        self.conn.execute(
+            "UPDATE messages SET text = ?1, payload = ?2
+             WHERE id = ?3 AND kind = 'tool_call'",
+            params![tool_name, payload.to_string(), id],
+        )?;
+        self.message_by_id(id)
+    }
+
+    pub(crate) fn insert_code_block(
+        &mut self,
+        chat_id: &str,
+        event: TurnEvent,
+        code: Option<String>,
+    ) -> AppResult<ChatMessage> {
+        let (payload, tool_call_ids) = match event {
+            TurnEvent::CodeBlockStarted { language, code } => (
+                json!({
+                    "phase": "started",
+                    "language": language,
+                    "code": code,
+                }),
+                Vec::new(),
+            ),
+            TurnEvent::CodeBlockCompleted {
+                language,
+                output,
+                error,
+                success,
+                duration_ms,
+                tool_call_ids,
+            } => (
+                json!({
+                    "phase": "completed",
+                    "language": language,
+                    "output": output,
+                    "error": error,
+                    "success": success,
+                    "duration_ms": duration_ms,
+                    "tool_call_ids": tool_call_ids,
+                    "code": code,
+                }),
+                tool_call_ids,
+            ),
+            _ => return Err(AppError::internal("expected code-block event")),
+        };
+        let created_at = now();
+        let language = payload["language"].as_str().unwrap_or("code").to_string();
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, kind, role, text, payload, created_at)
+             VALUES (?1, 'code_block', 'assistant', ?2, ?3, ?4)",
+            params![chat_id, language, payload.to_string(), created_at],
+        )?;
+        self.conn.execute(
+            "UPDATE chats SET updated_at = ?1 WHERE id = ?2",
+            params![now(), chat_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.replace_code_block_tool_links(chat_id, id, &tool_call_ids)?;
+        Ok(ChatMessage {
+            id,
+            chat_id: chat_id.to_string(),
+            kind: "code_block".to_string(),
+            role: "assistant".to_string(),
+            text: language,
+            payload: Some(payload),
+            created_at,
+        })
+    }
+
+    pub(crate) fn update_code_block(
+        &mut self,
+        id: i64,
+        event: TurnEvent,
+        code: Option<String>,
+    ) -> AppResult<ChatMessage> {
+        let (payload, tool_call_ids) = match event {
+            TurnEvent::CodeBlockCompleted {
+                language,
+                output,
+                error,
+                success,
+                duration_ms,
+                tool_call_ids,
+            } => (
+                json!({
+                    "phase": "completed",
+                    "language": language,
+                    "output": output,
+                    "error": error,
+                    "success": success,
+                    "duration_ms": duration_ms,
+                    "tool_call_ids": tool_call_ids,
+                    "code": code,
+                }),
+                tool_call_ids,
+            ),
+            _ => return Err(AppError::internal("expected code-block event")),
+        };
+        let language = payload["language"].as_str().unwrap_or("code").to_string();
+        self.conn.execute(
+            "UPDATE messages SET text = ?1, payload = ?2
+             WHERE id = ?3 AND kind = 'code_block'",
+            params![language, payload.to_string(), id],
+        )?;
+        let chat_id = self
+            .conn
+            .query_row(
+                "SELECT chat_id FROM messages WHERE id = ?1 AND kind = 'code_block'",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::internal("code block message not found"))?;
+        self.replace_code_block_tool_links(&chat_id, id, &tool_call_ids)?;
+        self.message_by_id(id)
+    }
+
+    pub(crate) fn list_messages(&mut self, chat_id: &str) -> AppResult<Vec<ChatMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, kind, role, text, payload, created_at
+             FROM messages WHERE chat_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![chat_id], chat_message_from_row)?;
+        let mut messages = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(AppError::from)?;
+        drop(stmt);
+        self.hydrate_code_block_tool_links(&mut messages)?;
+        Ok(messages)
+    }
+
+    fn message_by_id(&mut self, id: i64) -> AppResult<ChatMessage> {
+        self.conn
+            .query_row(
+                "SELECT id, chat_id, kind, role, text, payload, created_at
+                 FROM messages WHERE id = ?1",
+                params![id],
+                chat_message_from_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    fn replace_code_block_tool_links(
+        &mut self,
+        chat_id: &str,
+        code_block_message_id: i64,
+        tool_call_ids: &[String],
+    ) -> AppResult<()> {
+        self.conn.execute(
+            "DELETE FROM code_block_tool_calls WHERE code_block_message_id = ?1",
+            params![code_block_message_id],
+        )?;
+        for call_id in tool_call_ids {
+            let tool_message_id = self
+                .find_tool_call_message_id(chat_id, call_id)
+                .map_err(AppError::from)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO code_block_tool_calls
+                 (code_block_message_id, tool_call_message_id, call_id)
+                 VALUES (?1, ?2, ?3)",
+                params![code_block_message_id, tool_message_id, call_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn find_tool_call_message_id(
+        &mut self,
+        chat_id: &str,
+        call_id: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, payload FROM messages
+             WHERE chat_id = ?1 AND kind = 'tool_call'
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![chat_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, payload) = row?;
+            let Some(payload) = payload else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                continue;
+            };
+            if payload.get("call_id").and_then(|value| value.as_str()) == Some(call_id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    fn hydrate_code_block_tool_links(&mut self, messages: &mut [ChatMessage]) -> AppResult<()> {
+        for message in messages.iter_mut() {
+            if message.kind != "code_block" {
+                continue;
+            }
+            let Some(payload) = message.payload.as_mut() else {
+                continue;
+            };
+            let mut stmt = self.conn.prepare(
+                "SELECT call_id FROM code_block_tool_calls
+                 WHERE code_block_message_id = ?1
+                 ORDER BY rowid ASC",
+            )?;
+            let call_ids = stmt
+                .query_map(params![message.id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !call_ids.is_empty()
+                && let Some(object) = payload.as_object_mut()
+            {
+                object.insert("tool_call_ids".to_string(), json!(call_ids));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn tool_payload(event: TurnEvent) -> AppResult<serde_json::Value> {
+    match event {
+        TurnEvent::ToolCallStarted {
+            call_id,
+            name,
+            args,
+        } => Ok(json!({
+            "phase": "started",
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+        })),
+        TurnEvent::ToolCallCompleted {
+            call_id,
+            name,
+            args,
+            output,
+            duration_ms,
+        } => Ok(json!({
+            "phase": "completed",
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+            "output": output,
+            "duration_ms": duration_ms,
+        })),
+        _ => Err(AppError::internal("expected tool-call event")),
+    }
+}
+
+fn chat_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSummary> {
+    let model: String = row.get(4)?;
+    let model_variant: Option<String> = row.get(5)?;
+    let model_label = model_label(&model, model_variant.as_deref());
+    Ok(ChatSummary {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+        model,
+        model_variant,
+        model_label,
+    })
+}
+
+fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
+    let payload: Option<String> = row.get(5)?;
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        chat_id: row.get(1)?,
+        kind: row.get(2)?,
+        role: row.get(3)?,
+        text: row.get(4)?,
+        payload: payload.and_then(|value| serde_json::from_str(&value).ok()),
+        created_at: row.get(6)?,
+    })
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn model_label(model: &str, model_variant: Option<&str>) -> String {
+    match model_variant
+        .map(str::trim)
+        .filter(|variant| !variant.is_empty())
+    {
+        Some(variant) => format!("{model} ({variant})"),
+        None => model.to_string(),
+    }
+}
+
+fn split_legacy_model_label(label: &str) -> Option<(String, String)> {
+    let label = label.trim();
+    let (model, variant) = label.rsplit_once(" (")?;
+    let variant = variant.strip_suffix(')')?.trim();
+    let model = model.trim();
+    if model.is_empty() || variant.is_empty() {
+        return None;
+    }
+    Some((model.to_string(), variant.to_string()))
+}
+
+fn compact_title(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title = text.chars().take(54).collect::<String>();
+    if text.chars().count() > 54 {
+        title.push_str("...");
+    }
+    if title.is_empty() {
+        "New chat".to_string()
+    } else {
+        title
+    }
+}

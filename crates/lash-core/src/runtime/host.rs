@@ -1078,6 +1078,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_task_registry_completion_is_idempotent() {
+        let registry = LocalBackgroundTaskRegistry::default();
+        registry
+            .register(spec("task:idempotent", BackgroundTaskKind::Tool))
+            .await
+            .expect("register");
+
+        let first = registry
+            .complete(
+                "task:idempotent",
+                BackgroundTaskCompletion {
+                    state: BackgroundTaskState::Completed,
+                    summary: Some("first".to_string()),
+                    output: Some(crate::ToolCallOutput::success(
+                        serde_json::json!({"value": 1}),
+                    )),
+                },
+            )
+            .await
+            .expect("first complete");
+        let second = registry
+            .complete(
+                "task:idempotent",
+                BackgroundTaskCompletion {
+                    state: BackgroundTaskState::Failed,
+                    summary: Some("second".to_string()),
+                    output: None,
+                },
+            )
+            .await
+            .expect("second complete");
+
+        assert_eq!(first.state, BackgroundTaskState::Completed);
+        assert_eq!(second.state, BackgroundTaskState::Completed);
+        assert_eq!(
+            second
+                .result
+                .as_ref()
+                .and_then(|outcome| outcome.summary.as_deref()),
+            Some("first")
+        );
+    }
+
+    #[tokio::test]
     async fn background_task_transfer_moves_live_task_visibility() {
         let registry = LocalBackgroundTaskRegistry::default();
         registry

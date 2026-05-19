@@ -223,10 +223,10 @@ impl TurnStream {
 
     pub async fn finish(self) -> Result<TurnResult> {
         self.completion.await.map_err(|err| {
-            EmbedError::Runtime(lash_core::RuntimeError {
-                code: "turn_stream_join".to_string(),
-                message: format!("turn stream task failed: {err}"),
-            })
+            EmbedError::Runtime(lash_core::RuntimeError::new(
+                RuntimeErrorCode::TurnStreamJoin,
+                format!("turn stream task failed: {err}"),
+            ))
         })?
     }
 }
@@ -476,10 +476,10 @@ pub(crate) async fn stream_prepared_assembled(
     ))
     .await?;
     turn.into_final_turn().ok_or_else(|| {
-        EmbedError::Runtime(lash_core::RuntimeError {
-            code: "empty_followed_turn".to_string(),
-            message: "runtime completed without an assembled turn".to_string(),
-        })
+        EmbedError::Runtime(lash_core::RuntimeError::new(
+            RuntimeErrorCode::EmptyFollowedTurn,
+            "runtime completed without an assembled turn",
+        ))
     })
 }
 
@@ -501,10 +501,10 @@ pub(crate) async fn stream_prepared_assembled_with_effect_scope(
     ))
     .await?;
     turn.into_final_turn().ok_or_else(|| {
-        EmbedError::Runtime(lash_core::RuntimeError {
-            code: "empty_followed_turn".to_string(),
-            message: "runtime completed without an assembled turn".to_string(),
-        })
+        EmbedError::Runtime(lash_core::RuntimeError::new(
+            RuntimeErrorCode::EmptyFollowedTurn,
+            "runtime completed without an assembled turn",
+        ))
     })
 }
 
