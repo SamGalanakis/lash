@@ -14,9 +14,9 @@ keywords = ["lash", "agent", "llm", "openai", "openrouter"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.6" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.6" }
-lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.6" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.7" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.7" }
+lash-openai-schema = { path = "../lash-openai-schema", version = "=0.1.0-alpha.7" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
