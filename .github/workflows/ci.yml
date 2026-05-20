@@ -38,9 +38,7 @@ jobs:
           cache-bin: false
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
 
       - name: Test lash-sansio
         run: cargo test -p lash-sansio --locked
@@ -115,9 +113,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ${{ matrix.apt_packages }}
+        run: scripts/ci-install-apt-packages.sh ${{ matrix.apt_packages }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -160,9 +156,7 @@ jobs:
           cache-bin: false
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
 
       - name: Run synthetic UI performance benchmark
         run: |
@@ -230,9 +224,7 @@ jobs:
           cache-bin: false
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        run: scripts/ci-install-apt-packages.sh protobuf-compiler
 
       - name: Run synthetic runtime performance benchmark
         run: |
