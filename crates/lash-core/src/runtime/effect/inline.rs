@@ -46,11 +46,17 @@ impl InlineRuntimeEffectController {
         &self,
         registry: Arc<dyn crate::ProcessRegistry>,
         registration: crate::ProcessRegistration,
+        grant: Option<crate::ProcessStartGrant>,
+        execution_context: crate::ProcessExecutionContext,
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<ProcessRecord, PluginError> {
-        registry.register(registration.clone()).await?;
+        let record = registry.register_process(registration.clone()).await?;
+        if let Some(grant) = grant {
+            registry
+                .grant_handle(&grant.session_id, &registration.id, grant.descriptor)
+                .await?;
+        }
         let process_id = registration.id.clone();
-        let running = registry.mark_running(&process_id).await?;
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let registry_for_task = Arc::clone(&registry);
@@ -59,6 +65,7 @@ impl InlineRuntimeEffectController {
         let handle = tokio::spawn(async move {
             let future = runner.run_process(
                 registration,
+                execution_context,
                 Arc::clone(&registry_for_task),
                 task_cancellation,
             );
@@ -74,7 +81,7 @@ impl InlineRuntimeEffectController {
                 )),
             };
             let _ = registry_for_task
-                .complete(&process_id_for_task, output)
+                .complete_process(&process_id_for_task, output)
                 .await;
             processes.lock().await.remove(&process_id_for_task);
         });
@@ -83,7 +90,7 @@ impl InlineRuntimeEffectController {
             .await
             .insert(process_id, LocalProcessExecution { cancellation });
         drop(handle);
-        Ok(running)
+        Ok(record)
     }
 
     pub(crate) async fn request_process_cancel(
@@ -92,7 +99,11 @@ impl InlineRuntimeEffectController {
         process_id: &str,
         reason: Option<String>,
     ) -> Result<ProcessRecord, PluginError> {
-        let record = registry.request_cancel(process_id, reason.clone()).await?;
+        let _ = reason;
+        let record = registry
+            .get_process(process_id)
+            .await
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
         let execution = self.processes.lock().await.get(process_id).cloned();
         if let Some(execution) = execution {
             execution.cancellation.cancel();
@@ -108,7 +119,11 @@ impl InlineRuntimeEffectController {
         let execution = local_executor.into_process()?;
         let registry = execution.registry;
         match command {
-            ProcessCommand::Start { registration } => {
+            ProcessCommand::Start {
+                registration,
+                grant,
+                execution_context,
+            } => {
                 let Some(runner) = execution.runner else {
                     return Err(RuntimeEffectControllerError::new(
                         "process_runner_required",
@@ -118,16 +133,24 @@ impl InlineRuntimeEffectController {
                         ),
                     ));
                 };
-                let record = self.start_process(registry, registration, runner).await?;
+                let record = self
+                    .start_process(registry, registration, grant, execution_context, runner)
+                    .await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }
-            ProcessCommand::Get { process_id } => {
-                let record = registry.get(&process_id).await;
-                Ok(ProcessEffectOutcome::Get { record })
+            ProcessCommand::List { session_id } => {
+                let entries = registry.list_handle_grants(&session_id).await?;
+                Ok(ProcessEffectOutcome::List { entries })
             }
-            ProcessCommand::List { filter } => {
-                let records = registry.list(filter).await;
-                Ok(ProcessEffectOutcome::List { records })
+            ProcessCommand::Transfer {
+                from_session_id,
+                to_session_id,
+                process_ids,
+            } => {
+                registry
+                    .transfer_handle_grants(&from_session_id, &to_session_id, &process_ids)
+                    .await?;
+                Ok(ProcessEffectOutcome::Transfer)
             }
             ProcessCommand::Await { process_id } => {
                 let output = registry.await_process(&process_id).await?;

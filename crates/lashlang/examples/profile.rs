@@ -1,7 +1,9 @@
 mod bench_support;
 
 use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
-use lashlang::{ExecutionOutcome, ExecutionScratch, ProfileReport, compile_program, parse};
+use lashlang::{
+    ExecutionEnvironment, ExecutionOutcome, ExecutionScratch, ProfileReport, compile, execute,
+};
 use std::env;
 
 fn main() {
@@ -41,22 +43,19 @@ fn main() {
     for scenario in &scenarios {
         let source = benchmark_program(*scenario);
         program_bytes += source.len();
-        let program = parse(source).expect("benchmark program should parse");
-        let compiled = compile_program(&program);
+        let compiled = compile(source).expect("benchmark program should compile");
 
         for _ in 0..iterations {
             let mut state = seeded_state_for(*scenario);
-            let (outcome, run_profile) = rt
-                .block_on(
-                    lashlang::profile_compiled_with_scratch_and_projected_bindings(
-                        &compiled,
-                        &mut state,
-                        &host,
-                        &mut scratch,
-                        &projected_bindings(*scenario),
-                    ),
-                )
+            let env = ExecutionEnvironment::new(&host)
+                .profiled()
+                .with_scratch(std::mem::take(&mut scratch))
+                .with_projected_bindings(projected_bindings(*scenario));
+            let outcome = rt
+                .block_on(execute(&compiled, &mut state, &env))
                 .expect("profiled execution");
+            scratch = env.take_recycled_scratch().unwrap_or_default();
+            let run_profile = env.take_profile().expect("profile should be recorded");
             profile.merge(&run_profile);
             let ExecutionOutcome::Finished(_) = outcome else {
                 panic!("benchmark program must finish");

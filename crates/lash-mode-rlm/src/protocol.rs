@@ -69,10 +69,10 @@ pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
 - Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
-- Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
+- Background processes: `handle = start(name: "label", timeout_ms: 600000, input: { key: value }) { ... }` starts a lashlang block and returns a **handle** (not wrapped). There is no implicit parent capture; pass every child variable through `input`, whose record fields become variables inside the block. Inside a process block use `yield value` for a durable progress event, `wake value` to also wake the parent turn, `finish value` for success, or `fail value` for failure; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside process blocks. `start call tool { arg: expr }` is the single-tool shorthand backed by the same handle machinery. Resolve a handle with `await handle` or `(await handle)?`; `await [h1, h2]` returns wrappers in order and `await { a: h1, b: h2 }` returns wrappers keyed by name. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
+- Independent tool fanout: start each call first (`a = start call tool_a { ... }`, `b = start call tool_b { ... }`), then join with `results = await { a: a, b: b }` or `await [a, b]`. Unwrap each wrapper with `?` after the join, e.g. `a_result = results.a?`. Do not use fanout when one branch needs another branch's output.
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
-- Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
+- Bare expressions are valid statements in normal blocks.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 "#;
 
@@ -82,10 +82,10 @@ pub const LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION: &str = r#"### Language
 - Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
 - Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
 - Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background start: `start call tool { arg: expr }` returns a **handle** (not wrapped). Some documented tools may also return handles directly. Resolve a handle with `await handle` when you want to wait for completion, or use `(await handle)?` for fail-fast unwrapping. `await [h1, h2]` returns a list of wrappers in order. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
-- Independent parallel tool calls: `parallel { ... }`. Prefer named branches (`parallel { a: call ... b: call ... }`) so results come back as a record (`results.a`, `results.b`). Positional branches still return a list in order. Do not use `parallel` when one branch needs another branch's output.
+- Background processes: `handle = start(name: "label", timeout_ms: 600000, input: { key: value }) { ... }` starts a lashlang block and returns a **handle** (not wrapped). There is no implicit parent capture; pass every child variable through `input`, whose record fields become variables inside the block. Inside a process block use `yield value` for a durable progress event, `wake value` to also wake the parent turn, `finish value` for success, or `fail value` for failure; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside process blocks. `start call tool { arg: expr }` is the single-tool shorthand backed by the same handle machinery. Resolve a handle with `await handle` or `(await handle)?`; `await [h1, h2]` returns wrappers in order and `await { a: h1, b: h2 }` returns wrappers keyed by name. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
+- Independent tool fanout: start each call first (`a = start call tool_a { ... }`, `b = start call tool_b { ... }`), then join with `results = await { a: a, b: b }` or `await [a, b]`. Unwrap each wrapper with `?` after the join, e.g. `a_result = results.a?`. Do not use fanout when one branch needs another branch's output.
 - Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
-- Bare expressions are valid statements. Inside `parallel { ... }`, a bare expression contributes its value to the result list.
+- Bare expressions are valid statements in normal blocks.
 - When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
 "#;
 
@@ -197,7 +197,7 @@ Your turn's REPL trace is your working memory. Keep it small, decision-sized, an
 Choose the lightest mechanism that preserves progress:
 
 - Current variables already hold what you need → reason inline in lashlang.
-- Several independent tool calls can run at once → `parallel { ... }` or `start call ...` + `await`.
+- Several independent tool calls can run at once → `start call ...` each one, then `await { ... }` or `await [ ... ]`; use a `start { ... }` block for multi-step background work.
 - The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.
 - Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.
 
@@ -206,8 +206,10 @@ Example fanout to two available tools (use `?` for fail-fast unwrapping):
 ```lashlang
 a = start call tool_a { key: "one" }
 b = start call tool_b { key: "two" }
-results = parallel { one: (await a)?, two: (await b)? }
-submit [results.one, results.two]
+results = await { one: a, two: b }
+one = results.one?
+two = results.two?
+submit [one, two]
 ```"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -276,7 +278,7 @@ struct RlmDriverState {
     images: Vec<AttachmentRef>,
     /// One entry per `print` from the executed lashlang block (plus any
     /// raw stdout-style emission). Replaces the old split between a
-    /// concatenated `combined_output: String` and a parallel
+    /// concatenated `combined_output: String` and a sibling
     /// `observations: Vec<String>` — the two carried the same content.
     output: Vec<String>,
     exec_error: Option<String>,

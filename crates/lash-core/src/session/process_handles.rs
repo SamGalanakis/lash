@@ -4,8 +4,8 @@ use super::execution_context::ModeExecutionContext;
 use super::tool_execution::ModeToolReply;
 use crate::tool_dispatch::ToolPreparationOutcome;
 use crate::{
-    ProcessClosePolicy, ProcessInput, ProcessRegistration, ProcessScope, ToolCallOutput,
-    ToolCallRecord,
+    ProcessExecutionContext, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
+    ToolCallOutput, ToolCallRecord,
 };
 
 const PROCESS_HANDLE_KIND: &str = "process";
@@ -13,10 +13,7 @@ const PROCESS_HANDLE_KIND: &str = "process";
 impl ModeExecutionContext<'_> {
     pub(super) fn process_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
         let _ = tool_name;
-        json!({
-            "__handle__": PROCESS_HANDLE_KIND,
-            "id": id,
-        })
+        crate::lashlang_bridge::process_handle_json(id)
     }
 
     pub(super) fn parse_process_handle(
@@ -62,24 +59,15 @@ impl ModeExecutionContext<'_> {
                 return ModeToolReply::from_output(record.output.clone()).with_record(record);
             }
         };
-        let mut registration = ProcessRegistration::new(
+        let registration = ProcessRegistration::new(
             handle_id.clone(),
-            tool_name.clone(),
-            ProcessScope {
-                session_id: self.session_id.clone(),
-            },
             ProcessInput::ToolCall {
                 call: prepared_call.clone(),
             },
-        )
-        .with_tags(["tool"])
-        .with_handle_visible(true)
-        .with_close_policy(ProcessClosePolicy::Transfer);
-        if let Some(metadata) = self.effect_metadata.as_ref() {
-            registration = registration.with_metadata(serde_json::json!({
-                "tool_effect_metadata": metadata,
-            }));
-        }
+        );
+        let execution_context = ProcessExecutionContext::default()
+            .with_tool_effect_metadata(self.effect_metadata.clone())
+            .with_wake_session_id(self.session_id.clone());
 
         if let Err(err) = self
             .dispatch
@@ -87,6 +75,11 @@ impl ModeExecutionContext<'_> {
             .start_process_scoped(
                 &self.session_id,
                 registration,
+                Some(ProcessHandleDescriptor::new(
+                    Some("tool"),
+                    Some(tool_name.clone()),
+                )),
+                execution_context,
                 self.effect_metadata.clone(),
                 Some(self.dispatch.effect_controller.as_controller()),
             )
@@ -111,16 +104,46 @@ impl ModeExecutionContext<'_> {
             Ok(parsed) => parsed,
             Err(err) => return ModeToolReply::error(json!(err)),
         };
-        match self
+        if let Err(err) = self
             .dispatch
             .host
-            .await_process_scoped(
-                &handle_id,
-                self.effect_metadata.clone(),
-                Some(self.dispatch.effect_controller.as_controller()),
-            )
+            .validate_process_handles_visible(&self.session_id, std::slice::from_ref(&handle_id))
             .await
         {
+            return ModeToolReply::error(json!(err.to_string()));
+        }
+        let output = if let Some(cancellation) = self.cancellation_token.clone() {
+            tokio::select! {
+                result = self.dispatch.host.await_process_scoped(
+                    &handle_id,
+                    self.effect_metadata.clone(),
+                    Some(self.dispatch.effect_controller.as_controller()),
+                ) => result,
+                _ = cancellation.cancelled() => {
+                    let _ = self.dispatch.host.cancel_process_scoped(
+                        &self.session_id,
+                        &handle_id,
+                        self.effect_metadata.clone(),
+                        Some(self.dispatch.effect_controller.as_controller()),
+                    ).await;
+                    self.dispatch.host.await_process_scoped(
+                        &handle_id,
+                        self.effect_metadata.clone(),
+                        Some(self.dispatch.effect_controller.as_controller()),
+                    ).await
+                }
+            }
+        } else {
+            self.dispatch
+                .host
+                .await_process_scoped(
+                    &handle_id,
+                    self.effect_metadata.clone(),
+                    Some(self.dispatch.effect_controller.as_controller()),
+                )
+                .await
+        };
+        match output {
             Ok(output) => ModeToolReply::from_output(output.into_tool_output()),
             Err(err) => ModeToolReply::error(json!(err.to_string())),
         }
@@ -131,6 +154,14 @@ impl ModeExecutionContext<'_> {
             Ok(parsed) => parsed,
             Err(err) => return ModeToolReply::error(json!(err)),
         };
+        if let Err(err) = self
+            .dispatch
+            .host
+            .validate_process_handles_visible(&self.session_id, std::slice::from_ref(&handle_id))
+            .await
+        {
+            return ModeToolReply::error(json!(err.to_string()));
+        }
         match self
             .dispatch
             .host
@@ -168,6 +199,7 @@ mod tests {
 
     fn process_tool_definition() -> ToolDefinition {
         ToolDefinition::raw(
+            "tool:process_prepare",
             "process_prepare",
             "Records preparation before background registration.",
             serde_json::json!({
@@ -277,7 +309,7 @@ mod tests {
         assert_eq!(prepares.load(Ordering::SeqCst), 1);
         let record = host
             .process_registry
-            .get("async-call-1")
+            .get_process("async-call-1")
             .await
             .expect("registered process");
         let ProcessInput::ToolCall { call } = record.input else {
@@ -293,5 +325,68 @@ mod tests {
         let awaited = context.await_process_handle(handle.to_json_value()).await;
 
         assert!(awaited.output.is_success());
+    }
+
+    #[tokio::test]
+    async fn process_handle_await_and_cancel_require_session_grant() {
+        let provider: Arc<dyn ToolProvider> = Arc::new(PrepareRecordingTool {
+            prepares: Arc::new(AtomicUsize::new(0)),
+        });
+        let plugins = PluginHost::empty()
+            .build_standard_session("root", None)
+            .expect("plugin session");
+        let surface = Arc::new(crate::ToolSurface::from_tools(
+            provider.tool_manifests(),
+            ExecutionMode::standard(),
+            BTreeMap::new(),
+        ));
+        let host = Arc::new(crate::testing::MockSessionManager::default());
+        host.process_registry
+            .register_process(ProcessRegistration::new(
+                "hidden-process",
+                ProcessInput::External {
+                    metadata: serde_json::Value::Null,
+                },
+            ))
+            .await
+            .expect("register hidden process");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: provider,
+            surface,
+            host,
+            effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            tool_effect_metadata: None,
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let context = ModeExecutionContext::new(
+            "session".to_string(),
+            ExecutionMode::standard(),
+            dispatch,
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+        let handle = json!({
+            "__handle__": "process",
+            "id": "hidden-process"
+        });
+
+        let awaited = context.await_process_handle(handle.clone()).await;
+        let cancelled = context.cancel_process_handle(handle).await;
+
+        assert!(!awaited.output.is_success());
+        assert!(!cancelled.output.is_success());
     }
 }

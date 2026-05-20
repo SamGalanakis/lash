@@ -46,8 +46,8 @@ hint: write nested object types as `Type { field: type }`
 
 ---
 
-runtime_finish_inside_parallel
-`submit` can't be used inside `parallel`
+parse_removed_parallel_keyword
+unexpected `parallel`
 --> line 1, column 1
 parallel {
 ^

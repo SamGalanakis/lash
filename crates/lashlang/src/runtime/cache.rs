@@ -1,10 +1,14 @@
-use super::{CompiledProgram, compile_source, prewarm};
+use crate::ast::Program;
+
+use super::entry_points::compile_program_internal;
+use super::{CompiledProgram, prewarm};
 use rustc_hash::FxHasher;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 const DEFAULT_COMPILED_PROGRAM_CACHE_CAPACITY: usize = 64;
+const AST_CACHE_VERSION: &str = "lashlang-ast-v2";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CompiledProgramCacheStats {
@@ -24,8 +28,8 @@ pub struct CompiledProgramCache {
 }
 
 struct CachedCompiledProgram {
-    source_hash: u64,
-    source: Arc<str>,
+    ast_hash: u64,
+    program: Arc<Program>,
     compiled: Arc<CompiledProgram>,
 }
 
@@ -49,18 +53,19 @@ impl CompiledProgramCache {
         &mut self,
         source: &str,
     ) -> Result<Arc<CompiledProgram>, crate::parser::ParseError> {
+        let program = Arc::new(crate::parse(source)?);
+        let ast_hash = program_hash(&program);
         if let Some(entry) = self.entries.back()
-            && source_matches(entry, source)
+            && program_matches(entry, ast_hash, &program)
         {
             self.hits += 1;
             return Ok(entry.compiled.clone());
         }
 
-        let source_hash = source_hash(source);
         if let Some(index) = self
             .entries
             .iter()
-            .position(|entry| entry.source_hash == source_hash && entry.source.as_ref() == source)
+            .position(|entry| program_matches(entry, ast_hash, &program))
         {
             self.hits += 1;
             let entry = self
@@ -73,7 +78,7 @@ impl CompiledProgramCache {
         }
 
         self.misses += 1;
-        let compiled = Arc::new(compile_source(source)?);
+        let compiled = Arc::new(compile_program_internal(&program));
         if self.capacity == 0 {
             return Ok(compiled);
         }
@@ -82,8 +87,8 @@ impl CompiledProgramCache {
             self.evictions += 1;
         }
         self.entries.push_back(CachedCompiledProgram {
-            source_hash,
-            source: Arc::<str>::from(source),
+            ast_hash,
+            program,
             compiled: compiled.clone(),
         });
         Ok(compiled)
@@ -113,13 +118,15 @@ impl Default for CompiledProgramCache {
     }
 }
 
-fn source_matches(entry: &CachedCompiledProgram, source: &str) -> bool {
-    entry.source.len() == source.len()
-        && (std::ptr::eq(entry.source.as_ptr(), source.as_ptr()) || entry.source.as_ref() == source)
+fn program_matches(entry: &CachedCompiledProgram, ast_hash: u64, program: &Program) -> bool {
+    entry.ast_hash == ast_hash && entry.program.as_ref() == program
 }
 
-fn source_hash(source: &str) -> u64 {
+fn program_hash(program: &Program) -> u64 {
     let mut hasher = FxHasher::default();
-    source.hash(&mut hasher);
+    AST_CACHE_VERSION.hash(&mut hasher);
+    serde_json::to_string(program)
+        .expect("lashlang AST should serialize for cache hashing")
+        .hash(&mut hasher);
     hasher.finish()
 }

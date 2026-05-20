@@ -220,21 +220,33 @@ async fn execute_code_inner(
         state.observe_projection.clone(),
         tool_result_projectors,
     );
-
-    let result = Box::pin(
-        lashlang::execute_compiled_traced_with_scratch_and_projected_bindings(
-            &compiled,
-            &mut state.rlm,
-            &host,
-            &mut state.scratch,
-            &projected,
-        ),
-    )
-    .await;
+    let env = lashlang::ExecutionEnvironment::new(&host)
+        .traced()
+        .with_scratch(std::mem::take(&mut state.scratch))
+        .with_projected_bindings(projected);
+    let result = Box::pin(lashlang::execute(compiled.as_ref(), &mut state.rlm, &env)).await;
+    state.scratch = env.take_recycled_scratch().unwrap_or_default();
+    let runtime_failure = env.take_runtime_failure();
+    drop(env);
     let terminal_finish = match result {
         Ok(ExecutionOutcome::Finished(value)) => Some(flow_to_json_value(&value).await),
         Ok(ExecutionOutcome::Continued) => None,
-        Err(failure) => {
+        Ok(ExecutionOutcome::Failed(value)) => {
+            let collected = host.into_collected();
+            return ExecResponse {
+                output: String::new(),
+                observations: collected.observations,
+                observation_truncation: collected.observation_truncation,
+                tool_calls: collected.tool_calls,
+                images: collected.tool_images,
+                printed_images: collected.printed_images,
+                error: Some(format!("process failed in foreground execution: {value}")),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+        Err(error) => {
+            let failure = runtime_failure.unwrap_or(lashlang::RuntimeFailure { error, span: None });
             let collected = host.into_collected();
             return ExecResponse {
                 output: String::new(),
@@ -372,8 +384,9 @@ mod tests {
     };
     use lash_rlm_types::PROJECTED_JSON_TAG;
     use lashlang::{
-        ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
-        ProjectedReadResponse, ProjectedValue, Record as FlowRecord, ToolHost, ToolHostError,
+        AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
+        ExecutionOutcome, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
+        ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record as FlowRecord,
         Value as FlowValue,
     };
     use serde_json::Value;
@@ -382,10 +395,24 @@ mod tests {
     #[derive(Default)]
     struct NoopHost;
 
-    impl ToolHost for NoopHost {
-        async fn call(&self, name: String, _args: FlowRecord) -> Result<FlowValue, ToolHostError> {
-            Err(ToolHostError::new(format!("unknown tool: {name}")))
+    impl ExecutionHost for NoopHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::CallTool { name, .. } | AbilityOp::StartToolCall { name, .. } => {
+                    Err(ExecutionHostError::new(format!("unknown tool: {name}")))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
+            }
         }
+    }
+
+    async fn execute_with_projected(
+        compiled: &lashlang::CompiledProgram,
+        state: &mut lashlang::State,
+        projected: &ProjectedBindings,
+    ) -> Result<ExecutionOutcome, lashlang::RuntimeError> {
+        let env = ExecutionEnvironment::new(&NoopHost).with_projected_bindings(projected.clone());
+        lashlang::execute(compiled, state, &env).await
     }
 
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -486,18 +513,12 @@ mod tests {
                 .expect("patch diary");
 
             let projected = projected_history(vec![FlowValue::String("hello".into())]);
-            let compiled = lashlang::compile_source(
-                "submit { history_len: len(history), diary_len: len(diary) }",
-            )
-            .expect("compile");
-            let outcome = lashlang::execute_compiled_with_projected_bindings(
-                &compiled,
-                &mut state.rlm,
-                &NoopHost,
-                &projected,
-            )
-            .await
-            .expect("execute");
+            let compiled =
+                lashlang::compile("submit { history_len: len(history), diary_len: len(diary) }")
+                    .expect("compile");
+            let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
+                .await
+                .expect("execute");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
                 panic!("expected submitted record");
             };
@@ -515,15 +536,10 @@ mod tests {
 
             let projected = projected_history(Vec::new());
             let compiled =
-                lashlang::compile_source("submit { history_len: len(history) }").expect("compile");
-            let outcome = lashlang::execute_compiled_with_projected_bindings(
-                &compiled,
-                &mut state.rlm,
-                &NoopHost,
-                &projected,
-            )
-            .await
-            .expect("execute");
+                lashlang::compile("submit { history_len: len(history) }").expect("compile");
+            let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
+                .await
+                .expect("execute");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
                 panic!("expected submitted record");
             };
@@ -617,18 +633,12 @@ mod tests {
                 ProjectedValue::scalar("current_query", FlowValue::String("host".into())),
             );
 
-            let compiled = lashlang::compile_source(
-                "submit { chars: len(current_query), value: current_query }",
-            )
-            .expect("compile read");
-            let outcome = lashlang::execute_compiled_with_projected_bindings(
-                &compiled,
-                &mut state.rlm,
-                &NoopHost,
-                &projected,
-            )
-            .await
-            .expect("execute read");
+            let compiled =
+                lashlang::compile("submit { chars: len(current_query), value: current_query }")
+                    .expect("compile read");
+            let outcome = execute_with_projected(&compiled, &mut state.rlm, &projected)
+                .await
+                .expect("execute read");
             let ExecutionOutcome::Finished(FlowValue::Record(record)) = outcome else {
                 panic!("expected submitted record");
             };
@@ -636,16 +646,16 @@ mod tests {
             assert_eq!(record["value"], FlowValue::String("host".into()));
             assert!(state.rlm.snapshot().globals.get("current_query").is_none());
 
-            let compiled =
-                lashlang::compile_source("current_query = \"local\"").expect("compile write");
-            let failure = lashlang::execute_compiled_traced_with_projected_bindings(
-                &compiled,
-                &mut state.rlm,
-                &NoopHost,
-                &projected,
-            )
-            .await
-            .expect_err("projected write should fail");
+            let compiled = lashlang::compile("current_query = \"local\"").expect("compile write");
+            let env = ExecutionEnvironment::new(&NoopHost)
+                .traced()
+                .with_projected_bindings(projected.clone());
+            let error = lashlang::execute(&compiled, &mut state.rlm, &env)
+                .await
+                .expect_err("projected write should fail");
+            let failure = env
+                .take_runtime_failure()
+                .unwrap_or(lashlang::RuntimeFailure { error, span: None });
             assert!(
                 failure
                     .error
@@ -883,7 +893,7 @@ while len(final_ids) < 100 && pool_i < len(candidate_pools) {
     print m
   }
 }"#;
-        let err = match lashlang::compile_source(source) {
+        let err = match lashlang::compile(source) {
             Ok(_) => panic!("while should not compile"),
             Err(err) => err,
         };

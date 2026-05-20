@@ -505,11 +505,18 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         &self,
         _session_id: &str,
         registration: crate::ProcessRegistration,
+        descriptor: Option<crate::ProcessHandleDescriptor>,
+        _execution_context: crate::ProcessExecutionContext,
     ) -> Result<crate::ProcessRecord, PluginError> {
         let id = registration.id.clone();
-        self.process_registry.register(registration).await?;
+        self.process_registry.register_process(registration).await?;
+        if let Some(descriptor) = descriptor {
+            self.process_registry
+                .grant_handle(_session_id, &id, descriptor)
+                .await?;
+        }
         self.process_registry
-            .complete(
+            .complete_process(
                 &id,
                 crate::ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
                     serde_json::json!({
@@ -527,20 +534,84 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         self.process_registry.await_process(process_id).await
     }
 
-    async fn list_processes(
+    async fn list_process_handles(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        Ok(self
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
+        self.process_registry.list_handle_grants(session_id).await
+    }
+
+    async fn validate_process_handles_visible(
+        &self,
+        session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        let visible = self
             .process_registry
-            .list(crate::ProcessFilter {
-                session_id: Some(session_id.to_string()),
-                producer: None,
-                tags: Vec::new(),
-                handle_visible: None,
-                include_terminal: true,
-            })
-            .await)
+            .list_handle_grants(session_id)
+            .await?
+            .into_iter()
+            .map(|(grant, _)| grant.process_id)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(missing) = handle_ids.iter().find(|id| !visible.contains(*id)) {
+            return Err(PluginError::Session(format!(
+                "process handle `{missing}` is not live or visible in this session"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn transfer_process_handles(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), PluginError> {
+        self.process_registry
+            .transfer_handle_grants(from_session_id, to_session_id, handle_ids)
+            .await
+    }
+
+    async fn cancel_unreferenced_process_handles(
+        &self,
+        session_id: &str,
+        keep_handle_ids: &[String],
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        let keep = keep_handle_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let grants = self.process_registry.list_handle_grants(session_id).await?;
+        let mut cancelled = Vec::new();
+
+        for (grant, record) in grants {
+            if keep.contains(&grant.process_id) {
+                continue;
+            }
+            self.process_registry
+                .revoke_handle(session_id, &grant.process_id)
+                .await?;
+            if record.is_terminal()
+                || !self
+                    .process_registry
+                    .handle_grants_for_process(&grant.process_id)
+                    .await?
+                    .is_empty()
+            {
+                continue;
+            }
+            cancelled.push(
+                crate::InlineRuntimeEffectController::default()
+                    .request_process_cancel(
+                        self.process_registry.clone(),
+                        &grant.process_id,
+                        Some("unreferenced by test".to_string()),
+                    )
+                    .await?,
+            );
+        }
+
+        Ok(cancelled)
     }
 
     async fn cancel_process(
@@ -764,6 +835,7 @@ mod test_mode_fakes {
     /// `lash-mode-standard`.
     fn test_batch_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:batch",
             "batch",
             "Execute up to 25 independent tool calls concurrently.",
             serde_json::json!({

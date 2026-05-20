@@ -53,8 +53,8 @@ pub use session_model::{
 pub use tool_contract::{
     CompactToolContract, ModelTool, SchemaProjectionOverride, ToolActivation,
     ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolContract,
-    ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
-    ToolRetryPolicy, schema_for,
+    ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolId, ToolManifest,
+    ToolOutputContract, ToolRetryPolicy, schema_for,
 };
 pub use tool_output::{
     ModelToolReturn, ModelToolReturnPart, ToolCallOutcome, ToolCallOutput, ToolCallRecord,

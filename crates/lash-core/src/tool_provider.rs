@@ -112,11 +112,17 @@ impl<'run> ToolProcessControl<'run> {
     pub async fn start_process(
         &self,
         registration: crate::ProcessRegistration,
+        descriptor: Option<crate::ProcessHandleDescriptor>,
     ) -> Result<crate::ProcessRecord, PluginError> {
+        let execution_context = crate::ProcessExecutionContext::default()
+            .with_tool_effect_metadata(self.tool_effect_metadata.clone())
+            .with_wake_session_id(self.session_id.clone());
         self.host
             .start_process_scoped(
                 &self.session_id,
                 registration,
+                descriptor,
+                execution_context,
                 self.tool_effect_metadata.clone(),
                 Some(self.effect_controller.as_controller()),
             )

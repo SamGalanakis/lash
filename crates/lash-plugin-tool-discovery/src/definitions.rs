@@ -35,6 +35,7 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
     }
 
     ToolDefinition::raw(
+        "tool:search_tools",
         "search_tools",
         "Search catalogued tool names, namespaces, aliases, descriptions, signatures, return fields, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result names and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms.",
         serde_json::to_value(schemars::schema_for!(SearchToolsArgs))

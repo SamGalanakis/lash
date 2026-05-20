@@ -394,7 +394,7 @@ pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
     outcome(tool_name, args, result, duration_ms)
 }
 
-fn resolve_callable_manifest(
+pub(crate) fn resolve_callable_manifest(
     context: &ToolDispatchContext<'_>,
     tool_name: &str,
 ) -> Option<ToolManifest> {
@@ -433,6 +433,52 @@ fn resolve_callable_manifest(
     context
         .tools
         .resolve_manifest(tool_name)
+        .and_then(visible_and_callable)
+}
+
+pub(crate) fn resolve_callable_manifest_by_id(
+    context: &ToolDispatchContext<'_>,
+    tool_id: &crate::ToolId,
+) -> Option<ToolManifest> {
+    if let Some(entry) = context
+        .surface
+        .tools
+        .iter()
+        .find(|tool| tool.manifest.id == *tool_id)
+    {
+        return entry
+            .availability
+            .is_callable()
+            .then(|| entry.manifest.clone());
+    }
+
+    let mode = context.plugins.execution_mode();
+    let visible_and_callable = |manifest: ToolManifest| {
+        if context.plugins.tool_access().hides(&manifest.name) {
+            return None;
+        }
+        manifest
+            .effective_availability(&mode)
+            .is_callable()
+            .then_some(manifest)
+    };
+
+    for provider in context.plugins.mode_native_tools() {
+        if let Some(manifest) = provider
+            .tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest.id == *tool_id)
+            .and_then(visible_and_callable)
+        {
+            return Some(manifest);
+        }
+    }
+
+    context
+        .tools
+        .tool_manifests()
+        .into_iter()
+        .find(|manifest| manifest.id == *tool_id)
         .and_then(visible_and_callable)
 }
 
@@ -591,6 +637,7 @@ mod tests {
 
     fn test_tool(name: &str, execution_mode: ToolExecutionMode) -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             "",
             crate::ToolDefinition::default_input_schema(),
@@ -601,6 +648,7 @@ mod tests {
 
     fn beta_tool() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:beta",
             "beta",
             "",
             json!({
@@ -618,6 +666,7 @@ mod tests {
 
     fn named_beta_tool(name: &str) -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             "",
             json!({
@@ -818,6 +867,7 @@ mod tests {
 
     fn strict_mcp_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:mcp__appworld__venmo_show_transactions",
             "mcp__appworld__venmo_show_transactions",
             "Show Venmo transactions",
             json!({
@@ -852,6 +902,7 @@ mod tests {
 
     fn projection_policy_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:seedy",
             "seedy",
             "Seed-aware",
             crate::ToolDefinition::default_input_schema(),

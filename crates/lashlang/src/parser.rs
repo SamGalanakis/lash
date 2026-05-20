@@ -1,6 +1,6 @@
 use crate::ast::{
-    AssignPathStep, AssignTarget, AstString, BinaryOp, CallExpr, Expr, NamedParallelBranch,
-    ParallelBranches, Program, Stmt, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, AstString, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
+    ToolCallMode, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -21,6 +21,10 @@ pub enum ParseError {
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
     #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges or lists")]
     UnsupportedLoop { keyword: &'static str, span: Span },
+    #[error("`{keyword}` can only be used inside a `start` process block")]
+    ProcessControlOutsideBlock { keyword: &'static str, span: Span },
+    #[error("`{keyword}` can't be used inside a `start` process block")]
+    ForegroundControlInsideProcess { keyword: &'static str, span: Span },
 }
 
 impl ParseError {
@@ -30,7 +34,9 @@ impl ParseError {
             Self::Expected { span, .. }
             | Self::Unexpected { span, .. }
             | Self::LoopControlOutsideLoop { span, .. }
-            | Self::UnsupportedLoop { span, .. } => span.start,
+            | Self::UnsupportedLoop { span, .. }
+            | Self::ProcessControlOutsideBlock { span, .. }
+            | Self::ForegroundControlInsideProcess { span, .. } => span.start,
         }
     }
 }
@@ -41,6 +47,7 @@ pub fn parse(source: &str) -> Result<Program, ParseError> {
         tokens,
         index: 0,
         loop_depth: 0,
+        process_depth: 0,
     }
     .parse_program()
 }
@@ -49,35 +56,44 @@ struct Parser {
     tokens: Vec<Token>,
     index: usize,
     loop_depth: usize,
+    process_depth: usize,
 }
 
 impl Parser {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
-        let statement_capacity = (self.tokens.len() / 20).max(1);
-        let mut statements = Vec::with_capacity(statement_capacity);
-        let mut statement_spans = Vec::with_capacity(statement_capacity);
+        let capacity = (self.tokens.len() / 20).max(1);
+        let mut expressions = Vec::with_capacity(capacity);
+        let mut expression_spans = Vec::with_capacity(capacity);
         while !self.at_eof() {
             let start = self.peek().span.start;
-            let stmt = self.parse_stmt()?;
-            let end = self.tokens[self.index.saturating_sub(1)].span.end;
-            statements.push(stmt);
-            statement_spans.push(Span { start, end });
+            expressions.push(self.parse_statement_expr()?);
+            let end = self
+                .tokens
+                .get(self.index.saturating_sub(1))
+                .map(|token| token.span.end)
+                .unwrap_or(start);
+            expression_spans.push(Span { start, end });
         }
-        Ok(Program {
-            statements,
-            statement_spans,
-        })
+        Ok(Program::block_with_spans(expressions, expression_spans))
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_statement_expr(&mut self) -> Result<Expr, ParseError> {
         match self.peek_kind() {
             TokenKind::If => self.parse_if(),
             TokenKind::For => self.parse_for(),
-            TokenKind::Parallel => self.parse_parallel(),
             TokenKind::Submit => self.parse_submit(),
             TokenKind::Cancel => self.parse_cancel(),
             TokenKind::Print => self.parse_print(),
-            TokenKind::Call => Ok(Stmt::Call(self.parse_call_expr()?)),
+            TokenKind::Call => Ok(Expr::ToolCall {
+                mode: ToolCallMode::Call,
+                call: self.parse_call_expr()?,
+            }),
+            TokenKind::Ident(name)
+                if matches!(name.as_str(), "yield" | "wake" | "finish" | "fail")
+                    && !self.peek_assignment_target() =>
+            {
+                self.parse_process_control()
+            }
             TokenKind::Ident(name) if name == "break" && !self.peek_assignment_target() => {
                 self.parse_loop_control("break")
             }
@@ -91,15 +107,18 @@ impl Parser {
                 })
             }
             TokenKind::Ident(_) if self.peek_assignment_target() => self.parse_assign(),
-            _ => Ok(Stmt::Expr(self.parse_expr()?)),
+            _ => self.parse_expr(),
         }
     }
 
-    fn parse_assign(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_assign(&mut self) -> Result<Expr, ParseError> {
         let target = self.parse_assignment_target()?;
         self.expect_exact(TokenKind::Equal, "`=`")?;
         let expr = self.parse_expr()?;
-        Ok(Stmt::Assign { target, expr })
+        Ok(Expr::Assign {
+            target,
+            expr: Box::new(expr),
+        })
     }
 
     fn parse_assignment_target(&mut self) -> Result<AssignTarget, ParseError> {
@@ -123,28 +142,28 @@ impl Parser {
         Ok(AssignTarget { root, steps })
     }
 
-    fn parse_if(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_if(&mut self) -> Result<Expr, ParseError> {
         self.bump();
         let condition = self.parse_expr()?;
         let then_block = self.parse_block()?;
         let else_block = if matches!(self.peek_kind(), TokenKind::Else) {
             self.bump();
             if matches!(self.peek_kind(), TokenKind::If) {
-                vec![self.parse_if()?]
+                self.parse_if()?
             } else {
                 self.parse_block()?
             }
         } else {
-            Vec::new()
+            Expr::Block(Vec::new())
         };
-        Ok(Stmt::If {
-            condition,
-            then_block,
-            else_block,
+        Ok(Expr::If {
+            condition: Box::new(condition),
+            then_block: Box::new(then_block),
+            else_block: Box::new(else_block),
         })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_for(&mut self) -> Result<Expr, ParseError> {
         self.bump();
         let binding = self.expect_ident()?;
         self.expect_exact(TokenKind::In, "`in`")?;
@@ -152,110 +171,100 @@ impl Parser {
         self.loop_depth += 1;
         let body = self.parse_block()?;
         self.loop_depth -= 1;
-        Ok(Stmt::For {
+        Ok(Expr::For {
             binding,
-            iterable,
-            body,
+            iterable: Box::new(iterable),
+            body: Box::new(body),
         })
     }
 
-    fn parse_loop_control(&mut self, keyword: &'static str) -> Result<Stmt, ParseError> {
+    fn parse_loop_control(&mut self, keyword: &'static str) -> Result<Expr, ParseError> {
         let span = self.bump().span;
         if self.loop_depth == 0 {
             return Err(ParseError::LoopControlOutsideLoop { keyword, span });
         }
         Ok(match keyword {
-            "break" => Stmt::Break,
-            "continue" => Stmt::Continue,
+            "break" => Expr::Break,
+            "continue" => Expr::Continue,
             _ => unreachable!("unknown loop control keyword"),
         })
     }
 
-    fn parse_parallel(&mut self) -> Result<Stmt, ParseError> {
-        self.bump();
-        let branches = self.parse_parallel_branches()?;
-        Ok(Stmt::Parallel { branches })
-    }
-
-    fn parse_parallel_branches(&mut self) -> Result<ParallelBranches, ParseError> {
-        self.expect_exact(TokenKind::LBrace, "`{`")?;
-        if matches!(self.peek_kind(), TokenKind::RBrace) {
-            self.bump();
-            return Ok(ParallelBranches::Positional(Vec::new()));
+    fn parse_submit(&mut self) -> Result<Expr, ParseError> {
+        let span = self.bump().span;
+        if self.process_depth > 0 {
+            return Err(ParseError::ForegroundControlInsideProcess {
+                keyword: "submit",
+                span,
+            });
         }
-
-        let outer_loop_depth = std::mem::take(&mut self.loop_depth);
-        let named = self.peek_named_parallel_branch();
-        if named {
-            let mut branches = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-                let name_span = self.peek().span;
-                let name = self.expect_key_name()?;
-                if !seen.insert(name.clone()) {
-                    return Err(ParseError::Expected {
-                        expected: "unique branch name",
-                        found: format!("duplicate branch `{name}`"),
-                        span: name_span,
-                    });
-                }
-                self.expect_exact(TokenKind::Colon, "`:`")?;
-                let stmt = self.parse_stmt()?;
-                branches.push(NamedParallelBranch { name, stmt });
-                if matches!(self.peek_kind(), TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-            }
-            self.expect_exact(TokenKind::RBrace, "`}`")?;
-            self.loop_depth = outer_loop_depth;
-            return Ok(ParallelBranches::Named(branches));
-        }
-
-        let mut statements = Vec::new();
-        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            statements.push(self.parse_stmt()?);
-            // Accept commas as an optional branch separator so
-            // `parallel { a; b }` and `parallel { a, b }` parse the
-            // same — matches the leniency already in the named-branch
-            // path above.
-            if matches!(self.peek_kind(), TokenKind::Comma) {
-                self.bump();
-            }
-        }
-        self.expect_exact(TokenKind::RBrace, "`}`")?;
-        self.loop_depth = outer_loop_depth;
-        Ok(ParallelBranches::Positional(statements))
-    }
-
-    fn parse_submit(&mut self) -> Result<Stmt, ParseError> {
-        self.bump();
         let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
             None
         } else {
             Some(self.parse_expr()?)
         };
-        Ok(Stmt::Submit(expr))
+        Ok(Expr::Submit(expr.map(Box::new)))
     }
 
-    fn parse_print(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_print(&mut self) -> Result<Expr, ParseError> {
+        let span = self.bump().span;
+        if self.process_depth > 0 {
+            return Err(ParseError::ForegroundControlInsideProcess {
+                keyword: "print",
+                span,
+            });
+        }
+        Ok(Expr::Print(Box::new(self.parse_expr()?)))
+    }
+
+    fn parse_process_control(&mut self) -> Result<Expr, ParseError> {
+        let token = self.bump().clone();
+        let TokenKind::Ident(keyword) = token.kind else {
+            unreachable!("process controls are contextual identifiers");
+        };
+        let keyword_static = match keyword.as_str() {
+            "yield" => "yield",
+            "wake" => "wake",
+            "finish" => "finish",
+            "fail" => "fail",
+            _ => unreachable!("unknown process control keyword"),
+        };
+        if self.process_depth == 0 {
+            return Err(ParseError::ProcessControlOutsideBlock {
+                keyword: keyword_static,
+                span: token.span,
+            });
+        }
+        let stmt = match keyword_static {
+            "yield" => Expr::Yield(Box::new(self.parse_expr()?)),
+            "wake" => Expr::Wake(Box::new(self.parse_expr()?)),
+            "finish" => {
+                let expr = if matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
+                Expr::Finish(expr.map(Box::new))
+            }
+            "fail" => Expr::Fail(Box::new(self.parse_expr()?)),
+            _ => unreachable!("unknown process control keyword"),
+        };
+        Ok(stmt)
+    }
+
+    fn parse_cancel(&mut self) -> Result<Expr, ParseError> {
         self.bump();
-        Ok(Stmt::Print(self.parse_expr()?))
+        Ok(Expr::Cancel(Box::new(self.parse_expr()?)))
     }
 
-    fn parse_cancel(&mut self) -> Result<Stmt, ParseError> {
-        self.bump();
-        Ok(Stmt::Cancel(self.parse_expr()?))
-    }
-
-    fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
+    fn parse_block(&mut self) -> Result<Expr, ParseError> {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
-        let mut statements = Vec::new();
+        let mut expressions = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            statements.push(self.parse_stmt()?);
+            expressions.push(self.parse_statement_expr()?);
         }
         self.expect_exact(TokenKind::RBrace, "`}`")?;
-        Ok(statements)
+        Ok(Expr::Block(expressions))
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -271,10 +280,10 @@ impl Parser {
         let then_expr = self.parse_expr()?;
         self.expect_exact(TokenKind::Colon, "`:`")?;
         let else_expr = self.parse_expr()?;
-        Ok(Expr::Conditional {
+        Ok(Expr::If {
             condition: Box::new(condition),
-            then_expr: Box::new(then_expr),
-            else_expr: Box::new(else_expr),
+            then_block: Box::new(then_expr),
+            else_block: Box::new(else_expr),
         })
     }
 
@@ -455,10 +464,30 @@ impl Parser {
                 Ok(Expr::String(value))
             }
             TokenKind::Ident(name) => {
+                if name == "parallel"
+                    && self
+                        .tokens
+                        .get(self.index + 1)
+                        .is_some_and(|token| matches!(token.kind, TokenKind::LBrace))
+                {
+                    return Err(ParseError::Unexpected {
+                        found: "`parallel`".to_string(),
+                        span: self.peek().span,
+                    });
+                }
                 let name = name.clone();
                 self.bump();
                 if name == "start" && matches!(self.peek_kind(), TokenKind::Call) {
-                    return Ok(Expr::StartToolCall(self.parse_call_expr()?));
+                    return Ok(Expr::ToolCall {
+                        mode: ToolCallMode::Start,
+                        call: self.parse_call_expr()?,
+                    });
+                }
+                if name == "start"
+                    && (matches!(self.peek_kind(), TokenKind::LBrace)
+                        || self.paren_group_followed_by_lbrace())
+                {
+                    return self.parse_process_start_expr();
                 }
                 if name == "Type" && matches!(self.peek_kind(), TokenKind::LBrace) {
                     let ty = self.parse_type_object()?;
@@ -491,12 +520,10 @@ impl Parser {
             }
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
-            TokenKind::Call => Ok(Expr::ToolCall(self.parse_call_expr()?)),
-            TokenKind::Parallel => {
-                self.bump();
-                let branches = self.parse_parallel_branches()?;
-                Ok(Expr::Parallel { branches })
-            }
+            TokenKind::Call => Ok(Expr::ToolCall {
+                mode: ToolCallMode::Call,
+                call: self.parse_call_expr()?,
+            }),
             _ => Err(self.unexpected()),
         }
     }
@@ -546,6 +573,77 @@ impl Parser {
         let args = self.parse_record_entries()?;
         self.expect_exact(TokenKind::RBrace, "`}`")?;
         Ok(CallExpr { name, args })
+    }
+
+    fn parse_process_start_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut name = None;
+        let mut timeout_ms = None;
+        let mut input = None;
+        if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.bump();
+            while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+                let key_span = self.peek().span;
+                let key = self.expect_ident()?;
+                self.expect_exact(TokenKind::Colon, "`:`")?;
+                let expr = Box::new(self.parse_expr()?);
+                match key.as_str() {
+                    "name" => {
+                        if name.replace(expr).is_some() {
+                            return Err(ParseError::Expected {
+                                expected: "unique process option",
+                                found: "duplicate `name`".to_string(),
+                                span: key_span,
+                            });
+                        }
+                    }
+                    "timeout_ms" => {
+                        if timeout_ms.replace(expr).is_some() {
+                            return Err(ParseError::Expected {
+                                expected: "unique process option",
+                                found: "duplicate `timeout_ms`".to_string(),
+                                span: key_span,
+                            });
+                        }
+                    }
+                    "input" => {
+                        if input.replace(expr).is_some() {
+                            return Err(ParseError::Expected {
+                                expected: "unique process option",
+                                found: "duplicate `input`".to_string(),
+                                span: key_span,
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::Expected {
+                            expected: "`name`, `timeout_ms`, or `input`",
+                            found: format!("process option `{key}`"),
+                            span: key_span,
+                        });
+                    }
+                }
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+            self.expect_exact(TokenKind::RParen, "`)`")?;
+        }
+        self.expect_exact(TokenKind::LBrace, "`{`")?;
+        self.process_depth += 1;
+        let mut body = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
+            body.push(self.parse_statement_expr()?);
+        }
+        self.process_depth -= 1;
+        self.expect_exact(TokenKind::RBrace, "`}`")?;
+        Ok(Expr::StartProcess(ProcessStartExpr {
+            name,
+            timeout_ms,
+            input,
+            body: Box::new(Expr::Block(body)),
+        }))
     }
 
     fn parse_type_object(&mut self) -> Result<TypeExpr, ParseError> {
@@ -785,14 +883,6 @@ impl Parser {
         None
     }
 
-    fn peek_named_parallel_branch(&self) -> bool {
-        token_can_be_key(self.peek_kind())
-            && self
-                .tokens
-                .get(self.index + 1)
-                .is_some_and(|token| matches!(token.kind, TokenKind::Colon))
-    }
-
     fn question_starts_ternary(&self) -> bool {
         debug_assert!(matches!(self.peek_kind(), TokenKind::Question));
         let Some(next) = self.tokens.get(self.index + 1) else {
@@ -842,6 +932,30 @@ impl Parser {
         false
     }
 
+    fn paren_group_followed_by_lbrace(&self) -> bool {
+        if !matches!(self.peek_kind(), TokenKind::LParen) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.index) {
+            match &token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(index + 1)
+                            .is_some_and(|next| matches!(next.kind, TokenKind::LBrace));
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek_kind(), TokenKind::Eof)
     }
@@ -859,11 +973,6 @@ impl Parser {
         self.index += 1;
         token
     }
-
-    #[cfg(test)]
-    fn prev_span(&self) -> Span {
-        self.tokens[self.index.saturating_sub(1)].span
-    }
 }
 
 fn token_can_be_key(kind: &TokenKind) -> bool {
@@ -876,12 +985,20 @@ fn keyword_key_name(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::Else => "else",
         TokenKind::For => "for",
         TokenKind::In => "in",
-        TokenKind::Parallel => "parallel",
         TokenKind::Await => "await",
         TokenKind::Cancel => "cancel",
         TokenKind::Submit => "submit",
         TokenKind::Print => "print",
         TokenKind::Call => "call",
+        TokenKind::Ident(name) if matches!(name.as_str(), "yield" | "wake" | "finish" | "fail") => {
+            return Some(match name.as_str() {
+                "yield" => "yield",
+                "wake" => "wake",
+                "finish" => "finish",
+                "fail" => "fail",
+                _ => unreachable!(),
+            });
+        }
         TokenKind::And => "and",
         TokenKind::Or => "or",
         TokenKind::Not => "not",
@@ -905,7 +1022,6 @@ fn token_can_start_expr(kind: &TokenKind) -> bool {
             | TokenKind::LBracket
             | TokenKind::LBrace
             | TokenKind::Call
-            | TokenKind::Parallel
             | TokenKind::Await
             | TokenKind::Minus
             | TokenKind::Bang
@@ -948,7 +1064,6 @@ fn render_kind(kind: &TokenKind) -> String {
         TokenKind::Else => "`else`".to_string(),
         TokenKind::For => "`for`".to_string(),
         TokenKind::In => "`in`".to_string(),
-        TokenKind::Parallel => "`parallel`".to_string(),
         TokenKind::Await => "`await`".to_string(),
         TokenKind::Cancel => "`cancel`".to_string(),
         TokenKind::Submit => "`submit`".to_string(),
@@ -967,838 +1082,82 @@ fn render_kind(kind: &TokenKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{Expr, ToolCallMode};
 
-    #[test]
-    fn parses_full_language_shapes() {
-        let program = parse(
-            r#"
-            call ping {}
-            value = !false || -(5 - 2) < 0 && 8 / 2 >= 4 && 7 % 3 != 0 && 1 <= 2 && 3 > 2
-            rec = { a: [1, 2], b: call tool { x: 1 } }
-            if value {
-              field = rec.b.ok
-            } else {
-              field = rec.a[0]
-            }
-            for item in rec.a {
-              last = item
-            }
-            parallel {
-              left = call alpha {}
-              right = helper()
-            }
-            print rec
-            submit field
-            "#,
-        )
-        .expect("program should parse");
-
-        assert_eq!(program.statements.len(), 8);
+    fn block(program: &Program) -> &[Expr] {
+        let Expr::Block(expressions) = &program.expr else {
+            panic!("program root should be a block");
+        };
+        expressions
     }
 
     #[test]
-    fn parses_empty_records_lists_and_builtin_without_args() {
-        let program = parse(
-            r#"
-            xs = []
-            rec = {}
-            out = now()
-            submit out
-            "#,
-        )
-        .expect("program should parse");
-
-        assert_eq!(program.statements.len(), 4);
+    fn top_level_source_becomes_root_block() {
+        let program = parse("x = 1\nsubmit x").expect("program should parse");
+        let expressions = block(&program);
+        assert_eq!(expressions.len(), 2);
+        assert!(matches!(expressions[0], Expr::Assign { .. }));
+        assert!(matches!(expressions[1], Expr::Submit(Some(_))));
     }
 
     #[test]
-    fn parses_ternary_expressions_with_low_precedence_and_right_association() {
-        let program = parse(
-            r#"
-            value = false or true ? 1 : 2 ? 3 : 4
-            submit value
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::Assign { expr, .. } = &program.statements[0] else {
+    fn ternary_desugars_to_if_expression() {
+        let program = parse("answer = ok ? 1 : 2").expect("program should parse");
+        let Expr::Assign { expr, .. } = &block(&program)[0] else {
             panic!("expected assignment");
         };
-        let Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } = expr
-        else {
-            panic!("expected conditional expression");
+        assert!(matches!(expr.as_ref(), Expr::If { .. }));
+    }
+
+    #[test]
+    fn await_record_of_starts_parses_directly() {
+        let program = parse("result = await { a: start call one {}, b: start call two {} }")
+            .expect("program should parse");
+        let Expr::Assign { expr, .. } = &block(&program)[0] else {
+            panic!("expected assignment");
         };
-        assert!(matches!(
-            condition.as_ref(),
-            Expr::Binary {
-                op: BinaryOp::Or,
-                ..
-            }
-        ));
-        assert!(matches!(then_expr.as_ref(), Expr::Number(1.0)));
-        assert!(matches!(else_expr.as_ref(), Expr::Conditional { .. }));
-    }
-
-    #[test]
-    fn parses_result_unwrap_without_breaking_ternary() {
-        let program = parse(
-            r#"
-            a = r?
-            b = (call echo { value: 1 })?
-            c = items[0]?
-            d = r? + 1
-            e = cond ? yes : no
-            f = r?[0]
-            submit e
-            "#,
-        )
-        .expect("program should parse");
-
-        assert!(matches!(
-            &program.statements[0],
-            Stmt::Assign {
-                expr: Expr::ResultUnwrap(_),
-                ..
-            }
-        ));
-        assert!(matches!(
-            &program.statements[1],
-            Stmt::Assign {
-                expr: Expr::ResultUnwrap(inner),
-                ..
-            } if matches!(inner.as_ref(), Expr::ToolCall(_))
-        ));
-        assert!(matches!(
-            &program.statements[2],
-            Stmt::Assign {
-                expr: Expr::ResultUnwrap(inner),
-                ..
-            } if matches!(inner.as_ref(), Expr::Index { .. })
-        ));
-        assert!(matches!(
-            &program.statements[3],
-            Stmt::Assign {
-                expr: Expr::Binary { left, .. },
-                ..
-            } if matches!(left.as_ref(), Expr::ResultUnwrap(_))
-        ));
-        assert!(matches!(
-            &program.statements[4],
-            Stmt::Assign {
-                expr: Expr::Conditional { .. },
-                ..
-            }
-        ));
-        assert!(matches!(
-            &program.statements[5],
-            Stmt::Assign {
-                expr: Expr::Index { target, .. },
-                ..
-            } if matches!(target.as_ref(), Expr::ResultUnwrap(_))
-        ));
-    }
-
-    #[test]
-    fn parses_variable_rooted_assignment_targets() {
-        let program = parse(
-            r#"
-            x = 1
-            rec.a = 1
-            rec[k] = 1
-            items[0] = 1
-            a[b].c[0] = 1
-            submit x
-            "#,
-        )
-        .expect("program should parse");
-
-        assert!(matches!(
-            &program.statements[0],
-            Stmt::Assign { target, .. } if target.root == "x" && target.steps.is_empty()
-        ));
-        assert!(matches!(
-            &program.statements[1],
-            Stmt::Assign { target, .. }
-                if target.root == "rec"
-                    && matches!(target.steps.as_slice(), [AssignPathStep::Field(field)] if field == "a")
-        ));
-        assert!(matches!(
-            &program.statements[2],
-            Stmt::Assign { target, .. }
-                if target.root == "rec"
-                    && matches!(target.steps.as_slice(), [AssignPathStep::Index(Expr::Variable(key))] if key == "k")
-        ));
-        assert!(matches!(
-            &program.statements[3],
-            Stmt::Assign { target, .. }
-                if target.root == "items"
-                    && matches!(target.steps.as_slice(), [AssignPathStep::Index(Expr::Number(0.0))])
-        ));
-        assert!(matches!(
-            &program.statements[4],
-            Stmt::Assign { target, .. }
-                if target.root == "a"
-                    && matches!(
-                        target.steps.as_slice(),
-                        [
-                            AssignPathStep::Index(Expr::Variable(b)),
-                            AssignPathStep::Field(c),
-                            AssignPathStep::Index(Expr::Number(0.0)),
-                        ] if b == "b" && c == "c"
-                    )
-        ));
-    }
-
-    #[test]
-    fn rejects_non_variable_rooted_assignment_targets() {
-        for source in ["(x)[0] = 1", "{a: 1}.a = 2", "(call f {})[0] = 1"] {
-            parse(source).expect_err("non-variable-rooted target should not parse as assignment");
-        }
-    }
-
-    #[test]
-    fn parses_symbolic_boolean_operator_aliases() {
-        let program = parse(
-            r#"
-            value = true && false || true
-            submit value
-            "#,
-        )
-        .expect("program should parse");
-
-        assert_eq!(program.statements.len(), 2);
-    }
-
-    #[test]
-    fn parses_expression_statements_and_parallel_expression_branches() {
-        let program = parse(
-            r#"
-            "branch_a"
-            results = parallel {
-              "branch_b"
-              40 + 2
-              len([1,2,3])
-            }
-            submit results
-            "#,
-        )
-        .expect("program should parse");
-
-        assert_eq!(program.statements.len(), 3);
-        assert!(matches!(program.statements[0], Stmt::Expr(Expr::String(_))));
-    }
-
-    #[test]
-    fn positional_parallel_branches_accept_optional_commas() {
-        let program = parse(
-            r#"
-            results = parallel {
-              "branch_a",
-              40 + 2,
-              len([1,2,3]),
-            }
-            submit results
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::Assign {
-            expr: Expr::Parallel { branches },
-            ..
-        } = &program.statements[0]
-        else {
-            panic!("expected parallel expression assignment");
+        let Expr::Await(inner) = expr.as_ref() else {
+            panic!("expected await expression");
         };
-        let ParallelBranches::Positional(statements) = branches else {
-            panic!("expected positional parallel branches");
+        let Expr::Record(entries) = inner.as_ref() else {
+            panic!("await should target a record");
         };
-        assert_eq!(statements.len(), 3);
-    }
-
-    #[test]
-    fn parses_named_parallel_branches() {
-        let program = parse(
-            r#"
-            results = parallel {
-              cargo: call exec_command { cmd: "cargo test" }
-              fmt: "ok"
-            }
-            submit results
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::Assign {
-            expr: Expr::Parallel { branches },
-            ..
-        } = &program.statements[0]
-        else {
-            panic!("expected parallel expression assignment");
-        };
-        let ParallelBranches::Named(branches) = branches else {
-            panic!("expected named parallel branches");
-        };
-        assert_eq!(branches.len(), 2);
-        assert_eq!(branches[0].name, "cargo");
-        assert!(matches!(branches[0].stmt, Stmt::Call(_)));
-        assert_eq!(branches[1].name, "fmt");
-        assert!(matches!(branches[1].stmt, Stmt::Expr(Expr::String(_))));
-    }
-
-    #[test]
-    fn named_parallel_branches_accept_optional_commas_and_keyword_names() {
-        let program = parse(
-            r#"
-            results = parallel {
-              parallel: "branch",
-              "quoted": "ok",
-            }
-            submit results.parallel
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::Assign {
-            expr: Expr::Parallel { branches },
-            ..
-        } = &program.statements[0]
-        else {
-            panic!("expected parallel expression assignment");
-        };
-        let ParallelBranches::Named(branches) = branches else {
-            panic!("expected named parallel branches");
-        };
-        assert_eq!(branches.len(), 2);
-        assert_eq!(branches[0].name, "parallel");
-        assert_eq!(branches[1].name, "quoted");
-    }
-
-    #[test]
-    fn named_parallel_rejects_duplicate_branch_names() {
-        let err = parse(
-            r#"
-            results = parallel {
-              same: 1
-              same: 2
-            }
-            "#,
-        )
-        .expect_err("duplicate branch names should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "unique branch name",
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|(_, expr)| matches!(
+            expr,
+            Expr::ToolCall {
+                mode: ToolCallMode::Start,
                 ..
             }
-        ));
+        )));
     }
 
     #[test]
-    fn parses_else_if_chains_without_extra_braces() {
-        let program = parse(
-            r#"
-            if false {
-              answer = 1
-            } else if true {
-              answer = 2
-            } else {
-              answer = 3
-            }
-            submit answer
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::If { else_block, .. } = &program.statements[0] else {
-            panic!("expected if statement");
+    fn await_list_of_starts_parses_directly() {
+        let program = parse("submit await [start call one {}, start call two {}]")
+            .expect("program should parse");
+        let Expr::Submit(Some(expr)) = &block(&program)[0] else {
+            panic!("expected submit");
         };
-        assert!(matches!(else_block.as_slice(), [Stmt::If { .. }]));
-    }
-
-    #[test]
-    fn parses_bare_finish_at_program_and_block_end() {
-        let program = parse(
-            r#"
-            if true {
-              submit
-            }
-            submit
-            "#,
-        )
-        .expect("program should parse");
-
-        assert!(matches!(
-            program.statements.as_slice(),
-            [
-                Stmt::If { then_block, .. },
-                Stmt::Submit(None)
-            ] if matches!(then_block.as_slice(), [Stmt::Submit(None)])
-        ));
-    }
-
-    #[test]
-    fn parses_loop_control_inside_for() {
-        let program = parse(
-            r#"
-            for item in [1, 2, 3] {
-              if item == 1 {
-                continue
-              }
-              break
-            }
-            "#,
-        )
-        .expect("program should parse");
-
-        let [Stmt::For { body, .. }] = program.statements.as_slice() else {
-            panic!("expected for statement");
+        let Expr::Await(inner) = expr.as_ref() else {
+            panic!("expected await expression");
         };
-        assert!(matches!(
-            body.as_slice(),
-            [Stmt::If { then_block, .. }, Stmt::Break]
-                if matches!(then_block.as_slice(), [Stmt::Continue])
-        ));
-    }
-
-    #[test]
-    fn rejects_loop_control_outside_for() {
-        for (source, keyword) in [("break", "break"), ("continue", "continue")] {
-            let err = parse(source).expect_err("loop control outside loop should fail");
-            assert_eq!(
-                err,
-                ParseError::LoopControlOutsideLoop {
-                    keyword,
-                    span: Span {
-                        start: 0,
-                        end: keyword.len()
-                    }
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn loop_control_does_not_cross_parallel_branch_boundaries() {
-        let err = parse(
-            r#"
-            for item in [1] {
-              parallel {
-                break
-              }
-            }
-            "#,
-        )
-        .expect_err("parallel branch should not break outer loop");
-        assert!(matches!(
-            err,
-            ParseError::LoopControlOutsideLoop {
-                keyword: "break",
+        let Expr::List(items) = inner.as_ref() else {
+            panic!("await should target a list");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|expr| matches!(
+            expr,
+            Expr::ToolCall {
+                mode: ToolCallMode::Start,
                 ..
             }
-        ));
-
-        parse(
-            r#"
-            parallel {
-              for item in [1] {
-                continue
-              }
-            }
-            "#,
-        )
-        .expect("loops inside parallel branches may use loop control");
+        )));
     }
 
     #[test]
-    fn loop_control_words_remain_contextual_identifiers() {
-        let program = parse(
-            r#"
-            break = 1
-            continue = break + 1
-            submit break
-            "#,
-        )
-        .expect("contextual identifiers should parse");
-
-        assert!(matches!(
-            program.statements.as_slice(),
-            [
-                Stmt::Assign { target: first, .. },
-                Stmt::Assign { target: second, .. },
-                Stmt::Submit(Some(Expr::Variable(submitted)))
-            ] if first.root == "break" && second.root == "continue" && submitted == "break"
-        ));
-    }
-
-    #[test]
-    fn rejects_while_loop_at_while_keyword() {
-        let source = r#"
-            pool_i = 0
-            while len(final_ids) < 100 && pool_i < len(candidate_pools) {
-              for m in candidate_pools[pool_i].matches {
-                print m
-              }
-            }
-            "#;
-
-        let err = parse(source).expect_err("while loops are not supported");
-        let while_offset = source.find("while").expect("source should contain while");
-        assert_eq!(
-            err,
-            ParseError::UnsupportedLoop {
-                keyword: "while",
-                span: Span {
-                    start: while_offset,
-                    end: while_offset + "while".len(),
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn unsupported_loop_words_remain_contextual_identifiers_for_assignment() {
-        let program = parse(
-            r#"
-            while = 1
-            submit while
-            "#,
-        )
-        .expect("contextual identifier should parse");
-
-        assert!(matches!(
-            program.statements.as_slice(),
-            [
-                Stmt::Assign { target, .. },
-                Stmt::Submit(Some(Expr::Variable(submitted)))
-            ] if target.root == "while" && submitted == "while"
-        ));
-    }
-
-    #[test]
-    fn parses_start_call_syntax() {
-        let program = parse(
-            r#"
-            handle = start call spawn_agent { task: "check", capability: "explore" }
-            result = await handle
-            cancel handle
-            submit result
-            "#,
-        )
-        .expect("program should parse");
-
-        assert!(matches!(
-            &program.statements[0],
-            Stmt::Assign {
-                expr: Expr::StartToolCall(_),
-                ..
-            }
-        ));
-        assert!(matches!(
-            &program.statements[1],
-            Stmt::Assign {
-                expr: Expr::Await(_),
-                ..
-            }
-        ));
-        assert!(matches!(&program.statements[2], Stmt::Cancel(_)));
-    }
-
-    #[test]
-    fn parse_errors_cover_expected_and_unexpected_paths() {
-        let err = parse("{").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected { .. } | ParseError::Unexpected { .. }
-        ));
-
-        let err = parse("x = ]").expect_err("parse should fail");
+    fn removed_parallel_keyword_is_rejected() {
+        let err = parse("parallel { x = 1 }").expect_err("keyword should be rejected");
         assert!(matches!(err, ParseError::Unexpected { .. }));
-
-        let err = parse("if true answer = 1").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`{`",
-                ..
-            }
-        ));
-
-        let err = parse("for x 1 {}").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`in`",
-                ..
-            }
-        ));
-
-        let err = parse("call {}").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "identifier",
-                ..
-            }
-        ));
-
-        let err = parse("x = [1").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`]`",
-                ..
-            }
-        ));
-
-        let err = parse("x = {a 1}").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`:`",
-                ..
-            }
-        ));
-
-        let err = parse("x = f(1").expect_err("parse should fail");
-        assert!(matches!(
-            err,
-            ParseError::Expected {
-                expected: "`)`",
-                ..
-            }
-        ));
-
-        let err = parse("submit true ? 1 :").expect_err("parse should fail");
-        assert!(matches!(err, ParseError::Unexpected { .. }));
-    }
-
-    #[test]
-    fn peek_assignment_target_and_prev_span_are_exercised() {
-        let tokens = lex("x[0].field = 1").expect("lexing should succeed");
-        let parser = Parser {
-            tokens,
-            index: 0,
-            loop_depth: 0,
-        };
-        assert!(parser.peek_assignment_target());
-
-        let tokens = lex("x").expect("lexing should succeed");
-        let parser = Parser {
-            tokens,
-            index: 1,
-            loop_depth: 0,
-        };
-        assert_eq!(parser.prev_span(), Span { start: 0, end: 1 });
-    }
-
-    #[test]
-    fn parses_type_literal_with_all_kinds() {
-        let program = parse(
-            r#"
-            Books = Type {
-              title: str,
-              count: int,
-              rating: float,
-              active: bool,
-              meta: dict,
-              extra: any,
-              genre: enum["fiction", "non-fiction"],
-              tags: list[str],
-              chapters: list[Type { name: str, page: int }],
-              nested: Type { pages: int },
-              isbn: str?,
-              reference: Books
-            }
-            submit Books
-            "#,
-        )
-        .expect("program should parse");
-
-        let Stmt::Assign { expr, .. } = &program.statements[0] else {
-            panic!("expected assign");
-        };
-        let Expr::TypeLiteral(ty) = expr else {
-            panic!("expected TypeLiteral");
-        };
-        let TypeExpr::Object(fields) = ty.as_ref() else {
-            panic!("expected object");
-        };
-        assert_eq!(fields.len(), 12);
-        assert!(matches!(fields[0].ty, TypeExpr::Str));
-        assert!(matches!(fields[1].ty, TypeExpr::Int));
-        assert!(matches!(fields[5].ty, TypeExpr::Any));
-        assert!(matches!(fields[6].ty, TypeExpr::Enum(_)));
-        assert!(matches!(fields[7].ty, TypeExpr::List(_)));
-        assert!(matches!(fields[9].ty, TypeExpr::Object(_)));
-        assert!(fields[10].optional);
-        assert!(matches!(fields[11].ty, TypeExpr::Ref(ref name) if name == "Books"));
-    }
-
-    #[test]
-    fn type_is_not_a_global_keyword_outside_literal_position() {
-        // A bare `Type` identifier should still bind as a variable reference
-        // when not followed by `{` — avoids breaking pre-existing programs
-        // that may already use the name.
-        let program = parse("Type = 1\nx = Type\nsubmit x").expect("should parse");
-        assert_eq!(program.statements.len(), 3);
-        let Stmt::Assign { expr, .. } = &program.statements[1] else {
-            panic!("expected assign");
-        };
-        assert!(matches!(expr, Expr::Variable(name) if name == "Type"));
-    }
-
-    #[test]
-    fn type_literal_rejects_empty_enum() {
-        let err = parse("x = Type { v: enum[] }").expect_err("empty enum should fail");
-        let message = format!("{err}");
-        assert!(
-            message.contains("empty enum") || message.contains("enum"),
-            "error should mention enum: {message}"
-        );
-    }
-
-    #[test]
-    fn type_literal_rejects_duplicate_fields() {
-        let err = parse("x = Type { a: str, a: int }").expect_err("duplicate field");
-        let message = format!("{err}");
-        assert!(message.contains("duplicate"), "error: {message}");
-    }
-
-    #[test]
-    fn type_literal_rejects_non_string_enum_value() {
-        let err = parse("x = Type { v: enum[1, 2] }").expect_err("numeric enum value");
-        assert!(matches!(err, ParseError::Expected { .. }));
-    }
-
-    #[test]
-    fn type_literal_parses_with_or_without_trailing_comma() {
-        parse("x = Type { a: str, b: int }").expect("no trailing comma should parse");
-        parse("x = Type { a: str, b: int, }").expect("trailing comma should parse");
-    }
-
-    #[test]
-    fn type_literal_parses_nullable_field_as_union_with_null() {
-        let program = parse(
-            r#"
-            User = Type { name: str, email: str | null }
-            submit User
-            "#,
-        )
-        .expect("program should parse");
-        let Stmt::Assign { expr, .. } = &program.statements[0] else {
-            panic!("expected assign");
-        };
-        let Expr::TypeLiteral(ty) = expr else {
-            panic!("expected TypeLiteral");
-        };
-        let TypeExpr::Object(fields) = ty.as_ref() else {
-            panic!("expected object");
-        };
-        assert_eq!(fields.len(), 2);
-        let TypeExpr::Union(variants) = &fields[1].ty else {
-            panic!("expected email to be a Union, got {:?}", fields[1].ty);
-        };
-        assert_eq!(variants.len(), 2);
-        assert!(matches!(variants[0], TypeExpr::Str));
-        assert!(matches!(variants[1], TypeExpr::Null));
-    }
-
-    #[test]
-    fn type_literal_parses_three_way_union() {
-        let program = parse("x = Type { v: str | int | null }").expect("should parse");
-        let Stmt::Assign { expr, .. } = &program.statements[0] else {
-            panic!("expected assign");
-        };
-        let Expr::TypeLiteral(ty) = expr else {
-            panic!("expected TypeLiteral");
-        };
-        let TypeExpr::Object(fields) = ty.as_ref() else {
-            panic!("expected object");
-        };
-        let TypeExpr::Union(variants) = &fields[0].ty else {
-            panic!("expected union");
-        };
-        assert_eq!(variants.len(), 3);
-    }
-
-    #[test]
-    fn type_literal_bare_brace_in_field_position_gives_targeted_diagnostic() {
-        let err = parse("x = Type { nested: { ok: bool } }")
-            .expect_err("bare `{` in type position should fail");
-        let message = format!("{err}");
-        assert!(
-            message.contains("Type"),
-            "diagnostic should mention the `Type` keyword: {message}",
-        );
-    }
-
-    #[test]
-    fn list_and_record_literals_accept_trailing_commas() {
-        parse("x = [1, 2, 3,]\nsubmit x").expect("list trailing comma");
-        parse("x = { a: 1, b: 2, }\nsubmit x").expect("record trailing comma");
-        parse("x = { parallel: 1, \"with space\": 2 }\nsubmit x.parallel")
-            .expect("record keyword and quoted keys");
-        // Empty literals still work.
-        parse("x = []\nsubmit x").expect("empty list");
-        parse("x = {}\nsubmit x").expect("empty record");
-    }
-
-    #[test]
-    fn render_kind_covers_every_variant() {
-        let samples = vec![
-            TokenKind::Ident("x".into()),
-            TokenKind::String("s".into()),
-            TokenKind::Number(1.0),
-            TokenKind::LBrace,
-            TokenKind::RBrace,
-            TokenKind::LParen,
-            TokenKind::RParen,
-            TokenKind::LBracket,
-            TokenKind::RBracket,
-            TokenKind::Comma,
-            TokenKind::Colon,
-            TokenKind::Question,
-            TokenKind::Dot,
-            TokenKind::Bang,
-            TokenKind::Equal,
-            TokenKind::DoubleEqual,
-            TokenKind::BangEqual,
-            TokenKind::AndAnd,
-            TokenKind::OrOr,
-            TokenKind::Less,
-            TokenKind::LessEqual,
-            TokenKind::Greater,
-            TokenKind::GreaterEqual,
-            TokenKind::Plus,
-            TokenKind::Minus,
-            TokenKind::Star,
-            TokenKind::Slash,
-            TokenKind::Percent,
-            TokenKind::If,
-            TokenKind::Else,
-            TokenKind::For,
-            TokenKind::In,
-            TokenKind::Parallel,
-            TokenKind::Await,
-            TokenKind::Cancel,
-            TokenKind::Submit,
-            TokenKind::Print,
-            TokenKind::Call,
-            TokenKind::And,
-            TokenKind::Or,
-            TokenKind::Not,
-            TokenKind::True,
-            TokenKind::False,
-            TokenKind::Null,
-            TokenKind::Eof,
-        ];
-
-        for sample in samples {
-            assert!(!render_kind(&sample).is_empty());
-        }
     }
 }

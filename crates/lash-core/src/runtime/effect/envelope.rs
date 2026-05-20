@@ -4,8 +4,8 @@ use crate::CheckpointKind;
 use crate::plugin::PluginMessage;
 use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
 use crate::{
-    ExecResponse, LlmResponse, ProcessAwaitOutput, ProcessFilter, ProcessRecord,
-    ProcessRegistration,
+    ExecResponse, LlmResponse, ProcessAwaitOutput, ProcessExecutionContext,
+    ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration, ProcessStartGrant,
 };
 
 use super::controller::RuntimeEffectControllerError;
@@ -147,12 +147,18 @@ impl RuntimeEffectCommand {
 pub enum ProcessCommand {
     Start {
         registration: ProcessRegistration,
-    },
-    Get {
-        process_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<ProcessStartGrant>,
+        #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
+        execution_context: ProcessExecutionContext,
     },
     List {
-        filter: ProcessFilter,
+        session_id: String,
+    },
+    Transfer {
+        from_session_id: String,
+        to_session_id: String,
+        process_ids: Vec<String>,
     },
     Await {
         process_id: String,
@@ -166,12 +172,16 @@ pub enum ProcessCommand {
 impl ProcessCommand {
     pub fn effect_id(&self) -> String {
         match self {
-            Self::Start { registration } => format!("process:start:{}", registration.id),
-            Self::Get { process_id } => format!("process:get:{process_id}"),
-            Self::List { filter } => {
-                let digest = crate::stable_hash::stable_json_sha256_hex(filter)
+            Self::Start { registration, .. } => format!("process:start:{}", registration.id),
+            Self::List { session_id } => format!("process:list:{session_id}"),
+            Self::Transfer {
+                from_session_id,
+                to_session_id,
+                process_ids,
+            } => {
+                let digest = crate::stable_hash::stable_json_sha256_hex(process_ids)
                     .unwrap_or_else(|_| "unhashable".to_string());
-                format!("process:list:{digest}")
+                format!("process:transfer:{from_session_id}:{to_session_id}:{digest}")
             }
             Self::Await { process_id } => format!("process:await:{process_id}"),
             Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
@@ -183,11 +193,19 @@ impl ProcessCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProcessEffectOutcome {
-    Start { record: ProcessRecord },
-    Get { record: Option<ProcessRecord> },
-    List { records: Vec<ProcessRecord> },
-    Await { output: ProcessAwaitOutput },
-    Cancel { record: ProcessRecord },
+    Start {
+        record: ProcessRecord,
+    },
+    List {
+        entries: Vec<ProcessHandleGrantEntry>,
+    },
+    Transfer,
+    Await {
+        output: ProcessAwaitOutput,
+    },
+    Cancel {
+        record: ProcessRecord,
+    },
 }
 
 /// Serializable result of a runtime effect command.

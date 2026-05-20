@@ -211,6 +211,7 @@ impl BenchmarkEchoTool {
 
 fn benchmark_echo_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:benchmark_echo",
         "benchmark_echo",
         "Return the input payload with a tiny async yield for runtime profiling.",
         serde_json::json!({
@@ -228,6 +229,7 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
 
 fn benchmark_slow_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:benchmark_slow",
         "benchmark_slow",
         "Sleep briefly before returning; used to profile process handle cancellation and await paths.",
         serde_json::json!({
@@ -245,6 +247,7 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
 
 fn benchmark_retry_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:benchmark_retry",
         "benchmark_retry",
         "Fail once with a safe retry disposition, then return the input payload.",
         serde_json::json!({

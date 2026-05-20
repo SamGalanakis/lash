@@ -75,6 +75,8 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         registration: crate::ProcessRegistration,
+        descriptor: Option<crate::ProcessHandleDescriptor>,
+        execution_context: crate::ProcessExecutionContext,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
         self.processes
             .start_process(
@@ -82,7 +84,9 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
                 &self.managed,
                 session_id,
                 registration,
+                descriptor,
                 Arc::new(self.clone()),
+                execution_context,
             )
             .await
     }
@@ -91,6 +95,8 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         &self,
         session_id: &str,
         registration: crate::ProcessRegistration,
+        descriptor: Option<crate::ProcessHandleDescriptor>,
+        execution_context: crate::ProcessExecutionContext,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
@@ -100,7 +106,9 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
                 &self.managed,
                 session_id,
                 registration,
+                descriptor,
                 Arc::new(self.clone()),
+                execution_context,
                 effect_metadata,
                 effect_controller,
             )
@@ -132,23 +140,23 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn list_processes(
+    async fn list_process_handles(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         self.processes
-            .list_processes(&self.current, session_id)
+            .list_process_handles(&self.current, session_id)
             .await
     }
 
-    async fn list_processes_scoped(
+    async fn list_process_handles_scoped(
         &self,
         session_id: &str,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         self.processes
-            .list_processes_scoped(
+            .list_process_handles_scoped(
                 &self.current,
                 session_id,
                 effect_metadata,

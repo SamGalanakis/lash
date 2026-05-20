@@ -91,6 +91,7 @@ impl ToolProvider for FetchUrl {
 
 fn fetch_url_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:fetch_url",
                 "fetch_url",
                 "Fetch one known URL and extract readable page text.",
                 object_schema(

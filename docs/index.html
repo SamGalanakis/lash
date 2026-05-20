@@ -3,8 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
 <title>lash · docs</title>
 <link rel="icon" href="data:,">
+<!-- Paint the page brand-dark immediately so the network gap between
+     this HTML and styles.css (or a meta-refresh hop from lash.run →
+     /main/) never shows a default-white flash. Light-scheme users get
+     the warm-paper bg via prefers-color-scheme. styles.css then takes
+     over with the data-theme-driven palette. -->
+<style>
+  html, body { background: #141412; }
+  @media (prefers-color-scheme: light) {
+    html, body { background: #f5efe0; }
+  }
+</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;600;700;800&family=Chivo+Mono:wght@400;500&family=Spectral:wght@400;500;600;ital,400&display=swap">

@@ -1,20 +1,18 @@
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use lash_core::plugin::project_observation_text;
 use lash_core::{
-    AttachmentRef, ExecImage, ModeExecutionContext, ModeToolBatchItem, ModeToolReply,
-    TextProjectionMetadata, ToolOutputBudgetConfig,
+    AttachmentRef, ExecImage, ModeExecutionContext, ModeToolReply, TextProjectionMetadata,
+    ToolOutputBudgetConfig,
 };
 use lashlang::{
-    ImageValue, ProjectedFuture, Record as FlowRecord, ToolHost, ToolHostCall, ToolHostError,
-    Value as FlowValue,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessBlockStart,
+    ProjectedFuture, Record as FlowRecord, Value as FlowValue,
 };
 use serde_json::Value;
 
-use crate::projection_codec::{
-    flow_record_to_tool_args, flow_to_json_value, format_output_value, json_to_flow_value,
-};
+use crate::projection_codec::{flow_record_to_tool_args, flow_to_json_value, format_output_value};
 
 pub(super) struct HostBridge<'run> {
     ctx: ModeExecutionContext<'run>,
@@ -71,7 +69,7 @@ impl<'run> HostBridge<'run> {
         &self,
         tool_name: &str,
         reply: ModeToolReply,
-    ) -> Result<FlowValue, ToolHostError> {
+    ) -> Result<FlowValue, ExecutionHostError> {
         let projected_tool_name = reply
             .record
             .as_ref()
@@ -81,7 +79,7 @@ impl<'run> HostBridge<'run> {
         if let Some(record) = reply.record {
             self.tool_calls
                 .lock()
-                .map_err(|_| ToolHostError::new("tool call buffer poisoned"))?
+                .map_err(|_| ExecutionHostError::new("tool call buffer poisoned"))?
                 .push(record);
         }
         if reply.output.is_success() {
@@ -91,15 +89,9 @@ impl<'run> HostBridge<'run> {
                     return Ok(value);
                 }
             }
-            Ok(lift_tool_result_to_flow_value(
-                value,
-                Vec::new(),
-                self.ctx.attachment_store().as_ref(),
-            ))
+            lash_core::lashlang_bridge::mode_tool_output_to_lashlang_value(&reply.output)
         } else {
-            Err(ToolHostError::new(tool_error_message(
-                reply.output.value_for_projection(),
-            )))
+            lash_core::lashlang_bridge::mode_tool_output_to_lashlang_value(&reply.output)
         }
     }
 
@@ -114,8 +106,8 @@ impl<'run> HostBridge<'run> {
     }
 }
 
-impl ToolHost for HostBridge<'_> {
-    async fn call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ToolHostError> {
+impl HostBridge<'_> {
+    async fn call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ExecutionHostError> {
         let index = self.next_index();
         let reply = self
             .ctx
@@ -129,37 +121,11 @@ impl ToolHost for HostBridge<'_> {
         self.consume_reply(&name, reply)
     }
 
-    async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<FlowValue, ToolHostError>> {
-        if calls.is_empty() {
-            return Vec::new();
-        }
-        let mut batch = Vec::with_capacity(calls.len());
-        for call in &calls {
-            batch.push(ModeToolBatchItem {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: call.name.clone(),
-                args: self.tool_payload(&call.name, &call.args).await,
-            });
-        }
-        let replies = self.ctx.call_tool_batch(batch).await;
-        if replies.len() != calls.len() {
-            return calls
-                .into_iter()
-                .map(|_| {
-                    Err(ToolHostError::new(
-                        "tool batch returned the wrong number of results",
-                    ))
-                })
-                .collect();
-        }
-        replies
-            .into_iter()
-            .zip(calls)
-            .map(|(reply, call)| self.consume_reply(&call.name, reply))
-            .collect()
-    }
-
-    async fn start_call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ToolHostError> {
+    async fn start_call(
+        &self,
+        name: String,
+        args: FlowRecord,
+    ) -> Result<FlowValue, ExecutionHostError> {
         let reply = self
             .ctx
             .start_tool_call(
@@ -171,29 +137,41 @@ impl ToolHost for HostBridge<'_> {
         self.consume_reply(&name, reply)
     }
 
-    async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
+    async fn start_process(
+        &self,
+        start: ProcessBlockStart,
+    ) -> Result<FlowValue, ExecutionHostError> {
+        let (registration, label) = self
+            .ctx
+            .prepare_lashlang_process_start(start)
+            .map_err(ExecutionHostError::new)?;
+        let reply = self.ctx.start_lashlang_process(registration, label).await;
+        self.consume_reply("start_process", reply)
+    }
+
+    async fn await_handle(&self, handle: FlowValue) -> Result<FlowValue, ExecutionHostError> {
         let reply = self
             .ctx
             .await_tool_handle(
                 uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle).await,
+                handle_to_json(&handle).await?,
             )
             .await;
         self.consume_reply("await_handle", reply)
     }
 
-    async fn cancel_handle(&self, handle: FlowValue) -> Result<FlowValue, ToolHostError> {
+    async fn cancel_handle(&self, handle: FlowValue) -> Result<FlowValue, ExecutionHostError> {
         let reply = self
             .ctx
             .cancel_tool_handle(
                 uuid::Uuid::new_v4().to_string(),
-                flow_to_json_value(&handle).await,
+                handle_to_json(&handle).await?,
             )
             .await;
         self.consume_reply("cancel_handle", reply)
     }
 
-    async fn print(&self, value: FlowValue) -> Result<(), ToolHostError> {
+    async fn print(&self, value: FlowValue) -> Result<(), ExecutionHostError> {
         let attachment_store = self.ctx.attachment_store();
         let images = collect_printed_images(&value, attachment_store.as_ref()).await?;
         let raw_text = format_output_value(&value).await;
@@ -201,23 +179,55 @@ impl ToolHost for HostBridge<'_> {
             project_observation_text(&raw_text, &self.observe_projection);
         self.observations
             .lock()
-            .map_err(|_| ToolHostError::new("observation buffer poisoned"))?
+            .map_err(|_| ExecutionHostError::new("observation buffer poisoned"))?
             .push(raw_text);
         self.observation_truncation
             .lock()
-            .map_err(|_| ToolHostError::new("observation metadata buffer poisoned"))?
+            .map_err(|_| ExecutionHostError::new("observation metadata buffer poisoned"))?
             .push(metadata);
         if !images.is_empty() {
             self.printed_images
                 .lock()
-                .map_err(|_| ToolHostError::new("printed image buffer poisoned"))?
+                .map_err(|_| ExecutionHostError::new("printed image buffer poisoned"))?
                 .extend(images);
         }
         Ok(())
     }
+}
+
+impl ExecutionHost for HostBridge<'_> {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => {
+                self.call(name, args).await.map(AbilityResult::Value)
+            }
+            AbilityOp::StartToolCall { name, args } => {
+                self.start_call(name, args).await.map(AbilityResult::Value)
+            }
+            AbilityOp::StartProcess(start) => {
+                self.start_process(start).await.map(AbilityResult::Value)
+            }
+            AbilityOp::Await(handle) => self.await_handle(handle).await.map(AbilityResult::Value),
+            AbilityOp::Cancel(handle) => self.cancel_handle(handle).await.map(AbilityResult::Value),
+            AbilityOp::Print(value) => {
+                self.print(value).await?;
+                Ok(AbilityResult::Unit)
+            }
+            AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
+                "process events are only available inside lashlang process blocks",
+            )),
+        }
+    }
 
     async fn yield_now(&self) {
         tokio::task::yield_now().await;
+    }
+}
+
+async fn handle_to_json(value: &FlowValue) -> Result<Value, ExecutionHostError> {
+    match value {
+        FlowValue::Projected(_) => Ok(flow_to_json_value(value).await),
+        _ => lash_core::lashlang_bridge::lashlang_value_to_json(value),
     }
 }
 
@@ -232,7 +242,7 @@ pub(super) struct CollectedExecutionOutput {
 async fn collect_printed_images(
     value: &FlowValue,
     attachment_store: &dyn lash_core::AttachmentStore,
-) -> Result<Vec<AttachmentRef>, ToolHostError> {
+) -> Result<Vec<AttachmentRef>, ExecutionHostError> {
     let mut seen = HashSet::new();
     let mut images = Vec::new();
     collect_printed_images_inner(value, attachment_store, &mut seen, &mut images).await?;
@@ -244,7 +254,7 @@ fn collect_printed_images_inner<'a>(
     attachment_store: &'a dyn lash_core::AttachmentStore,
     seen: &'a mut HashSet<String>,
     images: &'a mut Vec<AttachmentRef>,
-) -> ProjectedFuture<'a, Result<(), ToolHostError>> {
+) -> ProjectedFuture<'a, Result<(), ExecutionHostError>> {
     Box::pin(async move {
         match value {
             FlowValue::Image(image) => {
@@ -256,7 +266,7 @@ fn collect_printed_images_inner<'a>(
                     .ok()
                     .map(|stored| stored.meta.as_ref())
                     .ok_or_else(|| {
-                        ToolHostError::new(format!(
+                        ExecutionHostError::new(format!(
                             "image bytes for `{}` are unavailable or were pruned",
                             image.id
                         ))
@@ -286,96 +296,4 @@ fn collect_printed_images_inner<'a>(
         }
         Ok(())
     })
-}
-
-fn lift_tool_result_to_flow_value(
-    result: Value,
-    tool_images: Vec<ExecImage>,
-    attachment_store: &dyn lash_core::AttachmentStore,
-) -> FlowValue {
-    if tool_images.is_empty() {
-        return json_to_flow_value(result);
-    }
-
-    let image_values = tool_images
-        .into_iter()
-        .filter_map(|image| register_tool_image(image, attachment_store).ok())
-        .map(FlowValue::Image)
-        .collect::<Vec<_>>();
-
-    if image_values.is_empty() {
-        return json_to_flow_value(result);
-    }
-
-    if is_image_only_tool_payload(&result) {
-        return if image_values.len() == 1 {
-            image_values.into_iter().next().unwrap_or(FlowValue::Null)
-        } else {
-            FlowValue::List(image_values.into())
-        };
-    }
-
-    let mut value = json_to_flow_value(result);
-    let images_value = FlowValue::List(image_values.into());
-    match &mut value {
-        FlowValue::Record(record) => {
-            Arc::make_mut(record).insert("images".to_string(), images_value);
-            value
-        }
-        _ => {
-            let mut record = FlowRecord::new();
-            record.insert("payload".to_string(), value);
-            record.insert("images".to_string(), images_value);
-            FlowValue::Record(Arc::new(record))
-        }
-    }
-}
-
-fn register_tool_image(
-    mut image: ExecImage,
-    attachment_store: &dyn lash_core::AttachmentStore,
-) -> Result<ImageValue, lash_core::AttachmentStoreError> {
-    let reference = if let Some(reference) = image.reference.take() {
-        reference
-    } else if let Some(media_type) = lash_core::MediaType::from_mime(&image.mime) {
-        let meta = lash_core::AttachmentCreateMeta::new(
-            media_type,
-            image.width,
-            image.height,
-            Some(image.label.clone()),
-        );
-        attachment_store.put(std::mem::take(&mut image.data), meta)?
-    } else {
-        let meta = lash_core::AttachmentCreateMeta::new(
-            lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-            image.width,
-            image.height,
-            Some(image.label.clone()),
-        );
-        attachment_store.put(std::mem::take(&mut image.data), meta)?
-    };
-    Ok(ImageValue::new(
-        reference.id.to_string(),
-        reference.label.clone().unwrap_or_default(),
-        reference.byte_len,
-        reference.width,
-        reference.height,
-    ))
-}
-
-fn is_image_only_tool_payload(result: &Value) -> bool {
-    match result {
-        Value::String(text) => text.trim_start().starts_with("[Image:"),
-        Value::Null => true,
-        Value::Array(values) => values.is_empty(),
-        Value::Object(map) => map.is_empty(),
-        _ => false,
-    }
-}
-
-fn tool_error_message(value: Value) -> String {
-    match value {
-        Value::String(text) => text,
-        other => serde_json::to_string(&other).unwrap_or_else(|_| "tool call failed".to_string()),
-    }
 }

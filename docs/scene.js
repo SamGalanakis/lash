@@ -334,9 +334,17 @@
 
     const svgEl = document.getElementById("range");
     if (!svgEl) return;
+    // Match the viewBox to the SVG's actual rendered size so no
+    // preserveAspectRatio slicing/cropping is needed — figures and
+    // suns land exactly where the layout puts them, regardless of
+    // viewport aspect. Fall back to clientWidth × ASPECT on the
+    // first paint, before the layout has settled.
+    const svgBox = svgEl.getBoundingClientRect();
     const docClientW = document.documentElement.clientWidth || window.innerWidth || 1600;
-    W = Math.max(640, Math.round(docClientW));
-    H = Math.max(280, Math.round(W * ASPECT));
+    const measuredW = svgBox.width > 0 ? svgBox.width : docClientW;
+    const measuredH = svgBox.height > 0 ? svgBox.height : measuredW * ASPECT;
+    W = Math.max(640, Math.round(measuredW));
+    H = Math.max(280, Math.round(measuredH));
     HORIZON = H * 0.78;
     svgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
     const skyRect = document.getElementById("sky-rect");
@@ -631,10 +639,21 @@
   // expose so theme-init.js can repaint on theme switch
   window.__LASH_SCENE_RUN = generate;
 
+  // Defer the first generate to the next frame so the SVG element has
+  // already been laid out — getBoundingClientRect() returns 0 during
+  // initial parse, which would force the scene to fall back to the
+  // configured aspect instead of measuring the container.
+  function deferredGenerate() {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(generate);
+    } else {
+      setTimeout(generate, 0);
+    }
+  }
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", generate);
+    document.addEventListener("DOMContentLoaded", deferredGenerate);
   } else {
-    generate();
+    deferredGenerate();
   }
   const regen = document.getElementById("regen");
   if (regen) regen.addEventListener("click", generate);

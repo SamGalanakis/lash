@@ -138,6 +138,7 @@ impl ToolProvider for ApplyPatchTool {
 
 fn apply_patch_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:apply_patch",
                 "apply_patch",
                 APPLY_PATCH_INSTRUCTIONS,
                 object_schema(

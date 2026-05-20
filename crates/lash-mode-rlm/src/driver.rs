@@ -82,6 +82,7 @@ mod catalogue_tests {
 
     fn tool(name: &str) -> lash_core::ToolDefinition {
         lash_core::ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             format!("Tool {name}"),
             serde_json::json!({
@@ -331,12 +332,18 @@ fn required_output_block(termination: &RlmTermination) -> Option<String> {
 }
 
 fn render_value_schema_contract(schema: &serde_json::Value) -> String {
-    let input_contract =
-        lash_core::ToolDefinition::raw("submit", "", schema.clone(), serde_json::json!({}))
-            .compact_contract();
+    let input_contract = lash_core::ToolDefinition::raw(
+        "tool:submit",
+        "submit",
+        "",
+        schema.clone(),
+        serde_json::json!({}),
+    )
+    .compact_contract();
 
     if input_contract.parameters.is_empty() {
         return lash_core::ToolDefinition::raw(
+            "tool:submit",
             "submit",
             "",
             lash_core::ToolDefinition::default_input_schema(),

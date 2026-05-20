@@ -3,29 +3,43 @@ use super::*;
 #[test]
 fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let created_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
-    let mut running = lash_core::ProcessRecord::local_session(
-        "test-session-id",
+    let grant = lash_core::ProcessHandleGrant {
+        session_id: "test-session-id".to_string(),
+        process_id: "subagent:smoke".to_string(),
+        descriptor: lash_core::ProcessHandleDescriptor::new(Some("subagent"), Some("smoke")),
+    };
+    let running = lash_core::ProcessRecord::from_registration(lash_core::ProcessRegistration::new(
         "subagent:smoke",
-        "subagent",
-        lash_core::ProcessState::Running,
-    );
-    running.created_at = created_at;
-    app.update_processes(vec![running]);
+        lash_core::ProcessInput::External {
+            metadata: serde_json::Value::Null,
+        },
+    ));
+    app.update_processes(vec![(grant.clone(), running)]);
+    app.processes[0].first_seen = std::time::Instant::now() - std::time::Duration::from_secs(125);
     assert_eq!(app.processes.len(), 1);
     assert_eq!(app.processes[0].terminal_duration, None);
 
-    let mut completed = lash_core::ProcessRecord::local_session(
-        "test-session-id",
-        "subagent:smoke",
-        "subagent",
-        lash_core::ProcessState::Completed,
-    );
-    completed.created_at = created_at;
-    app.update_processes(vec![completed]);
+    let mut completed =
+        lash_core::ProcessRecord::from_registration(lash_core::ProcessRegistration::new(
+            "subagent:smoke",
+            lash_core::ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+        ));
+    completed.terminal = Some(lash_core::ProcessTerminalSemantics {
+        state: lash_core::ProcessTerminalState::Completed,
+        await_output: lash_core::ProcessAwaitOutput::Success {
+            value: serde_json::json!({}),
+            control: None,
+        },
+    });
+    app.update_processes(vec![(grant, completed)]);
 
     assert_eq!(app.processes.len(), 1);
-    assert_eq!(app.processes[0].state, lash_core::ProcessState::Completed);
+    assert_eq!(
+        app.processes[0].terminal,
+        Some(lash_core::ProcessTerminalState::Completed)
+    );
     assert!(app.processes[0].transient_until.is_some());
     assert!(
         app.processes[0]

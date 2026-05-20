@@ -112,6 +112,10 @@ jobs:
           # the docs themselves (top-right dropdown), not on a chooser
           # page. Anyone hitting bare lash.run lands on main; the
           # dropdown takes them to staging if they want it.
+          #
+          # The page is painted in brand-dark (matching --bg) and the
+          # body is hidden so the meta-refresh hop never flashes a
+          # white default-bg paint before the redirect completes.
           cat > "${site_dir}/index.html" <<'HTML'
           <!doctype html>
           <html lang="en">
@@ -119,7 +123,16 @@ jobs:
             <meta charset="utf-8">
             <meta http-equiv="refresh" content="0; url=./main/">
             <link rel="canonical" href="./main/">
+            <meta name="color-scheme" content="dark light">
             <title>lash docs</title>
+            <style>
+              html, body { margin: 0; height: 100%; background: #141412; }
+              body { visibility: hidden; }
+              @media (prefers-color-scheme: light) {
+                html, body { background: #f5efe0; }
+              }
+            </style>
+            <script>location.replace('./main/');</script>
           </head>
           <body><a href="./main/">lash docs · main</a></body>
           </html>

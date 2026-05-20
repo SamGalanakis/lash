@@ -178,6 +178,7 @@ mod tests {
         fn tool_definitions(&self) -> Vec<ToolDefinition> {
             vec![
                 ToolDefinition::raw(
+                    "tool:mock_tool",
                     "mock_tool",
                     "",
                     json!({

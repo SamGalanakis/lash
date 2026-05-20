@@ -445,8 +445,8 @@ impl ObservableSession {
             .unwrap_or_default()
     }
 
-    pub async fn list_processes(&self) -> Vec<ProcessRecord> {
-        self.snapshot().list_processes().await
+    pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
+        self.snapshot().list_process_handles().await
     }
 }
 pub struct QueueInputBuilder<'a> {

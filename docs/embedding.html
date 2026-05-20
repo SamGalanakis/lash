@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lash api · basics · lash docs</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -33,7 +35,7 @@
             <dt>Typed plugin capabilities</dt>
             <dd>Tools see a named <code>ToolContext</code> surface — <code>processes()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. The surface exposes no <code>ToolContext::host()</code> escape hatch.</dd>
             <dt>Sandboxed code load, ready</dt>
-            <dd>RLM mode runs model-emitted Lashlang programs in a VM with no filesystem, process, or network surface. Every effect crosses <code>ToolHost</code>. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
+            <dd>RLM mode runs model-emitted Lashlang programs in a VM with no filesystem, process, or network surface. Every effect crosses Lashlang's <code>ExecutionHost</code>. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
             <dt>Subagent capability boundaries</dt>
             <dd><code>Capability::resolve(parent_policy)</code> returns a constrained <code>SessionSpec</code> for the child. Interactive-only tools are stripped from every subagent surface regardless of capability.</dd>
             <dt>Semantic event stream</dt>

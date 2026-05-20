@@ -82,14 +82,14 @@ pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{
-    EmbeddedRuntimeHost, LocalProcessRegistry, ProcessAttempt, ProcessAwaitOutput,
-    ProcessCancelPolicy, ProcessClosePolicy, ProcessEvent, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExternalRef, ProcessFilter, ProcessId,
-    ProcessInput, ProcessOutcome, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    ProcessRuntimeHost, ProcessScope, ProcessStartReceipt, ProcessState, ProcessStateSpec,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessTransfer,
-    ProcessTransferSpec, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec,
-    RuntimeCoreConfig,
+    EmbeddedRuntimeHost, LashlangProcessToolBinding, LocalProcessRegistry, ProcessAwaitOutput,
+    ProcessCommandLineEventSpec, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
+    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessStartGrant,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
+    ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec, RuntimeCoreConfig,
+    lashlang_process_event_types,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};

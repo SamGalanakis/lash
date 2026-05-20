@@ -95,6 +95,7 @@ impl ToolProvider for Ls {
 
 fn ls_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:ls",
                 "ls",
                 [
                     "List filesystem entries. ",

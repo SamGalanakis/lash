@@ -134,6 +134,7 @@ impl ToolProvider for CliAskTool {
 
 fn ask_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:ask",
                 "ask",
                 "Pause and ask the user a targeted question, then wait for the answer before continuing. Use this only when you are genuinely blocked, need the user's decision, or must request a value that cannot be inferred safely. Prefer doing the work without asking when a reasonable default can be discovered from local context. Provide `options` when there are roughly 2-6 discrete choices; omit it for open-ended responses.",
                 object_schema(

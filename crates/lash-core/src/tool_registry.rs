@@ -291,6 +291,7 @@ impl ToolRegistry {
                     )));
                 }
             }
+            validate_unique_manifest_entries(next.entries().values())?;
         }
 
         let mut state = self
@@ -356,6 +357,16 @@ impl ToolRegistry {
                 return Err(ReconfigureError::Validation(format!(
                     "duplicate tool name `{}` from source `{}` conflicts with source `{}`",
                     manifest.name, source_id, existing.source_id
+                )));
+            }
+            if let Some((existing_name, existing)) = state
+                .tools
+                .iter()
+                .find(|(_, entry)| entry.source_id != source_id && entry.manifest.id == manifest.id)
+            {
+                return Err(ReconfigureError::Validation(format!(
+                    "duplicate tool id `{}` from source `{}` conflicts with tool `{}` from source `{}`",
+                    manifest.id, source_id, existing_name, existing.source_id
                 )));
             }
         }
@@ -481,6 +492,13 @@ impl ToolProvider for ToolRegistry {
             if let Some(existing) = state.tools.get(&manifest.name) {
                 return (existing.source_id == source_id).then(|| existing.manifest.clone());
             }
+            if let Some((_, existing)) = state
+                .tools
+                .iter()
+                .find(|(_, entry)| entry.manifest.id == manifest.id)
+            {
+                return (existing.source_id == source_id).then(|| existing.manifest.clone());
+            }
             state.tools.insert(
                 manifest.name.clone(),
                 ToolStateEntry {
@@ -569,7 +587,19 @@ impl ToolProvider for ToolRegistry {
 
 fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), ReconfigureError> {
     let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
     for manifest in manifests {
+        if manifest.id.as_str().trim().is_empty() {
+            return Err(ReconfigureError::Validation(
+                "tool id cannot be empty".to_string(),
+            ));
+        }
+        if !ids.insert(manifest.id.clone()) {
+            return Err(ReconfigureError::Validation(format!(
+                "duplicate tool id `{}` in source",
+                manifest.id
+            )));
+        }
         if manifest.name.trim().is_empty() {
             return Err(ReconfigureError::Validation(
                 "tool name cannot be empty".to_string(),
@@ -583,6 +613,16 @@ fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), Reconfigu
         }
     }
     Ok(())
+}
+
+fn validate_unique_manifest_entries<'a>(
+    entries: impl IntoIterator<Item = &'a ToolStateEntry>,
+) -> Result<(), ReconfigureError> {
+    let manifests = entries
+        .into_iter()
+        .map(|entry| entry.manifest.clone())
+        .collect::<Vec<_>>();
+    validate_unique_manifests(&manifests)
 }
 
 #[cfg(test)]
@@ -607,6 +647,7 @@ mod tests {
         availability: crate::ToolAvailabilityConfig,
     ) -> ToolDefinition {
         ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             description,
             ToolDefinition::default_input_schema(),
@@ -703,6 +744,7 @@ mod tests {
 
         fn advertised_tools(&self) -> Vec<ToolManifest> {
             manifests(vec![ToolDefinition::raw(
+                "tool:mcp__demo__search",
                 "mcp__demo__search",
                 "search",
                 json!({
@@ -720,6 +762,7 @@ mod tests {
         fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
             contract_from(
                 vec![ToolDefinition::raw(
+                    "tool:mcp__demo__search",
                     "mcp__demo__search",
                     "search",
                     json!({
@@ -1009,6 +1052,7 @@ mod tests {
     fn project_tool_catalog_keeps_searchable_tools_with_surface_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
+                format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
@@ -1036,6 +1080,7 @@ mod tests {
     fn project_tool_catalog_preserves_dynamic_output_contracts() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
             crate::ToolDefinition::raw(
+                format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
                 crate::ToolDefinition::default_input_schema(),
@@ -1067,6 +1112,7 @@ where
             let manifest = entry.manifest;
             let availability = entry.availability;
             let projected = serde_json::json!({
+                "id": manifest.id,
                 "name": manifest.name,
                 "namespace": manifest.discovery.namespace,
                 "description": manifest.description,

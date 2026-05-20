@@ -1,21 +1,40 @@
-//! Public entry points for compiling and executing lashlang programs.
-//!
-//! These are thin wrappers that instantiate the `Compiler` and `Vm`, plumb
-//! through optional `ExecutionScratch` reuse and projected bindings, and
-//! emit either an `ExecutionOutcome` or a profile report. All real work
-//! lives in `compiler.rs` and `vm.rs` (or, currently, in `mod.rs` until
-//! those stages land).
+//! Public compile/execute entry points for lashlang programs.
 
 use crate::ast::Program;
 
 use super::record::intern_symbol;
 use super::{
-    CompiledProgram, Compiler, ExecutionOutcome, ExecutionScratch, LASH_TYPE_KEY, ProfileReport,
-    ProjectedBindings, RuntimeError, RuntimeFailure, SlotState, State, ToolHost, Vm,
+    CompiledProgram, Compiler, ExecutionHost, ExecutionOutcome, ExecutionScratch, LASH_TYPE_KEY,
+    ProjectedBindings, RuntimeError, SlotState, State, Vm,
 };
 
-pub fn compile_source(source: &str) -> Result<CompiledProgram, crate::parser::ParseError> {
-    crate::parse(source).map(|program| compile_program(&program))
+pub enum ExecutableProgram<'program> {
+    Program(&'program Program),
+    Compiled(&'program CompiledProgram),
+}
+
+impl<'program> From<&'program Program> for ExecutableProgram<'program> {
+    fn from(program: &'program Program) -> Self {
+        Self::Program(program)
+    }
+}
+
+impl<'program> From<&'program CompiledProgram> for ExecutableProgram<'program> {
+    fn from(program: &'program CompiledProgram) -> Self {
+        Self::Compiled(program)
+    }
+}
+
+pub fn compile(source: &str) -> Result<CompiledProgram, crate::parser::ParseError> {
+    crate::parse(source).map(|program| compile_program_internal(&program))
+}
+
+pub(crate) fn compile_program_internal(program: &Program) -> CompiledProgram {
+    let (chunk, compile_stats) = Compiler::compile_program(program);
+    CompiledProgram {
+        chunk,
+        compile_stats,
+    }
 }
 
 pub fn prewarm() {
@@ -41,225 +60,100 @@ pub fn prewarm() {
     }
 }
 
-pub async fn execute_program<H: ToolHost>(
-    program: &Program,
+pub async fn execute<'program, H: ExecutionHost>(
+    program: impl Into<ExecutableProgram<'program>>,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    let compiled = compile_program(program);
-    execute_compiled(&compiled, state, host).await
-}
-
-pub fn compile_program(program: &Program) -> CompiledProgram {
-    let (chunk, compile_stats) = Compiler::compile_program(program);
-    CompiledProgram {
-        chunk,
-        compile_stats,
+    match program.into() {
+        ExecutableProgram::Program(program) => {
+            let compiled = compile_program_internal(program);
+            execute_compiled_internal(&compiled, state, host).await
+        }
+        ExecutableProgram::Compiled(compiled) => {
+            execute_compiled_internal(compiled, state, host).await
+        }
     }
 }
 
-pub async fn execute_compiled<H: ToolHost>(
+pub(crate) async fn execute_compiled_internal<H: ExecutionHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    execute_compiled_with_projected_bindings(program, state, host, &ProjectedBindings::default())
-        .await
+    let projected = host.projected_bindings();
+    if let Some(mut scratch) = host.take_scratch() {
+        let result =
+            execute_with_optional_scratch(program, state, host, &projected, Some(&mut scratch))
+                .await;
+        host.store_scratch(scratch);
+        result
+    } else {
+        execute_with_optional_scratch(program, state, host, &projected, None).await
+    }
 }
 
-pub async fn execute_compiled_with_projected_bindings<H: ToolHost>(
+async fn execute_with_optional_scratch<H: ExecutionHost>(
     program: &CompiledProgram,
     state: &mut State,
     host: &H,
     projected: &ProjectedBindings,
+    scratch: Option<&mut ExecutionScratch>,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    let mut vm = Vm::new(
-        &program.chunk,
-        SlotState::from_globals(
+    if let Some(scratch) = scratch {
+        let slots = SlotState::from_globals_with_scratch(
+            std::mem::take(&mut state.globals),
+            &program.chunk.slot_names,
+            scratch,
+            projected,
+        );
+        let mut vm = Vm::new_with_scratch_and_mode(
+            &program.chunk,
+            slots,
+            host,
+            scratch,
+            host.execution_mode(),
+        );
+        let result = run_vm(program, host, &mut vm).await;
+        state.globals = vm.recycle_into_globals(scratch);
+        result
+    } else {
+        let slots = SlotState::from_globals(
             std::mem::take(&mut state.globals),
             &program.chunk.slot_names,
             projected,
-        ),
-        host,
-        false,
-    );
-    let result = vm.run().await;
-    state.globals = vm.into_globals();
-    result
+        );
+        let mut vm = Vm::new_with_mode(&program.chunk, slots, host, host.execution_mode());
+        let result = run_vm(program, host, &mut vm).await;
+        state.globals = vm.into_globals();
+        result
+    }
 }
 
-pub async fn execute_compiled_with_scratch<H: ToolHost>(
+async fn run_vm<H: ExecutionHost>(
     program: &CompiledProgram,
-    state: &mut State,
     host: &H,
-    scratch: &mut ExecutionScratch,
+    vm: &mut Vm<'_, H>,
 ) -> Result<ExecutionOutcome, RuntimeError> {
-    execute_compiled_with_scratch_and_projected_bindings(
-        program,
-        state,
-        host,
-        scratch,
-        &ProjectedBindings::default(),
-    )
-    .await
-}
+    if host.profile_execution() {
+        vm.enable_profile();
+    }
 
-pub async fn execute_compiled_with_scratch_and_projected_bindings<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    scratch: &mut ExecutionScratch,
-    projected: &ProjectedBindings,
-) -> Result<ExecutionOutcome, RuntimeError> {
-    let slots = SlotState::from_globals_with_scratch(
-        std::mem::take(&mut state.globals),
-        &program.chunk.slot_names,
-        scratch,
-        projected,
-    );
-    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
-    let result = vm.run().await;
-    state.globals = vm.recycle_into_globals(scratch);
+    let result = if host.trace_runtime_errors() {
+        vm.run_traced_for_mode().await.map_err(|failure| {
+            let error = failure.error.clone();
+            host.observe_runtime_failure(failure);
+            error
+        })
+    } else {
+        vm.run_for_mode().await
+    };
+
+    if host.profile_execution() {
+        let mut profile = vm.take_profile();
+        profile.compile_stats = program.compile_stats;
+        host.observe_profile(profile);
+    }
+
     result
-}
-
-pub async fn execute_compiled_traced<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-) -> Result<ExecutionOutcome, RuntimeFailure> {
-    execute_compiled_traced_with_projected_bindings(
-        program,
-        state,
-        host,
-        &ProjectedBindings::default(),
-    )
-    .await
-}
-
-pub async fn execute_compiled_traced_with_projected_bindings<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    projected: &ProjectedBindings,
-) -> Result<ExecutionOutcome, RuntimeFailure> {
-    let mut vm = Vm::new(
-        &program.chunk,
-        SlotState::from_globals(
-            std::mem::take(&mut state.globals),
-            &program.chunk.slot_names,
-            projected,
-        ),
-        host,
-        false,
-    );
-    let result = vm.run_traced().await;
-    state.globals = vm.into_globals();
-    result
-}
-
-pub async fn execute_compiled_traced_with_scratch<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    scratch: &mut ExecutionScratch,
-) -> Result<ExecutionOutcome, RuntimeFailure> {
-    execute_compiled_traced_with_scratch_and_projected_bindings(
-        program,
-        state,
-        host,
-        scratch,
-        &ProjectedBindings::default(),
-    )
-    .await
-}
-
-pub async fn execute_compiled_traced_with_scratch_and_projected_bindings<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    scratch: &mut ExecutionScratch,
-    projected: &ProjectedBindings,
-) -> Result<ExecutionOutcome, RuntimeFailure> {
-    let slots = SlotState::from_globals_with_scratch(
-        std::mem::take(&mut state.globals),
-        &program.chunk.slot_names,
-        scratch,
-        projected,
-    );
-    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
-    let result = vm.run_traced().await;
-    state.globals = vm.recycle_into_globals(scratch);
-    result
-}
-
-pub async fn profile_compiled<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
-    profile_compiled_with_projected_bindings(program, state, host, &ProjectedBindings::default())
-        .await
-}
-
-pub async fn profile_compiled_with_projected_bindings<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    projected: &ProjectedBindings,
-) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
-    let mut vm = Vm::new(
-        &program.chunk,
-        SlotState::from_globals(
-            std::mem::take(&mut state.globals),
-            &program.chunk.slot_names,
-            projected,
-        ),
-        host,
-        false,
-    );
-    vm.enable_profile();
-    let result = vm.run().await;
-    let mut profile = vm.take_profile();
-    state.globals = vm.into_globals();
-    profile.compile_stats = program.compile_stats;
-    result.map(|outcome| (outcome, profile))
-}
-
-pub async fn profile_compiled_with_scratch<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    scratch: &mut ExecutionScratch,
-) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
-    profile_compiled_with_scratch_and_projected_bindings(
-        program,
-        state,
-        host,
-        scratch,
-        &ProjectedBindings::default(),
-    )
-    .await
-}
-
-pub async fn profile_compiled_with_scratch_and_projected_bindings<H: ToolHost>(
-    program: &CompiledProgram,
-    state: &mut State,
-    host: &H,
-    scratch: &mut ExecutionScratch,
-    projected: &ProjectedBindings,
-) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
-    let slots = SlotState::from_globals_with_scratch(
-        std::mem::take(&mut state.globals),
-        &program.chunk.slot_names,
-        scratch,
-        projected,
-    );
-    let mut vm = Vm::new_with_scratch(&program.chunk, slots, host, false, scratch);
-    vm.enable_profile();
-    let result = vm.run().await;
-    let mut profile = vm.take_profile();
-    state.globals = vm.recycle_into_globals(scratch);
-    profile.compile_stats = program.compile_stats;
-    result.map(|outcome| (outcome, profile))
 }

@@ -1294,6 +1294,7 @@ impl StandardShell {
         let output_schema = json!({ "type": "object", "additionalProperties": true });
         vec![
             ToolDefinition::raw(
+                "tool:exec_command",
                 "exec_command",
                 exec_command_description,
                 {
@@ -1315,6 +1316,7 @@ impl StandardShell {
             .with_discovery(lash_tool_support::discovery_metadata("shell", &["shell", "bash"]))
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::raw(
+                "tool:start_command",
                 "start_command",
                 start_command_description,
                 {
@@ -1338,6 +1340,7 @@ impl StandardShell {
             ))
             .with_execution_mode(ToolExecutionMode::Serial),
             ToolDefinition::raw(
+                "tool:write_stdin",
                 "write_stdin",
                 "Write bytes to a running command handle from `start_command` and poll for the next settled cleaned output chunk. Use `close_stdin: true` to send EOF. Results with `status: \"running\"`, `done: false`, and `session_id` are partial; continue polling or writing until a completed result with `exit_code` if command completion matters. If the process exits, nonzero exit codes fail the tool by default; pass `allow_nonzero_exit: true` only when nonzero is expected data, then inspect `exit_code`. ANSI/control noise is stripped from returned output. Large or truncated output may also include `full_output_path` pointing at the saved raw stream.",
                 object_schema(

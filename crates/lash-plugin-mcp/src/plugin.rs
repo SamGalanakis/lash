@@ -157,8 +157,13 @@ mod tests {
             },
             "required": ["query", "filters"]
         });
-        let definition =
-            ToolDefinition::raw("mcp__demo__search", "Search", schema.clone(), json!({}));
+        let definition = ToolDefinition::raw(
+            "mcp:demo/search",
+            "mcp__demo__search",
+            "Search",
+            schema.clone(),
+            json!({}),
+        );
         assert_eq!(definition.input_schema, schema);
         assert_eq!(definition.parameter_metadata().len(), 3);
     }

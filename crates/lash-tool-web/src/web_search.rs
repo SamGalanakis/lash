@@ -76,6 +76,7 @@ impl ToolProvider for WebSearch {
 
 fn web_search_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:search_web",
                 "search_web",
                 "Search the web for candidate sources. Returns `{results, answer?}` with snippet text; use `fetch_url` when you need the page itself.",
                 object_schema(

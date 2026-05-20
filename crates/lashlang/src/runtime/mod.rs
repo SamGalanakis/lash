@@ -30,16 +30,11 @@ mod vm;
 pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
 #[allow(unused_imports)]
 pub(crate) use compiler::*;
-pub use entry_points::{
-    compile_program, compile_source, execute_compiled, execute_compiled_traced,
-    execute_compiled_traced_with_projected_bindings, execute_compiled_traced_with_scratch,
-    execute_compiled_traced_with_scratch_and_projected_bindings,
-    execute_compiled_with_projected_bindings, execute_compiled_with_scratch,
-    execute_compiled_with_scratch_and_projected_bindings, execute_program, prewarm,
-    profile_compiled, profile_compiled_with_projected_bindings, profile_compiled_with_scratch,
-    profile_compiled_with_scratch_and_projected_bindings,
+pub use entry_points::{ExecutableProgram, compile, execute, prewarm};
+pub use host::{
+    AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
+    ExecutionMode, ProcessBlockEvent, ProcessBlockEventKind, ProcessBlockStart,
 };
-pub use host::{ToolHost, ToolHostCall, ToolHostError};
 #[allow(unused_imports)]
 pub(crate) use instruction::*;
 pub use json::from_json;
@@ -72,16 +67,16 @@ pub use value::{
 };
 use vm::IterState;
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum RuntimeError {
     #[error("unknown name `{name}`")]
     UndefinedVariable { name: String },
     #[error("`for` expects a list")]
     NonListIteration,
-    #[error("`submit` can't be used inside `parallel`")]
-    FinishInsideParallel,
-    #[error("`parallel` assigns `{name}` more than once")]
-    ParallelConflict { name: String },
+    #[error("`{keyword}` can only be used inside a process block")]
+    ProcessControlOutsideProcess { keyword: &'static str },
+    #[error("`{keyword}` can't be used inside a process block")]
+    ForegroundControlInsideProcess { keyword: &'static str },
     #[error("unknown builtin `{name}`")]
     UnknownBuiltin { name: String },
     #[error("{message}")]
@@ -90,7 +85,7 @@ pub enum RuntimeError {
     ValueError { message: String },
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 #[error("{error}")]
 pub struct RuntimeFailure {
     pub error: RuntimeError,
@@ -118,6 +113,15 @@ pub struct CompiledProgram {
     pub(crate) compile_stats: CompileStats,
 }
 
+impl std::fmt::Debug for CompiledProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledProgram")
+            .field("instruction_count", &self.chunk.code.len())
+            .field("compile_stats", &self.compile_stats)
+            .finish()
+    }
+}
+
 impl CompiledProgram {
     pub fn compile_stats(&self) -> &CompileStats {
         &self.compile_stats
@@ -128,6 +132,7 @@ impl CompiledProgram {
 pub enum ExecutionOutcome {
     Continued,
     Finished(Value),
+    Failed(Value),
 }
 
 #[derive(Clone, Debug, Default)]

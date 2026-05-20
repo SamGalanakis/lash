@@ -95,10 +95,6 @@ pub(crate) fn read_field_direct(value: Value, field: &Name) -> Result<Value, Run
     }
 }
 
-pub(crate) fn read_field_blocking(value: Value, field: &Name) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(read_field(value, field))
-}
-
 pub(crate) fn read_image_field(image: &ImageValue, field: &Name) -> Result<Value, RuntimeError> {
     match field.text.as_ref() {
         "id" => Ok(Value::String(image.id.clone().into())),
@@ -152,10 +148,6 @@ pub(crate) fn read_index_ref_direct(target: &Value, index: &Value) -> Result<Val
             message: format!("can't index {}", value_type_name(target)),
         }),
     }
-}
-
-pub(crate) fn read_index_blocking(target: Value, index: Value) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(read_index(target, index))
 }
 
 pub(crate) fn assign_path(

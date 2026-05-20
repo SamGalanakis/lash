@@ -76,6 +76,7 @@ mod tests {
 
     fn tool(name: &str) -> ToolDefinition {
         let mut definition = ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             format!("Tool {name}"),
             serde_json::json!({

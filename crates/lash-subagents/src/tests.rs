@@ -642,6 +642,7 @@ async fn rlm_provider_requires_process_support() {
 
 fn dummy_tool(name: &str) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         format!("{name} description"),
         ToolDefinition::default_input_schema(),

@@ -124,6 +124,7 @@ fn demo_tool_definitions() -> Vec<ToolDefinition> {
 
 fn read_board_tool() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:read_board",
         "read_board",
         "Read the app-owned Tic Tac Toe board. Returns the 0..8 index map, current marks by index, legal moves, winner, and whose turn it is.",
         json!({
@@ -137,6 +138,7 @@ fn read_board_tool() -> ToolDefinition {
 
 fn play_move_tool() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:play_move",
         "play_move",
         "Play one O move for the agent when it is O's turn. The move is a zero-based cell index: 0 top-left, 1 top-middle, 2 top-right, 3 middle-left, 4 center, 5 middle-right, 6 bottom-left, 7 bottom-middle, 8 bottom-right.",
         json!({

@@ -419,6 +419,7 @@ fn autoresearch_tool(
     input_schema: Value,
 ) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         description,
         input_schema,

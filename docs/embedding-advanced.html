@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lash api · advanced · lash docs</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -100,7 +102,7 @@ let core = LashCore::rlm()
             </article>
             <article class="panel">
               <h3><code>peer</code></h3>
-              <p>Parallel self. Inherits parent execution mode and tool authority, including recursive spawning. For a parallel branch of the same work.</p>
+              <p>Concurrent self. Inherits parent execution mode and tool authority, including recursive spawning. For a sibling branch of the same work.</p>
             </article>
           </div>
           <p>Both tiers consult <code>tier_models</code> for an override, then fall back to <code>default_agent_model(tier)</code>, then the parent's model. Pass overrides through <code>default_registry(&amp;tier_models)</code>.</p>

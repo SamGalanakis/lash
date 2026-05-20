@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use super::{LashRuntime, ProcessFilter, ProcessRecord, ProcessRegistry};
+use super::{LashRuntime, ProcessHandleGrantEntry, ProcessRegistry};
 
 #[derive(Clone)]
 pub struct RuntimeObservation {
@@ -47,19 +47,14 @@ impl RuntimeObservation {
         format!("{}:{}", self.runtime_scope_id, self.session_id)
     }
 
-    pub async fn list_processes(&self) -> Vec<ProcessRecord> {
+    pub async fn list_process_handles(&self) -> Vec<ProcessHandleGrantEntry> {
         let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
         executor
-            .list(ProcessFilter {
-                session_id: Some(self.process_scope_key()),
-                producer: None,
-                tags: Vec::new(),
-                handle_visible: None,
-                include_terminal: true,
-            })
+            .list_handle_grants(&self.process_scope_key())
             .await
+            .unwrap_or_default()
     }
 }
 

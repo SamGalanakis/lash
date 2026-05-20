@@ -589,6 +589,7 @@ impl ToolProvider for AppTools {
 
 fn app_tool_definition() -> lash_core::ToolDefinition {
     lash_core::ToolDefinition::raw(
+        "tool:app_lookup",
         "app_lookup",
         "Look up app state.",
         serde_json::json!({
@@ -619,6 +620,7 @@ impl ToolProvider for LongTextTools {
 
 fn long_text_tool_definition() -> lash_core::ToolDefinition {
     lash_core::ToolDefinition::raw(
+        "tool:app_lookup",
         "app_lookup",
         "Look up verbose app state.",
         serde_json::json!({

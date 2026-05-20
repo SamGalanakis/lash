@@ -65,8 +65,8 @@ use std::time::Duration;
 
 use lash_core::{
     EffectInvocationMetadata, PluginError, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessExternalRef, ProcessRecord, ProcessRegistration, ProcessRegistry,
-    ProcessStartReceipt, ProcessState, RuntimeEffectCommand, RuntimeEffectController,
+    ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
 };
@@ -120,6 +120,7 @@ pub trait RestateProcessRunner: Send + Sync + 'static {
     async fn run_process(
         &self,
         registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
     ) -> Result<ProcessAwaitOutput, PluginError>;
 
     async fn request_process_cancel(
@@ -131,11 +132,18 @@ pub trait RestateProcessRunner: Send + Sync + 'static {
 #[restate_sdk::workflow]
 pub trait LashProcessWorkflow {
     async fn run(
-        registration: Json<ProcessRegistration>,
+        input: Json<RestateProcessWorkflowInput>,
     ) -> HandlerResult<Json<ProcessAwaitOutput>>;
 
     #[shared]
     async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct RestateProcessWorkflowInput {
+    pub registration: ProcessRegistration,
+    #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
+    pub execution_context: ProcessExecutionContext,
 }
 
 pub struct LashProcessWorkflowImpl<R> {
@@ -155,8 +163,11 @@ where
     async fn run_registration(
         &self,
         registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
     ) -> Result<ProcessAwaitOutput, PluginError> {
-        self.runner.run_process(registration).await
+        self.runner
+            .run_process(registration, execution_context)
+            .await
     }
 
     async fn cancel_registration(
@@ -174,9 +185,9 @@ where
     async fn run(
         &self,
         _ctx: WorkflowContext<'_>,
-        Json(registration): Json<ProcessRegistration>,
+        Json(input): Json<RestateProcessWorkflowInput>,
     ) -> HandlerResult<Json<ProcessAwaitOutput>> {
-        self.run_registration(registration)
+        self.run_registration(input.registration, input.execution_context)
             .await
             .map(Json)
             .map_err(|err| TerminalError::from_error(err).into())
@@ -247,6 +258,7 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
     fn start_process_workflow<'run>(
         &'run self,
         registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
@@ -300,6 +312,7 @@ macro_rules! impl_restate_controller_context {
                 fn start_process_workflow<'run>(
                     &'run self,
                     registration: ProcessRegistration,
+                    execution_context: ProcessExecutionContext,
                 ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
@@ -307,7 +320,7 @@ macro_rules! impl_restate_controller_context {
                     let workflow_key = registration.id.clone();
                     let request: restate_sdk::context::Request<
                         '_,
-                        Json<ProcessRegistration>,
+                        Json<RestateProcessWorkflowInput>,
                         Json<ProcessAwaitOutput>,
                     > = ContextClient::request(
                         self,
@@ -316,7 +329,10 @@ macro_rules! impl_restate_controller_context {
                             workflow_key.clone(),
                             "run",
                         ),
-                        Json(registration),
+                        Json(RestateProcessWorkflowInput {
+                            registration,
+                            execution_context,
+                        }),
                     )
                     .idempotency_key(format!("lash-process:{workflow_key}:run"));
                     let handle = request.send();
@@ -526,24 +542,39 @@ where
     let execution = local_executor.into_process()?;
     let registry = execution.registry;
     match command {
-        ProcessCommand::Start { registration } => {
-            let record = schedule_restate_process(registry, registration, context).await?;
+        ProcessCommand::Start {
+            registration,
+            grant,
+            execution_context,
+        } => {
+            let record =
+                schedule_restate_process(registry, registration, grant, execution_context, context)
+                    .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
-        ProcessCommand::Get { process_id } => {
-            let record = registry.get(&process_id).await;
-            Ok(ProcessEffectOutcome::Get { record })
+        ProcessCommand::List { session_id } => {
+            let entries = registry.list_handle_grants(&session_id).await?;
+            Ok(ProcessEffectOutcome::List { entries })
         }
-        ProcessCommand::List { filter } => {
-            let records = registry.list(filter).await;
-            Ok(ProcessEffectOutcome::List { records })
+        ProcessCommand::Transfer {
+            from_session_id,
+            to_session_id,
+            process_ids,
+        } => {
+            registry
+                .transfer_handle_grants(&from_session_id, &to_session_id, &process_ids)
+                .await?;
+            Ok(ProcessEffectOutcome::Transfer)
         }
         ProcessCommand::Await { process_id } => {
             let output = registry.await_process(&process_id).await?;
             Ok(ProcessEffectOutcome::Await { output })
         }
         ProcessCommand::Cancel { process_id, reason } => {
-            let record = registry.request_cancel(&process_id, reason.clone()).await?;
+            let record = registry
+                .get_process(&process_id)
+                .await
+                .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
             context
                 .request_process_workflow_cancel(RestateProcessCancelRequest { process_id, reason })
                 .await
@@ -558,30 +589,36 @@ where
 async fn schedule_restate_process<'ctx, C>(
     registry: Arc<dyn ProcessRegistry>,
     registration: lash_core::ProcessRegistration,
+    grant: Option<lash_core::ProcessStartGrant>,
+    execution_context: lash_core::ProcessExecutionContext,
     context: &C,
 ) -> Result<ProcessRecord, PluginError>
 where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
     let process_id = registration.id.clone();
-    registry.register(registration.clone()).await?;
+    registry.register_process(registration.clone()).await?;
+    if let Some(grant) = grant {
+        registry
+            .grant_handle(&grant.session_id, &process_id, grant.descriptor)
+            .await?;
+    }
     let invocation_id = context
-        .start_process_workflow(registration)
+        .start_process_workflow(registration, execution_context)
         .await
         .map_err(|err| {
             RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
         })?;
-    let receipt = ProcessStartReceipt {
-        process_id: process_id.clone(),
-        state: ProcessState::Scheduled,
-        external_ref: Some(ProcessExternalRef {
-            backend: "restate".to_string(),
-            id: format!("LashProcessWorkflow/{process_id}"),
-            metadata: Some(serde_json::json!({ "invocation_id": invocation_id })),
-        }),
-        message: Some("submitted to Restate".to_string()),
-    };
-    registry.mark_scheduled(receipt).await
+    registry
+        .set_external_ref(
+            &process_id,
+            ProcessExternalRef {
+                backend: "restate".to_string(),
+                id: format!("LashProcessWorkflow/{process_id}"),
+                metadata: Some(serde_json::json!({ "invocation_id": invocation_id })),
+            },
+        )
+        .await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,8 +683,9 @@ fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::{BodyExt, Empty};
-    use lash_core::{ProcessInput, ProcessRegistration, ProcessScope, ProcessState};
+    use bytes::{BufMut, Bytes, BytesMut};
+    use http_body_util::{BodyExt, Empty, Full};
+    use lash_core::{ProcessInput, ProcessRegistration};
     use restate_sdk::prelude::Endpoint;
     use restate_sdk::service::Discoverable;
     use std::sync::Mutex;
@@ -737,14 +775,102 @@ mod tests {
     fn external_registration(id: &str) -> ProcessRegistration {
         ProcessRegistration::new(
             id,
-            "test",
-            ProcessScope {
-                session_id: "session".to_string(),
-            },
             ProcessInput::External {
                 metadata: serde_json::Value::Null,
             },
         )
+    }
+
+    const RESTATE_INVOCATION_CONTENT_TYPE: &str = "application/vnd.restate.invocation.v6";
+
+    fn encode_restate_message(message_type: u16, payload: Vec<u8>) -> Bytes {
+        let mut encoded = BytesMut::with_capacity(8 + payload.len());
+        let header = ((message_type as u64) << 48) | payload.len() as u64;
+        encoded.put_u64(header);
+        encoded.extend_from_slice(&payload);
+        encoded.freeze()
+    }
+
+    fn put_varint(buf: &mut BytesMut, mut value: u64) {
+        while value >= 0x80 {
+            buf.put_u8(((value as u8) & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        buf.put_u8(value as u8);
+    }
+
+    fn put_field_key(buf: &mut BytesMut, field_number: u32, wire_type: u8) {
+        put_varint(buf, ((field_number as u64) << 3) | wire_type as u64);
+    }
+
+    fn put_varint_field(buf: &mut BytesMut, field_number: u32, value: u64) {
+        put_field_key(buf, field_number, 0);
+        put_varint(buf, value);
+    }
+
+    fn put_len_field(buf: &mut BytesMut, field_number: u32, value: &[u8]) {
+        put_field_key(buf, field_number, 2);
+        put_varint(buf, value.len() as u64);
+        buf.extend_from_slice(value);
+    }
+
+    fn encode_start_message(workflow_key: &str) -> Bytes {
+        let mut payload = BytesMut::new();
+        put_len_field(&mut payload, 1, workflow_key.as_bytes());
+        put_len_field(&mut payload, 2, workflow_key.as_bytes());
+        put_varint_field(&mut payload, 3, 1);
+        put_len_field(&mut payload, 6, workflow_key.as_bytes());
+        encode_restate_message(0x0000, payload.to_vec())
+    }
+
+    fn encode_input_command(payload: &[u8]) -> Bytes {
+        let mut value = BytesMut::new();
+        put_len_field(&mut value, 1, payload);
+
+        let mut command = BytesMut::new();
+        put_len_field(&mut command, 14, &value);
+        encode_restate_message(0x0400, command.to_vec())
+    }
+
+    fn encode_invocation_body<T: serde::Serialize>(
+        workflow_key: &str,
+        input: &T,
+    ) -> Result<Bytes, TerminalError> {
+        let input = serde_json::to_vec(input).map_err(TerminalError::from_error)?;
+        let start = encode_start_message(workflow_key);
+        let input = encode_input_command(&input);
+        let mut body = BytesMut::with_capacity(start.len() + input.len());
+        body.extend_from_slice(&start);
+        body.extend_from_slice(&input);
+        Ok(body.freeze())
+    }
+
+    async fn invoke_process_workflow_endpoint<T: serde::Serialize>(
+        endpoint: &Endpoint,
+        handler: &str,
+        workflow_key: &str,
+        input: &T,
+    ) -> Result<Bytes, TerminalError> {
+        let response = endpoint.handle(
+            http::Request::builder()
+                .uri(format!("/invoke/LashProcessWorkflow/{handler}"))
+                .header(http::header::CONTENT_TYPE, RESTATE_INVOCATION_CONTENT_TYPE)
+                .body(Full::new(encode_invocation_body(workflow_key, input)?))
+                .expect("workflow invocation request"),
+        );
+        let status = response.status();
+        if !status.is_success() {
+            return Err(TerminalError::new_with_code(
+                status.as_u16(),
+                format!("workflow endpoint invocation returned status {status}"),
+            ));
+        }
+        response
+            .into_body()
+            .collect()
+            .await
+            .map(|body| body.to_bytes())
+            .map_err(|err| TerminalError::new(format!("workflow endpoint body failed: {err}")))
     }
 
     #[test]
@@ -809,10 +935,21 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingContext {
+        endpoint: Option<Endpoint>,
         sleeps: Mutex<Vec<u64>>,
         runs: Mutex<Vec<String>>,
-        started: Mutex<Vec<String>>,
+        started: Mutex<Vec<ProcessRegistration>>,
+        started_execution_contexts: Mutex<Vec<ProcessExecutionContext>>,
         cancelled: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl RecordingContext {
+        fn with_endpoint(endpoint: Endpoint) -> Self {
+            Self {
+                endpoint: Some(endpoint),
+                ..Default::default()
+            }
+        }
     }
 
     impl<'ctx> RestateControllerContext<'ctx> for Arc<RecordingContext> {
@@ -848,15 +985,36 @@ mod tests {
         fn start_process_workflow<'run>(
             &'run self,
             registration: ProcessRegistration,
+            execution_context: ProcessExecutionContext,
         ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
         where
             'ctx: 'run,
         {
+            let process_id = registration.id.clone();
+            let endpoint = self.endpoint.clone();
             self.started
                 .lock()
                 .expect("started lock")
-                .push(registration.id.clone());
-            Box::pin(async move { Ok(format!("invocation-{}", registration.id)) })
+                .push(registration.clone());
+            self.started_execution_contexts
+                .lock()
+                .expect("started execution contexts lock")
+                .push(execution_context.clone());
+            Box::pin(async move {
+                if let Some(endpoint) = endpoint {
+                    invoke_process_workflow_endpoint(
+                        &endpoint,
+                        "run",
+                        &process_id,
+                        &RestateProcessWorkflowInput {
+                            registration,
+                            execution_context,
+                        },
+                    )
+                    .await?;
+                }
+                Ok(format!("invocation-{process_id}"))
+            })
         }
 
         fn request_process_workflow_cancel<'run>(
@@ -866,11 +1024,19 @@ mod tests {
         where
             'ctx: 'run,
         {
+            let endpoint = self.endpoint.clone();
+            let process_id = request.process_id.clone();
             self.cancelled
                 .lock()
                 .expect("cancelled lock")
-                .push((request.process_id, request.reason));
-            Box::pin(async { Ok(()) })
+                .push((request.process_id.clone(), request.reason.clone()));
+            Box::pin(async move {
+                if let Some(endpoint) = endpoint {
+                    invoke_process_workflow_endpoint(&endpoint, "cancel", &process_id, &request)
+                        .await?;
+                }
+                Ok(())
+            })
         }
     }
 
@@ -947,7 +1113,17 @@ mod tests {
                 RuntimeEffectEnvelope::new(
                     effect_metadata(RuntimeEffectKind::Process, "background-start"),
                     RuntimeEffectCommand::Process {
-                        command: ProcessCommand::Start { registration },
+                        command: ProcessCommand::Start {
+                            registration,
+                            grant: Some(lash_core::ProcessStartGrant {
+                                session_id: "session".to_string(),
+                                descriptor: lash_core::ProcessHandleDescriptor::new(
+                                    Some("tool"),
+                                    Some("task"),
+                                ),
+                            }),
+                            execution_context: ProcessExecutionContext::default(),
+                        },
                     },
                 ),
                 RuntimeEffectLocalExecutor::process_control(registry.clone()),
@@ -961,8 +1137,6 @@ mod tests {
             panic!("wrong outcome");
         };
 
-        assert_eq!(record.state, ProcessState::Scheduled);
-        assert_eq!(record.progress.as_deref(), Some("submitted to Restate"));
         assert_eq!(
             record
                 .external_ref
@@ -972,20 +1146,22 @@ mod tests {
         );
         assert_eq!(
             registry
-                .get("task-1")
+                .get_process("task-1")
                 .await
                 .expect("get")
-                .progress
-                .as_deref(),
-            Some("submitted to Restate")
+                .external_ref
+                .as_ref()
+                .map(|external| external.id.as_str()),
+            Some("LashProcessWorkflow/task-1")
         );
         assert_eq!(
             registry
-                .list(Default::default())
+                .list_handle_grants("session")
                 .await
+                .expect("grants")
                 .into_iter()
                 .next()
-                .and_then(|record| record.external_ref)
+                .and_then(|(_, record)| record.external_ref)
                 .map(|external| (
                     external.backend,
                     external
@@ -998,9 +1174,188 @@ mod tests {
             ))
         );
         assert_eq!(
-            context.started.lock().expect("started lock").as_slice(),
-            &["task-1".to_string()]
+            context
+                .started
+                .lock()
+                .expect("started lock")
+                .iter()
+                .map(|registration| registration.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task-1"]
         );
+    }
+
+    #[tokio::test]
+    async fn restate_controller_schedules_lashlang_block_with_serializable_input() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let program = serde_json::json!({ "statements": [] });
+        let mut input = serde_json::Map::new();
+        input.insert("root".to_string(), serde_json::json!("."));
+        let registration = ProcessRegistration::new(
+            "block-1",
+            ProcessInput::LashlangBlock {
+                program: program.clone(),
+                input: input.clone(),
+                tool_bindings: vec![lash_core::LashlangProcessToolBinding {
+                    name: "echo".to_string(),
+                    tool_id: lash_core::ToolId::new("tool:echo"),
+                }],
+                timeout_ms: Some(5000),
+                display_name: Some("scan".to_string()),
+            },
+        )
+        .with_extra_event_types(lash_core::lashlang_process_event_types());
+
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "lashlang-block-start"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Start {
+                            registration,
+                            grant: None,
+                            execution_context: ProcessExecutionContext::default()
+                                .with_wake_session_id("session"),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            )
+            .await
+            .expect("start");
+        let RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::Start { record },
+        } = outcome
+        else {
+            panic!("wrong outcome");
+        };
+
+        assert_eq!(
+            record
+                .external_ref
+                .as_ref()
+                .map(|external| external.backend.as_str()),
+            Some("restate")
+        );
+        assert_eq!(
+            registry
+                .get_process("block-1")
+                .await
+                .expect("registered process")
+                .external_ref
+                .as_ref()
+                .map(|external| external.backend.as_str()),
+            Some("restate")
+        );
+        let started = context.started.lock().expect("started lock");
+        assert_eq!(started.len(), 1);
+        let ProcessInput::LashlangBlock {
+            program: sent_program,
+            input: sent_input,
+            tool_bindings,
+            timeout_ms,
+            display_name,
+        } = &started[0].input
+        else {
+            panic!("expected lashlang block input");
+        };
+        assert_eq!(sent_program, &program);
+        assert_eq!(sent_input, &input);
+        assert_eq!(
+            tool_bindings[0].tool_id,
+            lash_core::ToolId::new("tool:echo")
+        );
+        assert_eq!(*timeout_ms, Some(5000));
+        assert_eq!(display_name.as_deref(), Some("scan"));
+        assert_eq!(
+            context
+                .started_execution_contexts
+                .lock()
+                .expect("started execution contexts lock")
+                .iter()
+                .map(|context| context.wake_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("session")]
+        );
+    }
+
+    #[tokio::test]
+    async fn restate_controller_lists_and_transfers_grants_through_process_effects() {
+        let context = Arc::new(RecordingContext::default());
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        registry
+            .register_process(external_registration("task-list"))
+            .await
+            .expect("register");
+        registry
+            .grant_handle(
+                "s1",
+                "task-list",
+                lash_core::ProcessHandleDescriptor::new(Some("tool"), Some("task")),
+            )
+            .await
+            .expect("grant");
+
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "process-list-s1"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::List {
+                            session_id: "s1".to_string(),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            )
+            .await
+            .expect("list");
+        let RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::List { entries },
+        } = outcome
+        else {
+            panic!("wrong list outcome");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.process_id, "task-list");
+
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "process-transfer"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Transfer {
+                            from_session_id: "s1".to_string(),
+                            to_session_id: "s2".to_string(),
+                            process_ids: vec!["task-list".to_string()],
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            )
+            .await
+            .expect("transfer");
+        assert!(matches!(
+            outcome,
+            RuntimeEffectOutcome::Process {
+                result: ProcessEffectOutcome::Transfer
+            }
+        ));
+
+        let entries = registry.list_handle_grants("s2").await.expect("s2 grants");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.process_id, "task-list");
+        assert!(
+            registry
+                .list_handle_grants("s1")
+                .await
+                .expect("s1")
+                .is_empty()
+        );
+        assert!(context.started.lock().expect("started lock").is_empty());
     }
 
     #[tokio::test]
@@ -1009,7 +1364,10 @@ mod tests {
         let host = RestateRuntimeEffectController::new(context.clone());
         let registry = Arc::new(lash_core::LocalProcessRegistry::default());
         let registration = external_registration("task-cancel");
-        registry.register(registration).await.expect("register");
+        registry
+            .register_process(registration)
+            .await
+            .expect("register");
 
         let outcome = host
             .execute_effect(
@@ -1033,7 +1391,7 @@ mod tests {
             panic!("wrong outcome");
         };
 
-        assert_eq!(record.state, ProcessState::CancelRequested);
+        assert!(!record.is_terminal());
         assert_eq!(
             context.cancelled.lock().expect("cancelled lock").as_slice(),
             &[(
@@ -1043,9 +1401,16 @@ mod tests {
         );
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedProcessRun {
+        process_id: String,
+        wake_session_id: Option<String>,
+        tool_effect_id: Option<String>,
+    }
+
     #[derive(Default)]
     struct RecordingRunner {
-        ran: Mutex<Vec<String>>,
+        ran: Mutex<Vec<RecordedProcessRun>>,
         cancelled: Mutex<Vec<RestateProcessCancelRequest>>,
     }
 
@@ -1054,11 +1419,18 @@ mod tests {
         async fn run_process(
             &self,
             registration: ProcessRegistration,
+            execution_context: ProcessExecutionContext,
         ) -> Result<ProcessAwaitOutput, PluginError> {
             self.ran
                 .lock()
                 .expect("runner ran lock")
-                .push(registration.id);
+                .push(RecordedProcessRun {
+                    process_id: registration.id,
+                    wake_session_id: execution_context.wake_session_id,
+                    tool_effect_id: execution_context
+                        .tool_effect_metadata
+                        .map(|metadata| metadata.effect_id),
+                });
             Ok(ProcessAwaitOutput::Success {
                 value: serde_json::json!({"ok": true}),
                 control: None,
@@ -1075,6 +1447,140 @@ mod tests {
                 .push(request);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
+        let runner = Arc::new(RecordingRunner::default());
+        let endpoint = Endpoint::builder()
+            .bind(LashProcessWorkflowImpl::new(runner.clone()).serve())
+            .build();
+        let context = Arc::new(RecordingContext::with_endpoint(endpoint));
+        let host = RestateRuntimeEffectController::new(context.clone());
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registration = external_registration("task-smoke");
+        let execution_context = ProcessExecutionContext::default()
+            .with_wake_session_id("wake-smoke")
+            .with_tool_effect_metadata(Some(effect_metadata(
+                RuntimeEffectKind::ToolCall,
+                "tool-smoke",
+            )));
+
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "background-smoke-start"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Start {
+                            registration,
+                            grant: Some(lash_core::ProcessStartGrant {
+                                session_id: "session".to_string(),
+                                descriptor: lash_core::ProcessHandleDescriptor::new(
+                                    Some("tool"),
+                                    Some("task-smoke"),
+                                ),
+                            }),
+                            execution_context,
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry.clone()),
+            )
+            .await
+            .expect("start through endpoint smoke");
+        let RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::Start { record },
+        } = outcome
+        else {
+            panic!("wrong start outcome");
+        };
+
+        let external_ref = record.external_ref.as_ref().expect("external ref");
+        assert_eq!(external_ref.backend, "restate");
+        assert_eq!(external_ref.id, "LashProcessWorkflow/task-smoke");
+        assert_eq!(
+            external_ref
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("invocation_id")),
+            Some(&serde_json::json!("invocation-task-smoke"))
+        );
+
+        let grants = registry
+            .list_handle_grants("session")
+            .await
+            .expect("session grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].0.process_id, "task-smoke");
+        let granted_external_ref = grants[0].1.external_ref.as_ref().expect("grant ref");
+        assert_eq!(granted_external_ref.backend, "restate");
+        assert_eq!(granted_external_ref.id, "LashProcessWorkflow/task-smoke");
+
+        assert_eq!(
+            context
+                .started
+                .lock()
+                .expect("started lock")
+                .iter()
+                .map(|registration| registration.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task-smoke"]
+        );
+        assert_eq!(
+            context
+                .started_execution_contexts
+                .lock()
+                .expect("started execution contexts lock")
+                .iter()
+                .map(|context| context.wake_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("wake-smoke")]
+        );
+        assert_eq!(
+            runner.ran.lock().expect("runner ran lock").as_slice(),
+            &[RecordedProcessRun {
+                process_id: "task-smoke".to_string(),
+                wake_session_id: Some("wake-smoke".to_string()),
+                tool_effect_id: Some("tool-smoke".to_string()),
+            }]
+        );
+
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "background-smoke-cancel"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Cancel {
+                            process_id: "task-smoke".to_string(),
+                            reason: Some("stop-smoke".to_string()),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry),
+            )
+            .await
+            .expect("cancel through endpoint smoke");
+        assert!(matches!(
+            outcome,
+            RuntimeEffectOutcome::Process {
+                result: ProcessEffectOutcome::Cancel { .. }
+            }
+        ));
+        assert_eq!(
+            context.cancelled.lock().expect("cancelled lock").as_slice(),
+            &[("task-smoke".to_string(), Some("stop-smoke".to_string()))]
+        );
+        assert_eq!(
+            runner
+                .cancelled
+                .lock()
+                .expect("runner cancelled lock")
+                .as_slice(),
+            &[RestateProcessCancelRequest {
+                process_id: "task-smoke".to_string(),
+                reason: Some("stop-smoke".to_string()),
+            }]
+        );
     }
 
     fn discover_service<S: Discoverable>(_: &S) -> restate_sdk::discovery::Service {
@@ -1162,9 +1668,15 @@ mod tests {
         let runner = Arc::new(RecordingRunner::default());
         let workflow = LashProcessWorkflowImpl::new(runner.clone());
         let registration = external_registration("task-workflow");
+        let execution_context = ProcessExecutionContext::default()
+            .with_wake_session_id("wake-session")
+            .with_tool_effect_metadata(Some(effect_metadata(
+                RuntimeEffectKind::ToolCall,
+                "tool-effect",
+            )));
 
         let output = workflow
-            .run_registration(registration)
+            .run_registration(registration, execution_context)
             .await
             .expect("workflow run");
         workflow
@@ -1178,7 +1690,11 @@ mod tests {
         assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
         assert_eq!(
             runner.ran.lock().expect("runner ran lock").as_slice(),
-            &["task-workflow".to_string()]
+            &[RecordedProcessRun {
+                process_id: "task-workflow".to_string(),
+                wake_session_id: Some("wake-session".to_string()),
+                tool_effect_id: Some("tool-effect".to_string()),
+            }]
         );
         assert_eq!(
             runner
