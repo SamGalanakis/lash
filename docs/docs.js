@@ -78,10 +78,10 @@
     {
       label: "reference",
       items: [
+        { name: "api (docs.rs)", href: "architecture/reference.html" },
         { name: "providers",     href: "architecture/providers.html" },
         { name: "html exporter", href: "architecture/html-exporter.html" },
         { name: "deps",          href: "architecture/deps.html" },
-        { name: "reference",     href: "architecture/reference.html" },
       ],
     },
   ];
@@ -950,6 +950,10 @@
           '<span class="cmdk-label">search</span>' +
           `<span class="cmdk-kbd" aria-hidden="true">${kb}</span>` +
         '</button>' +
+        `<a class="band__btn" href="${base}architecture/reference.html" ` +
+          `aria-label="api reference" title="api reference (rustdoc on docs.rs)">` +
+          '<span>api</span><span aria-hidden="true">↗</span>' +
+        '</a>' +
         `<a class="band__btn band__btn--icon" href="https://github.com/SamGalanakis/lash" ` +
           `target="_blank" rel="noopener" aria-label="lash on GitHub" title="lash on GitHub">${GITHUB_ICON}</a>` +
         '<button class="band__btn" id="theme-toggle" type="button" ' +

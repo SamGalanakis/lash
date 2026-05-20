@@ -12,8 +12,8 @@ use lash_core::plugin::{
     SessionPlugin, ToolCallHookContext, TurnContextTransform, TurnTransformContext,
 };
 use lash_core::{
-    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError,
-    ToolOutputBudgetConfig,
+    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, ProcessCleanupRequest,
+    ProcessTransferRequest, SessionError, ToolOutputBudgetConfig,
 };
 use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent};
 
@@ -230,7 +230,7 @@ fn normalize_projected_tool_args(
     ctx: ToolCallHookContext,
 ) -> Result<Vec<PluginDirective>, PluginError> {
     let original = ctx.args;
-    let normalized = crate::projection_codec::normalize_tool_args_for_projection(
+    let normalized = crate::projection_transport::normalize_tool_args_for_projection(
         original.clone(),
         &ctx.argument_projection,
     );
@@ -586,7 +586,14 @@ impl ModeSessionPlugin for RlmModeSession {
         .map_err(PluginError::Session)?;
         if let Err(err) = ctx
             .host
-            .transfer_process_handles(&ctx.session_id, &session_id, &referenced_handles_vec)
+            .transfer_process_handles(
+                ProcessTransferRequest::new(
+                    &ctx.session_id,
+                    &session_id,
+                    referenced_handles_vec.clone(),
+                )
+                .with_scope(ctx.process_request_scope()),
+            )
             .await
         {
             let _ = ctx.host.close_session(&session_id).await;
@@ -596,9 +603,15 @@ impl ModeSessionPlugin for RlmModeSession {
         }
         if let Err(err) = ctx
             .host
-            .cancel_unreferenced_process_handles(&ctx.session_id, &referenced_handles_vec)
+            .cancel_unreferenced_process_handles(
+                ProcessCleanupRequest::new(&ctx.session_id, referenced_handles_vec.clone())
+                    .with_scope(ctx.process_request_scope()),
+            )
             .await
         {
+            if referenced_handles_vec.is_empty() && process_support_unavailable(&err) {
+                return Ok(Some(ModeLlmCallAction::Handoff { session_id }));
+            }
             let _ = ctx.host.close_session(&session_id).await;
             return Err(PluginError::Session(format!(
                 "forced continue_as process handle cleanup failed after successor creation: {err}"
@@ -623,6 +636,14 @@ impl ModeSessionPlugin for RlmModeSession {
             }
         }
     }
+}
+
+fn process_support_unavailable(err: &PluginError) -> bool {
+    matches!(
+        err,
+        PluginError::Session(message)
+            if message.contains("process") && message.contains("unavailable")
+    )
 }
 
 impl RlmModeSession {
@@ -899,7 +920,7 @@ mod tests {
         policy: lash_core::ToolArgumentProjectionPolicy,
         args: serde_json::Value,
     ) -> serde_json::Value {
-        crate::projection_codec::normalize_tool_args_for_projection(args, &policy)
+        crate::projection_transport::normalize_tool_args_for_projection(args, &policy)
     }
 
     fn materializing_args(args: serde_json::Value) -> serde_json::Value {

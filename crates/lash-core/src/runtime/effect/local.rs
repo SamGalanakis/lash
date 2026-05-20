@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use crate::AttachmentStore;
 use crate::LlmRequest as CoreLlmRequest;
 use crate::LlmResponse;
+use crate::ProcessRegistry;
 use crate::provider::ProviderHandle;
-use crate::runtime::host::ProcessRegistry;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
 

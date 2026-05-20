@@ -134,8 +134,13 @@ mod tests {
     struct Host;
 
     impl ExecutionHost for Host {
-        async fn perform(&self, _op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
-            Ok(AbilityResult::Value(Value::Null))
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Ok(AbilityResult::Value(Value::Null)),
+            }
         }
     }
 

@@ -43,7 +43,7 @@ impl PluginHost {
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),
-            processes_available: true,
+            processes_available: false,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }

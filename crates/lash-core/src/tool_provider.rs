@@ -118,13 +118,14 @@ impl<'run> ToolProcessControl<'run> {
             .with_tool_effect_metadata(self.tool_effect_metadata.clone())
             .with_wake_session_id(self.session_id.clone());
         self.host
-            .start_process_scoped(
-                &self.session_id,
-                registration,
-                descriptor,
-                execution_context,
-                self.tool_effect_metadata.clone(),
-                Some(self.effect_controller.as_controller()),
+            .start_process(
+                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
+                    .with_scope(
+                        crate::ProcessRequestScope::new()
+                            .with_effect_metadata(self.tool_effect_metadata.clone())
+                            .with_effect_controller(self.effect_controller.as_controller()),
+                    )
+                    .with_optional_descriptor(descriptor),
             )
             .await
     }
@@ -134,10 +135,12 @@ impl<'run> ToolProcessControl<'run> {
         process_id: &str,
     ) -> Result<crate::ProcessAwaitOutput, PluginError> {
         self.host
-            .await_process_scoped(
-                process_id,
-                self.tool_effect_metadata.clone(),
-                Some(self.effect_controller.as_controller()),
+            .await_process(
+                crate::ProcessAwaitRequest::new(process_id).with_scope(
+                    crate::ProcessRequestScope::new()
+                        .with_effect_metadata(self.tool_effect_metadata.clone())
+                        .with_effect_controller(self.effect_controller.as_controller()),
+                ),
             )
             .await
     }
@@ -157,7 +160,18 @@ impl<'run> ToolProcessControl<'run> {
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
         self.host
-            .transfer_process_handles(&self.session_id, successor_session_id, handle_ids)
+            .transfer_process_handles(
+                crate::ProcessTransferRequest::new(
+                    &self.session_id,
+                    successor_session_id,
+                    handle_ids.to_vec(),
+                )
+                .with_scope(
+                    crate::ProcessRequestScope::new()
+                        .with_effect_metadata(self.tool_effect_metadata.clone())
+                        .with_effect_controller(self.effect_controller.as_controller()),
+                ),
+            )
             .await
     }
 
@@ -166,7 +180,14 @@ impl<'run> ToolProcessControl<'run> {
         keep_handle_ids: &[String],
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
         self.host
-            .cancel_unreferenced_process_handles(&self.session_id, keep_handle_ids)
+            .cancel_unreferenced_process_handles(
+                crate::ProcessCleanupRequest::new(&self.session_id, keep_handle_ids.to_vec())
+                    .with_scope(
+                        crate::ProcessRequestScope::new()
+                            .with_effect_metadata(self.tool_effect_metadata.clone())
+                            .with_effect_controller(self.effect_controller.as_controller()),
+                    ),
+            )
             .await
     }
 

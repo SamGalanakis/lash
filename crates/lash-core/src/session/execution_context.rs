@@ -21,6 +21,15 @@ pub struct ModeExecutionContext<'run> {
 }
 
 impl<'run> ModeExecutionContext<'run> {
+    pub(super) fn process_request_scope(
+        &self,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> crate::ProcessRequestScope<'_> {
+        crate::ProcessRequestScope::new()
+            .with_effect_metadata(effect_metadata)
+            .with_effect_controller(self.dispatch.effect_controller.as_controller())
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "mode execution bridge carries explicit per-turn runtime dependencies"
@@ -176,13 +185,16 @@ impl<'run> ModeExecutionContext<'run> {
         match self
             .dispatch
             .host
-            .start_process_scoped(
-                &self.session_id,
-                registration,
-                Some(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
-                execution_context,
-                self.effect_metadata.clone(),
-                Some(self.dispatch.effect_controller.as_controller()),
+            .start_process(
+                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
+                    .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label))
+                    .with_scope(
+                        crate::ProcessRequestScope::new()
+                            .with_effect_metadata(self.effect_metadata.clone())
+                            .with_effect_controller(
+                                self.dispatch.effect_controller.as_controller(),
+                            ),
+                    ),
             )
             .await
         {
@@ -379,12 +391,12 @@ mod tests {
             timeout_ms,
             display_name,
             ..
-        } = registration.input
+        } = registration.input.as_ref()
         else {
             panic!("expected lashlang process input");
         };
         assert_eq!(input.get("root"), Some(&serde_json::json!(".")));
-        assert_eq!(timeout_ms, Some(42));
+        assert_eq!(timeout_ms, &Some(42));
         assert_eq!(display_name.as_deref(), Some("scan"));
         assert_eq!(tool_bindings.len(), 1);
         assert_eq!(tool_bindings[0].name, "alpha");

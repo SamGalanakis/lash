@@ -298,6 +298,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
         .provider(tool_roundtrip_provider())
         .model("mock-model", None)
         .tools(Arc::new(AppTools))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .max_context_tokens(200_000)
         .build()?;
     let session = core.session("fanout-tool-events").open().await?;
@@ -369,6 +370,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
         .provider(tool_roundtrip_provider())
         .model("mock-model", None)
         .tools(Arc::new(AppTools))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .max_context_tokens(200_000)
         .build()?;
     let session = core.session("tool-events").open().await?;
@@ -420,6 +422,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         ]))
         .model("mock-model", None)
         .tools(Arc::new(AppTools))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .max_context_tokens(200_000)
         .build()?;
     let session = core.session("rlm-live-tool-events").open().await?;

@@ -1400,6 +1400,11 @@ impl<'run> RuntimeTurnDriver<'run> {
             Some(self.turn_id.clone()),
             self.turn_lease.clone(),
         );
+        let process_effect_metadata = self.turn_effect_metadata(
+            machine,
+            crate::sansio::EffectId(u64::MAX),
+            RuntimeEffectKind::Process,
+        )?;
         self.session
             .plugins()
             .mode_session()
@@ -1414,6 +1419,8 @@ impl<'run> RuntimeTurnDriver<'run> {
                     ),
                     latest_prompt_usage,
                     direct_completions,
+                    process_effect_metadata,
+                    effect_controller,
                 },
                 request,
             )

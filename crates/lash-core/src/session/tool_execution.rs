@@ -149,7 +149,7 @@ impl ModeExecutionContext<'_> {
                 err.to_string(),
             ),
         };
-
+        tokio::task::yield_now().await;
         self.emit_turn_activity(
             tool_correlation_id,
             TurnEvent::ToolCallCompleted {
@@ -237,6 +237,7 @@ impl ModeExecutionContext<'_> {
             .execute_prepared_tool_process(prepared, effect_metadata)
             .await;
         outcome.record.call_id = Some(call_id.clone());
+        tokio::task::yield_now().await;
 
         self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
             .await
@@ -249,11 +250,11 @@ impl ModeExecutionContext<'_> {
     ) -> ToolDispatchOutcome {
         let started = std::time::Instant::now();
         let process_id = prepared.call_id.clone();
+        let tool_name = prepared.tool_name.clone();
+        let args = prepared.args.clone();
         let registration = crate::ProcessRegistration::new(
             process_id.clone(),
-            crate::ProcessInput::ToolCall {
-                call: prepared.clone(),
-            },
+            crate::ProcessInput::ToolCall { call: prepared },
         );
         let execution_context = crate::ProcessExecutionContext::default()
             .with_tool_effect_metadata(effect_metadata.clone())
@@ -261,13 +262,13 @@ impl ModeExecutionContext<'_> {
         let output = match self
             .dispatch
             .host
-            .start_process_scoped(
-                &self.dispatch.session_id,
-                registration,
-                None,
-                execution_context,
-                effect_metadata.clone(),
-                Some(self.dispatch.effect_controller.as_controller()),
+            .start_process(
+                crate::ProcessStartRequest::new(
+                    &self.dispatch.session_id,
+                    registration,
+                    execution_context,
+                )
+                .with_scope(self.process_request_scope(effect_metadata.clone())),
             )
             .await
         {
@@ -283,8 +284,8 @@ impl ModeExecutionContext<'_> {
         ToolDispatchOutcome {
             record: ToolCallRecord {
                 call_id: Some(process_id),
-                tool: prepared.tool_name,
-                args: prepared.args,
+                tool: tool_name,
+                args,
                 output,
                 duration_ms: started.elapsed().as_millis() as u64,
             },
@@ -298,32 +299,27 @@ impl ModeExecutionContext<'_> {
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
         if let Some(cancellation) = self.cancellation_token.clone() {
             tokio::select! {
-                result = self.dispatch.host.await_process_scoped(
-                    process_id,
-                    effect_metadata.clone(),
-                    Some(self.dispatch.effect_controller.as_controller()),
+                result = self.dispatch.host.await_process(
+                    crate::ProcessAwaitRequest::new(process_id)
+                        .with_scope(self.process_request_scope(effect_metadata.clone())),
                 ) => result,
                 _ = cancellation.cancelled() => {
-                    let _ = self.dispatch.host.cancel_process_scoped(
-                        &self.dispatch.session_id,
-                        process_id,
-                        effect_metadata.clone(),
-                        Some(self.dispatch.effect_controller.as_controller()),
+                    let _ = self.dispatch.host.cancel_process(
+                        crate::ProcessCancelRequest::new(&self.dispatch.session_id, process_id)
+                            .with_scope(self.process_request_scope(effect_metadata.clone())),
                     ).await;
-                    self.dispatch.host.await_process_scoped(
-                        process_id,
-                        effect_metadata,
-                        Some(self.dispatch.effect_controller.as_controller()),
+                    self.dispatch.host.await_process(
+                        crate::ProcessAwaitRequest::new(process_id)
+                            .with_scope(self.process_request_scope(effect_metadata)),
                     ).await
                 }
             }
         } else {
             self.dispatch
                 .host
-                .await_process_scoped(
-                    process_id,
-                    effect_metadata,
-                    Some(self.dispatch.effect_controller.as_controller()),
+                .await_process(
+                    crate::ProcessAwaitRequest::new(process_id)
+                        .with_scope(self.process_request_scope(effect_metadata)),
                 )
                 .await
         }
@@ -338,19 +334,22 @@ impl ModeExecutionContext<'_> {
         tool_correlation_id: TurnActivityId,
     ) -> CompletedModeToolCall {
         let output = outcome.record.output.clone();
-        let model_return = match self
-            .dispatch
-            .plugins
-            .project_tool_result(crate::plugin::ToolResultProjectionContext {
-                session_id: self.dispatch.session_id.clone(),
-                tool_name: outcome.record.tool.clone(),
-                args: outcome.record.args.clone(),
-                output: output.clone(),
-                duration_ms: outcome.record.duration_ms,
-                call_id: call_id.clone(),
-            })
-            .await
-        {
+        let projection_output = output.clone();
+        let projection_tool_name = outcome.record.tool.clone();
+        let projection_args = outcome.record.args.clone();
+        let projection_duration_ms = outcome.record.duration_ms;
+        let projection_call_id = call_id.clone();
+        tokio::task::yield_now().await;
+        let plugins = std::sync::Arc::clone(&self.dispatch.plugins);
+        let projection_context = crate::plugin::ToolResultProjectionContext {
+            session_id: self.dispatch.session_id.clone(),
+            tool_name: projection_tool_name,
+            args: projection_args,
+            output: projection_output,
+            duration_ms: projection_duration_ms,
+            call_id: projection_call_id,
+        };
+        let model_return = match plugins.project_tool_result(projection_context).await {
             Ok(projected) => projected,
             Err(err) => ModelToolReturn::text(
                 call_id.clone(),

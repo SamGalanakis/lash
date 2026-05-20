@@ -158,7 +158,7 @@ mod tests {
             panic!("wrong process command");
         };
         assert!(execution_context.is_empty());
-        let crate::ProcessInput::ToolCall { call } = registration.input else {
+        let crate::ProcessInput::ToolCall { call } = registration.input.as_ref() else {
             panic!("wrong process input");
         };
         assert_eq!(call.call_id, "call-123");

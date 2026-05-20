@@ -2,6 +2,7 @@ use super::*;
 use crate::llm::types::{LlmAttachment, LlmContentBlock, LlmMessage, LlmRole, LlmToolChoice};
 use crate::plugin::{ModeProtocolDriverPlugin, ModeSessionPlugin};
 use crate::store::RuntimePersistence;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 struct EffectControllerRecord {
@@ -206,6 +207,89 @@ impl RuntimeEffectController for RecordingEffectController {
                     }),
                 })
             }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct ProcessJournalController {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl ProcessJournalController {
+    fn call_count(&self) -> usize {
+        *self.calls.lock().expect("process journal calls")
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for ProcessJournalController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        *self.calls.lock().expect("process journal calls") += 1;
+        match envelope.command {
+            RuntimeEffectCommand::Process { command } => match command {
+                ProcessCommand::List { .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::List {
+                        entries: Vec::new(),
+                    },
+                }),
+                ProcessCommand::Transfer { .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Transfer,
+                }),
+                ProcessCommand::Start { registration, .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Start {
+                        record: ProcessRecord::from_registration(registration),
+                    },
+                }),
+                ProcessCommand::Await { .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Await {
+                        output: ProcessAwaitOutput::from_tool_output(
+                            crate::ToolCallOutput::success(serde_json::json!({"ok": true})),
+                        ),
+                    },
+                }),
+                ProcessCommand::Cancel { process_id, .. } => Ok(RuntimeEffectOutcome::Process {
+                    result: ProcessEffectOutcome::Cancel {
+                        record: ProcessRecord::from_registration(ProcessRegistration::new(
+                            process_id,
+                            ProcessInput::External {
+                                metadata: serde_json::json!({}),
+                            },
+                        )),
+                    },
+                }),
+            },
+            other => Err(RuntimeEffectControllerError::new(
+                "unexpected_effect",
+                format!("expected process effect, got {}", other.kind().as_str()),
+            )),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DelayedSleepController {
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for DelayedSleepController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        tokio::time::sleep(self.delay).await;
+        match envelope.command {
+            RuntimeEffectCommand::Sleep { .. } => Ok(RuntimeEffectOutcome::Sleep),
+            other => Err(RuntimeEffectControllerError::new(
+                "unexpected_effect",
+                format!("expected sleep effect, got {}", other.kind().as_str()),
+            )),
         }
     }
 }
@@ -644,6 +728,157 @@ async fn journaled_turn_effect_requires_lease_before_controller_execution() {
 
     assert_eq!(err.code, "runtime_turn_lease_required");
     assert_eq!(recorder.count_kind(RuntimeEffectKind::Sleep), 0);
+}
+
+#[tokio::test]
+async fn process_effect_journal_replays_without_reinvoking_controller_and_rejects_hash_mismatch() {
+    let controller = ProcessJournalController::default();
+    let store = RecordingStore::default();
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-process", "test", 60_000)
+        .await
+        .expect("lease");
+    let metadata = EffectInvocationMetadata {
+        session_id: "root".to_string(),
+        origin: EffectOrigin::Turn,
+        turn_id: Some("turn-process".to_string()),
+        turn_index: Some(1),
+        mode_iteration: Some(0),
+        effect_id: "process:list:scope-a".to_string(),
+        effect_kind: RuntimeEffectKind::Process,
+        idempotency_key: "root:turn-process:1:0:process:list".to_string(),
+        turn_checkpoint_hash: Some("0".repeat(64)),
+    };
+    let envelope = RuntimeEffectEnvelope::new(
+        metadata.clone(),
+        RuntimeEffectCommand::Process {
+            command: ProcessCommand::List {
+                session_id: "scope-a".to_string(),
+            },
+        },
+    );
+
+    let first = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &controller,
+        envelope.clone(),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect("first process effect");
+    let second = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &controller,
+        envelope,
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect("replayed process effect");
+
+    assert!(matches!(
+        first,
+        RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::List { .. }
+        }
+    ));
+    assert!(matches!(
+        second,
+        RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::List { .. }
+        }
+    ));
+    assert_eq!(controller.call_count(), 1);
+
+    let mismatched = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &controller,
+        RuntimeEffectEnvelope::new(
+            metadata,
+            RuntimeEffectCommand::Process {
+                command: ProcessCommand::List {
+                    session_id: "scope-b".to_string(),
+                },
+            },
+        ),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect_err("hash mismatch should fail");
+    assert_eq!(mismatched.code, "runtime_effect_journal_hash_mismatch");
+    assert_eq!(controller.call_count(), 1);
+}
+
+#[tokio::test]
+async fn journaled_effect_renews_lease_while_pending() {
+    let store = RecordingStore::default();
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-long-effect", "test", 60_000)
+        .await
+        .expect("lease");
+    let metadata = EffectInvocationMetadata {
+        session_id: "root".to_string(),
+        origin: EffectOrigin::Turn,
+        turn_id: Some("turn-long-effect".to_string()),
+        turn_index: Some(1),
+        mode_iteration: Some(0),
+        effect_id: "long-sleep".to_string(),
+        effect_kind: RuntimeEffectKind::Sleep,
+        idempotency_key: "root:turn-long-effect:1:0:sleep:long".to_string(),
+        turn_checkpoint_hash: Some("0".repeat(64)),
+    };
+    let outcome = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &DelayedSleepController {
+            delay: Duration::from_millis(80),
+        },
+        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect("long effect");
+
+    assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
+    assert!(store.runtime_turn_lease_renew_count() >= 2);
+    assert_eq!(store.runtime_effect_journal_save_count(), 1);
+}
+
+#[tokio::test]
+async fn journaled_effect_does_not_save_outcome_when_pending_lease_renewal_fails() {
+    let store = RecordingStore::default();
+    let lease = store
+        .claim_runtime_turn_lease("root", "turn-expiring-effect", "test", 1)
+        .await
+        .expect("lease");
+    let metadata = EffectInvocationMetadata {
+        session_id: "root".to_string(),
+        origin: EffectOrigin::Turn,
+        turn_id: Some("turn-expiring-effect".to_string()),
+        turn_index: Some(1),
+        mode_iteration: Some(0),
+        effect_id: "expiring-sleep".to_string(),
+        effect_kind: RuntimeEffectKind::Sleep,
+        idempotency_key: "root:turn-expiring-effect:1:0:sleep:expiring".to_string(),
+        turn_checkpoint_hash: Some("0".repeat(64)),
+    };
+
+    let err = crate::runtime::effect::execute_effect_with_journal(
+        Some(&store),
+        Some(&lease),
+        &DelayedSleepController {
+            delay: Duration::from_millis(80),
+        },
+        RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::Sleep { duration_ms: 80 }),
+        crate::RuntimeEffectLocalExecutor::unavailable(),
+    )
+    .await
+    .expect_err("expired pending lease renewal should fail");
+
+    assert_eq!(err.code, "runtime_store");
+    assert_eq!(store.runtime_effect_journal_save_count(), 0);
 }
 
 #[tokio::test]

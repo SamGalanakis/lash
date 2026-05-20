@@ -1234,6 +1234,9 @@ impl ExecutionHost for BenchHost {
             }
             AbilityOp::Cancel(handle) => Ok(AbilityResult::Value(handle)),
             AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }

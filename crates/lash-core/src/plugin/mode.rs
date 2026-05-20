@@ -141,6 +141,8 @@ pub struct ModeBeforeLlmCallContext<'run> {
     pub state: SessionReadView,
     pub latest_prompt_usage: Option<PromptUsage>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
+    pub(crate) process_effect_metadata: crate::EffectInvocationMetadata,
+    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
 
 impl ModeBeforeLlmCallContext<'_> {
@@ -152,6 +154,12 @@ impl ModeBeforeLlmCallContext<'_> {
         self.direct_completions
             .direct_llm_completion(request, usage_source)
             .await
+    }
+
+    pub fn process_request_scope(&self) -> crate::ProcessRequestScope<'_> {
+        crate::ProcessRequestScope::new()
+            .with_effect_metadata(Some(self.process_effect_metadata.clone()))
+            .with_effect_controller(self.effect_controller.as_controller())
     }
 }
 

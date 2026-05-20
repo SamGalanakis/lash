@@ -159,3 +159,88 @@ pub(crate) fn merge_llm_selection(
     }
     ranked
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::{DirectOutputSpec, DirectPart};
+
+    fn ranked_names(results: &[Value]) -> Vec<String> {
+        results
+            .iter()
+            .map(|result| {
+                result
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("ranked result name")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn llm_rerank_request_uses_structured_name_enum_schema() {
+        let candidates = vec![
+            json!({"name": "read_file", "signature": "read_file() -> str", "description": "Read file"}),
+            json!({"name": "search_web", "signature": "search_web(query: str) -> record", "description": "Search web"}),
+        ];
+
+        let request = llm_rerank_request(&json!({"query": "find docs"}), &candidates, 2);
+
+        assert_eq!(
+            request.model,
+            std::env::var("LASH_TOOL_SEARCH_LLM_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_LLM_RERANK_MODEL.to_string())
+        );
+        let DirectOutputSpec::JsonSchema(schema) = request.output else {
+            panic!("expected json schema output");
+        };
+        assert_eq!(schema.name, "tool_search_rerank");
+        assert_eq!(
+            schema.schema["properties"]["tool_names"]["items"]["enum"],
+            json!(["read_file", "search_web"])
+        );
+    }
+
+    #[test]
+    fn merge_llm_selection_dedupes_and_fills_from_deterministic_order() {
+        let candidates = vec![
+            json!({"name": "a"}),
+            json!({"name": "b"}),
+            json!({"name": "c"}),
+        ];
+
+        let merged = merge_llm_selection(
+            candidates,
+            vec!["b".to_string(), "b".to_string(), "missing".to_string()],
+            3,
+        );
+
+        assert_eq!(ranked_names(&merged), vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn llm_rerank_prompt_excludes_filtered_candidates() {
+        let candidates = vec![json!({"name": "search_web", "signature": "search_web() -> str"})];
+        let request = llm_rerank_request(
+            &json!({"query": "", "exclude": ["read_file"]}),
+            &candidates,
+            1,
+        );
+
+        assert!(
+            request
+                .messages
+                .iter()
+                .flat_map(|message| message.parts.iter())
+                .any(|part| matches!(
+                    part,
+                    DirectPart::Text(text)
+                        if text.contains("\"exclude\":[\"read_file\"]")
+                            && !text.contains("\"name\":\"read_file\"")
+                ))
+        );
+    }
+}

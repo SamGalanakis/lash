@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::controller::{RuntimeEffectController, RuntimeEffectControllerError};
 use super::envelope::{
@@ -60,7 +60,15 @@ pub(crate) async fn execute_effect_with_journal(
 
     let metadata = envelope.metadata.clone();
     let effect_kind = metadata.effect_kind;
-    let outcome = controller.execute_effect(envelope, local_executor).await?;
+    let outcome = execute_pending_effect_with_lease_renewal(
+        store,
+        &mut active_lease,
+        &metadata,
+        controller,
+        envelope,
+        local_executor,
+    )
+    .await?;
     active_lease = renew_runtime_turn_lease_for_effect(store, &active_lease, &metadata).await?;
     store
         .save_runtime_effect_outcome(
@@ -79,6 +87,41 @@ pub(crate) async fn execute_effect_with_journal(
         .await
         .map_err(RuntimeEffectControllerError::from)?;
     Ok(outcome)
+}
+
+async fn execute_pending_effect_with_lease_renewal(
+    store: &(dyn crate::RuntimePersistence + '_),
+    active_lease: &mut crate::RuntimeTurnLease,
+    metadata: &EffectInvocationMetadata,
+    controller: &dyn RuntimeEffectController,
+    envelope: RuntimeEffectEnvelope,
+    local_executor: RuntimeEffectLocalExecutor<'_>,
+) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+    let pending = controller.execute_effect(envelope, local_executor);
+    tokio::pin!(pending);
+    loop {
+        tokio::select! {
+            outcome = &mut pending => return outcome,
+            _ = tokio::time::sleep(pending_effect_lease_renew_interval()) => {
+                *active_lease =
+                    renew_runtime_turn_lease_for_effect(store, active_lease, metadata).await?;
+            }
+        }
+    }
+}
+
+fn pending_effect_lease_renew_interval() -> Duration {
+    Duration::from_millis(pending_effect_lease_renew_interval_ms())
+}
+
+#[cfg(test)]
+fn pending_effect_lease_renew_interval_ms() -> u64 {
+    25
+}
+
+#[cfg(not(test))]
+fn pending_effect_lease_renew_interval_ms() -> u64 {
+    30_000
 }
 
 fn require_matching_turn_lease(

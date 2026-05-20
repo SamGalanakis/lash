@@ -14,12 +14,14 @@ use serde_json::json;
 use self::host_bridge::HostBridge;
 use self::projections::{
     projected_bindings, prune_projected_binding_names, prune_protected_bindings,
-    prune_reserved_projected_bindings, rehydrate_projected_globals,
+    prune_reserved_projected_bindings,
 };
 use crate::projected_bindings::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
 };
-use crate::projection_codec::{flow_to_json_value, json_to_flow_value};
+use crate::projection_transport::{
+    flow_to_json_value, json_to_flow_value, rehydrate_projected_globals,
+};
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
 
@@ -379,7 +381,7 @@ mod tests {
     use super::projections::projected_index;
     use super::*;
     use crate::projected_bindings::ProjectionRef;
-    use crate::projection_codec::{
+    use crate::projection_transport::{
         flow_record_to_json_value, flow_record_to_tool_args, flow_to_json_value,
     };
     use lash_rlm_types::PROJECTED_JSON_TAG;
@@ -400,6 +402,9 @@ mod tests {
             match op {
                 AbilityOp::CallTool { name, .. } | AbilityOp::StartToolCall { name, .. } => {
                     Err(ExecutionHostError::new(format!("unknown tool: {name}")))
+                }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
                 }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
             }

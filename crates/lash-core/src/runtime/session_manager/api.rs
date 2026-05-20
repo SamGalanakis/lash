@@ -73,130 +73,44 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
 
     async fn start_process(
         &self,
-        session_id: &str,
-        registration: crate::ProcessRegistration,
-        descriptor: Option<crate::ProcessHandleDescriptor>,
-        execution_context: crate::ProcessExecutionContext,
+        request: crate::ProcessStartRequest<'_>,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
         self.processes
             .start_process(
                 &self.current,
                 &self.managed,
-                session_id,
-                registration,
-                descriptor,
                 Arc::new(self.clone()),
-                execution_context,
-            )
-            .await
-    }
-
-    async fn start_process_scoped(
-        &self,
-        session_id: &str,
-        registration: crate::ProcessRegistration,
-        descriptor: Option<crate::ProcessHandleDescriptor>,
-        execution_context: crate::ProcessExecutionContext,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
-        effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        self.processes
-            .start_process_scoped(
-                &self.current,
-                &self.managed,
-                session_id,
-                registration,
-                descriptor,
-                Arc::new(self.clone()),
-                execution_context,
-                effect_metadata,
-                effect_controller,
+                request,
             )
             .await
     }
 
     async fn await_process(
         &self,
-        process_id: &str,
+        request: crate::ProcessAwaitRequest<'_>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        self.processes
-            .await_process(&self.current, process_id)
-            .await
-    }
-
-    async fn await_process_scoped(
-        &self,
-        process_id: &str,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
-        effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        self.processes
-            .await_process_scoped(
-                &self.current,
-                process_id,
-                effect_metadata,
-                effect_controller,
-            )
-            .await
+        self.processes.await_process(&self.current, request).await
     }
 
     async fn list_process_handles(
         &self,
-        session_id: &str,
+        request: crate::ProcessListRequest<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
         self.processes
-            .list_process_handles(&self.current, session_id)
-            .await
-    }
-
-    async fn list_process_handles_scoped(
-        &self,
-        session_id: &str,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
-        effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
-        self.processes
-            .list_process_handles_scoped(
-                &self.current,
-                session_id,
-                effect_metadata,
-                effect_controller,
-            )
+            .list_process_handles(&self.current, request)
             .await
     }
 
     async fn cancel_process(
         &self,
-        session_id: &str,
-        process_id: &str,
+        request: crate::ProcessCancelRequest<'_>,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
         self.processes
             .cancel_process(
                 &self.current,
                 &self.managed,
                 Arc::new(self.clone()),
-                session_id,
-                process_id,
-            )
-            .await
-    }
-
-    async fn cancel_process_scoped(
-        &self,
-        session_id: &str,
-        process_id: &str,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
-        effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        self.processes
-            .cancel_process_scoped(
-                &self.current,
-                &self.managed,
-                Arc::new(self.clone()),
-                session_id,
-                process_id,
-                effect_metadata,
-                effect_controller,
+                request,
             )
             .await
     }
@@ -227,33 +141,23 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
 
     async fn transfer_process_handles(
         &self,
-        from_session_id: &str,
-        to_session_id: &str,
-        handle_ids: &[String],
+        request: crate::ProcessTransferRequest<'_>,
     ) -> Result<(), crate::PluginError> {
         self.processes
-            .transfer_process_handles(
-                &self.current,
-                &self.managed,
-                from_session_id,
-                to_session_id,
-                handle_ids,
-            )
+            .transfer_process_handles(&self.current, &self.managed, request)
             .await
     }
 
     async fn cancel_unreferenced_process_handles(
         &self,
-        session_id: &str,
-        keep_handle_ids: &[String],
+        request: crate::ProcessCleanupRequest<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         self.processes
             .cancel_unreferenced_process_handles(
                 &self.current,
                 &self.managed,
                 Arc::new(self.clone()),
-                session_id,
-                keep_handle_ids,
+                request,
             )
             .await
     }

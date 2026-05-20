@@ -7,11 +7,10 @@ use lashlang::{
 };
 
 use crate::projected_bindings::{
-    ProjectionRef, ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings,
-    RlmProjectionExtension,
+    ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
 };
 use crate::projection::{RlmHistoryProjection, rlm_history_projection};
-use crate::projection_codec::json_to_flow_value;
+use crate::projection_transport::json_to_flow_value;
 
 pub(super) async fn projected_bindings(
     ctx: &ModeExecutionContext<'_>,
@@ -73,84 +72,6 @@ async fn insert_projected_bindings(
         })?;
     }
     Ok(())
-}
-
-pub(super) async fn rehydrate_projected_globals(
-    rlm: &mut FlowState,
-    projection_resolver: Arc<dyn ProjectionResolver>,
-) -> Result<(), String> {
-    let mut snapshot = rlm.snapshot();
-    let mut changed = false;
-    let keys = snapshot
-        .globals
-        .keys()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    for key in keys {
-        if let Some(value) = snapshot.globals.get_mut(&key) {
-            changed |= rehydrate_projected_value(value, Arc::clone(&projection_resolver)).await?;
-        }
-    }
-    if changed {
-        *rlm = FlowState::from_snapshot(snapshot);
-    }
-    Ok(())
-}
-
-fn rehydrate_projected_value<'a>(
-    value: &'a mut FlowValue,
-    projection_resolver: Arc<dyn ProjectionResolver>,
-) -> ProjectedFuture<'a, Result<bool, String>> {
-    Box::pin(async move {
-        match value {
-            FlowValue::Projected(projected) => {
-                let Some(ref_json) = projected.projection_ref().cloned() else {
-                    return Ok(false);
-                };
-                let name = projected.name().to_string();
-                let reference = serde_json::from_value::<ProjectionRef>(ref_json.clone())
-                    .map_err(|err| format!("invalid projection ref for `{name}`: {err}"))?;
-                let resolved = projection_resolver
-                    .resolve_projection(&reference)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                *value = FlowValue::Projected(ProjectedValue::custom_with_projection_ref(
-                    name, resolved, ref_json,
-                ));
-                Ok(true)
-            }
-            FlowValue::List(values) => {
-                let mut changed = false;
-                let mut restored = values.iter().cloned().collect::<Vec<_>>();
-                for value in restored.iter_mut() {
-                    changed |=
-                        rehydrate_projected_value(value, Arc::clone(&projection_resolver)).await?;
-                }
-                if changed {
-                    *value = FlowValue::List(restored.into());
-                }
-                Ok(changed)
-            }
-            FlowValue::Record(record) => {
-                let mut changed = false;
-                let record = Arc::make_mut(record);
-                let keys = record.keys().map(str::to_string).collect::<Vec<_>>();
-                for key in keys {
-                    if let Some(value) = record.get_mut(&key) {
-                        changed |=
-                            rehydrate_projected_value(value, Arc::clone(&projection_resolver))
-                                .await?;
-                    }
-                }
-                Ok(changed)
-            }
-            FlowValue::Null
-            | FlowValue::Bool(_)
-            | FlowValue::Number(_)
-            | FlowValue::String(_)
-            | FlowValue::Image(_) => Ok(false),
-        }
-    })
 }
 
 struct HistoryProjectedValue {

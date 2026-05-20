@@ -168,6 +168,10 @@ impl LashRuntime {
                 "RuntimeEnvironment.plugin_host is required for from_environment".to_string(),
             )
         })?;
+        let plugin_host = plugin_host
+            .as_ref()
+            .clone()
+            .with_processes_available(env.process_registry.is_some());
         let plugin_session = plugin_host
             .build_session(
                 state.session_id.as_str(),
@@ -187,22 +191,24 @@ impl LashRuntime {
                 crate::session::TurnInputInjectionBridge::new(),
                 store,
             );
-            let process_registry = env
-                .process_registry
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
-            let host = ProcessRuntimeHost::new(embedded, process_registry);
-            Self::from_persistent_background_state(policy, host, services, state).await?
+            match env.process_registry.as_ref().cloned() {
+                Some(process_registry) => {
+                    let host = ProcessRuntimeHost::new(embedded, process_registry);
+                    Self::from_persistent_background_state(policy, host, services, state).await?
+                }
+                None => {
+                    Self::from_persistent_embedded_state(policy, embedded, services, state).await?
+                }
+            }
         } else {
             let services = RuntimeServices::new(plugin_session);
-            let process_registry = env
-                .process_registry
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
-            let host = ProcessRuntimeHost::new(embedded, process_registry);
-            Self::from_background_state(policy, host, services, state).await?
+            match env.process_registry.as_ref().cloned() {
+                Some(process_registry) => {
+                    let host = ProcessRuntimeHost::new(embedded, process_registry);
+                    Self::from_background_state(policy, host, services, state).await?
+                }
+                None => Self::from_embedded_state(policy, embedded, services, state).await?,
+            }
         };
         Ok(runtime)
     }

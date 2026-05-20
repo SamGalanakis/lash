@@ -16,7 +16,8 @@ use dataset::{SweBenchInstance, load_instances};
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
+        EventSink, LocalProcessRegistry, SessionEvent, StandardContextApproach, TurnFinish,
+        TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
     plugins::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory},
@@ -623,6 +624,7 @@ async fn run_instance(
         .max_context_tokens(args.max_context_tokens)
         .max_turns(args.max_turns)
         .trace_jsonl_path(Some(trace_path.clone()))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .plugins(build_plugin_stack(standard_context_approach.cloned()))
         .build()?;
     let session = core

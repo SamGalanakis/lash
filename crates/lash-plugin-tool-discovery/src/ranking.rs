@@ -6,10 +6,9 @@ use serde_json::Value;
 
 use crate::catalog::CatalogTool;
 use crate::common::{
-    FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, json_field, limit_from_args,
-    namespace_filter, round_score, string_field, string_vec, tokenize,
+    FUZZY_SCORE_CAP, RRF_K, SEMANTIC_CANDIDATE_FLOOR, exclude_filter, limit_from_args,
+    namespace_filter, round_score, tokenize,
 };
-use crate::schema_index::schema_index_text;
 #[cfg(feature = "semantic-tool-search")]
 use crate::schema_index::semantic_index_text;
 
@@ -269,21 +268,21 @@ impl DiscoveryDoc {
         push_field(
             &mut fields,
             "description",
-            vec![string_field(&tool.raw, "description")],
+            vec![tool.contract.description.clone()],
             1.8,
             false,
         );
         push_field(
             &mut fields,
             "params",
-            vec![json_field(&tool.raw, "params")],
+            vec![tool.contract.signature.clone()],
             0.3,
             false,
         );
         push_field(
             &mut fields,
             "input_fields",
-            vec![schema_index_text(tool.raw.get("input_schema"))],
+            vec![compact_values_index_text(&tool.contract.parameters)],
             0.9,
             false,
         );
@@ -291,10 +290,8 @@ impl DiscoveryDoc {
             &mut fields,
             "output_fields",
             vec![
-                schema_index_text(tool.raw.get("output_schema")),
-                tool.compact_definition()
-                    .compact_contract()
-                    .render_returns(),
+                compact_values_index_text(&tool.contract.return_fields),
+                tool.contract.render_returns(),
             ],
             2.4,
             false,
@@ -302,7 +299,7 @@ impl DiscoveryDoc {
         push_field(
             &mut fields,
             "examples",
-            string_vec(tool.raw.get("examples")),
+            tool.contract.examples.clone(),
             1.2,
             false,
         );
@@ -339,6 +336,14 @@ impl DiscoveryDoc {
             .sum::<f64>()
             .max(1.0)
     }
+}
+
+fn compact_values_index_text(values: &[Value]) -> String {
+    values
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn push_field(
@@ -656,5 +661,327 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
         0.0
     } else {
         dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::{ToolContract, ToolDefinition, ToolDiscoveryMetadata};
+    use serde_json::{Value, json};
+
+    fn catalog_tool(name: &str, description: &str) -> Value {
+        catalog_tool_from_definition(ToolDefinition::raw_named(
+            name,
+            description,
+            ToolContract::default_input_schema(),
+            json!({}),
+        ))
+    }
+
+    fn catalog_tool_with_metadata(
+        name: &str,
+        description: &str,
+        namespace: Option<&str>,
+        aliases: Vec<&str>,
+    ) -> Value {
+        let tool = ToolDefinition::raw_named(
+            name,
+            description,
+            ToolContract::default_input_schema(),
+            json!({}),
+        )
+        .with_discovery(ToolDiscoveryMetadata {
+            namespace: namespace.map(str::to_string),
+            aliases: aliases.into_iter().map(str::to_string).collect(),
+        });
+        catalog_tool_from_definition(tool)
+    }
+
+    fn catalog_tool_from_definition(tool: ToolDefinition) -> Value {
+        let manifest = tool.manifest();
+        json!({
+            "id": manifest.id,
+            "name": manifest.name,
+            "namespace": manifest.discovery.namespace,
+            "description": manifest.description,
+            "aliases": manifest.discovery.aliases,
+            "availability": "searchable",
+            "callable": false,
+            "showcased": false,
+            "searchable": true,
+            "activation": manifest.activation,
+            "contract": manifest.compact_contract.expect("compact contract"),
+        })
+    }
+
+    fn ranked_names(results: &[Value]) -> Vec<String> {
+        results
+            .iter()
+            .map(|result| {
+                result
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("ranked result name")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_name_beats_fuzzy_typo() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool("spotify_search_songs", "Find songs in Spotify"),
+                catalog_tool("spotty_notes", "Scratch notes"),
+            ],
+        );
+        let results = index.search(&json!({ "query": "spotify songs" }));
+        assert_eq!(results[0]["name"], json!("spotify_search_songs"));
+        let typo = index.search(&json!({ "query": "spotfy songs" }));
+        assert_eq!(typo[0]["name"], json!("spotify_search_songs"));
+    }
+
+    #[test]
+    fn ranking_prefers_output_fields_over_input_filter_matches() {
+        let filter_songs = ToolDefinition::raw_named(
+            "mcp__appworld__spotify_filter_songs",
+            "Search Spotify songs by filters.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "genre": {
+                        "type": "string",
+                        "description": "Genre filter."
+                    },
+                    "play_count": {
+                        "type": "integer",
+                        "description": "Minimum play count filter."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title filter."
+                    }
+                },
+                "required": ["access_token"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "song_id": {"type": "integer"}
+                            },
+                            "required": ["song_id"]
+                        }
+                    }
+                },
+                "required": ["response"]
+            }),
+        )
+        .with_discovery(ToolDiscoveryMetadata {
+            namespace: Some("appworld".to_string()),
+            aliases: vec!["spotify_filter_songs".to_string()],
+        });
+        let show_song = ToolDefinition::raw_named(
+            "mcp__appworld__spotify_show_song",
+            "Get a Spotify song record.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {"type": "string"},
+                    "song_id": {"type": "integer"}
+                },
+                "required": ["access_token", "song_id"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "object",
+                        "description": "Detailed song record.",
+                        "properties": {
+                            "genre": {
+                                "type": "string",
+                                "description": "Song genre."
+                            },
+                            "play_count": {
+                                "type": "integer",
+                                "description": "Number of times the song was played."
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Song title."
+                            }
+                        },
+                        "required": ["genre", "play_count", "title"]
+                    }
+                },
+                "required": ["response"]
+            }),
+        )
+        .with_discovery(ToolDiscoveryMetadata {
+            namespace: Some("appworld".to_string()),
+            aliases: vec!["spotify_show_song".to_string(), "song_details".to_string()],
+        });
+
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool_from_definition(filter_songs),
+                catalog_tool_from_definition(show_song),
+            ],
+        );
+        let results = index.search(&json!({
+            "query": "play_count genre title",
+            "namespace": "appworld"
+        }));
+
+        assert_eq!(
+            results[0]["name"],
+            json!("mcp__appworld__spotify_show_song")
+        );
+    }
+
+    #[test]
+    fn search_results_include_compact_schema_parameter_restrictions() {
+        let spotify = ToolDefinition::raw_named(
+            "mcp__appworld__spotify_search_songs",
+            "Find songs",
+            json!({
+                "type": "object",
+                "properties": {
+                    "access_token": {
+                        "type": "string",
+                        "description": "Access token obtained from spotify app login."
+                    },
+                    "genre": {
+                        "type": ["string", "null"],
+                        "description": "Only include songs from this genre.",
+                        "default": null
+                    },
+                    "page_limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return.",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 20
+                    }
+                },
+                "required": ["access_token"]
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "response": {
+                        "type": "array",
+                        "description": "Matched songs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "play_count": {
+                                    "type": "integer",
+                                    "description": "Number of times the song was played.",
+                                    "minimum": 0
+                                },
+                                "song_id": {
+                                    "type": "integer",
+                                    "description": "Stable song identifier."
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Song title."
+                                }
+                            },
+                            "required": ["play_count", "song_id", "title"]
+                        }
+                    }
+                },
+                "required": ["response"]
+            }),
+        )
+        .with_examples(vec![
+            "search songs by genre".to_string(),
+            "search songs by play count".to_string(),
+        ]);
+        let index = ToolDiscoveryIndex::build(1, vec![catalog_tool_from_definition(spotify)]);
+
+        let results = index.search(&json!({ "query": "spotify" }));
+        let signature = results[0]["signature"].as_str().expect("signature");
+        assert!(signature.contains("page_limit?: int >= 1 <= 20 = 20"));
+        assert!(signature.contains("response[].play_count: int >= 0"));
+        assert_eq!(
+            results[0]["examples"],
+            json!(["search songs by genre", "search songs by play count"])
+        );
+        assert!(results[0].get("input_schema").is_none());
+        assert!(results[0].get("output_schema").is_none());
+    }
+
+    #[test]
+    fn reciprocal_rank_fusion_keeps_cross_list_hits_ahead_of_single_list_noise() {
+        let fused = reciprocal_rank_fusion(
+            vec![
+                RankedCandidate {
+                    idx: 0,
+                    lexical_score: 10.0,
+                    semantic_score: None,
+                },
+                RankedCandidate {
+                    idx: 1,
+                    lexical_score: 8.0,
+                    semantic_score: None,
+                },
+                RankedCandidate {
+                    idx: 2,
+                    lexical_score: 6.0,
+                    semantic_score: None,
+                },
+            ],
+            vec![
+                RankedCandidate {
+                    idx: 3,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.99),
+                },
+                RankedCandidate {
+                    idx: 1,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.88),
+                },
+                RankedCandidate {
+                    idx: 4,
+                    lexical_score: 0.0,
+                    semantic_score: Some(0.87),
+                },
+            ],
+        );
+
+        let names = fused
+            .iter()
+            .map(|candidate| candidate.idx)
+            .collect::<Vec<_>>();
+        assert_eq!(names[..3], [1, 0, 3]);
+    }
+
+    #[test]
+    fn ranked_names_extracts_result_names() {
+        let index = ToolDiscoveryIndex::build(
+            1,
+            vec![
+                catalog_tool_with_metadata("read_file", "Read file contents", None, vec!["cat"]),
+                catalog_tool_with_metadata("search_web", "Search the web", None, vec!["web"]),
+            ],
+        );
+
+        assert_eq!(
+            ranked_names(&index.search(&json!({ "query": "cat" }))),
+            vec!["read_file"]
+        );
     }
 }

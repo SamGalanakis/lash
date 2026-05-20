@@ -773,6 +773,7 @@ pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> 
     )
     .await
     .expect("runtime");
+    runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
     runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
@@ -877,6 +878,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host(
     )
     .await
     .expect("runtime");
+    runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
     runtime.policy.provider = transport.clone().into_handle();
     runtime
 }

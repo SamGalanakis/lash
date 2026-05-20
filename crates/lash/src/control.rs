@@ -309,7 +309,7 @@ impl SessionControl {
         let session_id = runtime.session_id().to_string();
         let manager = runtime.session_manager()?;
         manager
-            .cancel_process(&session_id, process_id)
+            .cancel_process(lash_core::ProcessCancelRequest::new(session_id, process_id))
             .await
             .map_err(Into::into)
     }

@@ -13,11 +13,13 @@ pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+pub(crate) use lash_core::LocalProcessRegistry;
 pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
-    AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, LocalProcessRegistry, Message,
-    ModeTurnOptions, PluginFactory, PluginMessage, ProcessHandleGrantEntry, ProcessRecord,
-    ProcessRegistry, ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
+    AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, ModeTurnOptions,
+    PluginFactory, PluginMessage, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry,
+    ProviderHandle, Residency, RewriteTrigger, RuntimeEffectController,
     RuntimeEffectControllerScope, RuntimeErrorCode, RuntimePersistence, SessionCreateRequest,
     SessionError, SessionHandle, SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest,
     SessionStoreFactory, SessionUsageReport, StandardContextApproach, TerminationPolicy,
