@@ -72,16 +72,13 @@ impl ModeExecutionContext<'_> {
         if let Err(err) = self
             .dispatch
             .host
-            .start_process_scoped(
-                &self.session_id,
-                registration,
-                Some(ProcessHandleDescriptor::new(
-                    Some("tool"),
-                    Some(tool_name.clone()),
-                )),
-                execution_context,
-                self.effect_metadata.clone(),
-                Some(self.dispatch.effect_controller.as_controller()),
+            .start_process(
+                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
+                    .with_descriptor(ProcessHandleDescriptor::new(
+                        Some("tool"),
+                        Some(tool_name.clone()),
+                    ))
+                    .with_scope(self.process_request_scope(self.effect_metadata.clone())),
             )
             .await
         {
@@ -114,32 +111,27 @@ impl ModeExecutionContext<'_> {
         }
         let output = if let Some(cancellation) = self.cancellation_token.clone() {
             tokio::select! {
-                result = self.dispatch.host.await_process_scoped(
-                    &handle_id,
-                    self.effect_metadata.clone(),
-                    Some(self.dispatch.effect_controller.as_controller()),
+                result = self.dispatch.host.await_process(
+                    crate::ProcessAwaitRequest::new(&handle_id)
+                        .with_scope(self.process_request_scope(self.effect_metadata.clone())),
                 ) => result,
                 _ = cancellation.cancelled() => {
-                    let _ = self.dispatch.host.cancel_process_scoped(
-                        &self.session_id,
-                        &handle_id,
-                        self.effect_metadata.clone(),
-                        Some(self.dispatch.effect_controller.as_controller()),
+                    let _ = self.dispatch.host.cancel_process(
+                        crate::ProcessCancelRequest::new(&self.session_id, &handle_id)
+                            .with_scope(self.process_request_scope(self.effect_metadata.clone())),
                     ).await;
-                    self.dispatch.host.await_process_scoped(
-                        &handle_id,
-                        self.effect_metadata.clone(),
-                        Some(self.dispatch.effect_controller.as_controller()),
+                    self.dispatch.host.await_process(
+                        crate::ProcessAwaitRequest::new(&handle_id)
+                            .with_scope(self.process_request_scope(self.effect_metadata.clone())),
                     ).await
                 }
             }
         } else {
             self.dispatch
                 .host
-                .await_process_scoped(
-                    &handle_id,
-                    self.effect_metadata.clone(),
-                    Some(self.dispatch.effect_controller.as_controller()),
+                .await_process(
+                    crate::ProcessAwaitRequest::new(&handle_id)
+                        .with_scope(self.process_request_scope(self.effect_metadata.clone())),
                 )
                 .await
         };
@@ -165,11 +157,9 @@ impl ModeExecutionContext<'_> {
         match self
             .dispatch
             .host
-            .cancel_process_scoped(
-                &self.session_id,
-                &handle_id,
-                self.effect_metadata.clone(),
-                Some(self.dispatch.effect_controller.as_controller()),
+            .cancel_process(
+                crate::ProcessCancelRequest::new(&self.session_id, &handle_id)
+                    .with_scope(self.process_request_scope(self.effect_metadata.clone())),
             )
             .await
         {
@@ -312,7 +302,7 @@ mod tests {
             .get_process("async-call-1")
             .await
             .expect("registered process");
-        let ProcessInput::ToolCall { call } = record.input else {
+        let ProcessInput::ToolCall { call } = record.input.as_ref() else {
             panic!("expected prepared tool call process input");
         };
         assert_eq!(call.tool_name, "process_prepare");

@@ -351,6 +351,10 @@ impl ToolId {
         Self(id)
     }
 
+    pub fn default_for_name(name: &str) -> Self {
+        Self::new(format!("tool:{name}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -374,13 +378,17 @@ impl std::fmt::Display for ToolId {
     }
 }
 
-/// Cheap tool metadata exposed to prompts, catalogs, UI, and availability checks.
+/// Tool metadata exposed to prompts, catalogs, UI, and availability checks.
+/// The optional compact contract is the catalog-facing projection of the
+/// resolved contract; full schemas stay in [`ToolContract`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolManifest {
     pub id: ToolId,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_contract: Option<CompactToolContract>,
     #[serde(default, skip_serializing_if = "is_default_tool_availability_config")]
     pub availability: ToolAvailabilityConfig,
     #[serde(default, skip_serializing_if = "is_default_tool_activation")]
@@ -416,7 +424,7 @@ impl ToolManifest {
 /// Heavy tool contract resolved only when a prompt or call needs schemas/docs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ToolContract {
-    #[serde(default = "ToolDefinition::default_input_schema")]
+    #[serde(default = "ToolContract::default_input_schema")]
     pub input_schema: serde_json::Value,
     #[serde(default)]
     pub output_schema: serde_json::Value,
@@ -430,7 +438,28 @@ pub struct ToolContract {
     pub examples: Vec<String>,
 }
 
+impl Default for ToolContract {
+    fn default() -> Self {
+        Self {
+            input_schema: Self::default_input_schema(),
+            output_schema: serde_json::Value::Null,
+            input_schema_projections: Vec::new(),
+            output_schema_projections: Vec::new(),
+            output_contract: ToolOutputContract::Static,
+            examples: Vec::new(),
+        }
+    }
+}
+
 impl ToolContract {
+    pub fn default_input_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        })
+    }
+
     pub fn compact_contract(&self, manifest: &ToolManifest) -> CompactToolContract {
         self.compact_contract_with_example_limit(manifest, COMPACT_TOOL_EXAMPLE_LIMIT)
     }
@@ -504,7 +533,7 @@ pub struct ToolDefinition {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default = "ToolDefinition::default_input_schema")]
+    #[serde(default = "ToolContract::default_input_schema")]
     pub input_schema: serde_json::Value,
     #[serde(default)]
     pub output_schema: serde_json::Value,
@@ -651,23 +680,18 @@ impl CompactToolContract {
 }
 
 impl ToolDefinition {
-    pub fn raw(
+    pub fn raw_with_id(
         id: impl Into<ToolId>,
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: serde_json::Value,
         output_schema: serde_json::Value,
     ) -> Self {
-        Self {
+        let manifest = ToolManifest {
             id: id.into(),
             name: name.into(),
             description: description.into(),
-            input_schema,
-            output_schema,
-            input_schema_projections: Vec::new(),
-            output_schema_projections: Vec::new(),
-            output_contract: ToolOutputContract::Static,
-            examples: Vec::new(),
+            compact_contract: None,
             availability: ToolAvailabilityConfig::showcased(),
             activation: ToolActivation::Always,
             availability_override: None,
@@ -675,10 +699,32 @@ impl ToolDefinition {
             argument_projection: ToolArgumentProjectionPolicy::default(),
             execution_mode: ToolExecutionMode::Parallel,
             retry_policy: ToolRetryPolicy::Never,
-        }
+        };
+        let contract = ToolContract {
+            input_schema,
+            output_schema,
+            ..ToolContract::default()
+        };
+        Self::from_parts(manifest, contract)
     }
 
-    pub fn typed<Args, Output>(
+    pub fn raw_named(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+        output_schema: serde_json::Value,
+    ) -> Self {
+        let name = name.into();
+        Self::raw_with_id(
+            ToolId::default_for_name(&name),
+            name,
+            description,
+            input_schema,
+            output_schema,
+        )
+    }
+
+    pub fn typed_with_id<Args, Output>(
         id: impl Into<ToolId>,
         name: impl Into<String>,
         description: impl Into<String>,
@@ -687,13 +733,32 @@ impl ToolDefinition {
         Args: schemars::JsonSchema,
         Output: schemars::JsonSchema,
     {
-        Self::raw(
+        Self::raw_with_id(
             id,
             name,
             description,
             schema_for::<Args>(),
             schema_for::<Output>(),
         )
+    }
+
+    pub fn typed<Args, Output>(name: impl Into<String>, description: impl Into<String>) -> Self
+    where
+        Args: schemars::JsonSchema,
+        Output: schemars::JsonSchema,
+    {
+        let name = name.into();
+        Self::typed_with_id::<Args, Output>(ToolId::default_for_name(&name), name, description)
+    }
+
+    pub fn raw(
+        id: impl Into<ToolId>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+        output_schema: serde_json::Value,
+    ) -> Self {
+        Self::raw_with_id(id, name, description, input_schema, output_schema)
     }
 
     pub fn with_examples(mut self, examples: Vec<String>) -> Self {
@@ -777,11 +842,7 @@ impl ToolDefinition {
     }
 
     pub fn default_input_schema() -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": true
-        })
+        ToolContract::default_input_schema()
     }
 
     pub fn input_signature(&self) -> String {
@@ -827,10 +888,11 @@ impl ToolDefinition {
     }
 
     pub fn manifest(&self) -> ToolManifest {
-        ToolManifest {
+        let mut manifest = ToolManifest {
             id: self.id.clone(),
             name: self.name.clone(),
             description: self.description.clone(),
+            compact_contract: None,
             availability: self.availability.clone(),
             activation: self.activation,
             availability_override: self.availability_override,
@@ -838,7 +900,9 @@ impl ToolDefinition {
             argument_projection: self.argument_projection.clone(),
             execution_mode: self.execution_mode,
             retry_policy: self.retry_policy,
-        }
+        };
+        manifest.compact_contract = Some(self.contract().compact_contract(&manifest));
+        manifest
     }
 
     pub fn contract(&self) -> ToolContract {
@@ -852,7 +916,7 @@ impl ToolDefinition {
         }
     }
 
-    pub fn from_manifest_and_contract(manifest: ToolManifest, contract: ToolContract) -> Self {
+    fn from_parts(manifest: ToolManifest, contract: ToolContract) -> Self {
         Self {
             id: manifest.id,
             name: manifest.name,
@@ -1704,7 +1768,7 @@ mod tests {
     use super::*;
     #[test]
     fn tool_definition_uses_canonical_model_schemas() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:mcp__demo__search",
             "mcp__demo__search",
             "Search demo server",
@@ -1740,7 +1804,7 @@ mod tests {
 
     #[test]
     fn tool_retry_policy_defaults_to_never_and_is_omitted_from_manifest_json() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:demo",
             "demo",
             "Demo",
@@ -1757,7 +1821,7 @@ mod tests {
 
     #[test]
     fn tool_retry_policy_propagates_through_manifest_and_definition_roundtrip() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:demo",
             "demo",
             "Demo",
@@ -1776,7 +1840,7 @@ mod tests {
             }
         );
 
-        let roundtrip = ToolDefinition::from_manifest_and_contract(manifest, tool.contract());
+        let roundtrip = ToolDefinition::from_parts(manifest, tool.contract());
         assert_eq!(roundtrip.retry_policy, tool.retry_policy);
         let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
         assert_eq!(encoded["retry_policy"]["type"], serde_json::json!("safe"));
@@ -1784,7 +1848,7 @@ mod tests {
 
     #[test]
     fn tool_argument_projection_defaults_to_materialize_and_is_omitted_from_manifest_json() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:demo",
             "demo",
             "Demo",
@@ -1807,7 +1871,7 @@ mod tests {
 
     #[test]
     fn tool_argument_projection_propagates_through_manifest_and_definition_roundtrip() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:demo",
             "demo",
             "Demo",
@@ -1821,7 +1885,7 @@ mod tests {
         let manifest = tool.manifest();
         assert_eq!(manifest.argument_projection, tool.argument_projection);
 
-        let roundtrip = ToolDefinition::from_manifest_and_contract(manifest, tool.contract());
+        let roundtrip = ToolDefinition::from_parts(manifest, tool.contract());
         assert_eq!(roundtrip.argument_projection, tool.argument_projection);
         let encoded = serde_json::to_value(roundtrip.manifest()).expect("manifest json");
         assert_eq!(
@@ -1835,7 +1899,7 @@ mod tests {
 
     #[test]
     fn model_tool_preserves_schema_projection_overrides() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:demo",
             "demo",
             "Demo",
@@ -1902,7 +1966,7 @@ mod tests {
             confidence: f32,
         }
 
-        let tool = ToolDefinition::typed::<Args, Output>("tool:demo", "demo", "Demo");
+        let tool = ToolDefinition::typed::<Args, Output>("demo", "Demo");
         let metadata = tool.parameter_metadata();
         assert!(metadata.iter().any(|param| {
             param["name"] == "page_limit"
@@ -1946,7 +2010,7 @@ mod tests {
             "x-result": ["exact"]
         });
 
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:raw_demo",
             "raw_demo",
             "Raw demo",
@@ -1960,7 +2024,7 @@ mod tests {
 
     #[test]
     fn compact_tool_contract_renders_prompt_and_search_shape_from_schemas() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:search_docs",
             "search_docs",
             "Search indexed docs",
@@ -2033,7 +2097,7 @@ mod tests {
 
     #[test]
     fn static_output_contract_keeps_existing_compact_docs_and_serde_shape() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:read_text",
             "read_text",
             "Read text",
@@ -2058,7 +2122,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_schema_from_input_without_return_fields() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:spawn_agent",
             "spawn_agent",
             "Run a subagent",
@@ -2088,7 +2152,7 @@ mod tests {
 
     #[test]
     fn dynamic_output_contract_renders_default_schema() {
-        let tool = ToolDefinition::raw(
+        let tool = ToolDefinition::raw_with_id(
             "tool:llm_query",
             "llm_query",
             "Run a lightweight LLM query",
@@ -2591,7 +2655,7 @@ mod tests {
 
     #[test]
     fn tool_discovery_metadata_does_not_render_prompt_docs() {
-        let mut with_metadata = ToolDefinition::raw(
+        let mut with_metadata = ToolDefinition::raw_with_id(
             "tool:read_file",
             "read_file",
             "Read a file",

@@ -15,7 +15,8 @@ use dataset::{OolongQuestion, OolongSuite, default_dataset_path, load_questions}
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        EventSink, ExecutionMode, LocalProcessRegistry, ModeTurnOptions, TurnContext, TurnFinish,
+        TurnOutcome, TurnStop,
     },
     plugins::{PluginSpec, StaticPluginFactory},
     prompt::{
@@ -696,6 +697,7 @@ async fn run_question(
         .max_turns(args.max_turns)
         .prompt_template(oolong_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .plugins(build_plugin_stack(execution_mode.clone(), args))
         .build()?;
     let session = core

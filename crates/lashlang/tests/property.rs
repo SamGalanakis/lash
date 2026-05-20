@@ -20,6 +20,9 @@ impl ExecutionHost for DeterministicHost {
                 "fail" => Err(ExecutionHostError::new("fail")),
                 _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
             },
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }

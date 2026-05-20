@@ -1,5 +1,5 @@
 use lash_core::{ToolActivation, ToolAvailabilityConfig, ToolDefinition, ToolExecutionMode};
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(crate) fn search_tools_definition() -> ToolDefinition {
     #[derive(schemars::JsonSchema)]
@@ -34,32 +34,11 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
         Many(Vec<String>),
     }
 
-    ToolDefinition::raw(
-        "tool:search_tools",
+    ToolDefinition::raw_named(
         "search_tools",
         "Search catalogued tool names, namespaces, aliases, descriptions, signatures, return fields, and examples. Use this when the tool you need is not showcased in the prompt. Query with concise keywords and short intent phrases: include the app/domain, action, object, qualifiers, and important fields or constraints. For initial exploration, print only result names and signatures; inspect descriptions and examples only when you need to choose between close matches or learn call idioms.",
-        serde_json::to_value(schemars::schema_for!(SearchToolsArgs))
-            .unwrap_or_else(|_| json!({})),
-        json!({
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "signature": {
-                        "type": "string",
-                        "description": "Callable signature with successful return type plus compact parameter and return-field details."
-                    },
-                    "description": { "type": "string" },
-                    "examples": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    }
-                },
-                "required": ["name", "signature"],
-                "additionalProperties": false
-            }
-        }),
+        schema_for::<SearchToolsArgs>(),
+        search_tools_output_schema(),
     )
         .with_examples(vec![
             "search_tools(query=\"spotify liked songs library\", namespace=\"appworld\")".into(),
@@ -73,4 +52,69 @@ pub(crate) fn search_tools_definition() -> ToolDefinition {
             aliases: vec!["tool_search".to_string()],
         })
         .with_execution_mode(ToolExecutionMode::Serial)
+}
+
+fn schema_for<T>() -> Value
+where
+    T: schemars::JsonSchema,
+{
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({}))
+}
+
+fn search_tools_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "signature"],
+            "properties": {
+                "name": { "type": "string" },
+                "signature": {
+                    "type": "string",
+                    "description": "Callable signature with successful return type plus compact parameter and return-field details."
+                },
+                "description": { "type": "string" },
+                "examples": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn search_tools_has_typed_result_schema() {
+        let definition = search_tools_definition();
+
+        assert_eq!(definition.output_schema["type"], json!("array"));
+        let item = &definition.output_schema["items"];
+        assert_eq!(item["type"], json!("object"));
+        let required = item["required"].as_array().expect("required");
+        assert!(required.contains(&json!("name")));
+        assert!(required.contains(&json!("signature")));
+        let rendered_signature = definition.compact_contract().render_signature();
+        assert!(
+            rendered_signature.starts_with("search_tools(query: str"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("-> list[record{"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("name: str"),
+            "{rendered_signature}"
+        );
+        assert!(
+            rendered_signature.contains("signature: str"),
+            "{rendered_signature}"
+        );
+    }
 }

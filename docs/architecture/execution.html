@@ -115,14 +115,14 @@ let result = session
         <div class="section">
           <div class="section-header">
             <h2>Background Work</h2>
-            <p>Subagents are sessions. Monitors are processes that wake future turns from stdout lines. Async tool calls are tracked inside the session.</p>
+            <p>Subagents are sessions. Monitors and started async tool calls are explicit process handles backed by the installed <code>ProcessRegistry</code>.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Subagent and monitor path</div>
             <div class="mermaid">
 flowchart LR
   Rlm["RLM lashlang<br/>start call spawn_agent / call monitor"] --> Provider["spawn_agent_tool_definition<br/>+ lash_core::runtime_controls factories"]
-  Provider --> Host["ToolContext sessions/tasks<br/>+ MonitorHost"]
+  Provider --> Host["ToolContext sessions/processes<br/>+ MonitorHost"]
   Host --> Manager["RuntimeSessionManager"]
   Manager --> Child["start_turn -> stream_turn"]
   Manager --> Registry["process registry"]

@@ -1257,7 +1257,7 @@ mod tests {
             tool_bindings,
             timeout_ms,
             display_name,
-        } = &started[0].input
+        } = started[0].input.as_ref()
         else {
             panic!("expected lashlang block input");
         };

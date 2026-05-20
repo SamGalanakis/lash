@@ -368,13 +368,11 @@ impl MonitorPlugin {
             crate::ProcessExecutionContext::default().with_wake_session_id(session_id);
         match host
             .start_process(
-                session_id,
-                managed_spec,
-                Some(crate::ProcessHandleDescriptor::new(
-                    Some("monitor"),
-                    Some(spec.id.clone()),
-                )),
-                execution_context,
+                crate::ProcessStartRequest::new(session_id, managed_spec, execution_context)
+                    .with_descriptor(crate::ProcessHandleDescriptor::new(
+                        Some("monitor"),
+                        Some(spec.id.clone()),
+                    )),
             )
             .await
         {
@@ -443,7 +441,11 @@ impl MonitorPlugin {
         if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
             return ToolResult::err_fmt(err.to_string());
         }
-        let processes = match ctx.host.list_process_handles(session_id).await {
+        let processes = match ctx
+            .host
+            .list_process_handles(crate::ProcessListRequest::new(session_id))
+            .await
+        {
             Ok(processes) => processes,
             Err(err) => return ToolResult::err_fmt(err.to_string()),
         };
@@ -519,7 +521,10 @@ impl MonitorPlugin {
         let process_id = format!("monitor:{}", parsed.id);
         if let Err(err) = ctx
             .host
-            .cancel_process(ctx.session_id.as_deref().unwrap_or_default(), &process_id)
+            .cancel_process(crate::ProcessCancelRequest::new(
+                ctx.session_id.as_deref().unwrap_or_default(),
+                &process_id,
+            ))
             .await
         {
             return ToolResult::err_fmt(err.to_string());

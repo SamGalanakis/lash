@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
-    advanced::{EventSink, TurnFinish, TurnOutcome, TurnStop},
+    advanced::{EventSink, LocalProcessRegistry, TurnFinish, TurnOutcome, TurnStop},
     persistence::{
         ModeEvent, PersistedSessionState, RuntimePersistence, load_persisted_session_state,
     },
@@ -108,6 +108,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
             CLBENCH_MEMORY_GUIDANCE,
         ))
         .trace_jsonl_path(request.trace_path.clone())
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .plugins(build_plugin_stack())
         .build()?;
 
@@ -369,6 +370,7 @@ mod tests {
             .default_mode(ModeId::rlm())
             .model("mock-model", None)
             .max_context_tokens(DEFAULT_MAX_CONTEXT_TOKENS)
+            .process_registry(Arc::new(LocalProcessRegistry::default()))
             .plugins(build_plugin_stack())
             .build()
             .expect("core");

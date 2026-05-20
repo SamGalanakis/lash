@@ -1,7 +1,7 @@
 //! Bytecode instruction set + the inert data types that flow from the
 //! compiler to the VM: `Chunk`, `Name`, `Instruction`, `IntrinsicOp`, the
-//! profile-tag enums and accumulator, the format-template / assign-path
-//! shapes, and the pure-expression form used by lowered loop execution.
+//! profile-tag enums and accumulator, and the format-template / assign-path
+//! shapes. Optimizer-only lowered-loop IR lives with the VM implementation.
 //!
 //! Everything here is internal to the runtime crate — the visibility is
 //! `pub(crate)` because compiler.rs produces these structures and vm.rs
@@ -14,7 +14,7 @@ use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
 use super::schema::ValidationPlan;
-use super::{CompileStats, ProfileReport, ProfileStat, Value};
+use super::{CompileStats, LoweredLoop, ProfileReport, ProfileStat, Value};
 
 #[derive(Clone)]
 pub(crate) struct Chunk {
@@ -624,105 +624,4 @@ pub(crate) fn merge_stats(target: &mut Vec<ProfileStat>, source: &[ProfileStat])
             .cmp(&a.total_ns)
             .then_with(|| b.count.cmp(&a.count))
     });
-}
-
-#[derive(Clone)]
-pub(crate) struct LoweredLoop {
-    pub(crate) binding: usize,
-    pub(crate) iterable: LoopIterable,
-    pub(crate) body: Box<[LoopOp]>,
-}
-
-#[derive(Clone)]
-pub(crate) enum LoopIterable {
-    Range(Box<[LoopExpr]>),
-    Values(Box<LoopExpr>),
-    Keys(Box<LoopExpr>),
-}
-
-#[derive(Clone)]
-pub(crate) enum LoopOp {
-    Assign {
-        slot: usize,
-        expr: LoopExpr,
-    },
-    PathAssign {
-        slot: usize,
-        path: usize,
-        indexes: Box<[LoopExpr]>,
-        expr: LoopExpr,
-    },
-    AddAssign {
-        slot: usize,
-        expr: LoopExpr,
-    },
-    AddAssignNumber {
-        slot: usize,
-        right: f64,
-    },
-    AddAssignSlot {
-        slot: usize,
-        right: usize,
-    },
-    AddAssignIndexNumber {
-        slot: usize,
-        index: LoopExpr,
-        right: f64,
-    },
-    AddAssignIndexSlotNumber {
-        slot: usize,
-        index: usize,
-        right: f64,
-    },
-    AppendAssign {
-        slot: usize,
-        expr: LoopExpr,
-    },
-    Expr(LoopExpr),
-    If {
-        condition: LoopExpr,
-        then_ops: Box<[LoopOp]>,
-        else_ops: Box<[LoopOp]>,
-    },
-    Loop(Box<LoweredLoop>),
-    Break,
-    Continue,
-}
-
-#[derive(Clone)]
-pub(crate) enum LoopExpr {
-    Const(Value),
-    Slot(usize),
-    List(Box<[LoopExpr]>),
-    Record(Box<[(usize, LoopExpr)]>),
-    Intrinsic {
-        op: IntrinsicOp,
-        args: Box<[LoopExpr]>,
-    },
-    Format {
-        template: CompiledFormatTemplate,
-        args: Box<[LoopExpr]>,
-    },
-    Field {
-        target: Box<LoopExpr>,
-        field: usize,
-    },
-    Index {
-        target: Box<LoopExpr>,
-        index: Box<LoopExpr>,
-    },
-    Unary {
-        op: UnaryOp,
-        expr: Box<LoopExpr>,
-    },
-    Conditional {
-        condition: Box<LoopExpr>,
-        then_expr: Box<LoopExpr>,
-        else_expr: Box<LoopExpr>,
-    },
-    Binary {
-        left: Box<LoopExpr>,
-        op: BinaryOp,
-        right: Box<LoopExpr>,
-    },
 }

@@ -9,10 +9,9 @@ mod executor;
 mod plugin;
 mod projected_bindings;
 mod projection;
-mod projection_codec;
+mod projection_transport;
 mod protocol;
 mod rlm_support;
-mod seed;
 mod stream_mask;
 
 pub use control_tools::continue_as_tool_definition;
@@ -27,9 +26,9 @@ pub use projection::{
     RlmHistoryProjection, decode_rlm_mode_event, project_rlm_globals_from_events,
     rlm_history_projection, rlm_mode_event,
 };
+pub use projection_transport::{RlmSeed, rlm_seed_initial_nodes};
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
     rlm_execution_section_with_features,
 };
 pub use rlm_support::{BoundVariablesCache, format_budget_suffix};
-pub use seed::{RlmSeed, rlm_seed_initial_nodes};

@@ -39,6 +39,9 @@ impl ExecutionHost for TestHost {
                     .push(value);
                 Ok(AbilityResult::Unit)
             }
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -2119,11 +2122,16 @@ async fn type_is_usable_as_a_tool_call_argument() {
     }
     impl ExecutionHost for CaptureHost {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
-            let AbilityOp::CallTool { args, .. } = op else {
-                return Err(ExecutionHostError::new("unsupported host ability"));
-            };
-            *self.captured.lock().unwrap() = args.get("output").cloned();
-            Ok(AbilityResult::Value(Value::Null))
+            match op {
+                AbilityOp::CallTool { args, .. } => {
+                    *self.captured.lock().unwrap() = args.get("output").cloned();
+                    Ok(AbilityResult::Value(Value::Null))
+                }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
+            }
         }
     }
     let host = CaptureHost::default();

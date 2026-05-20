@@ -1,11 +1,59 @@
 use std::sync::Arc;
 
-use lash_core::ToolArgumentProjectionPolicy;
+use lash_core::{SessionAppendNode, ToolArgumentProjectionPolicy};
 use lash_rlm_types::{PROJECTED_JSON_TAG, PROJECTION_REF_JSON_TAG};
-use lashlang::{ImageValue, ProjectedFuture, Record as FlowRecord, Value as FlowValue};
+use lashlang::{
+    ImageValue, ProjectedFuture, ProjectedValue, Record as FlowRecord, State as FlowState,
+    Value as FlowValue,
+};
 use serde_json::Value;
 
-use crate::projected_bindings::{ProjectionRef, RlmProjectedSeedError};
+use crate::projected_bindings::{ProjectionRef, ProjectionResolver, RlmProjectedSeedError};
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct RlmSeed {
+    pub projected: lash_rlm_types::RlmProjectedSeedSnapshot,
+    pub globals: serde_json::Map<String, Value>,
+}
+
+impl RlmSeed {
+    pub fn from_tool_args(args: &Value) -> Result<Self, String> {
+        let raw = match args.get("seed") {
+            None | Some(Value::Null) => return Ok(Self::default()),
+            Some(Value::Object(map)) => map,
+            Some(_) => return Err("`seed` must be a record/dict".to_string()),
+        };
+        let mut out = Self::default();
+        for (name, value) in raw.iter() {
+            if let Some(inner) = lash_rlm_types::projection_inner(value) {
+                out.projected.push(name.clone(), inner.clone());
+            } else {
+                out.globals.insert(name.clone(), value.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.globals.is_empty() && self.projected.is_empty()
+    }
+
+    pub fn into_event_body(self) -> lash_rlm_types::RlmSeedPluginBody {
+        lash_rlm_types::RlmSeedPluginBody {
+            globals: self.globals,
+            projected: self.projected,
+        }
+    }
+}
+
+pub fn rlm_seed_initial_nodes(seed: RlmSeed) -> Vec<SessionAppendNode> {
+    if seed.is_empty() {
+        return Vec::new();
+    }
+    vec![SessionAppendNode::mode_event(crate::rlm_mode_event(
+        lash_rlm_types::RlmModeEvent::RlmSeed(seed.into_event_body()),
+    ))]
+}
 
 pub(crate) fn normalize_tool_args_for_projection(
     args: Value,
@@ -229,6 +277,84 @@ pub(crate) fn json_to_flow_value(value: Value) -> FlowValue {
                 ))
             }),
     }
+}
+
+pub(crate) async fn rehydrate_projected_globals(
+    rlm: &mut FlowState,
+    projection_resolver: Arc<dyn ProjectionResolver>,
+) -> Result<(), String> {
+    let mut snapshot = rlm.snapshot();
+    let mut changed = false;
+    let keys = snapshot
+        .globals
+        .keys()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for key in keys {
+        if let Some(value) = snapshot.globals.get_mut(&key) {
+            changed |= rehydrate_projected_value(value, Arc::clone(&projection_resolver)).await?;
+        }
+    }
+    if changed {
+        *rlm = FlowState::from_snapshot(snapshot);
+    }
+    Ok(())
+}
+
+fn rehydrate_projected_value<'a>(
+    value: &'a mut FlowValue,
+    projection_resolver: Arc<dyn ProjectionResolver>,
+) -> ProjectedFuture<'a, Result<bool, String>> {
+    Box::pin(async move {
+        match value {
+            FlowValue::Projected(projected) => {
+                let Some(ref_json) = projected.projection_ref().cloned() else {
+                    return Ok(false);
+                };
+                let name = projected.name().to_string();
+                let reference = serde_json::from_value::<ProjectionRef>(ref_json.clone())
+                    .map_err(|err| format!("invalid projection ref for `{name}`: {err}"))?;
+                let resolved = projection_resolver
+                    .resolve_projection(&reference)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                *value = FlowValue::Projected(ProjectedValue::custom_with_projection_ref(
+                    name, resolved, ref_json,
+                ));
+                Ok(true)
+            }
+            FlowValue::List(values) => {
+                let mut changed = false;
+                let mut restored = values.iter().cloned().collect::<Vec<_>>();
+                for value in restored.iter_mut() {
+                    changed |=
+                        rehydrate_projected_value(value, Arc::clone(&projection_resolver)).await?;
+                }
+                if changed {
+                    *value = FlowValue::List(restored.into());
+                }
+                Ok(changed)
+            }
+            FlowValue::Record(record) => {
+                let mut changed = false;
+                let record = Arc::make_mut(record);
+                let keys = record.keys().map(str::to_string).collect::<Vec<_>>();
+                for key in keys {
+                    if let Some(value) = record.get_mut(&key) {
+                        changed |=
+                            rehydrate_projected_value(value, Arc::clone(&projection_resolver))
+                                .await?;
+                    }
+                }
+                Ok(changed)
+            }
+            FlowValue::Null
+            | FlowValue::Bool(_)
+            | FlowValue::Number(_)
+            | FlowValue::String(_)
+            | FlowValue::Image(_) => Ok(false),
+        }
+    })
 }
 
 fn json_map_to_image(map: &serde_json::Map<String, Value>) -> Option<ImageValue> {

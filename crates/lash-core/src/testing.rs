@@ -503,16 +503,20 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
 
     async fn start_process(
         &self,
-        _session_id: &str,
-        registration: crate::ProcessRegistration,
-        descriptor: Option<crate::ProcessHandleDescriptor>,
-        _execution_context: crate::ProcessExecutionContext,
+        request: crate::ProcessStartRequest<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
+        let crate::ProcessStartRequest {
+            session_id,
+            registration,
+            descriptor,
+            execution_context: _,
+            scope: _,
+        } = request;
         let id = registration.id.clone();
         self.process_registry.register_process(registration).await?;
         if let Some(descriptor) = descriptor {
             self.process_registry
-                .grant_handle(_session_id, &id, descriptor)
+                .grant_handle(&session_id, &id, descriptor)
                 .await?;
         }
         self.process_registry
@@ -529,16 +533,20 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
 
     async fn await_process(
         &self,
-        process_id: &str,
+        request: crate::ProcessAwaitRequest<'_>,
     ) -> Result<crate::ProcessAwaitOutput, PluginError> {
-        self.process_registry.await_process(process_id).await
+        self.process_registry
+            .await_process(&request.process_id)
+            .await
     }
 
     async fn list_process_handles(
         &self,
-        session_id: &str,
+        request: crate::ProcessListRequest<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.process_registry.list_handle_grants(session_id).await
+        self.process_registry
+            .list_handle_grants(&request.session_id)
+            .await
     }
 
     async fn validate_process_handles_visible(
@@ -563,25 +571,30 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
 
     async fn transfer_process_handles(
         &self,
-        from_session_id: &str,
-        to_session_id: &str,
-        handle_ids: &[String],
+        request: crate::ProcessTransferRequest<'_>,
     ) -> Result<(), PluginError> {
         self.process_registry
-            .transfer_handle_grants(from_session_id, to_session_id, handle_ids)
+            .transfer_handle_grants(
+                &request.from_session_id,
+                &request.to_session_id,
+                &request.process_ids,
+            )
             .await
     }
 
     async fn cancel_unreferenced_process_handles(
         &self,
-        session_id: &str,
-        keep_handle_ids: &[String],
+        request: crate::ProcessCleanupRequest<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        let keep = keep_handle_ids
+        let keep = request
+            .keep_process_ids
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let grants = self.process_registry.list_handle_grants(session_id).await?;
+        let grants = self
+            .process_registry
+            .list_handle_grants(&request.session_id)
+            .await?;
         let mut cancelled = Vec::new();
 
         for (grant, record) in grants {
@@ -589,7 +602,7 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
                 continue;
             }
             self.process_registry
-                .revoke_handle(session_id, &grant.process_id)
+                .revoke_handle(&request.session_id, &grant.process_id)
                 .await?;
             if record.is_terminal()
                 || !self
@@ -616,13 +629,12 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
 
     async fn cancel_process(
         &self,
-        _session_id: &str,
-        process_id: &str,
+        request: crate::ProcessCancelRequest<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
         crate::InlineRuntimeEffectController::default()
             .request_process_cancel(
                 self.process_registry.clone(),
-                process_id,
+                &request.process_id,
                 Some("requested by test".to_string()),
             )
             .await

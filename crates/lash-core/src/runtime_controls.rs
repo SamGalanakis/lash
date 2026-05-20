@@ -341,10 +341,12 @@ pub async fn execute_monitor_tool_call(
 pub async fn execute_process_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
     match context
         .host
-        .list_process_handles_scoped(
-            &context.session_id,
-            context.tool_effect_metadata.clone(),
-            Some(context.effect_controller.as_controller()),
+        .list_process_handles(
+            crate::ProcessListRequest::new(&context.session_id).with_scope(
+                crate::ProcessRequestScope::new()
+                    .with_effect_metadata(context.tool_effect_metadata.clone())
+                    .with_effect_controller(context.effect_controller.as_controller()),
+            ),
         )
         .await
     {
@@ -386,11 +388,12 @@ pub async fn execute_process_cancel_tool_call(
     }
     match context
         .host
-        .cancel_process_scoped(
-            &context.session_id,
-            id,
-            context.tool_effect_metadata.clone(),
-            Some(context.effect_controller.as_controller()),
+        .cancel_process(
+            crate::ProcessCancelRequest::new(&context.session_id, id).with_scope(
+                crate::ProcessRequestScope::new()
+                    .with_effect_metadata(context.tool_effect_metadata.clone())
+                    .with_effect_controller(context.effect_controller.as_controller()),
+            ),
         )
         .await
     {

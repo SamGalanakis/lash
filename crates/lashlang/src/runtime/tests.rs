@@ -25,6 +25,9 @@ impl ExecutionHost for Host {
                 _ => Err(ExecutionHostError::new("expected handle record")),
             },
             AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -52,6 +55,9 @@ impl ExecutionHost for RecordingProcessHost {
             AbilityOp::ProcessEvent(event) => {
                 self.events.lock().expect("events lock").push(event);
                 Ok(AbilityResult::Unit)
+            }
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
             }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
@@ -3072,6 +3078,9 @@ async fn await_record_tool_calls_start_and_join_handles() {
                         .unwrap_or(Value::Null);
                     Ok(AbilityResult::Value(value))
                 }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
                 _ => Err(ExecutionHostError::new("unsupported host ability")),
             }
         }
@@ -3146,6 +3155,9 @@ impl ExecutionHost for AsyncHost {
             }
             AbilityOp::Cancel(_) => Ok(AbilityResult::Value(Value::Null)),
             AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
@@ -3821,18 +3833,23 @@ async fn type_literal_inside_tool_call_args_passes_through_as_record() {
     }
     impl ExecutionHost for CaptureHost {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
-            let AbilityOp::CallTool { name, args } = op else {
-                return Err(ExecutionHostError::new("unsupported host ability"));
-            };
-            if name == "spawn" {
-                let schema = args
-                    .get("output")
-                    .cloned()
-                    .expect("output arg must be present");
-                *self.captured.lock().unwrap() = Some(schema);
-                return Ok(AbilityResult::Value(Value::Null));
+            match op {
+                AbilityOp::CallTool { name, args } => {
+                    if name == "spawn" {
+                        let schema = args
+                            .get("output")
+                            .cloned()
+                            .expect("output arg must be present");
+                        *self.captured.lock().unwrap() = Some(schema);
+                        return Ok(AbilityResult::Value(Value::Null));
+                    }
+                    Err(ExecutionHostError::new(format!("unknown: {name}")))
+                }
+                AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
             }
-            Err(ExecutionHostError::new(format!("unknown: {name}")))
         }
     }
     let host = CaptureHost {
@@ -3993,5 +4010,161 @@ async fn record_literal_preserves_per_entry_projection() {
         !matches!(record.get("lit"), Some(Value::Projected(_))),
         "literal `lit` should not be projected, got {:?}",
         record.get("lit")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Terminator-op routing through the handler.
+//
+// `submit`, `finish`, `fail` go through `host.perform` as `AbilityOp::Submit`,
+// `Finish`, `Fail`. Default behavior is identity pass-through (the host returns
+// the value unchanged and the VM unwinds with that value). The handler may
+// transform the value or refuse with an `Err`; it cannot prevent unwind.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum TerminatorMode {
+    Identity,
+    Transform,
+    Err,
+    Unit,
+}
+
+struct TerminatorHost {
+    mode: TerminatorMode,
+    observed: Mutex<Vec<AbilityOp>>,
+}
+
+impl TerminatorHost {
+    fn new(mode: TerminatorMode) -> Self {
+        Self {
+            mode,
+            observed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ExecutionHost for TerminatorHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                let observed = match &value {
+                    Value::Number(n) => AbilityOp::Submit(Value::Number(*n)),
+                    other => AbilityOp::Submit(other.clone()),
+                };
+                self.observed.lock().expect("observed").push(observed);
+                match self.mode {
+                    TerminatorMode::Identity => Ok(AbilityResult::Value(value)),
+                    TerminatorMode::Transform => match value {
+                        Value::Number(n) => Ok(AbilityResult::Value(Value::Number(n + 100.0))),
+                        other => Ok(AbilityResult::Value(other)),
+                    },
+                    TerminatorMode::Err => Err(ExecutionHostError::new("handler refused")),
+                    TerminatorMode::Unit => Ok(AbilityResult::Unit),
+                }
+            }
+            AbilityOp::CallTool { name, .. } => {
+                Err(ExecutionHostError::new(format!("unknown tool: {name}")))
+            }
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
+        }
+    }
+}
+
+async fn run_with_terminator_host(
+    source: &str,
+    mode: TerminatorMode,
+) -> (Result<ExecutionOutcome, RuntimeError>, Vec<AbilityOp>) {
+    let host = TerminatorHost::new(mode);
+    let program = crate::parse(source).expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &host).await;
+    let observed = host.observed.lock().expect("observed").clone();
+    (outcome, observed)
+}
+
+async fn run_process_with_terminator_host(
+    program: Program,
+    mode: TerminatorMode,
+) -> (Result<ExecutionOutcome, RuntimeError>, Vec<AbilityOp>) {
+    let host = TerminatorHost::new(mode);
+    let compiled = compile_program(&program);
+    let mut state = State::new();
+    let outcome = execute_compiled_process(&compiled, &mut state, &host).await;
+    let observed = host.observed.lock().expect("observed").clone();
+    (outcome, observed)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_routes_through_host() {
+    let (outcome, observed) = run_with_terminator_host("submit 7", TerminatorMode::Identity).await;
+    assert_eq!(
+        outcome.expect("submit should succeed"),
+        ExecutionOutcome::Finished(Value::Number(7.0))
+    );
+    assert_eq!(observed.len(), 1, "host should observe one terminator op");
+    assert!(matches!(observed[0], AbilityOp::Submit(Value::Number(n)) if n == 7.0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_transforms_submit_value() {
+    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Transform).await;
+    assert_eq!(
+        outcome.expect("submit should succeed"),
+        ExecutionOutcome::Finished(Value::Number(107.0)),
+        "handler should transform the submit value before the VM unwinds"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_error_during_submit_propagates_as_runtime_error() {
+    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Err).await;
+    let err = outcome.expect_err("host error should surface");
+    let message = err.to_string();
+    assert!(message.contains("submit failed"), "{message}");
+    assert!(message.contains("handler refused"), "{message}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_returning_unit_for_submit_errors_cleanly() {
+    let (outcome, _) = run_with_terminator_host("submit 7", TerminatorMode::Unit).await;
+    let err = outcome.expect_err("unit result should error");
+    let message = err.to_string();
+    assert!(message.contains("submit failed"), "{message}");
+    assert!(message.contains("returned no value"), "{message}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finish_routes_through_host_in_process_mode() {
+    let program = Program::block(vec![Expr::Finish(Some(Box::new(Expr::Number(7.0))))]);
+    let (outcome, observed) =
+        run_process_with_terminator_host(program, TerminatorMode::Transform).await;
+    assert_eq!(
+        outcome.expect("finish should succeed"),
+        ExecutionOutcome::Finished(Value::Number(107.0))
+    );
+    assert_eq!(observed.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fail_routes_through_host_and_carries_failed_outcome() {
+    let program = Program::block(vec![Expr::Fail(Box::new(Expr::String("boom".into())))]);
+    let (outcome, observed) =
+        run_process_with_terminator_host(program, TerminatorMode::Identity).await;
+    assert_eq!(
+        outcome.expect("fail should produce an outcome"),
+        ExecutionOutcome::Failed(Value::String("boom".into()))
+    );
+    assert_eq!(observed.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_can_transform_fail_value_while_keeping_failure_path() {
+    let program = Program::block(vec![Expr::Fail(Box::new(Expr::Number(7.0)))]);
+    let (outcome, _) = run_process_with_terminator_host(program, TerminatorMode::Transform).await;
+    assert_eq!(
+        outcome.expect("fail should produce an outcome"),
+        ExecutionOutcome::Failed(Value::Number(107.0)),
+        "transformed value should still arrive on the failure path"
     );
 }

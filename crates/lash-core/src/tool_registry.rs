@@ -333,7 +333,11 @@ impl ToolRegistry {
         source: Arc<dyn ToolSourceExecutor>,
     ) -> Result<u64, ReconfigureError> {
         let source_id = source.id().to_string();
-        let advertised_tools = source.advertised_tools();
+        let advertised_tools = source
+            .advertised_tools()
+            .into_iter()
+            .map(|manifest| manifest_with_compact_contract(source.as_ref(), manifest))
+            .collect::<Vec<_>>();
         validate_unique_manifests(&advertised_tools)?;
 
         let mut state = self
@@ -471,9 +475,10 @@ impl ToolProvider for ToolRegistry {
             .map(|(source_id, source)| (source_id.clone(), Arc::clone(source)))
             .collect::<Vec<_>>();
         for (source_id, source) in sources {
-            let Some(mut manifest) = source.resolve_manifest(name) else {
+            let Some(manifest) = source.resolve_manifest(name) else {
                 continue;
             };
+            let mut manifest = manifest_with_compact_contract(source.as_ref(), manifest);
             let previous_override = {
                 let state = self
                     .state
@@ -615,6 +620,18 @@ fn validate_unique_manifests(manifests: &[ToolManifest]) -> Result<(), Reconfigu
     Ok(())
 }
 
+fn manifest_with_compact_contract(
+    source: &dyn ToolSourceExecutor,
+    mut manifest: ToolManifest,
+) -> ToolManifest {
+    if manifest.compact_contract.is_none()
+        && let Some(contract) = source.resolve_contract(&manifest.name)
+    {
+        manifest.compact_contract = Some(contract.compact_contract(&manifest));
+    }
+    manifest
+}
+
 fn validate_unique_manifest_entries<'a>(
     entries: impl IntoIterator<Item = &'a ToolStateEntry>,
 ) -> Result<(), ReconfigureError> {
@@ -646,7 +663,7 @@ mod tests {
         description: &str,
         availability: crate::ToolAvailabilityConfig,
     ) -> ToolDefinition {
-        ToolDefinition::raw(
+        ToolDefinition::raw_with_id(
             format!("tool:{name}"),
             name,
             description,
@@ -743,7 +760,7 @@ mod tests {
         }
 
         fn advertised_tools(&self) -> Vec<ToolManifest> {
-            manifests(vec![ToolDefinition::raw(
+            manifests(vec![ToolDefinition::raw_with_id(
                 "tool:mcp__demo__search",
                 "mcp__demo__search",
                 "search",
@@ -761,7 +778,7 @@ mod tests {
 
         fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
             contract_from(
-                vec![ToolDefinition::raw(
+                vec![ToolDefinition::raw_with_id(
                     "tool:mcp__demo__search",
                     "mcp__demo__search",
                     "search",
@@ -1051,7 +1068,7 @@ mod tests {
     #[test]
     fn project_tool_catalog_keeps_searchable_tools_with_surface_metadata() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            crate::ToolDefinition::raw(
+            crate::ToolDefinition::raw_with_id(
                 format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
@@ -1071,7 +1088,10 @@ mod tests {
         ]);
         assert_eq!(catalog.len(), 2);
         assert_eq!(catalog[0]["name"], serde_json::json!("read_file"));
-        assert!(catalog[0].get("signature").is_none());
+        assert_eq!(
+            catalog[0]["contract"]["signature"],
+            serde_json::json!("read_file()")
+        );
         assert_eq!(catalog[0]["showcased"], serde_json::json!(true));
         assert_eq!(catalog[1]["callable"], serde_json::json!(true));
     }
@@ -1079,7 +1099,7 @@ mod tests {
     #[test]
     fn project_tool_catalog_preserves_dynamic_output_contracts() {
         fn dummy_tool(name: &str) -> crate::ToolDefinition {
-            crate::ToolDefinition::raw(
+            crate::ToolDefinition::raw_with_id(
                 format!("tool:{name}"),
                 name,
                 format!("desc for {name}"),
@@ -1097,7 +1117,11 @@ mod tests {
             availability: crate::ToolAvailability::Searchable,
         }]);
 
-        assert!(catalog[0].get("output_contract").is_none());
+        assert_eq!(
+            catalog[0]["contract"]["signature"],
+            serde_json::json!("llm_query<T = str>()")
+        );
+        assert_eq!(catalog[0]["contract"]["returns"], serde_json::json!("T"));
     }
 }
 
@@ -1111,7 +1135,7 @@ where
         .map(|entry| {
             let manifest = entry.manifest;
             let availability = entry.availability;
-            let projected = serde_json::json!({
+            let mut projected = serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
                 "namespace": manifest.discovery.namespace,
@@ -1123,6 +1147,12 @@ where
                 "searchable": availability.is_searchable(),
                 "activation": manifest.activation,
             });
+            if let Some(contract) = manifest.compact_contract {
+                projected
+                    .as_object_mut()
+                    .expect("projected tool catalog entry is an object")
+                    .insert("contract".to_string(), serde_json::json!(contract));
+            }
             projected
         })
         .collect()

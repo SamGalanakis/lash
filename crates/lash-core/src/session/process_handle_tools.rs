@@ -7,7 +7,7 @@ impl ModeExecutionContext<'_> {
     pub(super) async fn live_processes(&self) -> Vec<crate::ProcessHandleGrantEntry> {
         self.dispatch
             .host
-            .list_process_handles(&self.session_id)
+            .list_process_handles(crate::ProcessListRequest::new(&self.session_id))
             .await
             .unwrap_or_default()
             .into_iter()

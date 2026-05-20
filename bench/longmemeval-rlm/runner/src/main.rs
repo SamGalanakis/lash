@@ -16,7 +16,8 @@ use dataset::{LongMemEvalQuestion, load_questions};
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
+        EventSink, LocalProcessRegistry, SessionEvent, StandardContextApproach, TurnFinish,
+        TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
     plugins::{PluginSpec, StaticPluginFactory},
@@ -600,6 +601,7 @@ async fn run_question(
         .max_context_tokens(args.max_context_tokens)
         .trace_jsonl_path(Some(trace_path.clone()))
         .prompt_template(prompt_template(args.prompt_profile, args.session_tools))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .plugins(build_plugin_stack(
             standard_context_approach.cloned(),
             args.session_tools,

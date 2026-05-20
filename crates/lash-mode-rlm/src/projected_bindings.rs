@@ -248,7 +248,7 @@ impl RlmProjectedBindings {
         let mut out = Self::new();
         for (name, value) in &snapshot.entries {
             out = if let Some(reference) =
-                crate::projection_codec::projection_ref_from_seed_value(name, value)?
+                crate::projection_transport::projection_ref_from_seed_value(name, value)?
             {
                 out.bind_lazy(name.clone(), reference)?
             } else {

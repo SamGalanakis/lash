@@ -55,24 +55,24 @@ struct LoopContext {
     break_jumps: SmallVec<[usize; 4]>,
 }
 
-struct LoopLowerer<'a, 'b> {
+struct LoweredLoopOptimizer<'a, 'b> {
     compiler: &'a mut Compiler,
     binding_name: &'b str,
     assigned_slots: SmallVec<[usize; 8]>,
 }
 
-impl LoopLowerer<'_, '_> {
-    fn lower_block(&mut self, block: &Expr) -> Option<Vec<LoopOp>> {
+impl LoweredLoopOptimizer<'_, '_> {
+    fn optimize_block(&mut self, block: &Expr) -> Option<Vec<LoopOp>> {
         match block {
             Expr::Block(expressions) => expressions
                 .iter()
-                .map(|expression| self.lower_expr(expression))
+                .map(|expression| self.optimize_expr(expression))
                 .collect(),
-            expression => Some(vec![self.lower_expr(expression)?]),
+            expression => Some(vec![self.optimize_expr(expression)?]),
         }
     }
 
-    fn lower_expr(&mut self, expression: &Expr) -> Option<LoopOp> {
+    fn optimize_expr(&mut self, expression: &Expr) -> Option<LoopOp> {
         match expression {
             Expr::Assign { target, expr } if target.root.as_str() == self.binding_name => None,
             Expr::Assign { target, expr } if target.is_simple() => {
@@ -90,7 +90,7 @@ impl LoopLowerer<'_, '_> {
                     {
                         return Some(LoopOp::AppendAssign {
                             slot,
-                            expr: self.compiler.lower_loop_expr(&items[0])?,
+                            expr: self.compiler.optimize_loop_expr(&items[0])?,
                         });
                     }
                     if let Some(Value::Number(right)) = self.compiler.fold_compile_time_expr(right)
@@ -103,7 +103,7 @@ impl LoopLowerer<'_, '_> {
                     }
                     return Some(LoopOp::AddAssign {
                         slot,
-                        expr: self.compiler.lower_loop_expr(right)?,
+                        expr: self.compiler.optimize_loop_expr(right)?,
                     });
                 }
                 if let Expr::BuiltinCall {
@@ -116,12 +116,12 @@ impl LoopLowerer<'_, '_> {
                 {
                     return Some(LoopOp::AppendAssign {
                         slot,
-                        expr: self.compiler.lower_loop_expr(item)?,
+                        expr: self.compiler.optimize_loop_expr(item)?,
                     });
                 }
                 Some(LoopOp::Assign {
                     slot,
-                    expr: self.compiler.lower_loop_expr(expr)?,
+                    expr: self.compiler.optimize_loop_expr(expr)?,
                 })
             }
             Expr::Assign { target, expr } => {
@@ -147,7 +147,7 @@ impl LoopLowerer<'_, '_> {
                     }
                     return Some(LoopOp::AddAssignIndexNumber {
                         slot,
-                        index: self.compiler.lower_loop_expr(index)?,
+                        index: self.compiler.optimize_loop_expr(index)?,
                         right,
                     });
                 }
@@ -157,7 +157,9 @@ impl LoopLowerer<'_, '_> {
                     .iter()
                     .filter_map(|step| match step {
                         AssignPathStep::Field(_) => None,
-                        AssignPathStep::Index(index) => Some(self.compiler.lower_loop_expr(index)),
+                        AssignPathStep::Index(index) => {
+                            Some(self.compiler.optimize_loop_expr(index))
+                        }
                     })
                     .collect::<Option<Vec<_>>>()?
                     .into_boxed_slice();
@@ -166,7 +168,7 @@ impl LoopLowerer<'_, '_> {
                     slot,
                     path,
                     indexes,
-                    expr: self.compiler.lower_loop_expr(expr)?,
+                    expr: self.compiler.optimize_loop_expr(expr)?,
                 })
             }
             Expr::If {
@@ -174,9 +176,9 @@ impl LoopLowerer<'_, '_> {
                 then_block,
                 else_block,
             } => {
-                let condition = self.compiler.lower_loop_expr(condition)?;
-                let then_ops = self.lower_block(then_block)?.into_boxed_slice();
-                let else_ops = self.lower_block(else_block)?.into_boxed_slice();
+                let condition = self.compiler.optimize_loop_expr(condition)?;
+                let then_ops = self.optimize_block(then_block)?.into_boxed_slice();
+                let else_ops = self.optimize_block(else_block)?.into_boxed_slice();
                 Some(LoopOp::If {
                     condition,
                     then_ops,
@@ -189,13 +191,13 @@ impl LoopLowerer<'_, '_> {
                 body,
             } => {
                 let binding_slot = self.compiler.push_slot(binding);
-                let iterable = self.compiler.lower_loop_iterable(iterable)?;
-                let mut nested = LoopLowerer {
+                let iterable = self.compiler.optimize_loop_iterable(iterable)?;
+                let mut nested = LoweredLoopOptimizer {
                     compiler: self.compiler,
                     binding_name: binding,
                     assigned_slots: SmallVec::new(),
                 };
-                let body = nested.lower_block(body)?.into_boxed_slice();
+                let body = nested.optimize_block(body)?.into_boxed_slice();
                 nested.compiler.set_const_slot(binding_slot, None);
                 for slot in nested.assigned_slots {
                     nested.compiler.set_const_slot(slot, None);
@@ -220,7 +222,7 @@ impl LoopLowerer<'_, '_> {
             | Expr::Fail(_)
             | Expr::StartProcess(_)
             | Expr::Await(_) => None,
-            expr => Some(LoopOp::Expr(self.compiler.lower_loop_expr(expr)?)),
+            expr => Some(LoopOp::Expr(self.compiler.optimize_loop_expr(expr)?)),
         }
     }
 }
@@ -763,13 +765,13 @@ impl Compiler {
         body: &Expr,
     ) -> Option<usize> {
         let binding = self.push_slot(binding_name);
-        let iterable = self.lower_loop_iterable(iterable)?;
-        let mut lowerer = LoopLowerer {
+        let iterable = self.optimize_loop_iterable(iterable)?;
+        let mut lowerer = LoweredLoopOptimizer {
             compiler: self,
             binding_name,
             assigned_slots: SmallVec::new(),
         };
-        let body = lowerer.lower_block(body)?;
+        let body = lowerer.optimize_block(body)?;
         lowerer.compiler.set_const_slot(binding, None);
         for slot in lowerer.assigned_slots {
             lowerer.compiler.set_const_slot(slot, None);
@@ -782,28 +784,28 @@ impl Compiler {
         Some(lowerer.compiler.push_lowered_loop(lowered_loop))
     }
 
-    fn lower_loop_iterable(&mut self, iterable: &Expr) -> Option<LoopIterable> {
+    fn optimize_loop_iterable(&mut self, iterable: &Expr) -> Option<LoopIterable> {
         match iterable {
             Expr::BuiltinCall { name, args }
                 if name == "range" && (1..=3).contains(&args.len()) =>
             {
                 Some(LoopIterable::Range(
                     args.iter()
-                        .map(|arg| self.lower_loop_expr(arg))
+                        .map(|arg| self.optimize_loop_expr(arg))
                         .collect::<Option<Vec<_>>>()?
                         .into_boxed_slice(),
                 ))
             }
             Expr::BuiltinCall { name, args } if name == "keys" && args.len() == 1 => Some(
-                LoopIterable::Keys(Box::new(self.lower_loop_expr(&args[0])?)),
+                LoopIterable::Keys(Box::new(self.optimize_loop_expr(&args[0])?)),
             ),
             _ => Some(LoopIterable::Values(Box::new(
-                self.lower_loop_expr(iterable)?,
+                self.optimize_loop_expr(iterable)?,
             ))),
         }
     }
 
-    fn lower_loop_expr(&mut self, expr: &Expr) -> Option<LoopExpr> {
+    fn optimize_loop_expr(&mut self, expr: &Expr) -> Option<LoopExpr> {
         match expr {
             Expr::Null => Some(LoopExpr::Const(Value::Null)),
             Expr::Bool(value) => Some(LoopExpr::Const(Value::Bool(*value))),
@@ -813,14 +815,16 @@ impl Compiler {
             Expr::List(items) => Some(LoopExpr::List(
                 items
                     .iter()
-                    .map(|item| self.lower_loop_expr(item))
+                    .map(|item| self.optimize_loop_expr(item))
                     .collect::<Option<Vec<_>>>()?
                     .into_boxed_slice(),
             )),
             Expr::Record(entries) => Some(LoopExpr::Record(
                 entries
                     .iter()
-                    .map(|(key, value)| Some((self.push_name(key), self.lower_loop_expr(value)?)))
+                    .map(|(key, value)| {
+                        Some((self.push_name(key), self.optimize_loop_expr(value)?))
+                    })
                     .collect::<Option<Vec<_>>>()?
                     .into_boxed_slice(),
             )),
@@ -835,7 +839,7 @@ impl Compiler {
                         template: compile_format_template(template, value_args.len()),
                         args: value_args
                             .iter()
-                            .map(|arg| self.lower_loop_expr(arg))
+                            .map(|arg| self.optimize_loop_expr(arg))
                             .collect::<Option<Vec<_>>>()?
                             .into_boxed_slice(),
                     });
@@ -844,36 +848,36 @@ impl Compiler {
                     op: self.resolve_intrinsic(name, args.len()),
                     args: args
                         .iter()
-                        .map(|arg| self.lower_loop_expr(arg))
+                        .map(|arg| self.optimize_loop_expr(arg))
                         .collect::<Option<Vec<_>>>()?
                         .into_boxed_slice(),
                 })
             }
             Expr::Field { target, field } => Some(LoopExpr::Field {
-                target: Box::new(self.lower_loop_expr(target)?),
+                target: Box::new(self.optimize_loop_expr(target)?),
                 field: self.push_name(field),
             }),
             Expr::Index { target, index } => Some(LoopExpr::Index {
-                target: Box::new(self.lower_loop_expr(target)?),
-                index: Box::new(self.lower_loop_expr(index)?),
+                target: Box::new(self.optimize_loop_expr(target)?),
+                index: Box::new(self.optimize_loop_expr(index)?),
             }),
             Expr::Unary { op, expr } => Some(LoopExpr::Unary {
                 op: *op,
-                expr: Box::new(self.lower_loop_expr(expr)?),
+                expr: Box::new(self.optimize_loop_expr(expr)?),
             }),
             Expr::If {
                 condition,
                 then_block,
                 else_block,
             } => Some(LoopExpr::Conditional {
-                condition: Box::new(self.lower_loop_expr(condition)?),
-                then_expr: Box::new(self.lower_loop_expr(then_block)?),
-                else_expr: Box::new(self.lower_loop_expr(else_block)?),
+                condition: Box::new(self.optimize_loop_expr(condition)?),
+                then_expr: Box::new(self.optimize_loop_expr(then_block)?),
+                else_expr: Box::new(self.optimize_loop_expr(else_block)?),
             }),
             Expr::Binary { left, op, right } => Some(LoopExpr::Binary {
-                left: Box::new(self.lower_loop_expr(left)?),
+                left: Box::new(self.optimize_loop_expr(left)?),
                 op: *op,
-                right: Box::new(self.lower_loop_expr(right)?),
+                right: Box::new(self.optimize_loop_expr(right)?),
             }),
             Expr::Block(_)
             | Expr::Assign { .. }

@@ -70,6 +70,9 @@ impl ExecutionHost for MockHost {
                 self.record_observation(value);
                 Ok(AbilityResult::Unit)
             }
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
             _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }

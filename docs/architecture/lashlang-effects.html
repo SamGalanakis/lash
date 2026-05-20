@@ -104,6 +104,23 @@ submit {
 }</code></pre>
         </div>
 
+        <div class="section" id="terminator-effects">
+          <div class="section-header">
+            <h2>Terminator Effects</h2>
+            <p><code>submit</code>, <code>finish</code>, and <code>fail</code> are ability operations too, not VM-local short-circuits. The VM hands the terminal value to <code>ExecutionHost::perform</code> as <code>AbilityOp::Submit</code>, <code>Finish</code>, or <code>Fail</code> before unwinding. Default handlers pass the value through unchanged; custom handlers can transform it, observe it, or record it for replay. The VM still enforces divergence — the handler may change the value but cannot prevent termination.</p>
+          </div>
+          <dl class="def-list">
+            <dt><code>AbilityOp::Submit(value)</code></dt>
+            <dd>Foreground program terminator. Runs once per fenced block when the program reaches <code>submit value</code>; the value returned by the handler becomes <code>ExecutionOutcome::Finished</code>. RLM's host bridge passes it through unchanged.</dd>
+            <dt><code>AbilityOp::Finish(value)</code></dt>
+            <dd>Process-mode terminator emitted by <code>finish value</code> inside a <code>process { ... }</code> block. The handler-returned value becomes the process's terminal output.</dd>
+            <dt><code>AbilityOp::Fail(value)</code></dt>
+            <dd>Process-mode failure path emitted by <code>fail value</code>. The handler may transform the value but the outcome stays on the failure path (<code>ExecutionOutcome::Failed</code>).</dd>
+            <dt>Handler errors</dt>
+            <dd>If a handler returns <code>Err</code> for a terminator op, the VM surfaces it as a <code>RuntimeError::ValueError</code> with the op name and the host's message. Returning <code>AbilityResult::Unit</code> errors with "<code>submit returned no value</code>" via the shared <code>into_value</code> helper.</dd>
+          </dl>
+        </div>
+
         <div class="section" id="fanout-with-await">
           <div class="section-header">
             <h2>Fanout With Await</h2>

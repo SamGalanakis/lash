@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, LocalProcessRegistry, PersistedSessionState,
-    PersistentRuntimeServices, PluginStack, ProcessRegistry, ProcessRuntimeHost, RuntimeCoreConfig,
-    RuntimeEffectController, RuntimePersistence, RuntimeServices, SessionError, SessionPolicy,
-    SessionStoreFactory, TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
+    EmbeddedRuntimeHost, LashRuntime, PersistedSessionState, PersistentRuntimeServices,
+    PluginStack, ProcessRegistry, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController,
+    RuntimePersistence, RuntimeServices, SessionError, SessionPolicy, SessionStoreFactory,
+    TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
@@ -73,7 +73,7 @@ impl EmbeddedRuntimeBuilder {
     }
 
     pub fn with_plugin_host(mut self, plugin_host: PluginHost) -> Self {
-        self.plugin_source = PluginSource::Host(plugin_host.with_processes());
+        self.plugin_source = PluginSource::Host(plugin_host);
         self
     }
 
@@ -84,7 +84,7 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_plugin_factories(mut self, factories: Vec<Arc<dyn PluginFactory>>) -> Self {
         let host = PluginHost::new(factories);
-        self.plugin_source = PluginSource::Host(host.with_processes());
+        self.plugin_source = PluginSource::Host(host);
         self
     }
 
@@ -256,6 +256,8 @@ impl EmbeddedRuntimeBuilder {
         match &self.plugin_source {
             PluginSource::Session(session) => Ok(Arc::clone(session)),
             PluginSource::Host(host) => host
+                .clone()
+                .with_processes_available(self.process_registry.is_some())
                 .isolated_registry()
                 .build_session(
                     state.session_id.clone(),
@@ -272,11 +274,8 @@ impl EmbeddedRuntimeBuilder {
         let plugins = self.resolve_plugins(&state)?;
         let embedded_host = EmbeddedRuntimeHost::new(self.core)
             .with_session_store_factory_option(self.session_store_factory.clone());
-        let process_registry = self
-            .process_registry
-            .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
-        match self.store {
-            Some(store) => {
+        match (self.store, self.process_registry) {
+            (Some(store), Some(process_registry)) => {
                 LashRuntime::from_persistent_background_state(
                     state.policy.clone(),
                     ProcessRuntimeHost::new(embedded_host, process_registry),
@@ -290,10 +289,37 @@ impl EmbeddedRuntimeBuilder {
                 )
                 .await
             }
-            None => {
+            (Some(store), None) => {
+                LashRuntime::from_persistent_embedded_state(
+                    state.policy.clone(),
+                    embedded_host,
+                    PersistentRuntimeServices::new_with_bridges(
+                        plugins,
+                        self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
+                        store,
+                    ),
+                    state,
+                )
+                .await
+            }
+            (None, Some(process_registry)) => {
                 LashRuntime::from_background_state(
                     state.policy.clone(),
                     ProcessRuntimeHost::new(embedded_host, process_registry),
+                    RuntimeServices::new_with_bridges(
+                        plugins,
+                        self.turn_injection_bridge,
+                        self.turn_input_injection_bridge,
+                    ),
+                    state,
+                )
+                .await
+            }
+            (None, None) => {
+                LashRuntime::from_embedded_state(
+                    state.policy.clone(),
+                    embedded_host,
                     RuntimeServices::new_with_bridges(
                         plugins,
                         self.turn_injection_bridge,

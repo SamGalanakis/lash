@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use lash_core::plugin::runtime_host::RuntimeSessionHost;
+use lash_core::plugin::{PluginError, runtime_host::RuntimeSessionHost};
 use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionCreateRequest, SessionPluginMode,
     SessionSnapshot, ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract,
@@ -62,6 +62,18 @@ impl RlmControlToolsProvider {
             .cancel_unreferenced_process_handles(&referenced_handles_vec)
             .await
         {
+            if referenced_handles_vec.is_empty() && process_support_unavailable(&err) {
+                return Ok(ContinueAsResult {
+                    value: json!({
+                        "ok": true,
+                        "session_id": successor_session_id.clone(),
+                        "task": task,
+                    }),
+                    control: ToolControl::Handoff {
+                        session_id: successor_session_id,
+                    },
+                });
+            }
             let _ = context
                 .sessions()
                 .close_session(&successor_session_id)
@@ -82,6 +94,14 @@ impl RlmControlToolsProvider {
             },
         })
     }
+}
+
+fn process_support_unavailable(err: &PluginError) -> bool {
+    matches!(
+        err,
+        PluginError::Session(message)
+            if message.contains("process") && message.contains("unavailable")
+    )
 }
 
 #[async_trait]
@@ -326,27 +346,24 @@ mod tests {
 
         async fn transfer_process_handles(
             &self,
-            from_session_id: &str,
-            to_session_id: &str,
-            handle_ids: &[String],
+            request: lash_core::ProcessTransferRequest<'_>,
         ) -> Result<(), PluginError> {
             self.transferred.lock().expect("transferred").push((
-                from_session_id.to_string(),
-                to_session_id.to_string(),
-                handle_ids.to_vec(),
+                request.from_session_id,
+                request.to_session_id,
+                request.process_ids,
             ));
             Ok(())
         }
 
         async fn cancel_unreferenced_process_handles(
             &self,
-            _session_id: &str,
-            keep_handle_ids: &[String],
+            request: lash_core::ProcessCleanupRequest<'_>,
         ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
             self.cleanup_keep
                 .lock()
                 .expect("cleanup keep")
-                .push(keep_handle_ids.to_vec());
+                .push(request.keep_process_ids);
             Ok(Vec::new())
         }
     }

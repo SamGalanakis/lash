@@ -202,6 +202,7 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
     LashCore::builder()
         .install_mode(ModePreset::standard())
         .provider(provider)
+        .process_registry(Arc::new(lash_core::LocalProcessRegistry::default()))
         .max_context_tokens(16_000)
         .build()
         .expect("core")

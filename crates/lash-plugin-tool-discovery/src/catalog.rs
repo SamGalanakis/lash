@@ -1,22 +1,21 @@
-use lash_core::ToolDefinition;
+use lash_core::CompactToolContract;
 use serde_json::{Value, json};
 
-use crate::common::{output_contract_field, round_score, string_field, string_vec};
+use crate::common::{round_score, string_vec};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CatalogTool {
-    pub(crate) raw: Value,
-    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) namespace: Option<String>,
     pub(crate) aliases: Vec<String>,
     pub(crate) searchable: bool,
+    pub(crate) contract: CompactToolContract,
 }
 
 impl CatalogTool {
     pub(crate) fn from_value(raw: Value) -> Option<Self> {
         let obj = raw.as_object()?;
-        let id = obj.get("id")?.as_str()?.to_string();
+        let _id = obj.get("id")?.as_str()?;
         let name = obj.get("name")?.as_str()?.to_string();
         let namespace = obj
             .get("namespace")
@@ -29,49 +28,41 @@ impl CatalogTool {
             .get("searchable")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        let contract = obj
+            .get("contract")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())?;
         Some(Self {
-            raw,
-            id,
             name,
             namespace,
             aliases,
             searchable,
+            contract,
         })
     }
 
     pub(crate) fn project(&self, score: f64, debug: bool) -> Value {
-        let definition = self.compact_definition();
-        let contract = definition.compact_contract();
         let mut out = serde_json::Map::new();
-        out.insert("name".to_string(), json!(contract.name));
-        out.insert("signature".to_string(), json!(contract.render_signature()));
-        if !contract.description.is_empty() {
-            out.insert("description".to_string(), json!(contract.description));
+        out.insert("name".to_string(), json!(self.contract.name.clone()));
+        out.insert(
+            "signature".to_string(),
+            json!(self.contract.render_signature()),
+        );
+        if !self.contract.description.is_empty() {
+            out.insert(
+                "description".to_string(),
+                json!(self.contract.description.clone()),
+            );
         }
-        if !contract.examples.is_empty() {
-            out.insert("examples".to_string(), json!(contract.examples));
+        if !self.contract.examples.is_empty() {
+            out.insert(
+                "examples".to_string(),
+                json!(self.contract.examples.clone()),
+            );
         }
         if debug {
             out.insert("score".to_string(), json!(round_score(score)));
         }
         Value::Object(out)
-    }
-
-    pub(crate) fn compact_definition(&self) -> ToolDefinition {
-        ToolDefinition::raw(
-            self.id.clone(),
-            self.name.clone(),
-            string_field(&self.raw, "description"),
-            self.raw
-                .get("input_schema")
-                .cloned()
-                .unwrap_or_else(ToolDefinition::default_input_schema),
-            self.raw
-                .get("output_schema")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        )
-        .with_output_contract(output_contract_field(self.raw.get("output_contract")))
-        .with_examples(string_vec(self.raw.get("examples")))
     }
 }

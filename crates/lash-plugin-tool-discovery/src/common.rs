@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
-use lash_core::ToolOutputContract;
 use serde_json::{Value, json};
 
 pub(crate) const DEFAULT_LIMIT: usize = 10;
@@ -70,25 +69,6 @@ pub(crate) fn exclude_filter(value: Option<&Value>) -> BTreeSet<String> {
             .collect(),
         _ => BTreeSet::new(),
     }
-}
-
-pub(crate) fn string_field(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-pub(crate) fn json_field(value: &Value, key: &str) -> String {
-    value.get(key).map(Value::to_string).unwrap_or_default()
-}
-
-pub(crate) fn output_contract_field(value: Option<&Value>) -> ToolOutputContract {
-    value
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
 }
 
 pub(crate) fn round_score(score: f64) -> f64 {

@@ -276,13 +276,12 @@ impl LashCoreBuilder {
         };
         let plugin_host = PluginHost::new(plugin_factories.clone());
 
-        let process_registry = self
-            .process_registry
-            .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
         let mut env_builder = RuntimeEnvironment::builder()
-            .with_plugin_host(Arc::new(plugin_host.with_processes()))
-            .with_process_registry(process_registry)
+            .with_plugin_host(Arc::new(plugin_host))
             .with_runtime_core_config(self.core);
+        if let Some(process_registry) = self.process_registry {
+            env_builder = env_builder.with_process_registry(process_registry);
+        }
         if let Some(residency) = self.residency {
             env_builder = env_builder.with_residency(residency);
         }

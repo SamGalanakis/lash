@@ -8,6 +8,7 @@ mod host;
 mod io;
 mod lifecycle;
 mod observation;
+mod process;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -81,18 +82,20 @@ pub use effect::{
 pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{RuntimeError, RuntimeErrorCode};
-pub use host::{
-    EmbeddedRuntimeHost, LashlangProcessToolBinding, LocalProcessRegistry, ProcessAwaitOutput,
-    ProcessCommandLineEventSpec, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessStartGrant,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector,
-    ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec, RuntimeCoreConfig,
-    lashlang_process_event_types,
-};
+pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
+pub use process::{
+    LashlangProcessToolBinding, LocalProcessRegistry, ProcessAwaitOutput, ProcessAwaitRequest,
+    ProcessCancelRequest, ProcessCleanupRequest, ProcessCommandLineEventSpec, ProcessEvent,
+    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+    ProcessId, ProcessInput, ProcessListRequest, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessRequestScope, ProcessStartGrant, ProcessStartRequest,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessTransferRequest,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec,
+    lashlang_process_event_types,
+};
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionState, SessionStateEnvelope};
 use state::{

@@ -12,6 +12,9 @@ pub enum AbilityOp {
     Await(Value),
     Cancel(Value),
     Print(Value),
+    Submit(Value),
+    Finish(Value),
+    Fail(Value),
     StartProcess(ProcessBlockStart),
     ProcessEvent(ProcessBlockEvent),
 }

@@ -12,7 +12,9 @@ use lashlang::{
 };
 use serde_json::Value;
 
-use crate::projection_codec::{flow_record_to_tool_args, flow_to_json_value, format_output_value};
+use crate::projection_transport::{
+    flow_record_to_tool_args, flow_to_json_value, format_output_value,
+};
 
 pub(super) struct HostBridge<'run> {
     ctx: ModeExecutionContext<'run>,
@@ -216,6 +218,9 @@ impl ExecutionHost for HostBridge<'_> {
             AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
                 "process events are only available inside lashlang process blocks",
             )),
+            AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
+                Ok(AbilityResult::Value(value))
+            }
         }
     }
 

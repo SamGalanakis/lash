@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
-use super::host::ProcessRegistry;
+use super::process::ProcessRegistry;
 use super::{RuntimeCoreConfig, RuntimeEffectController, TerminationPolicy};
 
 /// Where session nodes live at runtime.
@@ -56,8 +56,9 @@ pub enum Residency {
 /// across every `LashRuntime` it constructs.
 ///
 /// Cloning is cheap — every field is either `Arc`-wrapped or small.
-/// Default values preserve legacy behaviour so existing embedders can
-/// adopt incrementally.
+/// Default values build an embedded runtime without process lifecycle
+/// support. Hosts that want monitors, async handles, subagents, or
+/// process controls must provide a process registry explicitly.
 #[derive(Clone, Default)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
@@ -111,7 +112,7 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl RuntimeEnvironmentBuilder {
     pub fn with_plugin_host(mut self, host: Arc<crate::PluginHost>) -> Self {
-        self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_processes()));
+        self.env.plugin_host = Some(host);
         self
     }
 

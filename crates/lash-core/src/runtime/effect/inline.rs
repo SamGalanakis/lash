@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::PluginError;
-use crate::runtime::host::{ProcessAwaitOutput, ProcessRecord};
+use crate::{ProcessAwaitOutput, ProcessRecord};
 
 use super::controller::{RuntimeEffectController, RuntimeEffectControllerError};
 use super::envelope::{
@@ -29,7 +29,7 @@ impl RuntimeEffectController for InlineRuntimeEffectController {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        match envelope.command.clone() {
+        match envelope.command {
             RuntimeEffectCommand::Process { command } => {
                 let result = self
                     .execute_process_command(command, local_executor)
@@ -50,7 +50,8 @@ impl InlineRuntimeEffectController {
         execution_context: crate::ProcessExecutionContext,
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<ProcessRecord, PluginError> {
-        let record = registry.register_process(registration.clone()).await?;
+        let registration_for_record = registration.clone();
+        let record = registry.register_process(registration_for_record).await?;
         if let Some(grant) = grant {
             registry
                 .grant_handle(&grant.session_id, &registration.id, grant.descriptor)
@@ -62,7 +63,7 @@ impl InlineRuntimeEffectController {
         let registry_for_task = Arc::clone(&registry);
         let processes = Arc::clone(&self.processes);
         let process_id_for_task = process_id.clone();
-        let handle = tokio::spawn(async move {
+        let handle = tokio::spawn(Box::pin(async move {
             let future = runner.run_process(
                 registration,
                 execution_context,
@@ -84,7 +85,7 @@ impl InlineRuntimeEffectController {
                 .complete_process(&process_id_for_task, output)
                 .await;
             processes.lock().await.remove(&process_id_for_task);
-        });
+        }));
         self.processes
             .lock()
             .await
