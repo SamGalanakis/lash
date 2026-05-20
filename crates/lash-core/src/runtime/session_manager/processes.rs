@@ -499,6 +499,21 @@ impl RuntimeSessionManager {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
         let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
         let host = Arc::new(self.clone()) as Arc<dyn crate::plugin::RuntimeSessionHost>;
+        let tool_effect_metadata = registration
+            .metadata
+            .get("tool_effect_metadata")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let direct_completions = crate::DirectCompletionClient::runtime(
+            Arc::new(self.clone()),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
+                &self.current.host.core.effect_controller,
+            )),
+            tool_effect_metadata
+                .as_ref()
+                .and_then(|metadata: &crate::EffectInvocationMetadata| metadata.turn_id.clone()),
+            self.current.turn_lease.clone(),
+        );
         let dispatch = crate::tool_dispatch::ToolDispatchContext {
             plugins: Arc::clone(&self.current.plugins),
             tools: self.current.plugins.tools(),
@@ -510,9 +525,7 @@ impl RuntimeSessionManager {
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
-            direct_completions: crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable from background tool execution",
-            ),
+            direct_completions: direct_completions.clone(),
             tool_effect_metadata: None,
             session_id: self.current.session_id.clone(),
             event_tx,
@@ -520,19 +533,12 @@ impl RuntimeSessionManager {
             attachment_store: Arc::clone(&self.current.host.core.attachment_store),
             turn_context: crate::TurnContext::default(),
         };
-        let tool_effect_metadata = registration
-            .metadata
-            .get("tool_effect_metadata")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
         let tool_context = crate::ToolContext::new(
             self.current.session_id.clone(),
             host,
             crate::TurnContext::default(),
             Arc::clone(&self.current.host.core.attachment_store),
-            crate::DirectCompletionClient::unavailable(
-                "direct completions are unavailable from background tool execution",
-            ),
+            direct_completions,
             dispatch.effect_controller.clone_scoped(),
             Some(call.call_id.clone()),
         )

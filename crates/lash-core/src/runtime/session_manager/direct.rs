@@ -57,6 +57,7 @@ impl<'run> DirectCompletionClient<'run> {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(UnavailableDirectCompletionInvoker {
@@ -132,10 +133,12 @@ impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 struct UnavailableDirectCompletionInvoker {
     message: String,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl DirectCompletionInvoker for UnavailableDirectCompletionInvoker {
     fn direct_completion<'a>(
         &'a self,
