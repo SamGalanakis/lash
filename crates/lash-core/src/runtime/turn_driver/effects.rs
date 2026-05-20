@@ -94,6 +94,7 @@ impl RuntimeTurnDriver<'_> {
         code: &str,
         messages: crate::MessageSequence,
         mode_iteration: usize,
+        effect_metadata: crate::EffectInvocationMetadata,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
     ) -> Result<crate::ExecResponse, String> {
         let (session_event_tx, mut session_event_rx) = mpsc::channel::<SessionEvent>(100);
@@ -156,7 +157,6 @@ impl RuntimeTurnDriver<'_> {
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
                 effect_controller,
-                Arc::clone(&self.host.core.effect_controller),
                 direct_completions,
                 session_event_tx.clone(),
                 chronological_projection,
@@ -165,6 +165,7 @@ impl RuntimeTurnDriver<'_> {
             )
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
+        let context = context.with_effect_metadata(effect_metadata);
         let result = mode_session
             .execute_code(
                 context,

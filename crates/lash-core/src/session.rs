@@ -7,9 +7,9 @@ use crate::PluginMessage;
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, ToolProvider};
 
-pub(crate) mod async_handles;
 mod execution_context;
-mod monitor_handles;
+mod process_handle_tools;
+pub(crate) mod process_handles;
 mod tool_execution;
 
 pub use execution_context::ModeExecutionContext;
@@ -387,7 +387,6 @@ impl Session {
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-        detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
         direct_completions: crate::DirectCompletionClient<'run>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
@@ -401,6 +400,7 @@ impl Session {
             host,
             effect_controller,
             direct_completions: direct_completions.clone(),
+            tool_effect_metadata: None,
             session_id: session_id.to_string(),
             event_tx,
             turn_injection_bridge: self.turn_injection_bridge().clone(),
@@ -411,7 +411,6 @@ impl Session {
             session_id.to_string(),
             self.execution_mode.clone(),
             dispatch,
-            detached_effect_controller,
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             mode_extension,

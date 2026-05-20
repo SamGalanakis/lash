@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 use super::*;
 
@@ -12,13 +11,6 @@ pub struct SessionHandle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     pub policy: SessionPolicy,
-}
-
-pub struct SessionTurnHandle {
-    pub turn_id: String,
-    pub session_id: String,
-    pub policy: SessionPolicy,
-    pub events: mpsc::Receiver<crate::SessionEvent>,
 }
 
 pub type SessionSnapshot = PersistedSessionState;

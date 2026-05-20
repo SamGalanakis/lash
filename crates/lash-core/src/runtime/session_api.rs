@@ -106,14 +106,7 @@ impl LashRuntime {
     }
 
     pub async fn await_background_work(&mut self) -> Result<(), SessionError> {
-        let manager = self
-            .runtime_session_manager()
-            .map_err(|err| SessionError::Protocol(err.to_string()))?;
-        manager
-            .await_hidden_tasks(&self.state.session_id)
-            .await
-            .map_err(|err| SessionError::Protocol(format!("background task failed: {err}")))?;
-        if self.background_sync_needed.swap(false, Ordering::AcqRel) {
+        if self.process_sync_needed.swap(false, Ordering::AcqRel) {
             self.refresh_session_graph_from_store().await;
         }
         self.refresh_session_tool_surface().await?;
@@ -160,17 +153,28 @@ impl LashRuntime {
     pub(super) fn runtime_session_manager(
         &self,
     ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
-        Ok(Arc::new(RuntimeSessionManager::new(self, true, None)?))
+        Ok(Arc::new(RuntimeSessionManager::new(
+            self, true, None, None,
+        )?))
     }
 
     pub(super) fn runtime_session_manager_for_turn(
         &self,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
     ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
+        self.runtime_session_manager_for_turn_with_lease(child_usage_event_relay, None)
+    }
+
+    pub(super) fn runtime_session_manager_for_turn_with_lease(
+        &self,
+        child_usage_event_relay: Option<ChildUsageEventRelay>,
+        turn_lease: Option<crate::RuntimeTurnLease>,
+    ) -> Result<Arc<RuntimeSessionManager>, PluginActionInvokeError> {
         Ok(Arc::new(RuntimeSessionManager::new(
             self,
             false,
             child_usage_event_relay,
+            turn_lease,
         )?))
     }
 

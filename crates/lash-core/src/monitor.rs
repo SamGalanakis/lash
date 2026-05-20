@@ -74,15 +74,6 @@ pub struct MonitorStatus {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MonitorEvent {
-    pub sequence: u64,
-    pub monitor_id: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queue_turn_input: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MonitorSnapshot {
     #[serde(default)]
     pub revision: u64,
@@ -90,14 +81,4 @@ pub struct MonitorSnapshot {
     pub active_count: usize,
     #[serde(default)]
     pub monitors: Vec<MonitorStatus>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MonitorUpdateBatch {
-    #[serde(default)]
-    pub revision: u64,
-    #[serde(default)]
-    pub active_count: usize,
-    #[serde(default)]
-    pub events: Vec<MonitorEvent>,
 }

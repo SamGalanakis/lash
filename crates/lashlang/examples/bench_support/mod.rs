@@ -574,7 +574,7 @@ first = start call spawn_agent { task: "inspect auth", capability: "explore" }
 second = start call spawn_agent { task: "inspect api", capability: "explore" }
 llm = start call llm_query { prompt: "summarize benchmark", model: "gpt-5.4-mini" }
 monitor = start call monitor { command: "tail -f app.log", description: "app log", timeout_ms: 1000 }
-handles = (call list_async_handles {})?
+handles = (call list_process_handles {})?
 results = parallel {
   first: await first
   second: await second
@@ -612,7 +612,7 @@ submit {
         Scenario::ContinueAsSeedSurface => {
             r#"
 agent = start call spawn_agent { task: "inspect carry-forward", capability: "explore" }
-handles = (call list_async_handles {})?
+handles = (call list_process_handles {})?
 handoff = (call continue_as {
   task: "continue from compact state",
   seed: {
@@ -1302,10 +1302,10 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
         "monitor" => {
             let mut record = Record::default();
             record.insert(
-                "task_id".to_string(),
+                "process_id".to_string(),
                 Value::String("monitor:app-log".into()),
             );
-            record.insert("kind".to_string(), Value::String("monitor".into()));
+            record.insert("producer".to_string(), Value::String("monitor".into()));
             record.insert("state".to_string(), Value::String("running".into()));
             record.insert(
                 "description".to_string(),
@@ -1315,7 +1315,7 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
             );
             Ok(Value::Record(Arc::new(record)))
         }
-        "list_async_handles" => Ok(async_handles_record()),
+        "list_process_handles" => Ok(process_handles_record()),
         "continue_as" => Ok(continue_as_record(args)),
         _ => Err(unknown_tool(name)),
     }
@@ -1375,7 +1375,7 @@ fn count_handles(value: &Value) -> usize {
                     record.get("__handle__"),
                     record.get("id").or_else(|| record.get("tool"))
                 ),
-                (Some(Value::String(kind)), Some(_)) if kind.as_str() == "task"
+                (Some(Value::String(kind)), Some(_)) if kind.as_str() == "process"
             ) as usize;
             current + record.values().map(count_handles).sum::<usize>()
         }
@@ -1384,15 +1384,15 @@ fn count_handles(value: &Value) -> usize {
     }
 }
 
-fn async_handles_record() -> Value {
+fn process_handles_record() -> Value {
     let mut chunk_1 = Record::default();
-    chunk_1.insert("__handle__".to_string(), Value::String("task".into()));
+    chunk_1.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_1.insert("id".to_string(), Value::String("spawn-one".into()));
     chunk_1.insert("tool".to_string(), Value::String("spawn_agent".into()));
     chunk_1.insert("value".to_string(), spawn_agent_value("inspect auth"));
 
     let mut chunk_2 = Record::default();
-    chunk_2.insert("__handle__".to_string(), Value::String("task".into()));
+    chunk_2.insert("__handle__".to_string(), Value::String("process".into()));
     chunk_2.insert("id".to_string(), Value::String("spawn-two".into()));
     chunk_2.insert("tool".to_string(), Value::String("spawn_agent".into()));
     chunk_2.insert("value".to_string(), spawn_agent_value("inspect api"));
@@ -1428,7 +1428,7 @@ impl BenchHost {
         match name {
             "echo" | "llm_query" | "spawn_agent" | "monitor" | "continue_as" => {
                 let mut record = Record::default();
-                record.insert("__handle__".to_string(), Value::String("task".into()));
+                record.insert("__handle__".to_string(), Value::String("process".into()));
                 record.insert("tool".to_string(), Value::String(name.to_string().into()));
                 record.insert("value".to_string(), bench_call(name, args)?);
                 Ok(Value::Record(Arc::new(record)))

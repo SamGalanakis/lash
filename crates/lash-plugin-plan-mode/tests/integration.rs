@@ -15,7 +15,7 @@ use lash_core::{
     AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
     SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
     SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
-    ToolResult, TurnHookContext, TurnInput, TurnResultHookContext,
+    ToolResult, TurnHookContext, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
@@ -44,13 +44,6 @@ trait PlanTestHostCore: Send + Sync {
         request: SessionCreateRequest,
     ) -> Result<SessionHandle, PluginError>;
     async fn close_session(&self, session_id: &str) -> Result<(), PluginError>;
-    async fn start_turn_stream(
-        &self,
-        session_id: &str,
-        input: TurnInput,
-    ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError>;
-    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError>;
-    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError>;
     async fn prompt_user(
         &self,
         _request: lash_plugin_plan_mode::PlanModePromptRequest,
@@ -99,19 +92,6 @@ macro_rules! impl_plan_test_host {
             }
             async fn close_session(&self, session_id: &str) -> Result<(), PluginError> {
                 PlanTestHostCore::close_session(self, session_id).await
-            }
-            async fn start_turn_stream(
-                &self,
-                session_id: &str,
-                input: TurnInput,
-            ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
-                PlanTestHostCore::start_turn_stream(self, session_id, input).await
-            }
-            async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-                PlanTestHostCore::await_turn(self, turn_id).await
-            }
-            async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-                PlanTestHostCore::cancel_turn(self, turn_id).await
             }
         }
 
@@ -759,22 +739,6 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             self.base.close_session(session_id).await
         }
 
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            input: TurnInput,
-        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
-            self.base.start_turn_stream(session_id, input).await
-        }
-
-        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            self.base.await_turn(turn_id).await
-        }
-
-        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            self.base.cancel_turn(turn_id).await
-        }
-
         async fn prompt_user(
             &self,
             request: lash_plugin_plan_mode::PlanModePromptRequest,
@@ -915,25 +879,6 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
             base.close_session(session_id).await
         }
 
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            input: TurnInput,
-        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.start_turn_stream(session_id, input).await
-        }
-
-        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.await_turn(turn_id).await
-        }
-
-        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = mock_session_manager("run-session");
-            base.cancel_turn(turn_id).await
-        }
-
         async fn prompt_user(
             &self,
             request: lash_plugin_plan_mode::PlanModePromptRequest,
@@ -1040,25 +985,6 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
             base.close_session(session_id).await
         }
 
-        async fn start_turn_stream(
-            &self,
-            session_id: &str,
-            input: TurnInput,
-        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.start_turn_stream(session_id, input).await
-        }
-
-        async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            let base = mock_session_manager("run-session");
-            base.await_turn(turn_id).await
-        }
-
-        async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-            let base = mock_session_manager("run-session");
-            base.cancel_turn(turn_id).await
-        }
-
         async fn prompt_user(
             &self,
             _request: lash_plugin_plan_mode::PlanModePromptRequest,
@@ -1162,22 +1088,6 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
         }
 
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<lash_core::plugin::SessionTurnHandle, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
-        }
-
-        async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
     }

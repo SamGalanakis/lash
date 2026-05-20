@@ -73,22 +73,23 @@ use assembly::{
 use assembly::{classify_output_state, sanitize_assistant_output};
 pub use builder::EmbeddedRuntimeBuilder;
 pub use effect::{
-    BackgroundTaskLocalExecutor, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
-    InlineRuntimeEffectController, LlmAttachmentSpec, LlmRequestSpec, LocalBackgroundCancelPolicy,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, InlineRuntimeEffectController,
+    LlmAttachmentSpec, LlmRequestSpec, ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
 };
 pub(crate) use effect::{RuntimeEffectControllerHandle, tool_retry_sleep_metadata};
 pub use environment::{ParkedSession, Residency, RuntimeEnvironment, RuntimeEnvironmentBuilder};
 pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{
-    BackgroundCancelPolicy, BackgroundClosePolicy, BackgroundRuntimeHost, BackgroundTaskAttempt,
-    BackgroundTaskCompletion, BackgroundTaskEvent, BackgroundTaskExternalRef, BackgroundTaskFilter,
-    BackgroundTaskId, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskOutcome,
-    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope,
-    BackgroundTaskStartReceipt, BackgroundTaskState, BackgroundTaskUpdate, EmbeddedRuntimeHost,
-    LocalBackgroundTaskRegistry, RuntimeCoreConfig,
+    EmbeddedRuntimeHost, LocalProcessRegistry, ProcessAttempt, ProcessAwaitOutput,
+    ProcessCancelPolicy, ProcessClosePolicy, ProcessEvent, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExternalRef, ProcessFilter, ProcessId,
+    ProcessInput, ProcessOutcome, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessRuntimeHost, ProcessScope, ProcessStartReceipt, ProcessState, ProcessStateSpec,
+    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessTransfer,
+    ProcessTransferSpec, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec,
+    RuntimeCoreConfig,
 };
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
@@ -709,7 +710,7 @@ pub struct LashRuntime {
     /// (both per-turn and async maintenance). Entries accumulate here
     /// and are drained into `state.token_ledger` at turn-commit time.
     pub(in crate::runtime) shared_token_ledger: Arc<std::sync::Mutex<Vec<TokenLedgerEntry>>>,
-    pub(in crate::runtime) background_sync_needed: Arc<AtomicBool>,
+    pub(in crate::runtime) process_sync_needed: Arc<AtomicBool>,
     /// Seed `PluginMessage`s queued via
     /// `SessionCreateRequest::first_turn_input` for child sessions.
     /// Shared across `RuntimeSessionManager` instances built from this

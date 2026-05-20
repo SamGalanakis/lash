@@ -211,10 +211,10 @@ pub struct PluginSessionContext {
     pub standard_context_approach: Option<crate::StandardContextApproach>,
     pub tool_access: SessionToolAccess,
     pub subagent: Option<SubagentSessionContext>,
-    /// True when the host has a background task host. Plugins that
+    /// True when the host has a process host. Plugins that
     /// register background-managed tools should fail during plugin registration
     /// if this is false instead of surfacing tools that fail at call time.
-    pub background_tasks_available: bool,
+    pub processes_available: bool,
     /// Session id of the caller that created this one. `None` identifies
     /// a root session; any subagent / compaction / forked-child session
     /// carries the parent here so plugin factories can gate themselves

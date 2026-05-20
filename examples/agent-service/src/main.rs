@@ -6,7 +6,7 @@ use axum::Router;
 use axum::routing::get;
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::{InlineRuntimeEffectController, LocalBackgroundTaskRegistry},
+    advanced::{InlineRuntimeEffectController, LocalProcessRegistry},
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
@@ -124,7 +124,7 @@ async fn main() -> anyhow_like::Result<()> {
         AgentServiceDurability::Local => core_builder
             .advanced()
             .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
-            .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+            .process_registry(Arc::new(LocalProcessRegistry::default()))
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
@@ -132,7 +132,7 @@ async fn main() -> anyhow_like::Result<()> {
             {
                 core_builder
                     .advanced()
-                    .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+                    .process_registry(Arc::new(LocalProcessRegistry::default()))
                     .build()
                     .map_err(|err| err.to_string())?
             }

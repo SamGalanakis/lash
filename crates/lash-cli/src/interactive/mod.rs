@@ -767,8 +767,8 @@ pub(crate) async fn run_app(
                     timed_out = result.timed_out,
                     "applying UI snapshot"
                 );
-                if let Some(tasks) = result.background_tasks {
-                    app.update_background_tasks(tasks);
+                if let Some(tasks) = result.processes {
+                    app.update_processes(tasks);
                 }
                 for diagnostic in result.diagnostics {
                     tracing::warn!(%diagnostic, "UI snapshot diagnostic");

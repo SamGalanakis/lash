@@ -1,5 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -9,7 +7,7 @@ use crate::AttachmentStore;
 use crate::LlmRequest as CoreLlmRequest;
 use crate::LlmResponse;
 use crate::provider::ProviderHandle;
-use crate::runtime::host::BackgroundTaskCompletion;
+use crate::runtime::host::ProcessRegistry;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
 
@@ -17,47 +15,19 @@ use super::controller::RuntimeEffectControllerError;
 use super::envelope::{RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectOutcome};
 use super::trace::llm_call_error_from_transport;
 
-pub type BackgroundTaskFuture =
-    Pin<Box<dyn Future<Output = BackgroundTaskCompletion> + Send + 'static>>;
-
-/// Cancellation behavior available only to the inline/local background runner.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LocalBackgroundCancelPolicy {
-    #[default]
-    Cooperative,
-    LocalAbort,
+#[async_trait::async_trait]
+pub(crate) trait ProcessRunner: Send + Sync {
+    async fn run_process(
+        &self,
+        registration: crate::ProcessRegistration,
+        registry: Arc<dyn ProcessRegistry>,
+        cancellation: CancellationToken,
+    ) -> crate::ProcessAwaitOutput;
 }
 
-/// One-shot local executor for a background run container.
-pub struct BackgroundTaskLocalExecutor {
-    run: Box<dyn FnOnce(CancellationToken) -> BackgroundTaskFuture + Send + 'static>,
-    cancel_policy: LocalBackgroundCancelPolicy,
-}
-
-impl BackgroundTaskLocalExecutor {
-    pub fn new<F, Fut>(run: F) -> Self
-    where
-        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-        Fut: Future<Output = BackgroundTaskCompletion> + Send + 'static,
-    {
-        Self {
-            run: Box::new(move |cancellation| Box::pin(run(cancellation))),
-            cancel_policy: LocalBackgroundCancelPolicy::Cooperative,
-        }
-    }
-
-    pub fn with_cancel_policy(mut self, cancel_policy: LocalBackgroundCancelPolicy) -> Self {
-        self.cancel_policy = cancel_policy;
-        self
-    }
-
-    pub(super) fn cancel_policy(&self) -> LocalBackgroundCancelPolicy {
-        self.cancel_policy
-    }
-
-    pub(super) fn run(self, cancellation: CancellationToken) -> BackgroundTaskFuture {
-        (self.run)(cancellation)
-    }
+pub struct ProcessLocalExecution {
+    pub registry: Arc<dyn ProcessRegistry>,
+    pub(crate) runner: Option<Arc<dyn ProcessRunner>>,
 }
 
 pub(super) struct LocalTurnEffectRunner<'a, 'run> {
@@ -83,6 +53,7 @@ trait RuntimeEffectLocalRunner: Send {
 enum RuntimeEffectLocalExecutorState<'run> {
     Unavailable,
     SleepOnly { cancellation: CancellationToken },
+    Process(ProcessLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
 }
 
@@ -107,6 +78,27 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     pub fn sleep(cancellation: CancellationToken) -> Self {
         Self {
             state: RuntimeEffectLocalExecutorState::SleepOnly { cancellation },
+        }
+    }
+
+    pub(crate) fn process(
+        registry: Arc<dyn ProcessRegistry>,
+        runner: Option<Arc<dyn ProcessRunner>>,
+    ) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution {
+                registry,
+                runner,
+            }),
+        }
+    }
+
+    pub fn process_control(registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self {
+            state: RuntimeEffectLocalExecutorState::Process(ProcessLocalExecution {
+                registry,
+                runner: None,
+            }),
         }
     }
 
@@ -156,6 +148,23 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                     "no local executor is available for {}",
                     envelope.command.kind().as_str()
                 ),
+            )),
+            RuntimeEffectLocalExecutorState::Process(_) => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_mismatch",
+                format!(
+                    "process executor cannot execute {} command directly",
+                    envelope.command.kind().as_str()
+                ),
+            )),
+        }
+    }
+
+    pub fn into_process(self) -> Result<ProcessLocalExecution, RuntimeEffectControllerError> {
+        match self.state {
+            RuntimeEffectLocalExecutorState::Process(execution) => Ok(execution),
+            _ => Err(RuntimeEffectControllerError::new(
+                "runtime_effect_local_executor_unavailable",
+                "no process executor is available for process command",
             )),
         }
     }
@@ -209,7 +218,13 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 Ok(RuntimeEffectOutcome::ExecCode {
                     result: runner
                         .driver
-                        .run_exec_code(&code, messages, mode_iteration, &runner.event_tx)
+                        .run_exec_code(
+                            &code,
+                            messages,
+                            mode_iteration,
+                            envelope.metadata,
+                            &runner.event_tx,
+                        )
                         .await,
                 })
             }

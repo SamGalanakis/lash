@@ -41,7 +41,7 @@ struct McpEntry {
     config: McpServerConfig,
     /// `None` until [`McpEntry::connect`] succeeds. Once connected we keep
     /// the running service handle alive until the pool drops; the transport
-    /// owns its own background task internally.
+    /// owns its own process internally.
     service: tokio::sync::Mutex<Option<RunningService<RoleClient, ClientInfo>>>,
     /// Cached, prefixed tool definitions for this server, computed once after
     /// the `tools/list` handshake. Keys are the prefixed names
@@ -438,7 +438,7 @@ fn tool_result_from_rmcp(
 impl Drop for McpConnectionPool {
     fn drop(&mut self) {
         // We can't .await in Drop. The RunningService values inside each
-        // entry will cancel their background tasks when they're dropped
+        // entry will cancel their processes when they're dropped
         // (rmcp drops the transport, which kills the child process or
         // closes the HTTP connection). For a graceful shutdown, callers
         // should call `shutdown_all` themselves.

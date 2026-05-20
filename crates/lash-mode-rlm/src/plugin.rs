@@ -527,14 +527,14 @@ impl ModeSessionPlugin for RlmModeSession {
         let seed = crate::RlmSeed::from_tool_args(&args)
             .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
         let referenced_handles =
-            crate::control_tools::collect_seed_async_handle_ids(args.get("seed"));
+            crate::control_tools::collect_seed_process_handle_ids(args.get("seed"));
         let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
         ctx.host
-            .validate_async_handles_visible(&ctx.session_id, &referenced_handles_vec)
+            .validate_process_handles_visible(&ctx.session_id, &referenced_handles_vec)
             .await
             .map_err(|err| {
                 PluginError::Session(format!(
-                    "forced continue_as async handle validation failed: {err}"
+                    "forced continue_as process handle validation failed: {err}"
                 ))
             })?;
         let task = args
@@ -586,22 +586,22 @@ impl ModeSessionPlugin for RlmModeSession {
         .map_err(PluginError::Session)?;
         if let Err(err) = ctx
             .host
-            .transfer_async_handles(&ctx.session_id, &session_id, &referenced_handles_vec)
+            .transfer_process_handles(&ctx.session_id, &session_id, &referenced_handles_vec)
             .await
         {
             let _ = ctx.host.close_session(&session_id).await;
             return Err(PluginError::Session(format!(
-                "forced continue_as async handle transfer failed: {err}"
+                "forced continue_as process handle transfer failed: {err}"
             )));
         }
         if let Err(err) = ctx
             .host
-            .cancel_unreferenced_async_handles(&ctx.session_id, &referenced_handles_vec)
+            .cancel_unreferenced_process_handles(&ctx.session_id, &referenced_handles_vec)
             .await
         {
             let _ = ctx.host.close_session(&session_id).await;
             return Err(PluginError::Session(format!(
-                "forced continue_as async handle cleanup failed after successor creation: {err}"
+                "forced continue_as process handle cleanup failed after successor creation: {err}"
             )));
         }
         Ok(Some(ModeLlmCallAction::Handoff { session_id }))
@@ -737,7 +737,7 @@ async fn forced_continue_as_args(
 
 fn forced_continue_as_instruction(threshold: usize, observed_tokens: usize) -> String {
     format!(
-        "Context budget is above the forced continuation threshold ({observed_tokens} observed, threshold {threshold}). Produce fresh-context continuation arguments as JSON matching the provided schema. Set out the task at hand in `task`. Put only necessary state in `seed`, including only live async handles the successor must await. Live handles omitted from `seed` are not carried forward. Leave bulky logs, transcripts, raw command output, and repeated context behind. Prefer variable names, file paths, projected references, and compact summaries over copying large values. Omit `seed` when no extra state is needed."
+        "Context budget is above the forced continuation threshold ({observed_tokens} observed, threshold {threshold}). Produce fresh-context continuation arguments as JSON matching the provided schema. Set out the task at hand in `task`. Put only necessary state in `seed`, including only live process handles the successor must await. Live handles omitted from `seed` are not carried forward. Leave bulky logs, transcripts, raw command output, and repeated context behind. Prefer variable names, file paths, projected references, and compact summaries over copying large values. Omit `seed` when no extra state is needed."
     )
 }
 

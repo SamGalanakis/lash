@@ -35,7 +35,7 @@ use super::{
     eval_number_numeric_binary_value, eval_pure_expr, execute_compiled_format,
     execute_compiled_format_direct, execute_compiled_format_one_number_compact_direct,
     execute_integer_div_builtin, execute_intrinsic, execute_len_direct, execute_push_builtin_async,
-    execute_range_builtin, is_async_handle_record, is_truthy, is_truthy_async, iterable_values,
+    execute_range_builtin, is_process_handle_record, is_truthy, is_truthy_async, iterable_values,
     materialize_projected_async, materialize_value, range_bounds, range_bounds_async, read_field,
     read_field_direct, read_field_ref_direct, read_index, read_index_direct, success,
     unwrap_tool_result, unwrap_type_value,
@@ -2848,7 +2848,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
                     }
                     Value::List(values.into())
                 }
-                Value::Record(handles) if is_async_handle_record(&handles) => {
+                Value::Record(handles) if is_process_handle_record(&handles) => {
                     match self.host.await_handle(Value::Record(handles)).await {
                         Ok(value) => success(value),
                         Err(error) => error_value(error.to_string()),
@@ -2875,7 +2875,7 @@ impl<'a, H: ToolHost> Vm<'a, H> {
 
     async fn await_value_unwrap(&self, handle: Value) -> Result<Value, RuntimeError> {
         match handle {
-            Value::Record(handles) if is_async_handle_record(&handles) => self
+            Value::Record(handles) if is_process_handle_record(&handles) => self
                 .host
                 .await_handle(Value::Record(handles))
                 .await

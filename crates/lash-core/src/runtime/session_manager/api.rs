@@ -54,24 +54,14 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .close_session(&self.current, &self.usage, session_id)
             .await
     }
-    async fn start_turn_stream(
+    async fn start_turn(
         &self,
         session_id: &str,
         input: TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
+    ) -> Result<AssembledTurn, crate::PluginError> {
         self.managed
-            .start_turn_stream(&self.usage, session_id, input)
+            .start_turn(&self.current, &self.usage, session_id, input)
             .await
-    }
-
-    async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn, crate::PluginError> {
-        self.managed
-            .await_turn(&self.current, &self.usage, turn_id)
-            .await
-    }
-
-    async fn cancel_turn(&self, turn_id: &str) -> Result<(), crate::PluginError> {
-        self.managed.cancel_turn(turn_id).await
     }
     async fn inject_turn_input(
         &self,
@@ -81,90 +71,134 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         self.managed.inject_turn_input(session_id, input).await
     }
 
-    async fn spawn_hidden_task(
+    async fn start_process(
         &self,
         session_id: &str,
-        label: &str,
-        task: crate::plugin::PluginSessionTask,
-    ) -> Result<(), crate::PluginError> {
-        self.background
-            .spawn_hidden_task(&self.current, &self.managed, session_id, label, task)
-            .await
-    }
-
-    async fn await_hidden_tasks(&self, session_id: &str) -> Result<(), crate::PluginError> {
-        self.background
-            .await_hidden_tasks(&self.current, session_id)
-            .await
-    }
-
-    async fn start_background_task(
-        &self,
-        session_id: &str,
-        registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-        self.background
-            .start_background_task(
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .start_process(
                 &self.current,
                 &self.managed,
                 session_id,
                 registration,
-                executor,
+                Arc::new(self.clone()),
             )
             .await
     }
 
-    async fn await_background_task(
-        &self,
-        task_id: &str,
-    ) -> Result<crate::BackgroundTaskCompletion, crate::PluginError> {
-        self.background
-            .await_background_task(&self.current, task_id)
-            .await
-    }
-
-    async fn complete_background_task(
-        &self,
-        task_id: &str,
-        completion: crate::BackgroundTaskCompletion,
-    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-        self.background
-            .complete_background_task(&self.current, task_id, completion)
-            .await
-    }
-
-    async fn list_background_tasks(
+    async fn start_process_scoped(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
-        self.background
-            .list_background_tasks(&self.current, session_id)
+        registration: crate::ProcessRegistration,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .start_process_scoped(
+                &self.current,
+                &self.managed,
+                session_id,
+                registration,
+                Arc::new(self.clone()),
+                effect_metadata,
+                effect_controller,
+            )
             .await
     }
 
-    async fn cancel_background_task(
+    async fn await_process(
+        &self,
+        process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
+        self.processes
+            .await_process(&self.current, process_id)
+            .await
+    }
+
+    async fn await_process_scoped(
+        &self,
+        process_id: &str,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
+        self.processes
+            .await_process_scoped(
+                &self.current,
+                process_id,
+                effect_metadata,
+                effect_controller,
+            )
+            .await
+    }
+
+    async fn list_processes(
         &self,
         session_id: &str,
-        task_id: &str,
-    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-        self.background
-            .cancel_background_task(
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .list_processes(&self.current, session_id)
+            .await
+    }
+
+    async fn list_processes_scoped(
+        &self,
+        session_id: &str,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .list_processes_scoped(
+                &self.current,
+                session_id,
+                effect_metadata,
+                effect_controller,
+            )
+            .await
+    }
+
+    async fn cancel_process(
+        &self,
+        session_id: &str,
+        process_id: &str,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .cancel_process(
                 &self.current,
                 &self.managed,
                 Arc::new(self.clone()),
                 session_id,
-                task_id,
+                process_id,
             )
             .await
     }
 
-    async fn cancel_all_background_tasks(
+    async fn cancel_process_scoped(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
-        self.background
-            .cancel_all_background_tasks(
+        process_id: &str,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+        effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .cancel_process_scoped(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                process_id,
+                effect_metadata,
+                effect_controller,
+            )
+            .await
+    }
+
+    async fn cancel_all_processes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .cancel_all_processes(
                 &self.current,
                 &self.managed,
                 Arc::new(self.clone()),
@@ -173,24 +207,24 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn validate_async_handles_visible(
+    async fn validate_process_handles_visible(
         &self,
         session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), crate::PluginError> {
-        self.background
-            .validate_async_handles_visible(&self.current, &self.managed, session_id, handle_ids)
+        self.processes
+            .validate_process_handles_visible(&self.current, &self.managed, session_id, handle_ids)
             .await
     }
 
-    async fn transfer_async_handles(
+    async fn transfer_process_handles(
         &self,
         from_session_id: &str,
         to_session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), crate::PluginError> {
-        self.background
-            .transfer_async_handles(
+        self.processes
+            .transfer_process_handles(
                 &self.current,
                 &self.managed,
                 from_session_id,
@@ -200,13 +234,13 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .await
     }
 
-    async fn cancel_unreferenced_async_handles(
+    async fn cancel_unreferenced_process_handles(
         &self,
         session_id: &str,
         keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, crate::PluginError> {
-        self.background
-            .cancel_unreferenced_async_handles(
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .cancel_unreferenced_process_handles(
                 &self.current,
                 &self.managed,
                 Arc::new(self.clone()),
@@ -219,17 +253,8 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         &self,
         session_id: &str,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.background
+        self.processes
             .monitor_snapshot(&self.current, Arc::new(self.clone()), session_id)
-            .await
-    }
-
-    async fn take_monitor_updates(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::MonitorUpdateBatch, crate::PluginError> {
-        self.background
-            .take_monitor_updates(&self.current, Arc::new(self.clone()), session_id)
             .await
     }
 
@@ -238,7 +263,7 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         session_id: &str,
         spec: crate::MonitorSpec,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.background
+        self.processes
             .start_monitor(&self.current, Arc::new(self.clone()), session_id, spec)
             .await
     }
@@ -248,7 +273,7 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         session_id: &str,
         monitor_id: &str,
     ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.background
+        self.processes
             .stop_monitor(
                 &self.current,
                 Arc::new(self.clone()),
@@ -266,7 +291,7 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
             .append_session_nodes(
                 &self.managed,
                 &self.usage,
-                &self.background,
+                &self.processes,
                 session_id,
                 request,
             )

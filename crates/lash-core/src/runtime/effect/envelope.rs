@@ -2,8 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::CheckpointKind;
 use crate::plugin::PluginMessage;
-use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError, PendingToolCall};
-use crate::{ExecResponse, LlmResponse};
+use crate::sansio::{CompletedToolCall, ExecutionSurfaceSync, LlmCallError};
+use crate::{
+    ExecResponse, LlmResponse, ProcessAwaitOutput, ProcessFilter, ProcessRecord,
+    ProcessRegistration,
+};
 
 use super::controller::RuntimeEffectControllerError;
 use super::spec::{DirectRequestSpec, LlmRequestSpec};
@@ -25,6 +28,7 @@ pub enum RuntimeEffectKind {
     DirectCompletion,
     DirectLlmCompletion,
     ToolCall,
+    Process,
     ExecCode,
     Checkpoint,
     SyncExecutionSurface,
@@ -38,6 +42,7 @@ impl RuntimeEffectKind {
             Self::DirectCompletion => "direct_completion",
             Self::DirectLlmCompletion => "direct_llm_completion",
             Self::ToolCall => "tool_call",
+            Self::Process => "process",
             Self::ExecCode => "exec_code",
             Self::Checkpoint => "checkpoint",
             Self::SyncExecutionSurface => "sync_execution_surface",
@@ -101,7 +106,10 @@ pub enum RuntimeEffectCommand {
         usage_source: String,
     },
     ToolCall {
-        call: PendingToolCall,
+        call: crate::PreparedToolCall,
+    },
+    Process {
+        command: ProcessCommand,
     },
     ExecCode {
         code: String,
@@ -124,12 +132,62 @@ impl RuntimeEffectCommand {
             Self::DirectCompletion { .. } => RuntimeEffectKind::DirectCompletion,
             Self::DirectLlmCompletion { .. } => RuntimeEffectKind::DirectLlmCompletion,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,
             Self::Sleep { .. } => RuntimeEffectKind::Sleep,
         }
     }
+}
+
+/// Serializable operation against the process control plane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProcessCommand {
+    Start {
+        registration: ProcessRegistration,
+    },
+    Get {
+        process_id: String,
+    },
+    List {
+        filter: ProcessFilter,
+    },
+    Await {
+        process_id: String,
+    },
+    Cancel {
+        process_id: String,
+        reason: Option<String>,
+    },
+}
+
+impl ProcessCommand {
+    pub fn effect_id(&self) -> String {
+        match self {
+            Self::Start { registration } => format!("process:start:{}", registration.id),
+            Self::Get { process_id } => format!("process:get:{process_id}"),
+            Self::List { filter } => {
+                let digest = crate::stable_hash::stable_json_sha256_hex(filter)
+                    .unwrap_or_else(|_| "unhashable".to_string());
+                format!("process:list:{digest}")
+            }
+            Self::Await { process_id } => format!("process:await:{process_id}"),
+            Self::Cancel { process_id, .. } => format!("process:cancel:{process_id}"),
+        }
+    }
+}
+
+/// Serializable result of a process operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProcessEffectOutcome {
+    Start { record: ProcessRecord },
+    Get { record: Option<ProcessRecord> },
+    List { records: Vec<ProcessRecord> },
+    Await { output: ProcessAwaitOutput },
+    Cancel { record: ProcessRecord },
 }
 
 /// Serializable result of a runtime effect command.
@@ -148,6 +206,9 @@ pub enum RuntimeEffectOutcome {
     },
     ToolCall {
         result: CompletedToolCall,
+    },
+    Process {
+        result: ProcessEffectOutcome,
     },
     ExecCode {
         result: Result<ExecResponse, String>,
@@ -211,6 +272,16 @@ impl RuntimeEffectOutcome {
         }
     }
 
+    pub fn into_process(self) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
+        match self {
+            Self::Process { result } => Ok(result),
+            other => Err(RuntimeEffectControllerError::wrong_outcome(
+                RuntimeEffectKind::Process,
+                other.kind(),
+            )),
+        }
+    }
+
     pub fn into_exec_code(
         self,
     ) -> Result<Result<ExecResponse, String>, RuntimeEffectControllerError> {
@@ -256,6 +327,7 @@ impl RuntimeEffectOutcome {
             Self::DirectCompletion { .. } => RuntimeEffectKind::DirectCompletion,
             Self::DirectLlmCompletion { .. } => RuntimeEffectKind::DirectLlmCompletion,
             Self::ToolCall { .. } => RuntimeEffectKind::ToolCall,
+            Self::Process { .. } => RuntimeEffectKind::Process,
             Self::ExecCode { .. } => RuntimeEffectKind::ExecCode,
             Self::Checkpoint { .. } => RuntimeEffectKind::Checkpoint,
             Self::SyncExecutionSurface { .. } => RuntimeEffectKind::SyncExecutionSurface,

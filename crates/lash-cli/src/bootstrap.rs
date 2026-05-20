@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::config::LashConfig;
 use lash::advanced::ExecutionMode;
 use lash::plugins::{
-    BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginFactory,
+    BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginFactory,
 };
 use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
@@ -17,9 +17,7 @@ use lash::tools::{
 };
 use lash::tracing::TraceLevel;
 use lash::{PluginStack, SessionSpec};
-use lash_core::{
-    FileAttachmentStore, LocalBackgroundTaskRegistry, PromptLayer, SessionPolicy, ToolState,
-};
+use lash_core::{FileAttachmentStore, LocalProcessRegistry, PromptLayer, SessionPolicy, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -110,7 +108,7 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
     plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     plugin_stack.push(Arc::new(
@@ -589,7 +587,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
         trace_path,
         trace_level,
-        Arc::new(LocalBackgroundTaskRegistry::default()),
+        Arc::new(LocalProcessRegistry::default()),
     );
     let opened_session = runtime_factory
         .open(

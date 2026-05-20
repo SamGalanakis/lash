@@ -2,8 +2,8 @@
 
 use lash_core::plugin::PluginError;
 use lash_core::{
-    AssembledTurn, InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSpec,
-    SessionStartPoint, SessionToolAccess, SubagentSessionContext, ToolContext, ToolDefinition,
+    AssembledTurn, InputItem, ModeExtras, SessionCreateRequest, SessionPolicy, SessionSnapshot,
+    SessionSpec, SessionStartPoint, SessionToolAccess, SubagentSessionContext, ToolDefinition,
     ToolExecutionMode, ToolResult, ToolSurfaceContribution, TurnFinish, TurnInput, TurnOutcome,
     TurnStop,
 };
@@ -38,7 +38,8 @@ pub(crate) fn resolve_capability_spec(
 
 pub(crate) struct SpawnCreateRequestInput<'a> {
     pub(crate) registry: &'a CapabilityRegistry,
-    pub(crate) context: &'a ToolContext<'a>,
+    pub(crate) parent_session_id: &'a str,
+    pub(crate) current_snapshot: SessionSnapshot,
     pub(crate) session_spec: &'a SessionSpec,
     pub(crate) capability_name: &'a str,
     pub(crate) output_schema: Option<Value>,
@@ -53,7 +54,8 @@ pub(crate) async fn build_spawn_create_request(
 ) -> Result<SessionCreateRequest, String> {
     let SpawnCreateRequestInput {
         registry,
-        context,
+        parent_session_id,
+        current_snapshot,
         session_spec,
         capability_name,
         output_schema,
@@ -62,10 +64,6 @@ pub(crate) async fn build_spawn_create_request(
         originating_tool_call_id,
         configurator,
     } = input;
-    let current_snapshot = context
-        .session_snapshot()
-        .await
-        .map_err(|err| format!("failed to snapshot current session: {err}"))?;
     let mut policy = session_spec.resolve_against(&current_snapshot.policy);
     let spec = resolve_capability_spec(registry, &policy, capability_name)?;
     policy = spec.resolve_against(&policy);
@@ -103,7 +101,7 @@ pub(crate) async fn build_spawn_create_request(
         Vec::new()
     };
     let mut request = SessionCreateRequest::child(
-        context.session_id(),
+        parent_session_id,
         SessionStartPoint::Empty,
         policy,
         mode_extras,
@@ -113,7 +111,7 @@ pub(crate) async fn build_spawn_create_request(
     let child_policy = request.policy.as_ref().expect("child policy set").clone();
     configurator.configure(
         &SubagentSpawnContext {
-            parent_session_id: context.session_id(),
+            parent_session_id,
             capability: capability_name,
             parent_policy: &current_snapshot.policy,
             child_policy: &child_policy,
@@ -122,7 +120,7 @@ pub(crate) async fn build_spawn_create_request(
     )?;
     finalize_subagent_create_request(
         request,
-        context.session_id(),
+        parent_session_id,
         capability_name,
         parent_subagent,
         originating_tool_call_id,
@@ -358,37 +356,6 @@ pub(crate) fn task_result_value(turn: &AssembledTurn) -> Value {
         return json!(turn.assistant_output.safe_text.trim().to_string());
     }
     json!(turn.assistant_output.raw_text.trim().to_string())
-}
-
-pub(crate) fn task_terminal_state(
-    outcome: &Result<AssembledTurn, lash_core::PluginError>,
-) -> lash_core::BackgroundTaskState {
-    let Ok(turn) = outcome else {
-        return lash_core::BackgroundTaskState::Failed;
-    };
-    match &turn.outcome {
-        TurnOutcome::Finished(_) | TurnOutcome::Handoff { .. } => {
-            lash_core::BackgroundTaskState::Completed
-        }
-        TurnOutcome::Stopped(TurnStop::Cancelled) => lash_core::BackgroundTaskState::Cancelled,
-        TurnOutcome::Stopped(_) => lash_core::BackgroundTaskState::Failed,
-    }
-}
-
-pub(crate) fn terminal_error_message(outcome: &TurnOutcome) -> Option<String> {
-    if let TurnOutcome::Stopped(
-        TurnStop::SubmittedError { value } | TurnStop::ToolError { value, .. },
-    ) = outcome
-    {
-        return Some(
-            value
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("Subagent reported an error.")
-                .to_string(),
-        );
-    }
-    None
 }
 
 /// Wrap an `Ok`/`Err` result as a `ToolResult`. Used by both providers'

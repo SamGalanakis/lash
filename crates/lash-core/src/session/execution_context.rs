@@ -11,11 +11,11 @@ pub struct ModeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) execution_mode: crate::ExecutionMode,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
-    pub(super) detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
     turn_context: crate::TurnContext,
+    pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
 }
@@ -29,7 +29,6 @@ impl<'run> ModeExecutionContext<'run> {
         session_id: String,
         execution_mode: crate::ExecutionMode,
         dispatch: Arc<ToolDispatchContext<'run>>,
-        detached_effect_controller: Arc<dyn crate::RuntimeEffectController>,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
@@ -39,11 +38,11 @@ impl<'run> ModeExecutionContext<'run> {
             session_id,
             execution_mode,
             dispatch,
-            detached_effect_controller,
             attachment_store,
             chronological_projection,
             mode_extension,
             turn_context,
+            effect_metadata: None,
             turn_event_tx: None,
             cancellation_token: None,
         }
@@ -87,6 +86,14 @@ impl<'run> ModeExecutionContext<'run> {
 
     pub(crate) fn with_turn_event_sender(mut self, turn_event_tx: Sender<TurnActivity>) -> Self {
         self.turn_event_tx = Some(turn_event_tx);
+        self
+    }
+
+    pub(crate) fn with_effect_metadata(
+        mut self,
+        metadata: crate::EffectInvocationMetadata,
+    ) -> Self {
+        self.effect_metadata = Some(metadata);
         self
     }
 
@@ -160,6 +167,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -170,7 +178,6 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
-            Arc::new(crate::InlineRuntimeEffectController::default()),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,

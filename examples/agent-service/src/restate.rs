@@ -321,7 +321,7 @@ mod restate_tests {
     use crate::board::BoardState;
     use crate::db::AppDb;
     use crate::state::AgentServiceDurability;
-    use lash::advanced::LocalBackgroundTaskRegistry;
+    use lash::advanced::LocalProcessRegistry;
     use lash::{LashCore, ModeId, ModePreset};
     use lash_core::LlmOutputPart;
     use lash_core::llm::types::LlmResponse;
@@ -510,7 +510,7 @@ mod restate_tests {
                 data_dir.join("attachments"),
             )))
             .advanced()
-            .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+            .process_registry(Arc::new(LocalProcessRegistry::default()))
             .build()
             .expect("build test core");
         AppStateData::new(

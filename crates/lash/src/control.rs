@@ -290,8 +290,8 @@ impl SessionControl {
         Ok(state)
     }
 
-    async fn list_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
-        Ok(self.runtime.observe().list_background_tasks().await)
+    async fn list_processes(&self) -> Result<Vec<ProcessRecord>> {
+        Ok(self.runtime.observe().list_processes().await)
     }
 
     async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
@@ -303,24 +303,24 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn cancel_background_task(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
+    async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let manager = runtime.session_manager()?;
         manager
-            .cancel_background_task(&session_id, task_id)
+            .cancel_process(&session_id, process_id)
             .await
             .map_err(Into::into)
     }
 
-    async fn cancel_all_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
+    async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>> {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
         let manager = runtime.session_manager()?;
         manager
-            .cancel_all_background_tasks(&session_id)
+            .cancel_all_processes(&session_id)
             .await
             .map_err(Into::into)
     }
@@ -432,32 +432,16 @@ impl SessionControl {
             .map_err(Into::into)
     }
 
-    async fn start_child_turn(
-        &self,
-        session_id: &str,
-        input: TurnInput,
-    ) -> Result<SessionTurnHandle> {
-        let writer = self.runtime.writer();
-        let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
+    async fn start_child_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
+        let manager = {
+            let writer = self.runtime.writer();
+            let runtime = writer.lock().await;
+            runtime.session_manager()?
+        };
         manager
-            .start_turn_stream(session_id, input)
+            .start_turn(session_id, input)
             .await
             .map_err(Into::into)
-    }
-
-    async fn await_child_turn(&self, turn_id: &str) -> Result<AssembledTurn> {
-        let writer = self.runtime.writer();
-        let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
-        manager.await_turn(turn_id).await.map_err(Into::into)
-    }
-
-    async fn cancel_child_turn(&self, turn_id: &str) -> Result<()> {
-        let writer = self.runtime.writer();
-        let runtime = writer.lock().await;
-        let manager = runtime.session_manager()?;
-        manager.cancel_turn(turn_id).await.map_err(Into::into)
     }
 
     async fn close_child_session(&self, session_id: &str) -> Result<()> {
@@ -637,29 +621,29 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct BackgroundTasks {
+pub struct Processes {
     control: SessionControl,
 }
 
-impl BackgroundTasks {
+impl Processes {
     pub(crate) fn new(control: SessionControl) -> Self {
         Self { control }
     }
 
-    pub async fn list(&self) -> Result<Vec<BackgroundTaskRecord>> {
-        self.control.list_background_tasks().await
+    pub async fn list(&self) -> Result<Vec<ProcessRecord>> {
+        self.control.list_processes().await
     }
 
     pub async fn await_all(&self) -> Result<()> {
         self.control.await_background_work().await
     }
 
-    pub async fn cancel(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
-        self.control.cancel_background_task(task_id).await
+    pub async fn cancel(&self, process_id: &str) -> Result<ProcessRecord> {
+        self.control.cancel_process(process_id).await
     }
 
-    pub async fn cancel_all(&self) -> Result<Vec<BackgroundTaskRecord>> {
-        self.control.cancel_all_background_tasks().await
+    pub async fn cancel_all(&self) -> Result<Vec<ProcessRecord>> {
+        self.control.cancel_all_processes().await
     }
 }
 
@@ -723,20 +707,20 @@ impl StateControl {
         self.control.persist_current_state().await
     }
 
-    pub async fn list_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
-        self.control.list_background_tasks().await
+    pub async fn list_processes(&self) -> Result<Vec<ProcessRecord>> {
+        self.control.list_processes().await
     }
 
     pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
         self.control.session_manager().await
     }
 
-    pub async fn cancel_background_task(&self, task_id: &str) -> Result<BackgroundTaskRecord> {
-        self.control.cancel_background_task(task_id).await
+    pub async fn cancel_process(&self, process_id: &str) -> Result<ProcessRecord> {
+        self.control.cancel_process(process_id).await
     }
 
-    pub async fn cancel_all_background_tasks(&self) -> Result<Vec<BackgroundTaskRecord>> {
-        self.control.cancel_all_background_tasks().await
+    pub async fn cancel_all_processes(&self) -> Result<Vec<ProcessRecord>> {
+        self.control.cancel_all_processes().await
     }
 
     pub async fn snapshot_execution(&self) -> Result<Option<Vec<u8>>> {
@@ -777,20 +761,8 @@ impl ChildrenControl {
         self.control.take_first_turn_input(session_id).await
     }
 
-    pub async fn start_turn(
-        &self,
-        session_id: &str,
-        input: TurnInput,
-    ) -> Result<SessionTurnHandle> {
+    pub async fn start_turn(&self, session_id: &str, input: TurnInput) -> Result<AssembledTurn> {
         self.control.start_child_turn(session_id, input).await
-    }
-
-    pub async fn await_turn(&self, turn_id: &str) -> Result<AssembledTurn> {
-        self.control.await_child_turn(turn_id).await
-    }
-
-    pub async fn cancel_turn(&self, turn_id: &str) -> Result<()> {
-        self.control.cancel_child_turn(turn_id).await
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<()> {

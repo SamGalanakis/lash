@@ -17,9 +17,9 @@ use crate::provider::{
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, BackgroundTaskRegistry, ExecutionMode, ExecutionSummary,
-    OutputState, PersistedSessionState, ProviderOptions, RuntimeEffectController, SessionPolicy,
-    SessionStateEnvelope, TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
+    PersistedSessionState, ProcessRegistry, ProviderOptions, SessionPolicy, SessionStateEnvelope,
+    TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
 type CompletionFuture =
@@ -377,16 +377,15 @@ pub fn mock_assembled_turn(session_id: &str, summary: &str) -> AssembledTurn {
 
 /// Configurable mock for host capability traits. Tests override
 /// the snapshot, tool catalog, and turn outcome via the builder
-/// methods; mutations (`create_session`, `cancel_turn`, `close_session`)
+/// methods; mutations (`create_session`, `close_session`)
 /// are recorded so tests can assert against them.
 pub struct MockSessionManager {
     pub snapshot: SessionSnapshot,
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
     pub tool_registry: Option<crate::ToolRegistry>,
-    pub background: Arc<crate::LocalBackgroundTaskRegistry>,
+    pub process_registry: Arc<crate::LocalProcessRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
-    pub cancelled: Mutex<Vec<String>>,
     pub closed: Mutex<Vec<String>>,
 }
 
@@ -397,9 +396,8 @@ impl Default for MockSessionManager {
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,
-            background: Arc::new(crate::LocalBackgroundTaskRegistry::default()),
+            process_registry: Arc::new(crate::LocalProcessRegistry::default()),
             created: Mutex::new(Vec::new()),
-            cancelled: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
         }
     }
@@ -495,82 +493,65 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
             .push(session_id.to_string());
         Ok(())
     }
-    async fn start_turn_stream(
+    async fn start_turn(
         &self,
-        session_id: &str,
+        _session_id: &str,
         _input: TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok(crate::plugin::SessionTurnHandle {
-            turn_id: format!("{session_id}-turn"),
-            session_id: session_id.to_string(),
-            policy: mock_session_policy(),
-            events: rx,
-        })
-    }
-
-    async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
+    ) -> Result<AssembledTurn, PluginError> {
         Ok(self.turn.clone())
     }
 
-    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-        self.cancelled
-            .lock()
-            .expect("cancelled lock")
-            .push(turn_id.to_string());
-        Ok(())
-    }
-
-    async fn start_background_task(
+    async fn start_process(
         &self,
         _session_id: &str,
-        registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        self.background.register(registration.clone()).await?;
-        crate::InlineRuntimeEffectController::default()
-            .start_background_task(self.background.clone(), registration, executor)
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        let id = registration.id.clone();
+        self.process_registry.register(registration).await?;
+        self.process_registry
+            .complete(
+                &id,
+                crate::ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::success(
+                    serde_json::json!({
+                        "state": "completed"
+                    }),
+                )),
+            )
             .await
     }
 
-    async fn await_background_task(
+    async fn await_process(
         &self,
-        task_id: &str,
-    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
-        self.background.await_completion(task_id).await
+        process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
+        self.process_registry.await_process(process_id).await
     }
 
-    async fn complete_background_task(
-        &self,
-        task_id: &str,
-        completion: crate::BackgroundTaskCompletion,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        self.background.complete(task_id, completion).await
-    }
-
-    async fn list_background_tasks(
+    async fn list_processes(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
         Ok(self
-            .background
-            .list(crate::BackgroundTaskFilter {
+            .process_registry
+            .list(crate::ProcessFilter {
                 session_id: Some(session_id.to_string()),
-                kind: None,
+                producer: None,
+                tags: Vec::new(),
+                handle_visible: None,
                 include_terminal: true,
             })
             .await)
     }
 
-    async fn cancel_background_task(
+    async fn cancel_process(
         &self,
         _session_id: &str,
-        task_id: &str,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        process_id: &str,
+    ) -> Result<crate::ProcessRecord, PluginError> {
         crate::InlineRuntimeEffectController::default()
-            .request_background_task_cancel(
-                self.background.clone(),
-                task_id,
+            .request_process_cancel(
+                self.process_registry.clone(),
+                process_id,
                 Some("requested by test".to_string()),
             )
             .await
@@ -660,7 +641,7 @@ mod test_mode_fakes {
     /// `lash-mode-rlm` crates instead.
     pub fn test_mode_factories() -> Vec<Arc<dyn PluginFactory>> {
         vec![
-            Arc::new(crate::BuiltinTaskControlsPluginFactory::new()),
+            Arc::new(crate::BuiltinProcessControlsPluginFactory::new()),
             Arc::new(crate::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(TestModeFactory {
                 id: "mode_standard",

@@ -449,23 +449,78 @@ impl<'run> RuntimeTurnDriver<'run> {
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Vec<crate::sansio::CompletedToolCall>, RuntimeEffectControllerError> {
+        let (tool_event_tx, mut tool_event_rx) = tokio::sync::mpsc::channel::<SessionEvent>(64);
+        let runtime_event_tx = event_tx.clone();
+        let tool_event_forwarder = tokio::spawn(async move {
+            while let Some(event) = tool_event_rx.recv().await {
+                send_session_event(&runtime_event_tx, event).await;
+            }
+        });
+        let manager = self.session_manager.clone();
+        let effect_controller =
+            crate::runtime::RuntimeEffectControllerHandle::borrowed(self.effect_scope.controller());
+        let direct_completions = manager.direct_completion_client(
+            effect_controller.clone_scoped(),
+            Some(self.turn_id.clone()),
+            self.turn_lease.clone(),
+        );
+        let prepare_context = self
+            .session
+            .mode_execution_context(
+                &self.session_id,
+                manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                effect_controller,
+                direct_completions,
+                tool_event_tx.clone(),
+                Arc::new(crate::ChronologicalProjection::default()),
+                self.mode_extension.clone(),
+                self.turn_context.clone(),
+            )
+            .map_err(|err| {
+                RuntimeEffectControllerError::new("tool_surface_resolution_failed", err.to_string())
+            })?;
         let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
+        for (index, call) in calls.into_iter().enumerate() {
+            let call_id = call.call_id.clone();
+            let replay = call.replay.clone();
+            let prepared = match prepare_context.prepare_tool_call(call).await {
+                crate::tool_dispatch::ToolPreparationOutcome::Prepared(prepared) => prepared,
+                crate::tool_dispatch::ToolPreparationOutcome::Completed(outcome) => {
+                    let completed = prepare_context
+                        .complete_tool_call(
+                            index,
+                            call_id.clone(),
+                            replay,
+                            outcome,
+                            crate::TurnActivityId::new(format!("tool:{call_id}")),
+                        )
+                        .await
+                        .completed;
+                    results.push(completed);
+                    continue;
+                }
+            };
             let mut metadata =
                 self.turn_effect_metadata(machine, id, RuntimeEffectKind::ToolCall)?;
-            metadata.effect_id = format!("{}:{}", id.0, call.call_id);
-            metadata.idempotency_key = format!("{}:{}", metadata.idempotency_key, call.call_id);
+            metadata.effect_id = format!("{}:{}", id.0, prepared.call_id);
+            metadata.idempotency_key = format!("{}:{}", metadata.idempotency_key, prepared.call_id);
             let result = self
                 .execute_typed_turn_effect(
                     machine,
                     event_tx,
                     cancel,
-                    RuntimeEffectEnvelope::new(metadata, RuntimeEffectCommand::ToolCall { call }),
+                    RuntimeEffectEnvelope::new(
+                        metadata,
+                        RuntimeEffectCommand::ToolCall { call: prepared },
+                    ),
                     RuntimeEffectOutcome::into_tool_call,
                 )
                 .await?;
             results.push(result);
         }
+        drop(prepare_context);
+        drop(tool_event_tx);
+        let _ = tool_event_forwarder.await;
         Ok(results)
     }
 

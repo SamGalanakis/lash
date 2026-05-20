@@ -6,7 +6,7 @@ impl CurrentSessionCapability {
         &self,
         managed: &ManagedSessionCapability,
         usage: &UsageCapability,
-        background: &BackgroundTaskCapability,
+        background: &ProcessCapability,
         session_id: &str,
         request: crate::AppendSessionNodesRequest,
     ) -> Result<crate::AppendSessionNodesResult, crate::PluginError> {

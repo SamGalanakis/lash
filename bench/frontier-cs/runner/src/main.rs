@@ -674,14 +674,14 @@ async fn run_problem(
         .collect_session_events_with(sink_trait.as_ref())
         .await;
     let background_result = if args.await_background_work && turn_result.is_ok() {
-        session.background_tasks().await_all().await
+        session.processes().await_all().await
     } else {
         Ok(())
     };
-    let cancelled = session.background_tasks().cancel_all().await?;
+    let cancelled = session.processes().cancel_all().await?;
     if !cancelled.is_empty() {
         eprintln!(
-            "  cancelled {} background task(s) after {}/{}",
+            "  cancelled {} process(es) after {}/{}",
             cancelled.len(),
             problem.track,
             problem.problem_id
@@ -871,8 +871,8 @@ fn build_plugin_stack(execution_mode: ExecutionMode, args: &Args) -> PluginStack
     let mut stack = PluginStack::runtime();
     stack.push(Arc::new(llm_tools));
     stack.push(Arc::new(StaticPluginFactory::new(
-        "frontier_async_handles",
-        PluginSpec::new().with_tool_provider(Arc::new(FrontierAsyncHandlesTool)),
+        "frontier_process_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(FrontierProcessHandlesTool)),
     )));
     stack.push(Arc::new(
         SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
@@ -906,17 +906,17 @@ fn rlm_config() -> RlmModePluginConfig {
     }
 }
 
-struct FrontierAsyncHandlesTool;
+struct FrontierProcessHandlesTool;
 
 #[async_trait]
-impl ToolProvider for FrontierAsyncHandlesTool {
+impl ToolProvider for FrontierProcessHandlesTool {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![frontier_list_async_handles_tool_definition().manifest()]
+        vec![frontier_list_process_handles_tool_definition().manifest()]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "list_async_handles")
-            .then(|| Arc::new(frontier_list_async_handles_tool_definition().contract()))
+        (name == "list_process_handles")
+            .then(|| Arc::new(frontier_list_process_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -927,10 +927,10 @@ impl ToolProvider for FrontierAsyncHandlesTool {
     }
 }
 
-fn frontier_list_async_handles_tool_definition() -> ToolDefinition {
+fn frontier_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-            "list_async_handles",
-            "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
+            "list_process_handles",
+            "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
             ToolDefinition::default_input_schema(),
             json!({
                 "type": "object",
@@ -941,7 +941,7 @@ fn frontier_list_async_handles_tool_definition() -> ToolDefinition {
                 "required": ["monitor", "tool"]
             }),
         )
-        .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+        .with_examples(vec![r#"handles = (call list_process_handles {})?"#.into()])
         .with_execution_mode(ToolExecutionMode::Parallel)
 }
 

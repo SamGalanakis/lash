@@ -64,12 +64,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    BackgroundTaskCompletion, BackgroundTaskExternalRef, BackgroundTaskLocalExecutor,
-    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry,
-    BackgroundTaskStartReceipt, BackgroundTaskState, EffectInvocationMetadata, PluginError,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
-    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    EffectInvocationMetadata, PluginError, ProcessAwaitOutput, ProcessCommand,
+    ProcessEffectOutcome, ProcessExternalRef, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessStartReceipt, ProcessState, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -110,73 +109,73 @@ impl RestateEffectError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub struct RestateBackgroundTaskCancelRequest {
-    pub task_id: String,
+pub struct RestateProcessCancelRequest {
+    pub process_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
 #[async_trait::async_trait]
-pub trait RestateBackgroundTaskRunner: Send + Sync + 'static {
-    async fn run_background_task(
+pub trait RestateProcessRunner: Send + Sync + 'static {
+    async fn run_process(
         &self,
-        registration: BackgroundTaskRegistration,
-    ) -> Result<BackgroundTaskCompletion, PluginError>;
+        registration: ProcessRegistration,
+    ) -> Result<ProcessAwaitOutput, PluginError>;
 
-    async fn request_background_task_cancel(
+    async fn request_process_cancel(
         &self,
-        request: RestateBackgroundTaskCancelRequest,
+        request: RestateProcessCancelRequest,
     ) -> Result<(), PluginError>;
 }
 
 #[restate_sdk::workflow]
-pub trait LashBackgroundTaskWorkflow {
+pub trait LashProcessWorkflow {
     async fn run(
-        registration: Json<BackgroundTaskRegistration>,
-    ) -> HandlerResult<Json<BackgroundTaskCompletion>>;
+        registration: Json<ProcessRegistration>,
+    ) -> HandlerResult<Json<ProcessAwaitOutput>>;
 
     #[shared]
-    async fn cancel(request: Json<RestateBackgroundTaskCancelRequest>) -> HandlerResult<Json<()>>;
+    async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
 }
 
-pub struct LashBackgroundTaskWorkflowImpl<R> {
+pub struct LashProcessWorkflowImpl<R> {
     runner: Arc<R>,
 }
 
-impl<R> LashBackgroundTaskWorkflowImpl<R> {
+impl<R> LashProcessWorkflowImpl<R> {
     pub fn new(runner: Arc<R>) -> Self {
         Self { runner }
     }
 }
 
-impl<R> LashBackgroundTaskWorkflowImpl<R>
+impl<R> LashProcessWorkflowImpl<R>
 where
-    R: RestateBackgroundTaskRunner,
+    R: RestateProcessRunner,
 {
     async fn run_registration(
         &self,
-        registration: BackgroundTaskRegistration,
-    ) -> Result<BackgroundTaskCompletion, PluginError> {
-        self.runner.run_background_task(registration).await
+        registration: ProcessRegistration,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
+        self.runner.run_process(registration).await
     }
 
     async fn cancel_registration(
         &self,
-        request: RestateBackgroundTaskCancelRequest,
+        request: RestateProcessCancelRequest,
     ) -> Result<(), PluginError> {
-        self.runner.request_background_task_cancel(request).await
+        self.runner.request_process_cancel(request).await
     }
 }
 
-impl<R> LashBackgroundTaskWorkflow for LashBackgroundTaskWorkflowImpl<R>
+impl<R> LashProcessWorkflow for LashProcessWorkflowImpl<R>
 where
-    R: RestateBackgroundTaskRunner,
+    R: RestateProcessRunner,
 {
     async fn run(
         &self,
         _ctx: WorkflowContext<'_>,
-        Json(registration): Json<BackgroundTaskRegistration>,
-    ) -> HandlerResult<Json<BackgroundTaskCompletion>> {
+        Json(registration): Json<ProcessRegistration>,
+    ) -> HandlerResult<Json<ProcessAwaitOutput>> {
         self.run_registration(registration)
             .await
             .map(Json)
@@ -186,7 +185,7 @@ where
     async fn cancel(
         &self,
         _ctx: SharedWorkflowContext<'_>,
-        Json(request): Json<RestateBackgroundTaskCancelRequest>,
+        Json(request): Json<RestateProcessCancelRequest>,
     ) -> HandlerResult<Json<()>> {
         self.cancel_registration(request)
             .await
@@ -245,16 +244,16 @@ pub trait RestateControllerContext<'ctx>: Send + Sync + 'ctx {
         T: Serialize + DeserializeOwned + Send + 'static,
         Fut: Future<Output = T> + Send + 'run;
 
-    fn start_background_workflow<'run>(
+    fn start_process_workflow<'run>(
         &'run self,
-        registration: BackgroundTaskRegistration,
+        registration: ProcessRegistration,
     ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
 
-    fn request_background_workflow_cancel<'run>(
+    fn request_process_workflow_cancel<'run>(
         &'run self,
-        request: RestateBackgroundTaskCancelRequest,
+        request: RestateProcessCancelRequest,
     ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
     where
         'ctx: 'run;
@@ -298,9 +297,9 @@ macro_rules! impl_restate_controller_context {
                     Box::pin(run)
                 }
 
-                fn start_background_workflow<'run>(
+                fn start_process_workflow<'run>(
                     &'run self,
-                    registration: BackgroundTaskRegistration,
+                    registration: ProcessRegistration,
                 ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
@@ -308,44 +307,44 @@ macro_rules! impl_restate_controller_context {
                     let workflow_key = registration.id.clone();
                     let request: restate_sdk::context::Request<
                         '_,
-                        Json<BackgroundTaskRegistration>,
-                        Json<BackgroundTaskCompletion>,
+                        Json<ProcessRegistration>,
+                        Json<ProcessAwaitOutput>,
                     > = ContextClient::request(
                         self,
                         RequestTarget::workflow(
-                            "LashBackgroundTaskWorkflow",
+                            "LashProcessWorkflow",
                             workflow_key.clone(),
                             "run",
                         ),
                         Json(registration),
                     )
-                    .idempotency_key(format!("lash-background-task:{workflow_key}:run"));
+                    .idempotency_key(format!("lash-process:{workflow_key}:run"));
                     let handle = request.send();
                     Box::pin(async move { handle.invocation_id().await })
                 }
 
-                fn request_background_workflow_cancel<'run>(
+                fn request_process_workflow_cancel<'run>(
                     &'run self,
-                    request: RestateBackgroundTaskCancelRequest,
+                    request: RestateProcessCancelRequest,
                 ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
                 where
                     'ctx: 'run,
                 {
-                    let workflow_key = request.task_id.clone();
+                    let workflow_key = request.process_id.clone();
                     let request: restate_sdk::context::Request<
                         '_,
-                        Json<RestateBackgroundTaskCancelRequest>,
+                        Json<RestateProcessCancelRequest>,
                         Json<()>,
                     > = ContextClient::request(
                         self,
                         RequestTarget::workflow(
-                            "LashBackgroundTaskWorkflow",
+                            "LashProcessWorkflow",
                             workflow_key.clone(),
                             "cancel",
                         ),
                         Json(request),
                     )
-                    .idempotency_key(format!("lash-background-task:{workflow_key}:cancel"));
+                    .idempotency_key(format!("lash-process:{workflow_key}:cancel"));
                     let call = request.call();
                     Box::pin(async move {
                         let Json(()) = call.await?;
@@ -455,6 +454,27 @@ where
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        if let RuntimeEffectCommand::Process { command } = envelope.command.clone() {
+            let current_hash = envelope.stable_hash()?;
+            let metadata = envelope.metadata.clone();
+            let journal_hash = current_hash.clone();
+            let context = &self.context;
+            let journaled = self
+                .journal_effect(metadata, async move {
+                    let outcome = execute_restate_process_command(context, command, local_executor)
+                        .await
+                        .map(|result| RuntimeEffectOutcome::Process { result });
+                    JournaledRuntimeEffect {
+                        envelope_hash: journal_hash,
+                        outcome,
+                    }
+                })
+                .await
+                .map_err(|err| {
+                    RuntimeEffectControllerError::new("restate_effect_controller", err.to_string())
+                })?;
+            return validate_journaled_effect_hash(journaled, &current_hash)?;
+        }
         match restate_effect_execution(&envelope.command) {
             RestateEffectExecution::Timer => {
                 let RuntimeEffectCommand::Sleep { duration_ms } = &envelope.command else {
@@ -493,57 +513,70 @@ where
             }
         }
     }
-
-    async fn start_background_task(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        registration: BackgroundTaskRegistration,
-        _local_executor: BackgroundTaskLocalExecutor,
-    ) -> Result<BackgroundTaskRecord, PluginError> {
-        schedule_restate_background_task(registry, registration, &self.context).await
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<BackgroundTaskRecord, PluginError> {
-        let record = registry.request_cancel(task_id, reason.clone()).await?;
-        self.context
-            .request_background_workflow_cancel(RestateBackgroundTaskCancelRequest {
-                task_id: task_id.to_string(),
-                reason,
-            })
-            .await
-            .map_err(|err| {
-                RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
-            })?;
-        Ok(record)
-    }
 }
 
-async fn schedule_restate_background_task<'ctx, C>(
-    registry: Arc<dyn BackgroundTaskRegistry>,
-    registration: lash_core::BackgroundTaskRegistration,
+async fn execute_restate_process_command<'ctx, C>(
     context: &C,
-) -> Result<BackgroundTaskRecord, PluginError>
+    command: ProcessCommand,
+    local_executor: RuntimeEffectLocalExecutor<'_>,
+) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError>
 where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
-    let task_id = registration.id.clone();
+    let execution = local_executor.into_process()?;
+    let registry = execution.registry;
+    match command {
+        ProcessCommand::Start { registration } => {
+            let record = schedule_restate_process(registry, registration, context).await?;
+            Ok(ProcessEffectOutcome::Start { record })
+        }
+        ProcessCommand::Get { process_id } => {
+            let record = registry.get(&process_id).await;
+            Ok(ProcessEffectOutcome::Get { record })
+        }
+        ProcessCommand::List { filter } => {
+            let records = registry.list(filter).await;
+            Ok(ProcessEffectOutcome::List { records })
+        }
+        ProcessCommand::Await { process_id } => {
+            let output = registry.await_process(&process_id).await?;
+            Ok(ProcessEffectOutcome::Await { output })
+        }
+        ProcessCommand::Cancel { process_id, reason } => {
+            let record = registry.request_cancel(&process_id, reason.clone()).await?;
+            context
+                .request_process_workflow_cancel(RestateProcessCancelRequest { process_id, reason })
+                .await
+                .map_err(|err| {
+                    RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
+                })?;
+            Ok(ProcessEffectOutcome::Cancel { record })
+        }
+    }
+}
+
+async fn schedule_restate_process<'ctx, C>(
+    registry: Arc<dyn ProcessRegistry>,
+    registration: lash_core::ProcessRegistration,
+    context: &C,
+) -> Result<ProcessRecord, PluginError>
+where
+    C: RestateControllerContext<'ctx> + ?Sized,
+{
+    let process_id = registration.id.clone();
+    registry.register(registration.clone()).await?;
     let invocation_id = context
-        .start_background_workflow(registration)
+        .start_process_workflow(registration)
         .await
         .map_err(|err| {
             RestateEffectError::BackgroundScheduler(err.to_string()).into_plugin_error()
         })?;
-    let receipt = BackgroundTaskStartReceipt {
-        task_id: task_id.clone(),
-        state: BackgroundTaskState::Scheduled,
-        external_ref: Some(BackgroundTaskExternalRef {
+    let receipt = ProcessStartReceipt {
+        process_id: process_id.clone(),
+        state: ProcessState::Scheduled,
+        external_ref: Some(ProcessExternalRef {
             backend: "restate".to_string(),
-            id: format!("LashBackgroundTaskWorkflow/{task_id}"),
+            id: format!("LashProcessWorkflow/{process_id}"),
             metadata: Some(serde_json::json!({ "invocation_id": invocation_id })),
         }),
         message: Some("submitted to Restate".to_string()),
@@ -564,6 +597,7 @@ fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExec
         | RuntimeEffectCommand::DirectCompletion { .. }
         | RuntimeEffectCommand::DirectLlmCompletion { .. }
         | RuntimeEffectCommand::ToolCall { .. }
+        | RuntimeEffectCommand::Process { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionSurface { .. } => RestateEffectExecution::JournaledRun,
@@ -612,16 +646,11 @@ fn tracing_sleep_error(metadata: &EffectInvocationMetadata, err: &TerminalError)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::{StreamExt, stream};
     use http_body_util::{BodyExt, Empty};
-    use lash_core::{
-        BackgroundCancelPolicy, BackgroundTaskInput, BackgroundTaskKind, BackgroundTaskScope,
-        BackgroundTaskState,
-    };
+    use lash_core::{ProcessInput, ProcessRegistration, ProcessScope, ProcessState};
     use restate_sdk::prelude::Endpoint;
     use restate_sdk::service::Discoverable;
     use std::sync::Mutex;
-    use std::time::SystemTime;
 
     #[test]
     fn restate_effect_name_uses_lash_idempotency_key() {
@@ -695,13 +724,27 @@ mod tests {
         }
     }
 
-    fn pending_tool_call() -> lash_core::sansio::PendingToolCall {
-        lash_core::sansio::PendingToolCall {
+    fn prepared_tool_call() -> lash_core::PreparedToolCall {
+        lash_core::PreparedToolCall {
             call_id: "call-1".to_string(),
             tool_name: "tool".to_string(),
             args: serde_json::json!({}),
             replay: None,
+            prepared_payload: serde_json::Value::Null,
         }
+    }
+
+    fn external_registration(id: &str) -> ProcessRegistration {
+        ProcessRegistration::new(
+            id,
+            "test",
+            ProcessScope {
+                session_id: "session".to_string(),
+            },
+            ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+        )
     }
 
     #[test]
@@ -735,7 +778,7 @@ mod tests {
             ),
             (
                 RuntimeEffectCommand::ToolCall {
-                    call: pending_tool_call(),
+                    call: prepared_tool_call(),
                 },
                 RestateEffectExecution::JournaledRun,
             ),
@@ -802,9 +845,9 @@ mod tests {
             Box::pin(async move { Ok(Json(future.await)) })
         }
 
-        fn start_background_workflow<'run>(
+        fn start_process_workflow<'run>(
             &'run self,
-            registration: BackgroundTaskRegistration,
+            registration: ProcessRegistration,
         ) -> Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'run>>
         where
             'ctx: 'run,
@@ -816,9 +859,9 @@ mod tests {
             Box::pin(async move { Ok(format!("invocation-{}", registration.id)) })
         }
 
-        fn request_background_workflow_cancel<'run>(
+        fn request_process_workflow_cancel<'run>(
             &'run self,
-            request: RestateBackgroundTaskCancelRequest,
+            request: RestateProcessCancelRequest,
         ) -> Pin<Box<dyn Future<Output = Result<(), TerminalError>> + Send + 'run>>
         where
             'ctx: 'run,
@@ -826,7 +869,7 @@ mod tests {
             self.cancelled
                 .lock()
                 .expect("cancelled lock")
-                .push((request.task_id, request.reason));
+                .push((request.process_id, request.reason));
             Box::pin(async { Ok(()) })
         }
     }
@@ -894,49 +937,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restate_controller_schedules_background_workflow_without_running_executor() {
+    async fn restate_controller_schedules_process_workflow_without_running_executor() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(MemoryRegistry::default());
-        let registration = lash_core::BackgroundTaskRegistration {
-            id: "task-1".to_string(),
-            kind: BackgroundTaskKind::External,
-            producer: "test".to_string(),
-            scope: BackgroundTaskScope {
-                session_id: "session".to_string(),
-            },
-            child_session_id: None,
-            parent_task_id: None,
-            input: BackgroundTaskInput::External {
-                metadata: serde_json::Value::Null,
-            },
-            attempt: Default::default(),
-            cancel_policy: BackgroundCancelPolicy::Cooperative,
-            close_policy: Default::default(),
-        };
-        registry
-            .register(registration.clone())
-            .await
-            .expect("register");
-        let record = host
-            .start_background_task(
-                registry.clone(),
-                registration,
-                BackgroundTaskLocalExecutor::new(|_| async {
-                    panic!("Restate test controller should not run the local executor")
-                }),
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registration = external_registration("task-1");
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "background-start"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Start { registration },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry.clone()),
             )
             .await
             .expect("start");
+        let RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::Start { record },
+        } = outcome
+        else {
+            panic!("wrong outcome");
+        };
 
-        assert_eq!(record.state, BackgroundTaskState::Scheduled);
+        assert_eq!(record.state, ProcessState::Scheduled);
         assert_eq!(record.progress.as_deref(), Some("submitted to Restate"));
         assert_eq!(
             record
                 .external_ref
                 .as_ref()
                 .map(|external| external.id.as_str()),
-            Some("LashBackgroundTaskWorkflow/task-1")
+            Some("LashProcessWorkflow/task-1")
         );
         assert_eq!(
             registry
@@ -975,35 +1007,33 @@ mod tests {
     async fn restate_controller_cancel_requests_call_workflow_cancel() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(MemoryRegistry::default());
-        let registration = lash_core::BackgroundTaskRegistration {
-            id: "task-cancel".to_string(),
-            kind: BackgroundTaskKind::External,
-            producer: "test".to_string(),
-            scope: BackgroundTaskScope {
-                session_id: "session".to_string(),
-            },
-            child_session_id: None,
-            parent_task_id: None,
-            input: BackgroundTaskInput::External {
-                metadata: serde_json::Value::Null,
-            },
-            attempt: Default::default(),
-            cancel_policy: BackgroundCancelPolicy::Cooperative,
-            close_policy: Default::default(),
-        };
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registration = external_registration("task-cancel");
         registry.register(registration).await.expect("register");
 
-        let record = host
-            .request_background_task_cancel(
-                registry,
-                "task-cancel",
-                Some("user requested".to_string()),
+        let outcome = host
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "background-cancel"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Cancel {
+                            process_id: "task-cancel".to_string(),
+                            reason: Some("user requested".to_string()),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(registry),
             )
             .await
             .expect("cancel");
+        let RuntimeEffectOutcome::Process {
+            result: ProcessEffectOutcome::Cancel { record },
+        } = outcome
+        else {
+            panic!("wrong outcome");
+        };
 
-        assert_eq!(record.state, BackgroundTaskState::CancelRequested);
+        assert_eq!(record.state, ProcessState::CancelRequested);
         assert_eq!(
             context.cancelled.lock().expect("cancelled lock").as_slice(),
             &[(
@@ -1016,31 +1046,28 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         ran: Mutex<Vec<String>>,
-        cancelled: Mutex<Vec<RestateBackgroundTaskCancelRequest>>,
+        cancelled: Mutex<Vec<RestateProcessCancelRequest>>,
     }
 
     #[async_trait::async_trait]
-    impl RestateBackgroundTaskRunner for RecordingRunner {
-        async fn run_background_task(
+    impl RestateProcessRunner for RecordingRunner {
+        async fn run_process(
             &self,
-            registration: BackgroundTaskRegistration,
-        ) -> Result<BackgroundTaskCompletion, PluginError> {
+            registration: ProcessRegistration,
+        ) -> Result<ProcessAwaitOutput, PluginError> {
             self.ran
                 .lock()
                 .expect("runner ran lock")
                 .push(registration.id);
-            Ok(BackgroundTaskCompletion {
-                state: BackgroundTaskState::Completed,
-                summary: Some("done".to_string()),
-                output: Some(lash_core::ToolCallOutput::success(
-                    serde_json::json!({"ok": true}),
-                )),
+            Ok(ProcessAwaitOutput::Success {
+                value: serde_json::json!({"ok": true}),
+                control: None,
             })
         }
 
-        async fn request_background_task_cancel(
+        async fn request_process_cancel(
             &self,
-            request: RestateBackgroundTaskCancelRequest,
+            request: RestateProcessCancelRequest,
         ) -> Result<(), PluginError> {
             self.cancelled
                 .lock()
@@ -1055,13 +1082,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_task_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
+    async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         let runner = Arc::new(RecordingRunner::default());
-        let service = LashBackgroundTaskWorkflowImpl::new(runner).serve();
+        let service = LashProcessWorkflowImpl::new(runner).serve();
         let discovery = discover_service(&service);
         let endpoint = Endpoint::builder().bind(service).build();
 
-        assert_eq!(discovery.name.to_string(), "LashBackgroundTaskWorkflow");
+        assert_eq!(discovery.name.to_string(), "LashProcessWorkflow");
         assert_eq!(
             discovery.ty.to_string(),
             restate_sdk::discovery::ServiceType::Workflow.to_string()
@@ -1115,7 +1142,7 @@ mod tests {
             .as_array()
             .expect("services array")
             .iter()
-            .find(|service| service["name"] == "LashBackgroundTaskWorkflow")
+            .find(|service| service["name"] == "LashProcessWorkflow")
             .expect("workflow service");
         let handlers = workflow["handlers"].as_array().expect("handlers array");
         assert!(
@@ -1131,39 +1158,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_task_workflow_impl_runs_and_cancels_through_runner() {
+    async fn process_workflow_impl_runs_and_cancels_through_runner() {
         let runner = Arc::new(RecordingRunner::default());
-        let workflow = LashBackgroundTaskWorkflowImpl::new(runner.clone());
-        let registration = lash_core::BackgroundTaskRegistration {
-            id: "task-workflow".to_string(),
-            kind: BackgroundTaskKind::External,
-            producer: "test".to_string(),
-            scope: BackgroundTaskScope {
-                session_id: "session".to_string(),
-            },
-            child_session_id: None,
-            parent_task_id: None,
-            input: BackgroundTaskInput::External {
-                metadata: serde_json::Value::Null,
-            },
-            attempt: Default::default(),
-            cancel_policy: BackgroundCancelPolicy::Cooperative,
-            close_policy: Default::default(),
-        };
+        let workflow = LashProcessWorkflowImpl::new(runner.clone());
+        let registration = external_registration("task-workflow");
 
-        let completion = workflow
+        let output = workflow
             .run_registration(registration)
             .await
             .expect("workflow run");
         workflow
-            .cancel_registration(RestateBackgroundTaskCancelRequest {
-                task_id: "task-workflow".to_string(),
+            .cancel_registration(RestateProcessCancelRequest {
+                process_id: "task-workflow".to_string(),
                 reason: Some("stop".to_string()),
             })
             .await
             .expect("workflow cancel");
 
-        assert_eq!(completion.state, BackgroundTaskState::Completed);
+        assert!(matches!(output, ProcessAwaitOutput::Success { .. }));
         assert_eq!(
             runner.ran.lock().expect("runner ran lock").as_slice(),
             &["task-workflow".to_string()]
@@ -1174,179 +1186,10 @@ mod tests {
                 .lock()
                 .expect("runner cancelled lock")
                 .as_slice(),
-            &[RestateBackgroundTaskCancelRequest {
-                task_id: "task-workflow".to_string(),
+            &[RestateProcessCancelRequest {
+                process_id: "task-workflow".to_string(),
                 reason: Some("stop".to_string()),
             }]
         );
-    }
-
-    #[derive(Default)]
-    struct MemoryRegistry {
-        record: Mutex<Option<BackgroundTaskRecord>>,
-    }
-
-    fn record_from_registration(
-        registration: lash_core::BackgroundTaskRegistration,
-        state: BackgroundTaskState,
-    ) -> BackgroundTaskRecord {
-        let now = SystemTime::now();
-        BackgroundTaskRecord {
-            id: registration.id,
-            kind: registration.kind,
-            producer: registration.producer,
-            scope: registration.scope,
-            parent_task_id: registration.parent_task_id,
-            child_session_id: registration.child_session_id,
-            input: registration.input,
-            state,
-            cancel_policy: registration.cancel_policy,
-            close_policy: registration.close_policy,
-            attempt: registration.attempt,
-            external_ref: None,
-            progress: None,
-            result: None,
-            failure: None,
-            created_at: now,
-            updated_at: now,
-            completed_at: None,
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl BackgroundTaskRegistry for MemoryRegistry {
-        async fn register(
-            &self,
-            registration: lash_core::BackgroundTaskRegistration,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            let record = record_from_registration(registration, BackgroundTaskState::Pending);
-            *self.record.lock().expect("record lock") = Some(record.clone());
-            Ok(record)
-        }
-
-        async fn await_completion(
-            &self,
-            task_id: &str,
-        ) -> Result<lash_core::BackgroundTaskCompletion, PluginError> {
-            Err(PluginError::Session(format!(
-                "test registry has no completion for `{task_id}`"
-            )))
-        }
-
-        async fn update(
-            &self,
-            task_id: &str,
-            update: lash_core::BackgroundTaskUpdate,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            let mut guard = self.record.lock().expect("record lock");
-            let Some(record) = guard.as_mut() else {
-                return Err(PluginError::Session(format!("unknown task `{task_id}`")));
-            };
-            if record.id != task_id {
-                return Err(PluginError::Session(format!("unknown task `{task_id}`")));
-            }
-            if let Some(state) = update.state {
-                record.state = state;
-            }
-            if let Some(progress) = update.progress {
-                record.progress = Some(progress);
-            }
-            record.updated_at = SystemTime::now();
-            Ok(record.clone())
-        }
-
-        async fn mark_scheduled(
-            &self,
-            receipt: BackgroundTaskStartReceipt,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            let mut guard = self.record.lock().expect("record lock");
-            let Some(record) = guard.as_mut() else {
-                return Err(PluginError::Session(format!(
-                    "unknown task `{}`",
-                    receipt.task_id
-                )));
-            };
-            if record.id != receipt.task_id {
-                return Err(PluginError::Session(format!(
-                    "unknown task `{}`",
-                    receipt.task_id
-                )));
-            }
-            record.state = if receipt.state == BackgroundTaskState::Pending {
-                BackgroundTaskState::Scheduled
-            } else {
-                receipt.state
-            };
-            record.external_ref = receipt.external_ref;
-            record.progress = receipt.message;
-            record.updated_at = SystemTime::now();
-            Ok(record.clone())
-        }
-
-        async fn complete(
-            &self,
-            task_id: &str,
-            _outcome: lash_core::BackgroundTaskCompletion,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            self.update(
-                task_id,
-                lash_core::BackgroundTaskUpdate {
-                    state: Some(BackgroundTaskState::Completed),
-                    progress: None,
-                },
-            )
-            .await
-        }
-
-        async fn request_cancel(
-            &self,
-            task_id: &str,
-            _reason: Option<String>,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            self.update(
-                task_id,
-                lash_core::BackgroundTaskUpdate {
-                    state: Some(BackgroundTaskState::CancelRequested),
-                    progress: None,
-                },
-            )
-            .await
-        }
-
-        async fn get(&self, _task_id: &str) -> Option<BackgroundTaskRecord> {
-            self.record.lock().expect("record lock").clone()
-        }
-
-        async fn list(
-            &self,
-            _filter: lash_core::BackgroundTaskFilter,
-        ) -> Vec<BackgroundTaskRecord> {
-            self.record
-                .lock()
-                .expect("record lock")
-                .clone()
-                .into_iter()
-                .collect()
-        }
-
-        async fn transfer(
-            &self,
-            task_id: &str,
-            scope: BackgroundTaskScope,
-        ) -> Result<BackgroundTaskRecord, PluginError> {
-            let mut guard = self.record.lock().expect("record lock");
-            let Some(record) = guard.as_mut() else {
-                return Err(PluginError::Session(format!("unknown task `{task_id}`")));
-            };
-            record.scope = scope;
-            Ok(record.clone())
-        }
-
-        fn subscribe(
-            &self,
-            _filter: lash_core::BackgroundTaskFilter,
-        ) -> futures_util::stream::BoxStream<'static, lash_core::BackgroundTaskEvent> {
-            stream::empty().boxed()
-        }
     }
 }

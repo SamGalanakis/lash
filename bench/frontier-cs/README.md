@@ -45,9 +45,9 @@ The root and child sessions use the locked-down benchmark RLM surface:
 - `llm_query`
 - `spawn_agent` with `capability: "default"`
 - `continue_as`
-- `list_async_handles`
+- `list_process_handles`
 
-No shell, filesystem, web, MCP, monitor, or task-control tools are registered
+No shell, filesystem, web, MCP, monitor, or process-control tools are registered
 inside Lash. Evaluation happens after generation through Frontier-CS.
 
 ## Outputs

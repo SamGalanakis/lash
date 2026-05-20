@@ -214,7 +214,8 @@ fn live_activity_event(index: usize) -> TurnEvent {
             name: "monitor".to_string(),
             args: json!({ "command": "tail -f app.log", "description": "app log" }),
             output: ToolCallOutput::success(json!({
-                "task_id": "monitor:app-log",
+                "process_id": "monitor:app-log",
+                "producer": "monitor",
                 "state": "running",
                 "description": "app log"
             })),

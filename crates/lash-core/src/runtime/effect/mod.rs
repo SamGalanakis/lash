@@ -12,13 +12,12 @@ pub use controller::{
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
 };
 pub use envelope::{
-    EffectInvocationMetadata, EffectOrigin, RuntimeEffectCommand, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectOutcome,
+    EffectInvocationMetadata, EffectOrigin, ProcessCommand, ProcessEffectOutcome,
+    RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
 };
 pub use inline::InlineRuntimeEffectController;
-pub use local::{
-    BackgroundTaskLocalExecutor, LocalBackgroundCancelPolicy, RuntimeEffectLocalExecutor,
-};
+pub(crate) use local::ProcessRunner;
+pub use local::RuntimeEffectLocalExecutor;
 pub use spec::{DirectRequestSpec, LlmAttachmentSpec, LlmRequestSpec};
 
 pub(crate) use controller::RuntimeEffectControllerHandle;
@@ -102,5 +101,66 @@ mod tests {
             envelope.metadata.idempotency_key
         );
         assert_eq!(decoded.command.kind(), RuntimeEffectKind::DirectCompletion);
+    }
+
+    #[test]
+    fn process_effect_envelope_round_trips_prepared_tool_call() {
+        let registration = crate::ProcessRegistration::new(
+            "call-123",
+            "echo",
+            crate::ProcessScope {
+                session_id: "session".to_string(),
+            },
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall {
+                    call_id: "call-123".to_string(),
+                    tool_name: "echo".to_string(),
+                    args: serde_json::json!({"value": "hi"}),
+                    replay: None,
+                    prepared_payload: serde_json::json!({"context": "prepared"}),
+                },
+            },
+        );
+        let metadata = EffectInvocationMetadata {
+            session_id: "session".to_string(),
+            origin: EffectOrigin::Turn,
+            turn_id: Some("turn".to_string()),
+            turn_index: Some(0),
+            mode_iteration: Some(0),
+            effect_id: "process:start:call-123".to_string(),
+            effect_kind: RuntimeEffectKind::Process,
+            idempotency_key: "session:turn:process:start:call-123".to_string(),
+            turn_checkpoint_hash: Some("0".repeat(64)),
+        };
+        let envelope = RuntimeEffectEnvelope::new(
+            metadata,
+            RuntimeEffectCommand::Process {
+                command: ProcessCommand::Start { registration },
+            },
+        );
+
+        let hash = envelope.stable_hash().expect("hash");
+        let decoded: RuntimeEffectEnvelope =
+            serde_json::from_str(&serde_json::to_string(&envelope).expect("serialize"))
+                .expect("decode");
+
+        assert_eq!(decoded.command.kind(), RuntimeEffectKind::Process);
+        assert_eq!(decoded.stable_hash().expect("decoded hash"), hash);
+        let RuntimeEffectCommand::Process {
+            command: ProcessCommand::Start { registration },
+        } = decoded.command
+        else {
+            panic!("wrong process command");
+        };
+        let crate::ProcessInput::ToolCall { call } = registration.input else {
+            panic!("wrong process input");
+        };
+        assert_eq!(call.call_id, "call-123");
+        assert_eq!(call.tool_name, "echo");
+        assert_eq!(call.args, serde_json::json!({"value": "hi"}));
+        assert_eq!(
+            call.prepared_payload,
+            serde_json::json!({"context": "prepared"})
+        );
     }
 }

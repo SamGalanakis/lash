@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use lash_core::{
-    BackgroundTaskKind, BackgroundTaskRecord, BackgroundTaskState, Message, MessageRole, PartKind,
-    PluginMessage, PromptUsage, TokenUsage, ToolCallRecord,
+    Message, MessageRole, PartKind, PluginMessage, ProcessRecord, ProcessState, PromptUsage,
+    TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -95,25 +95,25 @@ impl PlanDockState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BackgroundTaskView {
-    pub task_id: String,
-    pub kind: BackgroundTaskKind,
+pub struct ProcessView {
+    pub process_id: String,
+    pub producer: String,
     pub label: String,
-    pub state: BackgroundTaskState,
+    pub state: ProcessState,
     pub created_at: std::time::SystemTime,
     pub terminal_duration: Option<std::time::Duration>,
     pub transient_until: Option<std::time::Instant>,
 }
 
-impl BackgroundTaskView {
+impl ProcessView {
     fn from_status(
-        status: BackgroundTaskRecord,
+        status: ProcessRecord,
         terminal_duration: Option<std::time::Duration>,
         transient_until: Option<std::time::Instant>,
     ) -> Self {
         Self {
-            task_id: status.id.clone(),
-            kind: status.kind,
+            process_id: status.id.clone(),
+            producer: status.producer,
             label: status.id,
             state: status.state,
             created_at: status.created_at,
@@ -465,8 +465,8 @@ pub struct App {
     /// renders as a sticky dock between the history viewport and the
     /// input row instead of as an inline panel in the scroll.
     pub plan_dock: Option<PlanDockState>,
-    /// Snapshot of background tasks registered for this session.
-    pub background_tasks: Vec<BackgroundTaskView>,
+    /// Snapshot of processes registered for this session.
+    pub processes: Vec<ProcessView>,
     /// UI extension registry used for slash-command completion and host actions.
     ui_extensions: Arc<TuiExtensions>,
     /// Shared state for the lash-cli chrome UI extension. The scratch-tui
@@ -537,9 +537,9 @@ impl App {
             self.dirty = true;
         }
 
-        let before_tasks = self.background_tasks.len();
-        self.background_tasks.retain(BackgroundTaskView::is_visible);
-        if self.background_tasks.len() != before_tasks {
+        let before_tasks = self.processes.len();
+        self.processes.retain(ProcessView::is_visible);
+        if self.processes.len() != before_tasks {
             self.invalidate_height_cache();
             self.dirty = true;
         }
@@ -548,8 +548,8 @@ impl App {
         // events: the tick task wakes us up but `dirty` never flips, so
         // the second-floor `Mm Ss` reading sticks until the next event
         // (often tens of seconds for slow subagents). Re-mark dirty
-        // whenever we still have at least one visible background task.
-        if !self.background_tasks.is_empty() {
+        // whenever we still have at least one visible process.
+        if !self.processes.is_empty() {
             self.dirty = true;
         }
 
@@ -628,7 +628,7 @@ impl App {
                 .and_then(|cwd| crate::repo_status::detect_repo_status(&cwd)),
             plugin_mode_indicators: BTreeMap::new(),
             plan_dock: None,
-            background_tasks: Vec::new(),
+            processes: Vec::new(),
             ui_extensions: Arc::new(TuiExtensions::default()),
             chrome_state: Arc::new(Mutex::new(crate::chrome_ui::ChromeUiState::default())),
             cwd,
@@ -733,13 +733,13 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn update_background_tasks(&mut self, tasks: Vec<BackgroundTaskRecord>) {
+    pub fn update_processes(&mut self, tasks: Vec<ProcessRecord>) {
         let now = std::time::Instant::now();
-        let previous: HashMap<String, BackgroundTaskView> = self
-            .background_tasks
+        let previous: HashMap<String, ProcessView> = self
+            .processes
             .iter()
             .cloned()
-            .map(|task| (task.task_id.clone(), task))
+            .map(|task| (task.process_id.clone(), task))
             .collect();
         let mut next = Vec::new();
         for task in tasks {
@@ -758,15 +758,15 @@ impl App {
                 } else {
                     previous.get(&task.id).and_then(|item| item.transient_until)
                 };
-            next.push(BackgroundTaskView::from_status(
+            next.push(ProcessView::from_status(
                 task,
                 terminal_duration,
                 transient_until,
             ));
         }
-        next.retain(BackgroundTaskView::is_visible);
-        if self.background_tasks != next {
-            self.background_tasks = next;
+        next.retain(ProcessView::is_visible);
+        if self.processes != next {
+            self.processes = next;
             self.invalidate_height_cache();
             self.dirty = true;
         }

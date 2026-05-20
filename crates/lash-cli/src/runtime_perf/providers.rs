@@ -229,7 +229,7 @@ fn benchmark_echo_tool_definition() -> ToolDefinition {
 fn benchmark_slow_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "benchmark_slow",
-        "Sleep briefly before returning; used to profile async handle cancellation and await paths.",
+        "Sleep briefly before returning; used to profile process handle cancellation and await paths.",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -784,12 +784,12 @@ submit first.value
                 .to_string();
             text_profile(text)
         }
-        RuntimePerfScenario::RlmAsyncHandles => {
+        RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
 first = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
 second = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
 slow = start call benchmark_slow { value: "cancelled", delay_ms: 50 }
-live = (call list_async_handles {})?
+live = (call list_process_handles {})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?

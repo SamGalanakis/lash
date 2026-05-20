@@ -371,8 +371,8 @@ mod tests {
 
     use async_trait::async_trait;
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
-    use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
-    use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall, TurnInput};
+    use lash_core::plugin::{PluginError, SessionHandle};
+    use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall};
 
     #[derive(Default)]
     struct DirectCompletionManager {
@@ -408,24 +408,6 @@ mod tests {
         }
 
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<SessionTurnHandle, PluginError> {
-            Err(PluginError::Session("not used".to_string()))
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash_core::AssembledTurn, PluginError> {
-            Err(PluginError::Session("not used".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
     }

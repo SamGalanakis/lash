@@ -81,7 +81,7 @@ impl LashRuntime {
             managed_turns: Arc::new(Mutex::new(HashMap::new())),
             mode_turn_options,
             shared_token_ledger: Arc::new(std::sync::Mutex::new(Vec::new())),
-            background_sync_needed: Arc::new(AtomicBool::new(false)),
+            process_sync_needed: Arc::new(AtomicBool::new(false)),
             pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             turn_phase_probe: None,
         })
@@ -100,7 +100,7 @@ impl LashRuntime {
     /// Build a runtime for a host that supports background plugin work.
     pub async fn from_background_state(
         policy: SessionPolicy,
-        host: BackgroundRuntimeHost,
+        host: ProcessRuntimeHost,
         services: RuntimeServices,
         state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
@@ -120,7 +120,7 @@ impl LashRuntime {
     /// Build a runtime for a background-capable host with persistent store support.
     pub async fn from_persistent_background_state(
         policy: SessionPolicy,
-        host: BackgroundRuntimeHost,
+        host: ProcessRuntimeHost,
         services: PersistentRuntimeServices,
         state: PersistedSessionState,
     ) -> Result<Self, SessionError> {
@@ -187,24 +187,22 @@ impl LashRuntime {
                 crate::session::TurnInputInjectionBridge::new(),
                 store,
             );
-            match env.background_task_registry.as_ref() {
-                Some(executor) => {
-                    let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
-                    Self::from_persistent_background_state(policy, host, services, state).await?
-                }
-                None => {
-                    Self::from_persistent_embedded_state(policy, embedded, services, state).await?
-                }
-            }
+            let process_registry = env
+                .process_registry
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
+            let host = ProcessRuntimeHost::new(embedded, process_registry);
+            Self::from_persistent_background_state(policy, host, services, state).await?
         } else {
             let services = RuntimeServices::new(plugin_session);
-            match env.background_task_registry.as_ref() {
-                Some(executor) => {
-                    let host = BackgroundRuntimeHost::new(embedded, Arc::clone(executor));
-                    Self::from_background_state(policy, host, services, state).await?
-                }
-                None => Self::from_embedded_state(policy, embedded, services, state).await?,
-            }
+            let process_registry = env
+                .process_registry
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
+            let host = ProcessRuntimeHost::new(embedded, process_registry);
+            Self::from_background_state(policy, host, services, state).await?
         };
         Ok(runtime)
     }

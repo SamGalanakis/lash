@@ -2,12 +2,12 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 
 mod api;
-mod background;
 mod current;
 mod direct;
 mod graph;
 mod managed;
 mod monitor;
+mod processes;
 mod turns;
 mod usage;
 
@@ -46,7 +46,6 @@ impl CurrentSnapshot {
 
 pub(super) struct ManagedSessionTurn {
     pub(super) session_id: String,
-    pub(super) cancel: CancellationToken,
     pub(super) task: tokio::task::JoinHandle<Result<AssembledTurn, crate::PluginError>>,
 }
 
@@ -58,6 +57,7 @@ pub(in crate::runtime) struct CurrentSessionCapability {
     pub(in crate::runtime) host: RuntimeHost,
     plugins: Arc<crate::PluginSession>,
     store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
 #[derive(Clone)]
@@ -80,7 +80,7 @@ pub(in crate::runtime) struct UsageCapability {
     /// Maps child session_id → usage_source label.
     child_sources: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Tracks live child-turn usage already bubbled into the shared
-    /// token ledger so `await_turn` can reconcile the final turn usage
+    /// token ledger so child turn completion can reconcile final usage
     /// without double counting.
     child_turn_live_usage: Arc<std::sync::Mutex<HashMap<String, TokenUsage>>>,
     /// Optional relay for bubbling child-session token usage into the
@@ -93,7 +93,7 @@ pub(in crate::runtime) struct UsageCapability {
 }
 
 #[derive(Clone)]
-struct BackgroundTaskCapability {
+struct ProcessCapability {
     runtime_scope_id: Arc<str>,
     sync_needed: Arc<AtomicBool>,
 }
@@ -105,7 +105,7 @@ struct DirectCompletionCapability;
 pub(super) struct RuntimeSessionManager {
     current: CurrentSessionCapability,
     managed: ManagedSessionCapability,
-    background: BackgroundTaskCapability,
+    processes: ProcessCapability,
     usage: UsageCapability,
     direct: DirectCompletionCapability,
 }
@@ -139,6 +139,7 @@ impl CurrentSessionCapability {
         runtime: &LashRuntime,
         plugins: Arc<crate::PluginSession>,
         persist_usage_to_store: bool,
+        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Self {
         Self {
             session_id: runtime.state.session_id.clone(),
@@ -156,6 +157,7 @@ impl CurrentSessionCapability {
             host: runtime.host.clone(),
             plugins,
             store: runtime.services.store.clone(),
+            turn_lease,
         }
     }
 }
@@ -171,11 +173,11 @@ impl ManagedSessionCapability {
     }
 }
 
-impl BackgroundTaskCapability {
+impl ProcessCapability {
     fn new(runtime: &LashRuntime) -> Self {
         Self {
             runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-            sync_needed: Arc::clone(&runtime.background_sync_needed),
+            sync_needed: Arc::clone(&runtime.process_sync_needed),
         }
     }
 }
@@ -210,6 +212,7 @@ impl RuntimeSessionManager {
         runtime: &LashRuntime,
         persist_usage_to_store: bool,
         child_usage_event_relay: Option<ChildUsageEventRelay>,
+        turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<Self, PluginActionInvokeError> {
         let Some(session) = runtime.session.as_ref() else {
             return Err(PluginActionInvokeError::Unknown(
@@ -221,9 +224,10 @@ impl RuntimeSessionManager {
                 runtime,
                 Arc::clone(session.plugins()),
                 persist_usage_to_store,
+                turn_lease,
             ),
             managed: ManagedSessionCapability::new(runtime),
-            background: BackgroundTaskCapability::new(runtime),
+            processes: ProcessCapability::new(runtime),
             usage: UsageCapability::new(runtime, persist_usage_to_store, child_usage_event_relay),
             direct: DirectCompletionCapability,
         })

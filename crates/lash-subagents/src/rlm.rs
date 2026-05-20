@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    BackgroundTaskKind, BackgroundTaskRegistration, BackgroundTaskState, SessionSpec,
-    SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract,
-    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    PreparedToolCall, ProcessRegistration, SessionSpec, SubagentSessionContext,
+    ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract, ToolDefinition,
+    ToolExecutionMode, ToolManifest, ToolPrepareCall, ToolProvider, ToolResult,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::SubagentSessionConfigurator;
@@ -18,8 +19,8 @@ use crate::capability::CapabilityRegistry;
 use crate::rlm_support::{
     self, SpawnCreateRequestInput, build_spawn_create_request, capability_list_for_description,
     example_capability_name, finalise_tool_result, render_task_prompt, required_string,
-    spawn_agent_input_schema, task_result_value, task_terminal_state, terminal_error_message,
-    tool_definition, turn_input_for_task, unknown_capability_message,
+    spawn_agent_input_schema, task_result_value, tool_definition, turn_input_for_task,
+    unknown_capability_message,
 };
 
 pub(crate) struct RlmSubagentToolsProvider {
@@ -31,17 +32,40 @@ pub(crate) struct RlmSubagentToolsProvider {
 }
 
 impl RlmSubagentToolsProvider {
-    async fn spawn_agent(&self, args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
-        let task = required_string(args, "task")?;
-        let capability_name = capability_name_from_args(args, &self.registry)?;
+    async fn spawn_agent(&self, _args: &Value, context: &ToolContext<'_>) -> Result<Value, String> {
+        let prepared: PreparedSpawnAgent = context
+            .decode_prepared_payload()
+            .map_err(|err| format!("spawn_agent was not prepared correctly: {err}"))?;
+        run_child_session(context, prepared.create_request, prepared.turn_input).await
+    }
+
+    async fn prepare_spawn_agent(
+        &self,
+        args: &Value,
+        context: &lash_core::ToolPrepareContext,
+        call: lash_core::sansio::PendingToolCall,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let task =
+            required_string(args, "task").map_err(|err| ToolResult::err(serde_json::json!(err)))?;
+        let capability_name = capability_name_from_args(args, &self.registry)
+            .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
         if self.registry.get(&capability_name).is_none() {
-            return Err(unknown_capability_message(&capability_name, &self.registry));
+            return Err(ToolResult::err(serde_json::json!(
+                unknown_capability_message(&capability_name, &self.registry)
+            )));
         }
-        let output_schema = lash_llm_tools::parse_output_schema(args.get("output"))?;
-        let seed = lash_mode_rlm::RlmSeed::from_tool_args(args)?;
+        let output_schema = lash_llm_tools::parse_output_schema(args.get("output"))
+            .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
+        let seed = lash_mode_rlm::RlmSeed::from_tool_args(args)
+            .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
+        let current_snapshot = context
+            .session_snapshot()
+            .await
+            .map_err(|err| ToolResult::err(serde_json::json!(err.to_string())))?;
         let create_request = build_spawn_create_request(SpawnCreateRequestInput {
             registry: &self.registry,
-            context,
+            parent_session_id: context.session_id(),
+            current_snapshot,
             session_spec: &self.session_spec,
             capability_name: &capability_name,
             output_schema: output_schema.clone(),
@@ -50,10 +74,28 @@ impl RlmSubagentToolsProvider {
             originating_tool_call_id: context.tool_call_id(),
             configurator: self.configurator.as_ref(),
         })
-        .await?;
+        .await
+        .map_err(|err| ToolResult::err(serde_json::json!(err)))?;
         let turn_input = turn_input_for_task(render_task_prompt(&task, output_schema.as_ref()));
-        run_child_session(context, create_request, turn_input).await
+        let payload = serde_json::to_value(PreparedSpawnAgent {
+            create_request,
+            turn_input,
+        })
+        .map_err(|err| ToolResult::err(serde_json::json!(err.to_string())))?;
+        Ok(PreparedToolCall::from_parts(
+            call.call_id,
+            call.tool_name,
+            call.args,
+            call.replay,
+            payload,
+        ))
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreparedSpawnAgent {
+    create_request: lash_core::SessionCreateRequest,
+    turn_input: lash_core::TurnInput,
 }
 
 async fn run_child_session(
@@ -73,187 +115,58 @@ async fn run_child_session(
         .session_id
         .clone()
         .ok_or_else(|| "child session id is required".to_string())?;
-    let sessions = context.sessions();
-    let child_session = tokio::spawn(async move { sessions.create_session(create_request).await })
-        .await
-        .map_err(|err| format!("child session creation task failed: {err}"))?
-        .map_err(|err| format!("failed to create child session: {err}"))?;
-    let child_session_id = child_session.session_id;
-    let task_id = format!("subagent:{child_session_id}");
-    let mut task_create_request = lash_core::SessionCreateRequest::child(
-        context.session_id().to_string(),
-        lash_core::SessionStartPoint::Empty,
-        child_session.policy.clone(),
-        lash_core::ModeExtras::default(),
-        "subagent",
-    );
-    task_create_request.session_id = Some(child_session_id.clone());
-    let registration_input = lash_core::BackgroundTaskInput::SessionTurn {
-        create_request: Box::new(task_create_request),
+    let child_session_id = requested_child_session_id.clone();
+    let process_id = format!("subagent:{child_session_id}");
+    let registration_input = lash_core::ProcessInput::SessionTurn {
+        create_request: Box::new(create_request),
         turn_input: Box::new(turn_input.clone()),
         output_contract: lash_core::ToolOutputContract::from_input_schema("output", None),
     };
 
-    let task_sessions = context.sessions();
-    let executor_child_session_id = child_session_id.clone();
-    let executor_turn_input = turn_input.clone();
-    let executor = lash_core::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
-        let sessions = task_sessions.clone();
-        let turn = match sessions
-            .start_turn_stream(&executor_child_session_id, executor_turn_input)
-            .await
-        {
-            Ok(turn) => turn,
-            Err(err) => {
-                close_child_session(&sessions, &executor_child_session_id, None).await;
-                return lash_core::BackgroundTaskCompletion {
-                    state: BackgroundTaskState::Failed,
-                    summary: Some(format!("failed to start child turn: {err}")),
-                    output: Some(lash_core::ToolCallOutput::failure(
-                        lash_core::ToolFailure::tool(
-                            lash_core::ToolFailureClass::Execution,
-                            "subagent_start_failed",
-                            err.to_string(),
-                        ),
-                    )),
-                };
-            }
-        };
-        let turn_id = turn.turn_id.clone();
-        drop(turn.events);
-
-        let outcome = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                let _ = sessions.cancel_turn(&turn_id).await;
-                sessions.await_turn(&turn_id).await
-            }
-            outcome = sessions.await_turn(&turn_id) => outcome,
-        };
-        let terminal_state = if cancellation.is_cancelled()
-            && outcome
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.to_string().contains("unknown turn"))
-        {
-            BackgroundTaskState::Cancelled
-        } else {
-            task_terminal_state(&outcome)
-        };
-        close_child_session(&sessions, &executor_child_session_id, None).await;
-        lash_core::BackgroundTaskCompletion {
-            state: terminal_state,
-            summary: completion_summary(&outcome, terminal_state),
-            output: Some(output_from_child_outcome(&outcome, terminal_state)),
-        }
-    });
-
     if let Err(err) = context
-        .tasks()
-        .start_background_task(
-            BackgroundTaskRegistration::new(
-                task_id.clone(),
-                BackgroundTaskKind::SessionTurn,
+        .processes()
+        .start_process(
+            ProcessRegistration::new(
+                process_id.clone(),
                 "subagent",
-                lash_core::BackgroundTaskScope {
+                lash_core::ProcessScope {
                     session_id: context.session_id().to_string(),
                 },
                 registration_input,
             )
             .with_child_session_id(child_session_id.clone())
-            .with_close_policy(lash_core::BackgroundClosePolicy::Cancel)
-            .with_optional_parent_task_id(context.async_task_id().map(str::to_string)),
-            executor,
+            .with_tags(["subagent"])
+            .with_handle_visible(true)
+            .with_close_policy(lash_core::ProcessClosePolicy::Cancel)
+            .with_optional_parent_process_id(context.async_process_id().map(str::to_string)),
         )
         .await
     {
-        let _ = context.sessions().close_session(&child_session_id).await;
         return Err(format!(
-            "failed to register subagent background task for `{requested_child_session_id}`: {err}"
+            "failed to register subagent process for `{requested_child_session_id}`: {err}"
         ));
     }
 
     let completion = context
-        .tasks()
-        .await_background_task(&task_id)
+        .processes()
+        .await_process(&process_id)
         .await
         .map_err(|err| format!("subagent failed while executing its task: {err}"))?;
-    if completion.state == BackgroundTaskState::Cancelled {
-        return Err("spawn_agent was cancelled".to_string());
-    }
-    if completion.state == BackgroundTaskState::Failed {
-        return Err(completion
-            .summary
-            .unwrap_or_else(|| "subagent failed".to_string()));
-    }
     completion_value(completion)
 }
 
-async fn close_child_session(
-    sessions: &lash_core::ToolSessionControl,
-    child_session_id: &str,
-    turn_id: Option<&str>,
-) {
-    if let Some(turn_id) = turn_id {
-        let _ = sessions.cancel_turn(turn_id).await;
-        let _ = sessions.await_turn(turn_id).await;
-    }
-    let _ = sessions.close_session(child_session_id).await;
-}
-
-fn completion_summary(
-    outcome: &Result<lash_core::AssembledTurn, lash_core::PluginError>,
-    terminal_state: BackgroundTaskState,
-) -> Option<String> {
-    match outcome {
-        Ok(turn) if terminal_state == BackgroundTaskState::Failed => {
-            terminal_error_message(&turn.outcome).or_else(|| Some("subagent failed".to_string()))
+fn completion_value(output: lash_core::ProcessAwaitOutput) -> Result<Value, String> {
+    match output {
+        lash_core::ProcessAwaitOutput::Success { value, .. } => {
+            if let Some(turn_value) = value.get("turn") {
+                let turn = serde_json::from_value::<lash_core::AssembledTurn>(turn_value.clone())
+                    .map_err(|err| format!("invalid subagent turn output: {err}"))?;
+                return Ok(task_result_value(&turn));
+            }
+            Ok(value)
         }
-        Ok(_) => None,
-        Err(err) => Some(err.to_string()),
-    }
-}
-
-fn output_from_child_outcome(
-    outcome: &Result<lash_core::AssembledTurn, lash_core::PluginError>,
-    terminal_state: BackgroundTaskState,
-) -> lash_core::ToolCallOutput {
-    match outcome {
-        Ok(turn) if terminal_state == BackgroundTaskState::Completed => {
-            lash_core::ToolCallOutput::success(task_result_value(turn))
-        }
-        Ok(turn) if terminal_state == BackgroundTaskState::Cancelled => {
-            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
-                terminal_error_message(&turn.outcome)
-                    .unwrap_or_else(|| "spawn_agent was cancelled".to_string()),
-            ))
-        }
-        Ok(turn) => lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
-            lash_core::ToolFailureClass::Execution,
-            "subagent_failed",
-            terminal_error_message(&turn.outcome).unwrap_or_else(|| "subagent failed".to_string()),
-        )),
-        Err(err) if terminal_state == BackgroundTaskState::Cancelled => {
-            lash_core::ToolCallOutput::cancelled(lash_core::ToolCancellation::runtime(
-                err.to_string(),
-            ))
-        }
-        Err(err) => lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
-            lash_core::ToolFailureClass::Execution,
-            "subagent_failed",
-            err.to_string(),
-        )),
-    }
-}
-
-fn completion_value(completion: lash_core::BackgroundTaskCompletion) -> Result<Value, String> {
-    let output = completion
-        .output
-        .ok_or_else(|| "subagent completed without output".to_string())?;
-    match output.outcome {
-        lash_core::ToolCallOutcome::Success(value) => Ok(value.to_json_value()),
-        lash_core::ToolCallOutcome::Failure(failure) => Err(failure.message),
-        lash_core::ToolCallOutcome::Cancelled(cancellation) => Err(cancellation.message),
+        lash_core::ProcessAwaitOutput::Failure { message, .. } => Err(message),
+        lash_core::ProcessAwaitOutput::Cancelled { message, .. } => Err(message),
     }
 }
 
@@ -271,6 +184,19 @@ impl ToolProvider for RlmSubagentToolsProvider {
             .into_iter()
             .find(|tool| tool.name == name)
             .map(|tool| Arc::new(tool.contract()))
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        if call.pending.tool_name == "spawn_agent" {
+            let args = call.pending.args.clone();
+            self.prepare_spawn_agent(&args, call.context, call.pending)
+                .await
+        } else {
+            Ok(PreparedToolCall::identity(call.pending))
+        }
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -337,7 +263,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang async handle immediately. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
+        "Run a subagent and return its final result. Plain `call spawn_agent {{ ... }}` blocks until the child finishes. Use `start call spawn_agent {{ ... }}` for fan-out; it returns a generic lashlang process handle immediately. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
         \n\nA child can fail terminally with `call submit_error {{ reason: \"...\" }}`; this tool returns an error with that reason."
     );

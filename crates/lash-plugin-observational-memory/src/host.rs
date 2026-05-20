@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use lash_core::plugin::PluginError;
 use lash_core::plugin::runtime_host::RuntimeSessionHost;
-use lash_core::plugin::{HistoryError, PluginError};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectRequest,
     SessionAppendNode, SessionGraph,
@@ -47,14 +47,6 @@ impl<'a> OmRuntimeHost<'a> {
             .direct_completion(request, usage_source)
             .await
     }
-}
-
-pub(crate) async fn await_hidden_tasks_and_snapshot(
-    session_id: &str,
-    host: &Arc<dyn RuntimeSessionHost>,
-) -> Result<SessionGraph, HistoryError> {
-    host.await_hidden_tasks(session_id).await?;
-    Ok(host.snapshot_current().await?.session_graph)
 }
 
 async fn append_plugin_nodes(

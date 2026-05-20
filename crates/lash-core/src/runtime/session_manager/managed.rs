@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::host::{BackgroundRuntimeHost, EmbeddedRuntimeHost};
+use crate::runtime::host::{EmbeddedRuntimeHost, ProcessRuntimeHost};
 
 impl ManagedSessionCapability {
     pub(in crate::runtime::session_manager) fn build_runtime_state(
@@ -111,9 +111,9 @@ impl ManagedSessionCapability {
             }
             None => None,
         };
-        let mut runtime = match (&current.host.background_task_registry, &session_store) {
+        let mut runtime = match (&current.host.process_registry, &session_store) {
             (Some(executor), Some(store)) => {
-                let host = BackgroundRuntimeHost::new(
+                let host = ProcessRuntimeHost::new(
                     EmbeddedRuntimeHost {
                         core: current.host.core.clone(),
                         session_store_factory: current.host.session_store_factory.clone(),
@@ -129,7 +129,7 @@ impl ManagedSessionCapability {
                 .await
             }
             (Some(executor), None) => {
-                let host = BackgroundRuntimeHost::new(
+                let host = ProcessRuntimeHost::new(
                     EmbeddedRuntimeHost {
                         core: current.host.core.clone(),
                         session_store_factory: current.host.session_store_factory.clone(),

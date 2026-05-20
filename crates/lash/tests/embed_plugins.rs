@@ -8,6 +8,7 @@ use lash::plugins::{
 };
 use lash::tools::{ToolCall, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolResult};
 use lash::{EmbedError, LashCore, ModePreset, PluginBinding};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 fn assistant_prose(result: &lash::turn::TurnOutput) -> String {
@@ -28,7 +29,7 @@ struct TestPluginConfig {
     tool_seen: Arc<Mutex<Vec<String>>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TestTurnInput {
     label: String,
 }
@@ -111,10 +112,32 @@ impl ToolProvider for TestTools {
         (name == "typed_probe").then(|| Arc::new(typed_probe_definition().contract()))
     }
 
+    async fn prepare_tool_call(
+        &self,
+        call: lash::tools::ToolPrepareCall<'_>,
+    ) -> Result<lash::tools::PreparedToolCall, ToolResult> {
+        if call.pending.tool_name != "typed_probe" {
+            return Ok(lash::tools::PreparedToolCall::identity(call.pending));
+        }
+        let Some(input) = call.context.plugin_input::<TestTurnInput>(TestPlugin::ID) else {
+            return Err(ToolResult::err_fmt("missing typed input"));
+        };
+        let prepared_payload = serde_json::to_value(input)
+            .map_err(|err| ToolResult::err_fmt(format!("failed to prepare typed input: {err}")))?;
+        Ok(lash::tools::PreparedToolCall::from_parts(
+            call.pending.call_id,
+            call.pending.tool_name,
+            call.pending.args,
+            call.pending.replay,
+            prepared_payload,
+        ))
+    }
+
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         assert_eq!(call.name, "typed_probe");
-        let Some(input) = call.context.plugin_input::<TestTurnInput>(TestPlugin::ID) else {
-            return ToolResult::err_fmt("missing typed input");
+        let input = match call.context.decode_prepared_payload::<TestTurnInput>() {
+            Ok(input) => input,
+            Err(err) => return ToolResult::err_fmt(format!("missing prepared typed input: {err}")),
         };
         self.seen
             .lock()

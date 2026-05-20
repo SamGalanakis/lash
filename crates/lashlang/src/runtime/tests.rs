@@ -3020,7 +3020,7 @@ impl ToolHost for AsyncHost {
 
     async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
         let mut record = Record::default();
-        record.insert("__handle__".to_string(), Value::String("task".into()));
+        record.insert("__handle__".to_string(), Value::String("process".into()));
         record.insert("tool".to_string(), Value::String(name.into()));
         record.insert(
             "value".to_string(),
@@ -3042,7 +3042,7 @@ impl ToolHost for AsyncHost {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn async_tool_handles_can_be_started_awaited_and_cancelled() {
+async fn process_handles_can_be_started_awaited_and_cancelled() {
     let program = crate::parse(
         r#"
         handle = start call echo { value: "done" }
@@ -3093,7 +3093,7 @@ async fn sync_steps_resume_correctly_after_tool_effects() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn traced_async_tool_errors_keep_original_instruction_span() {
+async fn traced_started_tool_errors_keep_original_instruction_span() {
     let source = r#"
         before = 1
         value = (call err {})?

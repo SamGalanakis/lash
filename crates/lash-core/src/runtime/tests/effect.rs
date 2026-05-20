@@ -144,6 +144,10 @@ impl RuntimeEffectController for RecordingEffectController {
                     },
                 })
             }
+            RuntimeEffectCommand::Process { .. } => Err(RuntimeEffectControllerError::new(
+                "process_unexpected",
+                "recording effect controller does not execute processes",
+            )),
             RuntimeEffectCommand::Checkpoint { .. } => Ok(RuntimeEffectOutcome::Checkpoint {
                 result: Ok((Vec::new(), Vec::new())),
             }),
@@ -204,27 +208,6 @@ impl RuntimeEffectController for RecordingEffectController {
             }
         }
     }
-
-    async fn start_background_task(
-        &self,
-        _registry: Arc<dyn BackgroundTaskRegistry>,
-        registration: BackgroundTaskRegistration,
-        _local_executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        Err(crate::PluginError::Session(format!(
-            "recording controller cannot start background task `{}`",
-            registration.id
-        )))
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        registry.request_cancel(task_id, reason).await
-    }
 }
 
 #[derive(Default)]
@@ -243,28 +226,6 @@ impl RuntimeEffectController for DurableAttachmentRequiredController {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         local_executor.execute(envelope).await
     }
-
-    async fn start_background_task(
-        &self,
-        registry: Arc<dyn crate::BackgroundTaskRegistry>,
-        registration: crate::BackgroundTaskRegistration,
-        local_executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-        crate::InlineRuntimeEffectController::default()
-            .start_background_task(registry, registration, local_executor)
-            .await
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn crate::BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-        crate::InlineRuntimeEffectController::default()
-            .request_background_task_cancel(registry, task_id, reason)
-            .await
-    }
 }
 
 struct RejectingEffectController;
@@ -281,27 +242,6 @@ impl RuntimeEffectController for RejectingEffectController {
             format!("rejected {}", envelope.command.kind().as_str()),
         ))
     }
-
-    async fn start_background_task(
-        &self,
-        _registry: Arc<dyn BackgroundTaskRegistry>,
-        registration: BackgroundTaskRegistration,
-        _local_executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        Err(crate::PluginError::Session(format!(
-            "rejecting controller cannot start background task `{}`",
-            registration.id
-        )))
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        registry.request_cancel(task_id, reason).await
-    }
 }
 
 struct WrongOutcomeEffectController;
@@ -314,27 +254,6 @@ impl RuntimeEffectController for WrongOutcomeEffectController {
         _local_executor: crate::RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         Ok(RuntimeEffectOutcome::Sleep)
-    }
-
-    async fn start_background_task(
-        &self,
-        _registry: Arc<dyn BackgroundTaskRegistry>,
-        registration: BackgroundTaskRegistration,
-        _local_executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        Err(crate::PluginError::Session(format!(
-            "wrong outcome controller cannot start background task `{}`",
-            registration.id
-        )))
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-        registry.request_cancel(task_id, reason).await
     }
 }
 
@@ -476,28 +395,6 @@ async fn durable_controller_error_abandons_lease_and_preserves_resume_state() {
             }
             self.inner.execute_effect(envelope, local_executor).await
         }
-
-        async fn start_background_task(
-            &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
-            registration: BackgroundTaskRegistration,
-            local_executor: crate::BackgroundTaskLocalExecutor,
-        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-            self.inner
-                .start_background_task(registry, registration, local_executor)
-                .await
-        }
-
-        async fn request_background_task_cancel(
-            &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-            self.inner
-                .request_background_task_cancel(registry, task_id, reason)
-                .await
-        }
     }
 
     let recorder = RecordingEffectController::default();
@@ -606,28 +503,6 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
                 ));
             }
             self.inner.execute_effect(envelope, local_executor).await
-        }
-
-        async fn start_background_task(
-            &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
-            registration: BackgroundTaskRegistration,
-            local_executor: crate::BackgroundTaskLocalExecutor,
-        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-            self.inner
-                .start_background_task(registry, registration, local_executor)
-                .await
-        }
-
-        async fn request_background_task_cancel(
-            &self,
-            registry: Arc<dyn BackgroundTaskRegistry>,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<BackgroundTaskRecord, crate::PluginError> {
-            self.inner
-                .request_background_task_cancel(registry, task_id, reason)
-                .await
         }
     }
 

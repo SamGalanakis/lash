@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
-use super::host::BackgroundTaskRegistry;
+use super::host::ProcessRegistry;
 use super::{RuntimeCoreConfig, RuntimeEffectController, TerminationPolicy};
 
 /// Where session nodes live at runtime.
@@ -71,8 +71,8 @@ pub struct RuntimeEnvironment {
     // + `vacuum`.
     pub residency: Residency,
 
-    // Host-owned background task lifecycle and local execution support.
-    pub background_task_registry: Option<Arc<dyn BackgroundTaskRegistry>>,
+    // Host-owned process lifecycle and local execution support.
+    pub process_registry: Option<Arc<dyn ProcessRegistry>>,
 
     // Store factory used by managed child sessions created from runtimes
     // built with this environment.
@@ -111,11 +111,7 @@ pub struct RuntimeEnvironmentBuilder {
 
 impl RuntimeEnvironmentBuilder {
     pub fn with_plugin_host(mut self, host: Arc<crate::PluginHost>) -> Self {
-        self.env.plugin_host = Some(if self.env.background_task_registry.is_some() {
-            Arc::new(host.as_ref().clone().with_background_tasks())
-        } else {
-            host
-        });
+        self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_processes()));
         self
     }
 
@@ -124,13 +120,10 @@ impl RuntimeEnvironmentBuilder {
         self
     }
 
-    pub fn with_background_task_registry(
-        mut self,
-        background_task_registry: Arc<dyn BackgroundTaskRegistry>,
-    ) -> Self {
-        self.env.background_task_registry = Some(background_task_registry);
+    pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
+        self.env.process_registry = Some(process_registry);
         if let Some(host) = self.env.plugin_host.take() {
-            self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_background_tasks()));
+            self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_processes()));
         }
         self
     }

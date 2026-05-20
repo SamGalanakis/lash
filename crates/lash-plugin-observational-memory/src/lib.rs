@@ -124,20 +124,7 @@ async fn maybe_spawn_post_persist_memory_maintenance(
     if !should_run_async_maintenance(&config, &graph) {
         return Ok(());
     }
-
-    let session_id = ctx.session_id.clone();
-    let host = Arc::clone(&ctx.host);
-    host.spawn_hidden_task(
-        &session_id,
-        OBSERVATIONAL_MEMORY_PLUGIN_ID,
-        Box::pin(async move {
-            if let Err(err) = run_async_maintenance(config, graph, ctx).await {
-                tracing::warn!("observational-memory maintenance failed: {err}");
-            }
-            Ok(())
-        }),
-    )
-    .await
+    run_async_maintenance(config, graph, ctx).await
 }
 
 async fn run_async_maintenance(

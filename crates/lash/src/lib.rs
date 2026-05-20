@@ -17,9 +17,7 @@ mod tests;
 pub mod turn;
 pub mod usage;
 
-pub use crate::control::{
-    AdvancedToolsControl, BackgroundTasks, Handoffs, PluginActions, ToolsControl,
-};
+pub use crate::control::{AdvancedToolsControl, Handoffs, PluginActions, Processes, ToolsControl};
 pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset, ModelSelection};
@@ -38,11 +36,11 @@ pub use lash_core::{
 
 pub mod prelude {
     pub use crate::{
-        AdvancedLashCoreBuilder, AdvancedToolsControl, BackgroundTasks, EmbedError,
-        FollowedTurnResult, Handoffs, InputItem, LashCore, LashCoreBuilder, LashSession, ModeId,
-        ModePreset, ObservableSession, PluginActions, PluginBinding, PluginStack, Result,
-        ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder,
-        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
+        AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, FollowedTurnResult, Handoffs,
+        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
+        PluginActions, PluginBinding, PluginStack, Processes, Result, ResumeTurnBuilder,
+        SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput,
+        TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -50,13 +48,13 @@ pub mod prelude {
 pub mod tools {
     pub use crate::ToolState;
     pub use lash_core::{
-        AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState,
-        MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus, MonitorStatusOp,
-        MonitorStopOp, MonitorTakeUpdatesOp, MonitorUpdateBatch, RegisterSpecsArgs,
-        StartMonitorArgs, StopMonitorArgs, ToolActivation, ToolArgumentProjectionPolicy,
-        ToolAvailability, ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord,
-        ToolContext, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-        ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolSourceHandle,
+        MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState, MonitorSnapshot, MonitorSpec,
+        MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, PreparedToolCall,
+        RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs, ToolActivation,
+        ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCall,
+        ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
+        ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
+        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolSourceHandle,
     };
 }
 
@@ -98,7 +96,7 @@ pub mod plugins {
         ToolResultHookContext,
     };
     pub use lash_core::{
-        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginError,
+        BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginError,
         PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
         PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
         SessionPlugin, ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
@@ -121,18 +119,18 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, BackgroundTaskRecord, BackgroundTaskRegistry, DirectCompletionClient,
-        DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost, EventSink,
-        ExecutionMode, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
-        LlmRequestSpec, LocalBackgroundTaskRegistry, ModeSessionExtensionHandle, ModeTurnOptions,
-        NoopEventSink, NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, Residency,
+        AssembledTurn, DirectCompletionClient, DirectRequestSpec, EffectInvocationMetadata,
+        EffectOrigin, EmbeddedRuntimeHost, EventSink, ExecutionMode, InlineRuntimeEffectController,
+        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry,
+        ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink, NoopTurnActivitySink,
+        PersistentRuntimeServices, PluginMessage, ProcessRecord, ProcessRegistry, Residency,
         RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
         RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
         RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
-        SessionPolicy, SessionStateEnvelope, SessionTurnHandle, StandardContextApproach,
-        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        SessionPolicy, SessionStateEnvelope, StandardContextApproach, TerminationPolicy,
+        TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 

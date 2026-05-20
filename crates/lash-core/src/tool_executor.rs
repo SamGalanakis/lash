@@ -1,7 +1,7 @@
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
-    ProgressSender, ToolCall, ToolCallOutcome, ToolContext, ToolManifest, ToolResult,
-    ToolRetryDisposition, ToolRetryPolicy,
+    PreparedToolCall, ProgressSender, ToolCall, ToolCallOutcome, ToolContext, ToolManifest,
+    ToolResult, ToolRetryDisposition, ToolRetryPolicy,
 };
 
 /// Runtime-owned execution policy for a validated tool call.
@@ -13,19 +13,18 @@ use crate::{
 pub(crate) async fn execute_tool_call<'run>(
     context: &ToolDispatchContext<'run>,
     manifest: &ToolManifest,
-    tool_name: &str,
-    args: &serde_json::Value,
+    prepared: &PreparedToolCall,
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
+    let tool_name = prepared.tool_name.as_str();
     let retry_policy = manifest.retry_policy;
     let max_attempts = retry_policy.max_attempts();
     let idempotency_key = derive_idempotency_key(&tool_context, tool_name);
     if retry_policy.requires_idempotency_key() && idempotency_key.is_none() {
         return execute_once(
             context,
-            tool_name,
-            args,
+            prepared,
             progress,
             tool_context.with_retry_context(tool_name, 1, 1),
         )
@@ -38,7 +37,7 @@ pub(crate) async fn execute_tool_call<'run>(
             tool_context
                 .clone()
                 .with_retry_context(tool_name, attempt, max_attempts);
-        let result = execute_once(context, tool_name, args, progress, attempt_context).await;
+        let result = execute_once(context, prepared, progress, attempt_context).await;
         let retry_after_ms = retry_after_ms(&result, retry_policy, attempt - 1);
         let Some(retry_after_ms) = retry_after_ms else {
             return result;
@@ -60,8 +59,7 @@ pub(crate) async fn execute_tool_call<'run>(
 
     execute_once(
         context,
-        tool_name,
-        args,
+        prepared,
         progress,
         tool_context.with_retry_context(tool_name, 1, 1),
     )
@@ -70,11 +68,12 @@ pub(crate) async fn execute_tool_call<'run>(
 
 async fn execute_once<'run>(
     context: &ToolDispatchContext<'run>,
-    tool_name: &str,
-    args: &serde_json::Value,
+    prepared: &PreparedToolCall,
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
+    let tool_name = prepared.tool_name.as_str();
+    let args = &prepared.args;
     let native_tools = context.plugins.mode_native_tools().to_vec();
     for provider in native_tools {
         if let Some(result) = provider.execute(context, tool_name, args, progress).await {
