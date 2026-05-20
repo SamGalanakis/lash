@@ -19,7 +19,7 @@ use lash::{
         EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
-    plugins::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory},
+    plugins::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory},
     provider::ProviderHandle,
     usage::{SessionUsageReport, diff_usage_reports},
 };
@@ -926,7 +926,7 @@ fn build_plugin_stack(standard_context_approach: Option<StandardContextApproach>
         standard_context_approach,
         tavily_api_key: None,
     });
-    stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
     stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
 
     let registry = Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(

@@ -1479,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_async_tool_syntax() {
+    fn parses_start_call_syntax() {
         let program = parse(
             r#"
             handle = start call spawn_agent { task: "check", capability: "explore" }

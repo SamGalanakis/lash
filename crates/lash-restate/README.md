@@ -58,26 +58,26 @@ same effect scope to claim ownership again, reload the checkpoint, and replay
 recorded outcomes.
 
 Background tasks are scheduled through the first-party
-`LashBackgroundTaskWorkflow`. Bind it on your Restate endpoint with `.serve()`:
+`LashProcessWorkflow`. Bind it on your Restate endpoint with `.serve()`:
 
 ```rust,no_run
 use std::sync::Arc;
 
 use lash_restate::{
-    LashBackgroundTaskWorkflow, LashBackgroundTaskWorkflowImpl, RestateBackgroundTaskRunner,
+    LashProcessWorkflow, LashProcessWorkflowImpl, RestateProcessRunner,
 };
 use restate_sdk::prelude::Endpoint;
 
 fn endpoint<R>(runner: Arc<R>) -> restate_sdk::endpoint::Endpoint
 where
-    R: RestateBackgroundTaskRunner,
+    R: RestateProcessRunner,
 {
     Endpoint::builder()
-        .bind(LashBackgroundTaskWorkflowImpl::new(runner).serve())
+        .bind(LashProcessWorkflowImpl::new(runner).serve())
         .build()
 }
 ```
 
 The controller submits workflow `run` with workflow key
-`BackgroundTaskRegistration.id` and sends cancellation to the workflow's shared
+`ProcessRegistration.id` and sends cancellation to the workflow's shared
 `cancel` handler.

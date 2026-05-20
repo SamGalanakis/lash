@@ -4,12 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PluginError, RuntimeError, RuntimeErrorCode};
 
-use crate::runtime::host::{
-    BackgroundTaskRecord, BackgroundTaskRegistration, BackgroundTaskRegistry,
-};
-
 use super::envelope::{RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome};
-use super::local::{BackgroundTaskLocalExecutor, RuntimeEffectLocalExecutor};
+use super::local::RuntimeEffectLocalExecutor;
 
 /// Boundary for nondeterministic runtime work.
 #[async_trait::async_trait]
@@ -23,20 +19,6 @@ pub trait RuntimeEffectController: Send + Sync {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
-
-    async fn start_background_task(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        registration: BackgroundTaskRegistration,
-        local_executor: BackgroundTaskLocalExecutor,
-    ) -> Result<BackgroundTaskRecord, PluginError>;
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<BackgroundTaskRecord, PluginError>;
 }
 
 /// Borrowed durable effect controller for one runtime execution.

@@ -208,27 +208,6 @@ impl lash::advanced::RuntimeEffectController for ScopedPerfEffectController {
     {
         local_executor.execute(envelope).await
     }
-
-    async fn start_background_task(
-        &self,
-        _registry: Arc<dyn lash_core::BackgroundTaskRegistry>,
-        registration: lash_core::BackgroundTaskRegistration,
-        _local_executor: lash_core::BackgroundTaskLocalExecutor,
-    ) -> Result<lash::advanced::BackgroundTaskRecord, lash_core::PluginError> {
-        Err(lash_core::PluginError::Session(format!(
-            "runtime perf scoped controller cannot start background task `{}`",
-            registration.id
-        )))
-    }
-
-    async fn request_background_task_cancel(
-        &self,
-        registry: Arc<dyn lash_core::BackgroundTaskRegistry>,
-        task_id: &str,
-        reason: Option<String>,
-    ) -> Result<lash::advanced::BackgroundTaskRecord, lash_core::PluginError> {
-        registry.request_cancel(task_id, reason).await
-    }
 }
 
 impl RuntimePerfPhaseProbe {

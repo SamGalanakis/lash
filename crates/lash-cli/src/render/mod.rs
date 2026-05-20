@@ -97,8 +97,8 @@ pub fn plan_dock_trailing_height(app: &App) -> usize {
     }
 }
 
-pub fn background_task_trailing_height(app: &App) -> usize {
-    usize::from(!app.background_tasks.is_empty()) + app.background_tasks.len()
+pub fn process_trailing_height(app: &App) -> usize {
+    usize::from(!app.processes.is_empty()) + app.processes.len()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -258,8 +258,8 @@ pub fn plan_dock_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line
     Some(lines)
 }
 
-pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'static>>> {
-    if app.background_tasks.is_empty() {
+pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'static>>> {
+    if app.processes.is_empty() {
         return None;
     }
 
@@ -268,18 +268,18 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
         "  Background",
         theme::text_faint_style().add_modifier(Modifier::Dim),
     )]));
-    for task in &app.background_tasks {
+    for task in &app.processes {
         let state = match task.state {
-            lash_core::BackgroundTaskState::Pending => "pending",
-            lash_core::BackgroundTaskState::Scheduled => "scheduled",
-            lash_core::BackgroundTaskState::Running => "running",
-            lash_core::BackgroundTaskState::Waiting => "idle",
-            lash_core::BackgroundTaskState::Completed => "success",
-            lash_core::BackgroundTaskState::Failed => "error",
-            lash_core::BackgroundTaskState::CancelRequested => "cancelling",
-            lash_core::BackgroundTaskState::Cancelled => "cancelled",
+            lash_core::ProcessState::Pending => "pending",
+            lash_core::ProcessState::Scheduled => "scheduled",
+            lash_core::ProcessState::Running => "running",
+            lash_core::ProcessState::Waiting => "idle",
+            lash_core::ProcessState::Completed => "success",
+            lash_core::ProcessState::Failed => "error",
+            lash_core::ProcessState::CancelRequested => "cancelling",
+            lash_core::ProcessState::Cancelled => "cancelled",
         };
-        let kind = task.kind.as_str();
+        let producer = task.producer.as_str();
         let elapsed_duration = task
             .terminal_duration
             .or_else(|| task.created_at.elapsed().ok())
@@ -287,22 +287,23 @@ pub fn background_task_lines_snapshot(app: &App, _frame_width: u16) -> Option<Ve
         let elapsed =
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
-        let state_style =
-            match task.state {
-                lash_core::BackgroundTaskState::Pending
-                | lash_core::BackgroundTaskState::Scheduled => theme::text_subtle_style(),
-                lash_core::BackgroundTaskState::Running => theme::turn_status_state(),
-                lash_core::BackgroundTaskState::Waiting => theme::text_subtle_style(),
-                lash_core::BackgroundTaskState::Completed => theme::tool_success(),
-                lash_core::BackgroundTaskState::CancelRequested => theme::text_subtle_style(),
-                lash_core::BackgroundTaskState::Failed
-                | lash_core::BackgroundTaskState::Cancelled => theme::tool_failure(),
-            };
+        let state_style = match task.state {
+            lash_core::ProcessState::Pending | lash_core::ProcessState::Scheduled => {
+                theme::text_subtle_style()
+            }
+            lash_core::ProcessState::Running => theme::turn_status_state(),
+            lash_core::ProcessState::Waiting => theme::text_subtle_style(),
+            lash_core::ProcessState::Completed => theme::tool_success(),
+            lash_core::ProcessState::CancelRequested => theme::text_subtle_style(),
+            lash_core::ProcessState::Failed | lash_core::ProcessState::Cancelled => {
+                theme::tool_failure()
+            }
+        };
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", theme::text_faint_style()),
             Span::styled(state.to_string(), state_style),
             Span::styled(" · ", theme::text_faint_style()),
-            Span::styled(kind.to_string(), theme::text_subtle_style()),
+            Span::styled(producer.to_string(), theme::text_subtle_style()),
             Span::styled(" · ", theme::text_faint_style()),
             Span::styled(task.label.clone(), Style::default().fg(theme::text_muted())),
             Span::styled(" · ", theme::text_faint_style()),

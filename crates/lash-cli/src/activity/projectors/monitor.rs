@@ -1,6 +1,6 @@
-//! Monitor/task-control projector.
+//! Monitor/process-control projector.
 //!
-//! Renders `monitor` and related task-control calls as first-class
+//! Renders `monitor` and related process-control calls as first-class
 //! activities instead of generic fallback rows.
 
 use serde_json::Value;
@@ -14,14 +14,14 @@ pub(crate) struct MonitorProjector;
 
 impl ToolProjector for MonitorProjector {
     fn tool_names(&self) -> &'static [&'static str] {
-        &["monitor", "tasks_list", "tasks_stop"]
+        &["monitor", "list_process_handles", "cancel_process"]
     }
 
     fn project(&self, ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         match ctx.name {
             "monitor" => project_monitor(ctx),
-            "tasks_list" => project_tasks_list(ctx),
-            "tasks_stop" => project_tasks_stop(ctx),
+            "list_process_handles" => project_list_process_handles(ctx),
+            "cancel_process" => project_cancel_process(ctx),
             _ => Vec::new(),
         }
     }
@@ -54,7 +54,7 @@ fn project_monitor(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     ]
 }
 
-fn project_tasks_list(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+fn project_list_process_handles(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let tasks = ctx
         .result
         .get("tasks")
@@ -79,13 +79,13 @@ fn project_tasks_list(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
         ActivityStatus::Completed
     };
     let summary = if ctx.success {
-        format!("listed background tasks · {} active", running + idle)
+        format!("listed processes · {} active", running + idle)
     } else {
-        "failed to list background tasks".to_string()
+        "failed to list processes".to_string()
     };
     let detail_lines = tasks
         .iter()
-        .filter_map(task_list_detail_line)
+        .filter_map(process_list_detail_line)
         .collect::<Vec<_>>();
     let args = std::mem::replace(&mut ctx.args, Value::Null);
     let result = std::mem::replace(&mut ctx.result, Value::Null);
@@ -104,19 +104,19 @@ fn project_tasks_list(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     ]
 }
 
-fn project_tasks_stop(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
+fn project_cancel_process(ctx: &mut ProjectCtx<'_>) -> Vec<ActivityBlock> {
     let status = if ctx.success {
         ActivityStatus::Completed
     } else {
         ActivityStatus::Failed
     };
-    let task_id = tool_arg_str(&ctx.args, "task_id").unwrap_or("task");
+    let process_id = tool_arg_str(&ctx.args, "process_id").unwrap_or("process");
     let summary = if ctx.success {
-        format!("stopped {}", inline_text(task_id))
+        format!("stopped {}", inline_text(process_id))
     } else {
-        format!("failed to stop {}", inline_text(task_id))
+        format!("failed to stop {}", inline_text(process_id))
     };
-    let detail_lines = task_stop_detail_lines(&ctx.result, ctx.success);
+    let detail_lines = process_stop_detail_lines(&ctx.result, ctx.success);
     let args = std::mem::replace(&mut ctx.args, Value::Null);
     let result = std::mem::replace(&mut ctx.result, Value::Null);
 
@@ -217,26 +217,29 @@ fn result_state(result: &Value) -> Option<&str> {
     result.get("state").and_then(Value::as_str)
 }
 
-fn task_list_detail_line(task: &Value) -> Option<String> {
-    let state = task
+fn process_list_detail_line(process: &Value) -> Option<String> {
+    let state = process
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let kind = task.get("kind").and_then(Value::as_str).unwrap_or("task");
-    let label = task
+    let producer = process
+        .get("producer")
+        .and_then(Value::as_str)
+        .unwrap_or("process");
+    let label = process
         .get("label")
         .and_then(Value::as_str)
-        .or_else(|| task.get("task_id").and_then(Value::as_str))
-        .unwrap_or("task");
+        .or_else(|| process.get("process_id").and_then(Value::as_str))
+        .unwrap_or("process");
     Some(format!(
         "{} · {} · {}",
         inline_text(state),
-        inline_text(kind),
+        inline_text(producer),
         inline_text(label)
     ))
 }
 
-fn task_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
+fn process_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
     if !success {
         return monitor_error_lines(result);
     }
@@ -245,16 +248,19 @@ fn task_stop_detail_lines(result: &Value, success: bool) -> Vec<String> {
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("stopped");
-    let task_id = result
-        .get("task_id")
+    let process_id = result
+        .get("process_id")
         .and_then(Value::as_str)
-        .unwrap_or("task");
-    let kind = result.get("kind").and_then(Value::as_str).unwrap_or("task");
-    let kind_prefix = format!("{kind}:");
-    let label = if task_id.starts_with(&kind_prefix) {
-        task_id.to_string()
+        .unwrap_or("process");
+    let producer = result
+        .get("producer")
+        .and_then(Value::as_str)
+        .unwrap_or("process");
+    let producer_prefix = format!("{producer}:");
+    let label = if process_id.starts_with(&producer_prefix) {
+        process_id.to_string()
     } else {
-        format!("{kind} {task_id}")
+        format!("{producer} {process_id}")
     };
 
     vec![format!("{} · {}", inline_text(state), inline_text(&label))]
@@ -356,16 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn tasks_stop_projects_cancelled_task_status() {
+    fn cancel_process_projects_cancelled_process_status() {
         let mut state = ActivityState::default();
         let blocks = state.project_tool_call(
-            "tasks_stop",
+            "cancel_process",
             json!({
-                "task_id": "monitor:abc123",
+                "process_id": "monitor:abc123",
             }),
             json!({
-                "task_id": "monitor:abc123",
-                "kind": "monitor",
+                "process_id": "monitor:abc123",
+                "producer": "monitor",
                 "state": "cancelled",
             }),
             true,

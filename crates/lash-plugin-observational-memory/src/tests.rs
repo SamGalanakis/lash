@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lash_core::plugin::{PluginError, PluginLifecycleEvent, PluginSessionTask, RuntimeSessionHost};
+use lash_core::plugin::{PluginError, PluginLifecycleEvent, RuntimeSessionHost};
 use lash_core::{
     AppendSessionNodesRequest, AppendSessionNodesResult, DirectCompletion, DirectCompletionClient,
     DirectRequest, Message, MessageRole, ObservationalMemoryConfig, Part, PartKind,
@@ -42,29 +42,11 @@ fn user_message(id: &str, content: &str) -> MessageNode {
 
 #[derive(Default)]
 struct RecordingHost {
-    spawned: Mutex<Vec<(String, String)>>,
     append_requests: Mutex<Vec<(String, AppendSessionNodesRequest)>>,
-    run_hidden_tasks_immediately: bool,
 }
 
 #[async_trait]
 impl RuntimeSessionHost for RecordingHost {
-    async fn spawn_hidden_task(
-        &self,
-        session_id: &str,
-        label: &str,
-        task: PluginSessionTask,
-    ) -> Result<(), PluginError> {
-        self.spawned
-            .lock()
-            .expect("spawned lock")
-            .push((session_id.to_string(), label.to_string()));
-        if self.run_hidden_tasks_immediately {
-            task.await?;
-        }
-        Ok(())
-    }
-
     async fn append_session_nodes(
         &self,
         session_id: &str,
@@ -90,14 +72,6 @@ impl RuntimeSessionHost for RecordingHost {
             leaf_node_id,
         })
     }
-}
-
-fn post_persist_context(
-    session_id: &str,
-    graph: SessionGraph,
-    host: Arc<dyn RuntimeSessionHost>,
-) -> SessionStateChangedContext {
-    post_persist_context_with_completion(session_id, graph, host, String::new())
 }
 
 fn post_persist_context_with_completion(
@@ -129,10 +103,7 @@ fn post_persist_context_with_completion(
 
 #[tokio::test]
 async fn maintenance_uses_post_persist_leaf_as_append_cas_ancestor() {
-    let host = Arc::new(RecordingHost {
-        run_hidden_tasks_immediately: true,
-        ..Default::default()
-    });
+    let host = Arc::new(RecordingHost::default());
     let config = ObservationalMemoryConfig {
         observation_buffer_tokens: 1,
         observation_max_tokens_per_batch: 1,
@@ -182,7 +153,7 @@ async fn maintenance_uses_post_persist_leaf_as_append_cas_ancestor() {
 }
 
 #[tokio::test]
-async fn maintenance_hook_only_spawns_from_post_persisted_graph() {
+async fn maintenance_hook_only_runs_from_post_persisted_graph() {
     let host = Arc::new(RecordingHost::default());
     let config = ObservationalMemoryConfig {
         observation_buffer_tokens: 1,
@@ -196,26 +167,32 @@ async fn maintenance_hook_only_spawns_from_post_persisted_graph() {
     .await
     .expect("turn finalized hook");
     assert!(
-        host.spawned.lock().expect("spawned lock").is_empty(),
-        "pre-persist turn finalization must not schedule OM maintenance"
+        host.append_requests
+            .lock()
+            .expect("append requests lock")
+            .is_empty(),
+        "pre-persist turn finalization must not run OM maintenance"
     );
 
     let mut graph = SessionGraph::default();
     graph.append_message(user_message("post-persist-message", "x".repeat(64).as_str()).message);
-    hook(PluginLifecycleEvent::TurnPersisted(post_persist_context(
-        "session",
-        graph,
-        host.clone(),
-    )))
+    hook(PluginLifecycleEvent::TurnPersisted(
+        post_persist_context_with_completion(
+            "session",
+            graph,
+            host.clone(),
+            "<observations>\n- Persisted graph only.\n</observations>".to_string(),
+        ),
+    ))
     .await
     .expect("turn persisted hook");
 
     assert_eq!(
-        host.spawned.lock().expect("spawned lock").as_slice(),
-        &[(
-            "session".to_string(),
-            crate::OBSERVATIONAL_MEMORY_PLUGIN_ID.to_string()
-        )]
+        host.append_requests
+            .lock()
+            .expect("append requests lock")
+            .len(),
+        1
     );
 }
 

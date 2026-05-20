@@ -732,14 +732,14 @@ async fn run_question(
         .collect_session_events_with(sink_trait.as_ref())
         .await;
     let background_result = if args.await_background_work && turn_result.is_ok() {
-        session.background_tasks().await_all().await
+        session.processes().await_all().await
     } else {
         Ok(())
     };
-    let cancelled = session.background_tasks().cancel_all().await?;
+    let cancelled = session.processes().cancel_all().await?;
     if !cancelled.is_empty() {
         eprintln!(
-            "  cancelled {} background task(s) after {}",
+            "  cancelled {} process(es) after {}",
             cancelled.len(),
             question.question_id
         );
@@ -1058,8 +1058,8 @@ fn build_plugin_stack(execution_mode: ExecutionMode, args: &Args) -> PluginStack
     let mut stack = PluginStack::runtime();
     stack.push(Arc::new(llm_tools));
     stack.push(Arc::new(StaticPluginFactory::new(
-        "oolong_async_handles",
-        PluginSpec::new().with_tool_provider(Arc::new(OolongAsyncHandlesTool)),
+        "oolong_process_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(OolongProcessHandlesTool)),
     )));
     stack.push(Arc::new(
         SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
@@ -1145,17 +1145,17 @@ fn rlm_config(args: &Args) -> RlmModePluginConfig {
     config
 }
 
-struct OolongAsyncHandlesTool;
+struct OolongProcessHandlesTool;
 
 #[async_trait]
-impl ToolProvider for OolongAsyncHandlesTool {
+impl ToolProvider for OolongProcessHandlesTool {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![oolong_list_async_handles_tool_definition().manifest()]
+        vec![oolong_list_process_handles_tool_definition().manifest()]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "list_async_handles")
-            .then(|| Arc::new(oolong_list_async_handles_tool_definition().contract()))
+        (name == "list_process_handles")
+            .then(|| Arc::new(oolong_list_process_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -1166,10 +1166,10 @@ impl ToolProvider for OolongAsyncHandlesTool {
     }
 }
 
-fn oolong_list_async_handles_tool_definition() -> ToolDefinition {
+fn oolong_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-        "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this after fan-out via `spawn_agent`.",
+        "list_process_handles",
+        "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this after fan-out via `spawn_agent`.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
@@ -1180,7 +1180,7 @@ fn oolong_list_async_handles_tool_definition() -> ToolDefinition {
             "required": ["monitor", "tool"]
         }),
     )
-    .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+    .with_examples(vec![r#"handles = (call list_process_handles {})?"#.into()])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -1231,7 +1231,7 @@ Default pattern:
 6. The root is responsible for reconciliation. Do not blindly combine subagent answers. Inspect returned evidence and notes, resolve conflicts, deduplicate overlaps, and investigate ambiguity before finalizing. If any partial result reports uncertainty, truncation, boundary risk, missing context, or inconsistent assumptions, run a targeted follow-up before submitting.
 7. Submit only the final answer value. If the required output schema lists choices, submit one of those raw values without prefixes like `Label:` or `Answer:`. If the expected answer is a label or user, submit a string; if it asks for multiple entries, submit an array; if it asks for a count, submit a number.
 
-Avoid copying the whole context into prose or printing whole document lists. Use short slices and compact projections to inspect structure and evidence. If a subtask requires its own multi-step inspection, use `spawn_agent`; if it is a small direct classification, extraction, summarization, or judgment over supplied data, `llm_query` is enough. Use `start call spawn_agent` plus `await`/`list_async_handles` for parallel fan-out when work is independent. Before final submission, perform one independent check appropriate to the task: search candidate terms, compare totals, validate coverage, inspect edge cases, or re-read the decisive sources."#;
+Avoid copying the whole context into prose or printing whole document lists. Use short slices and compact projections to inspect structure and evidence. If a subtask requires its own multi-step inspection, use `spawn_agent`; if it is a small direct classification, extraction, summarization, or judgment over supplied data, `llm_query` is enough. Use `start call spawn_agent` plus `await`/`list_process_handles` for parallel fan-out when work is independent. Before final submission, perform one independent check appropriate to the task: search candidate terms, compare totals, validate coverage, inspect edge cases, or re-read the decisive sources."#;
 
 fn build_projected_bindings(
     question: &OolongQuestion,

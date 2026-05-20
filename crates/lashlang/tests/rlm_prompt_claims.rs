@@ -93,7 +93,7 @@ impl ToolHost for MockHost {
                 record.insert("claim".into(), Value::String(format!("done:{task}").into()));
                 Ok(Value::Record(record.into()))
             }
-            "list_async_handles" => {
+            "list_process_handles" => {
                 let mut out = Record::default();
                 out.insert("monitor".into(), Value::Record(Record::default().into()));
                 out.insert("tool".into(), Value::Record(Record::default().into()));
@@ -117,7 +117,7 @@ impl ToolHost for MockHost {
             .unwrap()
             .insert(handle_id.clone(), result);
         let mut record = Record::default();
-        record.insert("__handle__".into(), Value::String("task".into()));
+        record.insert("__handle__".into(), Value::String("process".into()));
         record.insert("id".into(), Value::String(handle_id.into()));
         record.insert("tool".into(), Value::String(name.into()));
         Ok(Value::Record(record.into()))

@@ -7,7 +7,7 @@ use super::*;
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
-    background_tasks_available: bool,
+    processes_available: bool,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -43,25 +43,25 @@ impl PluginHost {
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),
-            background_tasks_available: false,
+            processes_available: true,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn with_background_tasks(mut self) -> Self {
-        self.background_tasks_available = true;
+    pub fn with_processes(mut self) -> Self {
+        self.processes_available = true;
         self
     }
 
-    pub fn with_background_tasks_available(mut self, available: bool) -> Self {
-        self.background_tasks_available = available;
+    pub fn with_processes_available(mut self, available: bool) -> Self {
+        self.processes_available = available;
         self
     }
 
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
-            background_tasks_available: self.background_tasks_available,
+            processes_available: self.processes_available,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
@@ -227,7 +227,7 @@ impl PluginHost {
             standard_context_approach: standard_context_approach.clone(),
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
-            background_tasks_available: self.background_tasks_available,
+            processes_available: self.processes_available,
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();

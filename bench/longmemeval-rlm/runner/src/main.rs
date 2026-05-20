@@ -629,7 +629,7 @@ async fn run_question(
         .await
         .context("run benchmark question")?;
     if args.await_background_work {
-        session.background_tasks().await_all().await?;
+        session.processes().await_all().await?;
     }
     let elapsed_seconds = started_at.elapsed().as_secs_f64();
     let after_usage = session.usage_report();

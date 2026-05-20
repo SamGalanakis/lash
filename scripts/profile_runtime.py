@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help=(
             "Limit to one or more runtime perf scenarios: standard, rlm, "
-            "standard_tool_calls, rlm_tool_calls, rlm_async_handles, "
+            "standard_tool_calls, rlm_tool_calls, rlm_process_handles, "
             "rlm_llm_query, rlm_tool_retry, rlm_globals, rlm_large_tool_surface, "
             "observational_memory, observational_memory_maintenance, "
             "openai_compat_stream, embed_standard, embed_rlm, "

@@ -571,7 +571,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if written_rows < viewport_height
-        && let Some(task_lines) = render::background_task_lines_snapshot(app, area.width)
+        && let Some(task_lines) = render::process_lines_snapshot(app, area.width)
     {
         for line in task_lines.iter().skip(skip_lines) {
             if written_rows >= viewport_height {
@@ -651,7 +651,7 @@ pub(crate) fn sync_chrome_turn_status(app: &App) {
     let snapshot = if app.has_prompt() {
         None
     } else {
-        let background = background_task_summary(app);
+        let background = process_summary(app);
         Some(match app.live_turn.as_ref() {
             Some(turn) => TurnStatusSnapshot {
                 label: match turn.status_text.as_str() {
@@ -692,26 +692,26 @@ fn combine_status_detail(primary: Option<&str>, background: Option<String>) -> O
     }
 }
 
-fn background_task_summary(app: &App) -> Option<String> {
+fn process_summary(app: &App) -> Option<String> {
     let running = app
-        .background_tasks
+        .processes
         .iter()
-        .filter(|task| task.state == lash_core::BackgroundTaskState::Running)
+        .filter(|task| task.state == lash_core::ProcessState::Running)
         .count();
     let idle = app
-        .background_tasks
+        .processes
         .iter()
-        .filter(|task| task.state == lash_core::BackgroundTaskState::Waiting)
+        .filter(|task| task.state == lash_core::ProcessState::Waiting)
         .count();
     match (running, idle) {
         (0, 0) => None,
         (running, 0) => Some(format!(
-            "{} background task{} running",
+            "{} process{} running",
             running,
             if running == 1 { "" } else { "s" }
         )),
         (0, idle) => Some(format!(
-            "{} background task{} idle",
+            "{} process{} idle",
             idle,
             if idle == 1 { "" } else { "s" }
         )),

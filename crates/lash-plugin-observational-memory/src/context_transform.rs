@@ -12,7 +12,7 @@ use crate::graph_state::{
     active_unobserved_message_nodes, approx_message_nodes_tokens, approx_token_count,
     build_graph_state,
 };
-use crate::host::{OmRuntimeHost, await_hidden_tasks_and_snapshot};
+use crate::host::OmRuntimeHost;
 use crate::model::ActiveMemoryState;
 use crate::transitions::maybe_advance_memory_state;
 
@@ -55,7 +55,7 @@ impl TurnContextTransform for ObservationalMemoryTransform {
         if pending_message_tokens >= self.config.observation_message_tokens
             || active_observation_tokens >= self.config.reflection_observation_tokens
         {
-            graph = await_hidden_tasks_and_snapshot(&ctx.session_id, &ctx.host).await?;
+            graph = ctx.host.snapshot_current().await?.session_graph;
         }
 
         graph = maybe_advance_memory_state(

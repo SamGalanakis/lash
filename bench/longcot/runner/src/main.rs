@@ -71,7 +71,7 @@ const DEFAULT_HARNESS: &str = "restricted";
 /// LongCoT runs are always in lashlang RLM mode. Standard mode is intentionally
 /// not wired in here; the benchmark forbids external tools, so the broader
 /// standard-mode plugin set (rolling history, observational memory, monitor,
-/// task controls) would only inflate the prompt without adding capability.
+/// process controls) would only inflate the prompt without adding capability.
 const EXECUTION_MODE_LABEL: &str = "rlm";
 
 /// Capability the model can pass to `spawn_agent`. Children inherit the root
@@ -634,7 +634,7 @@ async fn run_question(
         .await
         .context("run longcot question")?;
     if args.await_background_work {
-        session.background_tasks().await_all().await?;
+        session.processes().await_all().await?;
     }
     let elapsed_seconds = started.elapsed().as_secs_f64();
     let after_usage = session.usage_report();
@@ -770,10 +770,10 @@ fn extract_text(content: Option<&Value>) -> String {
 /// Minimal RLM plugin stack matching the continual-learning-bench pattern.
 ///
 /// Registered tools (model-visible): `llm_query`, `continue_as`,
-/// `list_async_handles`, `spawn_agent` (capability `default`).
+/// `list_process_handles`, `spawn_agent` (capability `default`).
 ///
 /// Deliberately not registered:
-/// - `monitor`, `tasks_list`, `tasks_stop` — there is no shell or background
+/// - `monitor`, `list_process_handles`, `cancel_process` — there is no shell or background
 ///   work to watch in a pure-reasoning bench.
 /// - Standard mode + rolling-history / observational-memory plugins — RLM is
 ///   the only execution path here; standard-mode contributions would only
@@ -790,8 +790,8 @@ fn build_plugin_stack() -> PluginStack {
     let mut stack = PluginStack::runtime();
     stack.push(Arc::new(LlmToolsPluginFactory::default()));
     stack.push(Arc::new(StaticPluginFactory::new(
-        "longcot_async_handles",
-        PluginSpec::new().with_tool_provider(Arc::new(LongCoTAsyncHandlesTool)),
+        "longcot_process_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(LongCoTProcessHandlesTool)),
     )));
     stack.push(Arc::new(
         SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
@@ -819,25 +819,25 @@ fn longcot_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         lash_llm_tools::llm_query_tool_definition(),
         lash_mode_rlm::continue_as_tool_definition(),
-        longcot_list_async_handles_tool_definition(),
+        longcot_list_process_handles_tool_definition(),
         lash_subagents::spawn_agent_tool_definition(&capabilities),
     ]
 }
 
-/// Custom `list_async_handles` registration so the tool shows up on the model's
+/// Custom `list_process_handles` registration so the tool shows up on the model's
 /// surface; the RLM session runtime intercepts the call and answers it without
 /// reaching this provider's `execute`.
-struct LongCoTAsyncHandlesTool;
+struct LongCoTProcessHandlesTool;
 
 #[async_trait]
-impl ToolProvider for LongCoTAsyncHandlesTool {
+impl ToolProvider for LongCoTProcessHandlesTool {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![longcot_list_async_handles_tool_definition().manifest()]
+        vec![longcot_list_process_handles_tool_definition().manifest()]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "list_async_handles")
-            .then(|| Arc::new(longcot_list_async_handles_tool_definition().contract()))
+        (name == "list_process_handles")
+            .then(|| Arc::new(longcot_list_process_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -848,10 +848,10 @@ impl ToolProvider for LongCoTAsyncHandlesTool {
     }
 }
 
-fn longcot_list_async_handles_tool_definition() -> ToolDefinition {
+fn longcot_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-        "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
+        "list_process_handles",
+        "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. Use this to rediscover live `start call` handles after a long-running fan-out via `spawn_agent`.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
@@ -862,7 +862,7 @@ fn longcot_list_async_handles_tool_definition() -> ToolDefinition {
             "required": ["monitor", "tool"]
         }),
     )
-    .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+    .with_examples(vec![r#"handles = (call list_process_handles {})?"#.into()])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 

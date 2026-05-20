@@ -1521,7 +1521,7 @@ submit answer
                         "llm_query",
                         "spawn_agent",
                         "continue_as",
-                        "list_async_handles"
+                        "list_process_handles"
                     ]),
                 )]),
                 metadata: BTreeMap::from([("project".to_string(), json!("clbench"))]),
@@ -1540,7 +1540,7 @@ submit answer
                         "llm_query".to_string(),
                         "spawn_agent".to_string(),
                         "continue_as".to_string(),
-                        "list_async_handles".to_string(),
+                        "list_process_handles".to_string(),
                     ],
                     forbidden_terms: vec![
                         "exec_command".to_string(),

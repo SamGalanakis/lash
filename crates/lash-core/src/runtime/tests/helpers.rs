@@ -1108,7 +1108,7 @@ impl crate::ToolProvider for ChildSessionTool {
 
         let turn = match context
             .sessions()
-            .start_turn_stream(
+            .start_turn(
                 &child.session_id,
                 TurnInput {
                     items: vec![InputItem::Text {
@@ -1127,14 +1127,9 @@ impl crate::ToolProvider for ChildSessionTool {
             Err(err) => return crate::ToolResult::err_fmt(format_args!("{err}")),
         };
 
-        drop(turn.events);
-
-        let result = context.sessions().await_turn(&turn.turn_id).await;
         let _ = context.sessions().close_session(&child.session_id).await;
-        match result {
-            Ok(_) => crate::ToolResult::ok(json!({ "status": "ok" })),
-            Err(err) => crate::ToolResult::err_fmt(format_args!("{err}")),
-        }
+        let _ = turn;
+        crate::ToolResult::ok(json!({ "status": "ok" }))
     }
 }
 
@@ -1145,52 +1140,6 @@ fn child_session_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-}
-
-pub(crate) async fn standard_runtime_with_transport_and_background(
-    transport: TestProvider,
-) -> LashRuntime {
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let host = BackgroundRuntimeHost::new(
-        test_host_config(),
-        Arc::new(LocalBackgroundTaskRegistry::default()),
-    );
-    let mut runtime = LashRuntime::from_background_state(
-        standard_test_policy(),
-        host,
-        crate::RuntimeServices::new(plugin_session_with_tools(
-            "root",
-            ExecutionMode::standard(),
-            tools,
-        )),
-        PersistedSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
-}
-
-pub(crate) async fn standard_runtime_with_shared_background_executor(
-    transport: TestProvider,
-    executor: Arc<dyn BackgroundTaskRegistry>,
-) -> LashRuntime {
-    let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
-    let host = BackgroundRuntimeHost::new(test_host_config(), executor);
-    let mut runtime = LashRuntime::from_background_state(
-        standard_test_policy(),
-        host,
-        crate::RuntimeServices::new(plugin_session_with_tools(
-            "root",
-            ExecutionMode::standard(),
-            tools,
-        )),
-        PersistedSessionState::default(),
-    )
-    .await
-    .expect("runtime");
-    runtime.policy.provider = transport.clone().into_handle();
-    runtime
 }
 
 pub(crate) async fn standard_runtime_with_transport_and_host(

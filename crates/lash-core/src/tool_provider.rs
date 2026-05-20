@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use lash_sansio::llm::types::ProviderReplayMeta;
+use serde::{Deserialize, Serialize};
+
 use crate::plugin::{
     DirectCompletion, PluginError, RuntimeSessionHost, SessionHandle, SessionSnapshot,
 };
@@ -27,10 +30,11 @@ pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    pub(crate) async_task_id: Option<String>,
-    pub(crate) turn_context: crate::TurnContext,
+    pub(crate) async_process_id: Option<String>,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
+    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
+    pub(crate) prepared_payload: serde_json::Value,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
     /// `DirectRequest::originating_tool_call_id` they issue so the trace
@@ -65,20 +69,12 @@ impl ToolSessionControl {
         self.host.close_session(session_id).await
     }
 
-    pub async fn start_turn_stream(
+    pub async fn start_turn(
         &self,
         session_id: &str,
         input: crate::TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-        self.host.start_turn_stream(session_id, input).await
-    }
-
-    pub async fn await_turn(&self, turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
-        self.host.await_turn(turn_id).await
-    }
-
-    pub async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-        self.host.cancel_turn(turn_id).await
+    ) -> Result<crate::AssembledTurn, PluginError> {
+        self.host.start_turn(session_id, input).await
     }
 }
 
@@ -95,106 +91,84 @@ impl RuntimeSessionHost for ToolSessionControl {
         ToolSessionControl::close_session(self, session_id).await
     }
 
-    async fn start_turn_stream(
+    async fn start_turn(
         &self,
         session_id: &str,
         input: crate::TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, PluginError> {
-        ToolSessionControl::start_turn_stream(self, session_id, input).await
-    }
-
-    async fn await_turn(&self, turn_id: &str) -> Result<crate::AssembledTurn, PluginError> {
-        ToolSessionControl::await_turn(self, turn_id).await
-    }
-
-    async fn cancel_turn(&self, turn_id: &str) -> Result<(), PluginError> {
-        ToolSessionControl::cancel_turn(self, turn_id).await
+    ) -> Result<crate::AssembledTurn, PluginError> {
+        ToolSessionControl::start_turn(self, session_id, input).await
     }
 }
 
 #[derive(Clone)]
-pub struct ToolTaskControl {
+pub struct ToolProcessControl<'run> {
     session_id: String,
     host: Arc<dyn RuntimeSessionHost>,
+    tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
 
-impl ToolTaskControl {
-    pub async fn start_background_task(
+impl<'run> ToolProcessControl<'run> {
+    pub async fn start_process(
         &self,
-        registration: crate::BackgroundTaskRegistration,
-        executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRecord, PluginError> {
         self.host
-            .start_background_task(&self.session_id, registration, executor)
+            .start_process_scoped(
+                &self.session_id,
+                registration,
+                self.tool_effect_metadata.clone(),
+                Some(self.effect_controller.as_controller()),
+            )
             .await
     }
 
-    pub async fn await_background_task(
+    pub async fn await_process(
         &self,
-        task_id: &str,
-    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
-        self.host.await_background_task(task_id).await
-    }
-
-    pub async fn complete_background_task(
-        &self,
-        task_id: &str,
-        completion: crate::BackgroundTaskCompletion,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
+        process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
         self.host
-            .complete_background_task(task_id, completion)
+            .await_process_scoped(
+                process_id,
+                self.tool_effect_metadata.clone(),
+                Some(self.effect_controller.as_controller()),
+            )
             .await
     }
 
-    pub async fn complete_background_task_with_state(
-        &self,
-        task_id: &str,
-        state: crate::BackgroundTaskState,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        self.complete_background_task(
-            task_id,
-            crate::BackgroundTaskCompletion {
-                state,
-                summary: None,
-                output: None,
-            },
-        )
-        .await
-    }
-
-    pub async fn validate_async_handles_visible(
+    pub async fn validate_process_handles_visible(
         &self,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
         self.host
-            .validate_async_handles_visible(&self.session_id, handle_ids)
+            .validate_process_handles_visible(&self.session_id, handle_ids)
             .await
     }
 
-    pub async fn transfer_async_handles_to_session(
+    pub async fn transfer_process_handles_to_session(
         &self,
         successor_session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
         self.host
-            .transfer_async_handles(&self.session_id, successor_session_id, handle_ids)
+            .transfer_process_handles(&self.session_id, successor_session_id, handle_ids)
             .await
     }
 
-    pub async fn cancel_unreferenced_async_handles(
+    pub async fn cancel_unreferenced_process_handles(
         &self,
         keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
         self.host
-            .cancel_unreferenced_async_handles(&self.session_id, keep_handle_ids)
+            .cancel_unreferenced_process_handles(&self.session_id, keep_handle_ids)
             .await
     }
 
-    pub async fn cancel_all_background_tasks_for_session(
+    pub async fn cancel_all_processes_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
-        self.host.cancel_all_background_tasks(session_id).await
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        self.host.cancel_all_processes(session_id).await
     }
 }
 
@@ -202,19 +176,21 @@ impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
-        turn_context: crate::TurnContext,
+        _turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
             session_id,
             host,
             cancellation_token: None,
-            async_task_id: None,
-            turn_context,
+            async_process_id: None,
             attachment_store,
             direct_completions,
+            effect_controller,
+            prepared_payload: serde_json::Value::Null,
             tool_call_id,
             attempt_number: 1,
             max_attempts: 1,
@@ -270,10 +246,12 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn tasks(&self) -> ToolTaskControl {
-        ToolTaskControl {
+    pub fn processes(&self) -> ToolProcessControl<'run> {
+        ToolProcessControl {
             session_id: self.session_id.clone(),
             host: Arc::clone(&self.host),
+            tool_effect_metadata: self.tool_effect_metadata.clone(),
+            effect_controller: self.effect_controller.clone_scoped(),
         }
     }
 
@@ -297,16 +275,23 @@ impl<'run> ToolContext<'run> {
         self.cancellation_token.as_ref()
     }
 
-    pub fn async_task_id(&self) -> Option<&str> {
-        self.async_task_id.as_deref()
-    }
-
-    pub fn turn_context(&self) -> &crate::TurnContext {
-        &self.turn_context
+    pub fn async_process_id(&self) -> Option<&str> {
+        self.async_process_id.as_deref()
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
+    }
+
+    pub fn prepared_payload(&self) -> &serde_json::Value {
+        &self.prepared_payload
+    }
+
+    pub fn decode_prepared_payload<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(self.prepared_payload.clone())
     }
 
     pub fn attempt_number(&self) -> u32 {
@@ -329,17 +314,12 @@ impl<'run> ToolContext<'run> {
         self.attachment_store.put(data, meta)
     }
 
-    /// Shortcut for [`TurnContext::plugin_input`](crate::TurnContext::plugin_input).
-    pub fn plugin_input<T: 'static>(&self, plugin_id: &'static str) -> Option<&T> {
-        self.turn_context.plugin_input::<T>(plugin_id)
-    }
-
-    pub fn with_async_task(
+    pub fn with_async_process(
         mut self,
-        task_id: impl Into<String>,
+        process_id: impl Into<String>,
         cancellation_token: tokio_util::sync::CancellationToken,
     ) -> Self {
-        self.async_task_id = Some(task_id.into());
+        self.async_process_id = Some(process_id.into());
         self.cancellation_token = Some(cancellation_token);
         self
     }
@@ -367,6 +347,11 @@ impl<'run> ToolContext<'run> {
         self
     }
 
+    pub(crate) fn with_prepared_payload(mut self, payload: serde_json::Value) -> Self {
+        self.prepared_payload = payload;
+        self
+    }
+
     /// Constructor reserved for `lash_core::testing` helpers. Do not call directly;
     /// use [`lash_core::testing::mock_tool_context`] instead.
     #[cfg(any(test, feature = "testing"))]
@@ -385,9 +370,113 @@ impl<'run> ToolContext<'run> {
             turn_context,
             attachment_store,
             direct_completions,
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             tool_call_id,
         )
     }
+}
+
+/// Runtime-prepared executable tool call.
+///
+/// The raw model/provider identity remains visible, but any argument rewrites
+/// and provider-owned context projections are frozen before the call crosses a
+/// runtime effect or process boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparedToolCall {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ProviderReplayMeta>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub prepared_payload: serde_json::Value,
+}
+
+impl PreparedToolCall {
+    pub fn identity(call: crate::sansio::PendingToolCall) -> Self {
+        Self {
+            call_id: call.call_id,
+            tool_name: call.tool_name,
+            args: call.args,
+            replay: call.replay,
+            prepared_payload: serde_json::Value::Null,
+        }
+    }
+
+    pub fn from_parts(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        args: serde_json::Value,
+        replay: Option<ProviderReplayMeta>,
+        prepared_payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            args,
+            replay,
+            prepared_payload,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolPrepareContext {
+    session_id: String,
+    host: Arc<dyn RuntimeSessionHost>,
+    turn_context: crate::TurnContext,
+    tool_call_id: Option<String>,
+}
+
+impl ToolPrepareContext {
+    pub(crate) fn new(
+        session_id: String,
+        host: Arc<dyn RuntimeSessionHost>,
+        turn_context: crate::TurnContext,
+        tool_call_id: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            host,
+            turn_context,
+            tool_call_id,
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    pub fn turn_context(&self) -> &crate::TurnContext {
+        &self.turn_context
+    }
+
+    pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>
+    where
+        T: 'static,
+    {
+        self.turn_context.plugin_input::<T>(plugin_id)
+    }
+
+    pub async fn session_snapshot(&self) -> Result<SessionSnapshot, PluginError> {
+        self.host.snapshot_session(&self.session_id).await
+    }
+
+    pub async fn tool_catalog(&self) -> Result<Vec<serde_json::Value>, PluginError> {
+        self.host.tool_catalog(&self.session_id).await
+    }
+}
+
+/// Inputs handed to [`ToolProvider::prepare_tool_call`].
+pub struct ToolPrepareCall<'a> {
+    pub pending: crate::sansio::PendingToolCall,
+    pub context: &'a ToolPrepareContext,
 }
 
 /// Per-call inputs handed to [`ToolProvider::execute`].
@@ -419,6 +508,12 @@ pub trait ToolProvider: Send + Sync + 'static {
             .find(|manifest| manifest.name == name)
     }
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        Ok(PreparedToolCall::identity(call.pending))
+    }
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult;
 }
 
@@ -491,6 +586,28 @@ impl ToolProvider for CompositeToolProvider {
                 .map(|(_, provider_idx)| *provider_idx)
         })?;
         self.providers[provider_idx].0.resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let provider_idx = self
+            .resolve_manifest(&call.pending.tool_name)
+            .and_then(|_| {
+                self.tools
+                    .read()
+                    .expect("composite tool provider lock poisoned")
+                    .get(&call.pending.tool_name)
+                    .map(|(_, provider_idx)| *provider_idx)
+            });
+        match provider_idx {
+            Some(provider_idx) => self.providers[provider_idx].0.prepare_tool_call(call).await,
+            None => Err(ToolResult::err_fmt(format_args!(
+                "Unknown tool: {}",
+                call.pending.tool_name
+            ))),
+        }
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {

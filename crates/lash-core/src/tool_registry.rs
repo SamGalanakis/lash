@@ -6,7 +6,8 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ProgressSender, ToolCall, ToolContext, ToolContract, ToolManifest, ToolProvider, ToolResult,
+    PreparedToolCall, ProgressSender, ToolCall, ToolContext, ToolContract, ToolManifest,
+    ToolPrepareCall, ToolProvider, ToolResult,
 };
 
 const PLUGIN_SOURCE_ID: &str = "plugins";
@@ -137,6 +138,12 @@ pub(crate) trait ToolSourceExecutor: Send + Sync + 'static {
             .find(|manifest| manifest.name == name)
     }
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>>;
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        Ok(PreparedToolCall::identity(call.pending))
+    }
     async fn execute(
         &self,
         tool: &str,
@@ -176,6 +183,13 @@ impl ToolSourceExecutor for ToolProviderSource {
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
         self.provider.resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        self.provider.prepare_tool_call(call).await
     }
 
     async fn execute(
@@ -493,6 +507,36 @@ impl ToolProvider for ToolRegistry {
             .expect("tool source lock poisoned")
             .get(&source_id)?
             .resolve_contract(name)
+    }
+
+    async fn prepare_tool_call(
+        &self,
+        call: ToolPrepareCall<'_>,
+    ) -> Result<PreparedToolCall, ToolResult> {
+        let name = call.pending.tool_name.clone();
+        let source_id = self.resolve_manifest(&name).and_then(|_| {
+            let state = self
+                .state
+                .read()
+                .expect("tool registry state lock poisoned");
+            state.tools.get(&name).map(|entry| entry.source_id.clone())
+        });
+        let Some(source_id) = source_id else {
+            return Err(ToolResult::err_fmt(format_args!("Unknown tool: {name}")));
+        };
+        let source = {
+            self.sources
+                .read()
+                .expect("tool source lock poisoned")
+                .get(&source_id)
+                .cloned()
+        };
+        let Some(source) = source else {
+            return Err(ToolResult::err_fmt(format_args!(
+                "Tool source missing for tool `{name}`"
+            )));
+        };
+        source.prepare_tool_call(call).await
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -853,6 +897,9 @@ mod tests {
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             None,
         );
         let args = json!({});
@@ -895,6 +942,9 @@ mod tests {
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
             None,
         );
         let args = json!({ "query": "hello" });

@@ -187,10 +187,10 @@ fn catalogue_notes(ctx: &ToolSurfaceContext, has_catalogued_tools: bool) -> Vec<
 mod tests {
     use super::*;
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
-    use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot, SessionTurnHandle};
+    use lash_core::plugin::{PluginError, SessionHandle, SessionSnapshot};
     use lash_core::{
-        AssembledTurn, DirectCompletion, ExecutionMode, TokenUsage, ToolCall,
-        ToolSurfaceBuildInput, TurnInput, build_tool_surface,
+        DirectCompletion, ExecutionMode, TokenUsage, ToolCall, ToolSurfaceBuildInput,
+        build_tool_surface,
     };
     use std::sync::Mutex;
 
@@ -258,21 +258,6 @@ mod tests {
         }
 
         async fn close_session(&self, _session_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<SessionTurnHandle, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
-        }
-
-        async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
-            Err(PluginError::Session("unused".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
             Ok(())
         }
     }

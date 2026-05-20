@@ -2646,7 +2646,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2792,7 +2791,6 @@ version = "0.1.0-alpha.6"
 dependencies = [
  "async-trait",
  "bytes",
- "futures-util",
  "http",
  "http-body-util",
  "lash-core",
@@ -2882,6 +2880,7 @@ dependencies = [
  "lash-llm-tools",
  "lash-mode-rlm",
  "lash-rlm-types",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

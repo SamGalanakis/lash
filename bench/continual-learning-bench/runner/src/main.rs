@@ -217,8 +217,8 @@ fn build_plugin_stack() -> PluginStack {
     let mut stack = PluginStack::runtime();
     stack.push(Arc::new(LlmToolsPluginFactory::default()));
     stack.push(Arc::new(StaticPluginFactory::new(
-        "clbench_async_handles",
-        PluginSpec::new().with_tool_provider(Arc::new(ClbenchAsyncHandlesTool)),
+        "clbench_process_handles",
+        PluginSpec::new().with_tool_provider(Arc::new(ClbenchProcessHandlesTool)),
     )));
     stack.push(Arc::new(
         SubagentsPluginFactory::new(Arc::new(CapabilityRegistry::new().with(Arc::new(
@@ -229,17 +229,17 @@ fn build_plugin_stack() -> PluginStack {
     stack
 }
 
-struct ClbenchAsyncHandlesTool;
+struct ClbenchProcessHandlesTool;
 
 #[async_trait]
-impl ToolProvider for ClbenchAsyncHandlesTool {
+impl ToolProvider for ClbenchProcessHandlesTool {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        vec![list_async_handles_tool_definition().manifest()]
+        vec![list_process_handles_tool_definition().manifest()]
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        (name == "list_async_handles")
-            .then(|| Arc::new(list_async_handles_tool_definition().contract()))
+        (name == "list_process_handles")
+            .then(|| Arc::new(list_process_handles_tool_definition().contract()))
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
@@ -255,19 +255,19 @@ fn clbench_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         lash_llm_tools::llm_query_tool_definition(),
         lash_mode_rlm::continue_as_tool_definition(),
-        clbench_list_async_handles_tool_definition(),
+        clbench_list_process_handles_tool_definition(),
         lash_subagents::spawn_agent_tool_definition(&capabilities),
     ]
 }
 
-fn list_async_handles_tool_definition() -> ToolDefinition {
-    clbench_list_async_handles_tool_definition()
+fn list_process_handles_tool_definition() -> ToolDefinition {
+    clbench_list_process_handles_tool_definition()
 }
 
-fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
+fn clbench_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-        "list_async_handles",
-        "List live lashlang async handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
+        "list_process_handles",
+        "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
         ToolDefinition::default_input_schema(),
         json!({
             "type": "object",
@@ -278,7 +278,7 @@ fn clbench_list_async_handles_tool_definition() -> ToolDefinition {
             "required": ["monitor", "tool"]
         }),
     )
-    .with_examples(vec![r#"handles = (call list_async_handles {})?"#.into()])
+    .with_examples(vec![r#"handles = (call list_process_handles {})?"#.into()])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
@@ -389,7 +389,7 @@ mod tests {
             names,
             vec![
                 "continue_as",
-                "list_async_handles",
+                "list_process_handles",
                 "llm_query",
                 "spawn_agent"
             ]
@@ -418,7 +418,7 @@ mod tests {
             "llm_query",
             "spawn_agent",
             "continue_as",
-            "list_async_handles",
+            "list_process_handles",
         ] {
             assert!(
                 names.iter().any(|name| name == expected),

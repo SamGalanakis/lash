@@ -10,14 +10,7 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     assert_eq!(usage.usage.output_tokens, 2);
     session.control().tools().refresh_surface().await?;
     session.control().state().await_background_work().await?;
-    assert!(
-        session
-            .control()
-            .state()
-            .list_background_tasks()
-            .await?
-            .is_empty()
-    );
+    assert!(session.control().state().list_processes().await?.is_empty());
     assert!(
         session
             .control()
@@ -44,7 +37,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .max_context_tokens(200_000)
         .tools(Arc::new(AppTools))
         .advanced()
-        .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
     let turn_session = session.clone();
@@ -59,7 +52,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.usage_report();
         let _ = session.control().tools().state().await?;
         let _ = session.control().tools().active_definitions().await?;
-        let _ = session.control().state().list_background_tasks().await?;
+        let _ = session.control().state().list_processes().await?;
         Result::<()>::Ok(())
     })
     .await
@@ -134,7 +127,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
         .model("mock-model", None)
         .max_context_tokens(200_000)
         .advanced()
-        .background_task_registry(Arc::new(LocalBackgroundTaskRegistry::default()))
+        .process_registry(Arc::new(LocalProcessRegistry::default()))
         .build()?;
     let session = core.session("child-observation-parent").open().await?;
     let children = session.control().children();
@@ -157,9 +150,14 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
             usage_source: None,
         })
         .await?;
-    let handle = children
-        .start_turn("child-observation", TurnInput::text("blocked child"))
-        .await?;
+    let child_runner = {
+        let children = children.clone();
+        tokio::spawn(async move {
+            children
+                .start_turn("child-observation", TurnInput::text("blocked child"))
+                .await
+        })
+    };
 
     entered_rx.await.expect("child provider entered");
     let host = session.control().state().session_manager().await?;
@@ -171,7 +169,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     assert_eq!(snapshot.session_id, "child-observation");
 
     release_tx.send(()).expect("release child provider");
-    children.await_turn(&handle.turn_id).await?;
+    child_runner.await.expect("child turn task")?;
     Ok(())
 }
 
@@ -200,10 +198,9 @@ async fn session_control_manages_child_session_turns() -> Result<()> {
         })
         .await?;
 
-    let handle = children
+    let assembled = children
         .start_turn(&child.session_id, TurnInput::text("child"))
         .await?;
-    let assembled = children.await_turn(&handle.turn_id).await?;
     assert_eq!(assembled.state.session_id, "child-control");
     children.close_session(&child.session_id).await?;
     Ok(())

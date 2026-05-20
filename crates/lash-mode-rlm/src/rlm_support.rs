@@ -26,7 +26,7 @@ pub fn format_budget_suffix(
         format!("Turn: {turn_index} · Tokens: {used} · handoff threshold: {max} ({pct}%).");
     if pct >= 60 {
         let tail = if used >= max {
-            "Past the handoff threshold. End this block with `continue_as` now; do not call `submit` or do more work after it. Pack only what the successor needs into `task` + `seed`; carry only necessary live async handles."
+            "Past the handoff threshold. End this block with `continue_as` now; do not call `submit` or do more work after it. Pack only what the successor needs into `task` + `seed`; carry only necessary live process handles."
         } else if pct >= 90 {
             "Budget tight — finish only the current step, then end the block with `continue_as`."
         } else {

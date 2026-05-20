@@ -75,6 +75,7 @@ pub use tool_registry::{
     ReconfigureError, ToolRegistry, ToolSourceHandle, ToolState, ToolStateEntry,
 };
 pub use tool_result::ToolResult;
+pub use tool_schema::LashSchema;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModeTurnOptions {
     pub mode_id: ExecutionMode,
@@ -150,32 +151,32 @@ pub use model_info::{
     ModelCatalogSource, ModelCatalogStore, ModelInfo, ModelsDevHttpSource, ResolvedModelSpec,
 };
 pub use monitor::{
-    MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot,
-    MonitorSpec, MonitorStatus, MonitorUpdateBatch, MonitorWakePolicy,
+    MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorRunState, MonitorSnapshot, MonitorSpec,
+    MonitorStatus, MonitorWakePolicy,
 };
 pub use plugin::{
-    AckWakeArgs, AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
+    AppendSessionNodesRequest, AppendSessionNodesResult, AssistantResponseHookContext,
     AssistantResponseTransform, AssistantStreamHookContext, AssistantStreamTransform,
     CheckpointHookContext, DirectCompletion, DirectLlmCompletion, HistoryError,
     HistoryRegistrations, HistoryRewriteMetadata, HistoryRewriter, HistoryState,
-    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorAckWakeOp, MonitorEmptyArgs,
+    ModeBeforeLlmCallContext, ModeExtras, ModeLlmCallAction, MonitorEmptyArgs,
     MonitorRegisterSpecsOp, MonitorRegistrations, MonitorStartOp, MonitorStatusOp, MonitorStopOp,
-    MonitorTakeUpdatesOp, OwnedMonitorSpec, PersistentRuntimeServices, PluginAction,
-    PluginActionContext, PluginActionDef, PluginActionFailure, PluginActionInvokeError,
-    PluginActionKind, PluginDirective, PluginError, PluginFactory, PluginHost,
-    PluginLifecycleEvent, PluginLifecycleEventHook, PluginOwned, PluginRegistrar, PluginSession,
-    PluginSessionContext, PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry,
-    PluginSnapshotMeta, PluginSpec, PluginSpecFactory, PromptHookContext, RegisterSpecsArgs,
-    RewriteContext, RewriteTrigger, RuntimeServices, SessionAppendNode,
-    SessionConfigChangedContext, SessionContextSurface, SessionCreateRequest, SessionHandle,
-    SessionParam, SessionPlugin, SessionPluginMode, SessionReadView, SessionRelation,
-    SessionSnapshot, SessionStartPoint, SessionStateChangedContext, SessionToolAccess,
-    SessionTurnHandle, SnapshotReader, SnapshotWriter, StandardCreateExtras, StartMonitorArgs,
-    StopMonitorArgs, SubagentSessionContext, ToolDiscoveryContext, ToolDiscoveryContribution,
-    ToolDiscoveryContributor, ToolDiscoveryToolContribution, ToolOutputBudgetConfig,
-    ToolOutputBudgetMode, ToolOutputBudgetPluginFactory, ToolResultProjectionContext,
-    ToolResultProjector, ToolSurfaceContribution, TurnContextTransform, TurnHookContext,
-    TurnResultHookContext, TurnResultSummary, TurnTransformContext, plugin_action_def,
+    OwnedMonitorSpec, PersistentRuntimeServices, PluginAction, PluginActionContext,
+    PluginActionDef, PluginActionFailure, PluginActionInvokeError, PluginActionKind,
+    PluginDirective, PluginError, PluginFactory, PluginHost, PluginLifecycleEvent,
+    PluginLifecycleEventHook, PluginOwned, PluginRegistrar, PluginSession, PluginSessionContext,
+    PluginSessionSnapshot, PluginSnapshotArtifact, PluginSnapshotEntry, PluginSnapshotMeta,
+    PluginSpec, PluginSpecFactory, PromptHookContext, RegisterSpecsArgs, RewriteContext,
+    RewriteTrigger, RuntimeServices, SessionAppendNode, SessionConfigChangedContext,
+    SessionContextSurface, SessionCreateRequest, SessionHandle, SessionParam, SessionPlugin,
+    SessionPluginMode, SessionReadView, SessionRelation, SessionSnapshot, SessionStartPoint,
+    SessionStateChangedContext, SessionToolAccess, SnapshotReader, SnapshotWriter,
+    StandardCreateExtras, StartMonitorArgs, StopMonitorArgs, SubagentSessionContext,
+    ToolDiscoveryContext, ToolDiscoveryContribution, ToolDiscoveryContributor,
+    ToolDiscoveryToolContribution, ToolOutputBudgetConfig, ToolOutputBudgetMode,
+    ToolOutputBudgetPluginFactory, ToolResultProjectionContext, ToolResultProjector,
+    ToolSurfaceContribution, TurnContextTransform, TurnHookContext, TurnResultHookContext,
+    TurnResultSummary, TurnTransformContext, plugin_action_def,
 };
 pub use plugin_stack::PluginStack;
 pub use provider::{
@@ -185,18 +186,19 @@ pub use provider::{
     VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
 pub use runtime::{
-    AssembledTurn, AssistantOutput, BackgroundCancelPolicy, BackgroundClosePolicy,
-    BackgroundRuntimeHost, BackgroundTaskAttempt, BackgroundTaskCompletion, BackgroundTaskEvent,
-    BackgroundTaskExternalRef, BackgroundTaskFilter, BackgroundTaskId, BackgroundTaskInput,
-    BackgroundTaskKind, BackgroundTaskLocalExecutor, BackgroundTaskOutcome, BackgroundTaskRecord,
-    BackgroundTaskRegistration, BackgroundTaskRegistry, BackgroundTaskScope,
-    BackgroundTaskStartReceipt, BackgroundTaskState, BackgroundTaskUpdate, CodeOutputRecord,
-    DirectCompletionClient, DirectRequestSpec, EffectInvocationMetadata, EffectOrigin,
-    EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
-    InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-    LocalBackgroundCancelPolicy, LocalBackgroundTaskRegistry, ModeSessionExtension,
+    AssembledTurn, AssistantOutput, CodeOutputRecord, DirectCompletionClient, DirectRequestSpec,
+    EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
+    ExecutionSummary, FollowedTurn, InlineRuntimeEffectController, InputItem, LashRuntime,
+    LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry, ModeSessionExtension,
     ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle, NoopEventSink,
-    NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState, PromptUsage,
+    NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState, ProcessAttempt,
+    ProcessAwaitOutput, ProcessCancelPolicy, ProcessClosePolicy, ProcessCommand,
+    ProcessEffectOutcome, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
+    ProcessEventType, ProcessExternalRef, ProcessFilter, ProcessId, ProcessInput, ProcessOutcome,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessScope,
+    ProcessStartReceipt, ProcessState, ProcessStateSpec, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessTransfer, ProcessTransferSpec,
+    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec, PromptUsage,
     Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
     RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
     RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
@@ -206,7 +208,7 @@ pub use runtime::{
     TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,
     diff_usage_reports,
 };
-pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory};
+pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory};
 pub use schemars::JsonSchema;
 pub use session::{
     ExecRequest, InjectedTurnInput, ModeExecutionContext, ModeToolBatchItem, ModeToolReply,
@@ -230,6 +232,6 @@ pub use store::{
     refresh_persisted_session_state, runtime_turn_checkpoint_hash,
 };
 pub use tool_provider::{
-    ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolProvider, ToolSessionControl,
-    ToolSessionModel, ToolTaskControl,
+    PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolPrepareCall,
+    ToolPrepareContext, ToolProcessControl, ToolProvider, ToolSessionControl, ToolSessionModel,
 };

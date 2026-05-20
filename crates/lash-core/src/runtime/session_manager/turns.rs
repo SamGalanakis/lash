@@ -1,12 +1,13 @@
 use super::*;
 
 impl ManagedSessionCapability {
-    pub(in crate::runtime::session_manager) async fn start_turn_stream(
+    pub(in crate::runtime::session_manager) async fn start_turn(
         &self,
+        current: &CurrentSessionCapability,
         usage: &UsageCapability,
         session_id: &str,
         input: TurnInput,
-    ) -> Result<crate::plugin::SessionTurnHandle, crate::PluginError> {
+    ) -> Result<AssembledTurn, crate::PluginError> {
         if self
             .turns
             .lock()
@@ -29,7 +30,7 @@ impl ManagedSessionCapability {
         };
         let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
-        let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(100);
+        let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(100);
         let usage_source = self.child_usage_source(usage, session_id);
         let runtime_clone = runtime.clone();
         let cancel_clone = cancel.clone();
@@ -45,6 +46,7 @@ impl ManagedSessionCapability {
                 relay: usage.child_usage_event_relay.clone(),
             }),
         };
+        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
         let task = tokio::spawn(async move {
             let mut runtime = runtime_clone.runtime.lock().await;
             runtime
@@ -62,16 +64,30 @@ impl ManagedSessionCapability {
             turn_id.clone(),
             ManagedSessionTurn {
                 session_id: session_id.to_string(),
-                cancel,
                 task,
             },
         );
-        Ok(crate::plugin::SessionTurnHandle {
-            turn_id,
-            session_id: session_id.to_string(),
-            policy,
-            events: event_rx,
-        })
+        let managed = self
+            .turns
+            .lock()
+            .await
+            .remove(&turn_id)
+            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
+        let session_id = managed.session_id.clone();
+        let turn = managed
+            .task
+            .await
+            .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?;
+        let _ = event_drain.await;
+        let live_reported = self.turn_live_usage(usage, &turn_id);
+        if let Ok(turn) = &turn {
+            let source = self.child_usage_source(usage, &session_id);
+            if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
+                usage.record_token_usage(&source, &turn.state.policy.model, &remainder);
+            }
+        }
+        usage.persist_current_usage_ledger(current).await?;
+        turn
     }
 
     fn child_usage_source(&self, usage: &UsageCapability, session_id: &str) -> String {
@@ -84,34 +100,6 @@ impl ManagedSessionCapability {
             .unwrap_or_else(|| "child".to_string())
     }
 
-    pub(in crate::runtime::session_manager) async fn await_turn(
-        &self,
-        current: &CurrentSessionCapability,
-        usage: &UsageCapability,
-        turn_id: &str,
-    ) -> Result<AssembledTurn, crate::PluginError> {
-        let managed = self
-            .turns
-            .lock()
-            .await
-            .remove(turn_id)
-            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
-        let session_id = managed.session_id.clone();
-        let turn = managed
-            .task
-            .await
-            .map_err(|err| crate::PluginError::Session(format!("turn task failed: {err}")))?;
-        let live_reported = self.turn_live_usage(usage, turn_id);
-        if let Ok(turn) = &turn {
-            let source = self.child_usage_source(usage, &session_id);
-            if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
-                usage.record_token_usage(&source, &turn.state.policy.model, &remainder);
-            }
-        }
-        usage.persist_current_usage_ledger(current).await?;
-        turn
-    }
-
     fn turn_live_usage(&self, usage: &UsageCapability, turn_id: &str) -> TokenUsage {
         usage
             .child_turn_live_usage
@@ -119,17 +107,5 @@ impl ManagedSessionCapability {
             .expect("child turn live usage lock")
             .remove(turn_id)
             .unwrap_or_default()
-    }
-
-    pub(in crate::runtime::session_manager) async fn cancel_turn(
-        &self,
-        turn_id: &str,
-    ) -> Result<(), crate::PluginError> {
-        let turns = self.turns.lock().await;
-        let managed = turns
-            .get(turn_id)
-            .ok_or_else(|| crate::PluginError::Session(format!("unknown turn `{turn_id}`")))?;
-        managed.cancel.cancel();
-        Ok(())
     }
 }

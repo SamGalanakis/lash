@@ -1,10 +1,10 @@
-//! Mode-agnostic runtime-control tools (`monitor`, `tasks_list`,
-//! `tasks_stop`).
+//! Mode-agnostic runtime-control tools (`monitor`, `list_process_handles`,
+//! `cancel_process`).
 //!
 //! Dedicated plugins register these tools into the native-tools surface,
 //! so mode crates do not own or duplicate runtime control behavior. RLM
-//! hides `tasks_list` / `tasks_stop` because it exposes the same
-//! background control through lashlang async handles.
+//! hides process-control tools when a mode exposes the same control through
+//! native process handles.
 
 use std::sync::Arc;
 
@@ -16,62 +16,63 @@ use crate::plugin::{
 };
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
-    BackgroundTaskKind, BackgroundTaskState, MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec,
-    ProgressSender, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
+    MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec, ProcessState, ProgressSender,
+    ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
 };
 
-/// Plugin factory for mode-agnostic task-control tools.
+/// Plugin factory for mode-agnostic process-control tools.
 #[derive(Default)]
-pub struct BuiltinTaskControlsPluginFactory;
+pub struct BuiltinProcessControlsPluginFactory;
 
-impl BuiltinTaskControlsPluginFactory {
+impl BuiltinProcessControlsPluginFactory {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl PluginFactory for BuiltinTaskControlsPluginFactory {
+impl PluginFactory for BuiltinProcessControlsPluginFactory {
     fn id(&self) -> &'static str {
-        "task_controls"
+        "process_controls"
     }
 
     fn build(&self, ctx: &PluginSessionContext) -> Result<Arc<dyn SessionPlugin>, PluginError> {
-        Ok(Arc::new(TaskControlsPlugin {
+        Ok(Arc::new(ProcessControlsPlugin {
             enabled: ctx.execution_mode != crate::ExecutionMode::new("rlm"),
         }))
     }
 }
 
-struct TaskControlsPlugin {
+struct ProcessControlsPlugin {
     enabled: bool,
 }
 
-impl SessionPlugin for TaskControlsPlugin {
+impl SessionPlugin for ProcessControlsPlugin {
     fn id(&self) -> &'static str {
-        "task_controls"
+        "process_controls"
     }
 
     fn register(&self, reg: &mut PluginRegistrar) -> Result<(), PluginError> {
         if self.enabled {
-            reg.mode().native_tools(Arc::new(TaskControlsNativeTools))?;
+            reg.mode()
+                .native_tools(Arc::new(ProcessControlsNativeTools))?;
         }
         Ok(())
     }
 }
 
-struct TaskControlsNativeTools;
+struct ProcessControlsNativeTools;
 
 #[async_trait::async_trait]
-impl ModeNativeToolsPlugin for TaskControlsNativeTools {
+impl ModeNativeToolsPlugin for ProcessControlsNativeTools {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
-        task_control_tool_definitions()
+        process_control_tool_definitions()
             .into_iter()
             .map(|tool| tool.manifest())
             .collect()
     }
 
     fn resolve_contract(&self, name: &str) -> Option<Arc<ToolContract>> {
-        task_control_tool_definitions()
+        process_control_tool_definitions()
             .into_iter()
             .find(|tool| tool.name == name)
             .map(|tool| Arc::new(tool.contract()))
@@ -85,8 +86,8 @@ impl ModeNativeToolsPlugin for TaskControlsNativeTools {
         _progress: Option<&ProgressSender>,
     ) -> Option<ToolResult> {
         match name {
-            "tasks_list" => Some(execute_tasks_list_tool_call(context).await),
-            "tasks_stop" => Some(execute_tasks_stop_tool_call(context, args).await),
+            "list_process_handles" => Some(execute_process_list_tool_call(context).await),
+            "cancel_process" => Some(execute_process_cancel_tool_call(context, args).await),
             _ => None,
         }
     }
@@ -160,7 +161,7 @@ impl ModeNativeToolsPlugin for MonitorNativeTool {
 pub fn monitor_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "monitor",
-        "Run a background script that turns each stdout line into a new turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, just run the command synchronously instead. In RLM mode this returns a lashlang async handle; use `list_async_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nWrong: `tail -f run.log | grep --line-buffered \"elapsed_steps=\"`\nRight: `tail -f run.log | grep -E --line-buffered \"elapsed_steps=|Traceback|Error|FAILED|Killed|OOM\"`\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
+        "Run a background script that turns each stdout line into a process event and optional turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, run the command synchronously instead. This returns a process handle; use `list_process_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first matching line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -197,41 +198,44 @@ pub fn monitor_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-pub fn tasks_list_tool_definition() -> ToolDefinition {
+pub fn process_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-        "tasks_list",
-        "List every background task registered for this session — monitors and subagents — with their `task_id`, kind, label, and state. `state` is one of `running`, `idle`, `completed`, `failed`, or `cancelled`. Use this to see what's still running before deciding whether to keep waiting, poll again, or stop something.",
+        "list_process_handles",
+        "List every model-visible process handle in this session with its process id, producer, tags, and state.",
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
-    .with_examples(vec!["tasks_list()".into()])
+    .with_examples(vec!["list_process_handles()".into()])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-fn task_control_tool_definitions() -> Vec<ToolDefinition> {
-    vec![tasks_list_tool_definition(), tasks_stop_tool_definition()]
+fn process_control_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        process_list_tool_definition(),
+        process_cancel_tool_definition(),
+    ]
 }
 
-pub fn tasks_stop_tool_definition() -> ToolDefinition {
+pub fn process_cancel_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
-        "tasks_stop",
-        "Cancel a background task by `task_id`. Monitors and subagents return this id when started; `tasks_list` can also rediscover it. For monitors this terminates the process tree; for subagents it closes the subtree (running turns are cancelled, idle sessions closed).",
+        "cancel_process",
+        "Request cancellation for a durable process by `process_id`.",
         serde_json::json!({
             "type": "object",
             "properties": {
-                "task_id": {
+                "process_id": {
                     "type": "string",
-                    "description": "Task id returned by `monitor`, `spawn_agent`, or `tasks_list`."
+                    "description": "Process id returned by a process handle or `list_process_handles`."
                 }
             },
-            "required": ["task_id"],
+            "required": ["process_id"],
             "additionalProperties": false
         }),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-        r#"tasks_stop(task_id="monitor:app-errors")"#.into(),
-        r#"tasks_stop(task_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
+        r#"cancel_process(process_id="monitor:app-errors")"#.into(),
+        r#"cancel_process(process_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
@@ -310,7 +314,7 @@ pub async fn execute_monitor_tool_call(
                 .cloned();
             match started {
                 Some(status) => ToolResult::ok(serde_json::json!({
-                    "task_id": format!("monitor:{}", status.spec.id),
+                    "process_id": format!("monitor:{}", status.spec.id),
                     "monitor_id": status.spec.id,
                     "description": status.spec.command,
                     "command": status.spec.command,
@@ -331,72 +335,78 @@ pub async fn execute_monitor_tool_call(
     }
 }
 
-pub async fn execute_tasks_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
+pub async fn execute_process_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
     match context
         .host
-        .list_background_tasks(&context.session_id)
+        .list_processes_scoped(
+            &context.session_id,
+            context.tool_effect_metadata.clone(),
+            Some(context.effect_controller.as_controller()),
+        )
         .await
     {
-        Ok(tasks) => {
-            let entries: Vec<Value> = tasks
+        Ok(processes) => {
+            let entries: Vec<Value> = processes
                 .into_iter()
-                .map(|task| {
-                    let created_at_iso = chrono::DateTime::<chrono::Utc>::from(task.created_at)
+                .filter(|process| process.handle_visible)
+                .map(|process| {
+                    let created_at_iso = chrono::DateTime::<chrono::Utc>::from(process.created_at)
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                     serde_json::json!({
-                        "task_id": task.id,
-                        "kind": kind_label(task.kind),
-                        "producer": task.producer,
-                        "state": state_label(task.state),
+                        "process_id": process.id,
+                        "producer": process.producer,
+                        "tags": process.tags,
+                        "state": state_label(process.state),
                         "created_at": created_at_iso,
                     })
                 })
                 .collect();
-            ToolResult::ok(serde_json::json!({ "tasks": entries }))
+            ToolResult::ok(serde_json::json!({ "processes": entries }))
         }
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
 }
 
-pub async fn execute_tasks_stop_tool_call(
+pub async fn execute_process_cancel_tool_call(
     context: &ToolDispatchContext<'_>,
     args: &Value,
 ) -> ToolResult {
     let Some(id) = args
-        .get("task_id")
+        .get("process_id")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return ToolResult::err_fmt("tasks_stop requires `task_id`");
+        return ToolResult::err_fmt("cancel_process requires `process_id`");
     };
     match context
         .host
-        .cancel_background_task(&context.session_id, id)
+        .cancel_process_scoped(
+            &context.session_id,
+            id,
+            context.tool_effect_metadata.clone(),
+            Some(context.effect_controller.as_controller()),
+        )
         .await
     {
         Ok(status) => ToolResult::ok(serde_json::json!({
-            "task_id": status.id,
-            "kind": kind_label(status.kind),
+            "process_id": status.id,
+            "producer": status.producer,
             "state": state_label(status.state),
         })),
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
 }
 
-fn state_label(state: BackgroundTaskState) -> &'static str {
+fn state_label(state: ProcessState) -> &'static str {
     match state {
-        BackgroundTaskState::Pending => "pending",
-        BackgroundTaskState::Scheduled => "scheduled",
-        BackgroundTaskState::Running => "running",
-        BackgroundTaskState::Waiting => "idle",
-        BackgroundTaskState::Completed => "completed",
-        BackgroundTaskState::Failed => "failed",
-        BackgroundTaskState::CancelRequested => "cancel_requested",
-        BackgroundTaskState::Cancelled => "cancelled",
+        ProcessState::Pending => "pending",
+        ProcessState::Scheduled => "scheduled",
+        ProcessState::Running => "running",
+        ProcessState::Waiting => "idle",
+        ProcessState::Completed => "completed",
+        ProcessState::Failed => "failed",
+        ProcessState::CancelRequested => "cancel_requested",
+        ProcessState::Cancelled => "cancelled",
     }
-}
-
-fn kind_label(kind: BackgroundTaskKind) -> &'static str {
-    kind.as_str()
 }

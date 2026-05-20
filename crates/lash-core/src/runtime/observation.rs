@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tokio::sync::Mutex;
 
-use super::{BackgroundTaskFilter, BackgroundTaskRecord, BackgroundTaskRegistry, LashRuntime};
+use super::{LashRuntime, ProcessFilter, ProcessRecord, ProcessRegistry};
 
 #[derive(Clone)]
 pub struct RuntimeObservation {
@@ -16,7 +16,7 @@ pub struct RuntimeObservation {
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
     pub tool_catalog_error: Option<String>,
     pub runtime_scope_id: Arc<str>,
-    pub background_task_registry: Option<Arc<dyn BackgroundTaskRegistry>>,
+    pub process_registry: Option<Arc<dyn ProcessRegistry>>,
 }
 
 impl RuntimeObservation {
@@ -35,7 +35,7 @@ impl RuntimeObservation {
             tool_catalog,
             tool_catalog_error,
             runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
-            background_task_registry: runtime.host.background_task_registry.clone(),
+            process_registry: runtime.host.process_registry.clone(),
         }
     }
 
@@ -43,18 +43,20 @@ impl RuntimeObservation {
         &self.session_id
     }
 
-    pub fn background_scope_key(&self) -> String {
+    pub fn process_scope_key(&self) -> String {
         format!("{}:{}", self.runtime_scope_id, self.session_id)
     }
 
-    pub async fn list_background_tasks(&self) -> Vec<BackgroundTaskRecord> {
-        let Some(executor) = self.background_task_registry.as_ref() else {
+    pub async fn list_processes(&self) -> Vec<ProcessRecord> {
+        let Some(executor) = self.process_registry.as_ref() else {
             return Vec::new();
         };
         executor
-            .list(BackgroundTaskFilter {
-                session_id: Some(self.background_scope_key()),
-                kind: None,
+            .list(ProcessFilter {
+                session_id: Some(self.process_scope_key()),
+                producer: None,
+                tags: Vec::new(),
+                handle_visible: None,
                 include_terminal: true,
             })
             .await

@@ -128,7 +128,7 @@ impl LashRuntime {
         let managed_sessions = Arc::clone(&self.managed_sessions);
         let active_handoff_continuations = Arc::clone(&self.active_handoff_continuations);
         let managed_turns = Arc::clone(&self.managed_turns);
-        let background_sync_needed = Arc::clone(&self.background_sync_needed);
+        let process_sync_needed = Arc::clone(&self.process_sync_needed);
         let runtime_scope_id = Arc::clone(&self.runtime_scope_id);
         let turn_phase_probe = self.turn_phase_probe.clone();
 
@@ -136,7 +136,7 @@ impl LashRuntime {
         rebuilt.managed_sessions = managed_sessions;
         rebuilt.active_handoff_continuations = active_handoff_continuations;
         rebuilt.managed_turns = managed_turns;
-        rebuilt.background_sync_needed = background_sync_needed;
+        rebuilt.process_sync_needed = process_sync_needed;
         rebuilt.runtime_scope_id = runtime_scope_id;
         rebuilt.turn_phase_probe = turn_phase_probe;
 

@@ -911,7 +911,7 @@ mod tests {
             "llm_query",
             "spawn_agent",
             "continue_as",
-            "list_async_handles",
+            "list_process_handles",
         ] {
             assert!(
                 !section.contains(tool_name),

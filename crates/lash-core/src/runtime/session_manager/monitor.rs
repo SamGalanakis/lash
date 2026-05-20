@@ -1,6 +1,6 @@
 use super::*;
 
-impl BackgroundTaskCapability {
+impl ProcessCapability {
     pub(in crate::runtime::session_manager) async fn ensure_registered_monitor_specs(
         &self,
         current: &CurrentSessionCapability,
@@ -45,25 +45,6 @@ impl BackgroundTaskCapability {
         current
             .plugins
             .call_plugin_action::<crate::MonitorStatusOp>(
-                crate::MonitorEmptyArgs {},
-                Some(session_id.to_string()),
-                false,
-                host,
-            )
-            .await
-    }
-
-    pub(in crate::runtime::session_manager) async fn take_monitor_updates(
-        &self,
-        current: &CurrentSessionCapability,
-        host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-        session_id: &str,
-    ) -> Result<crate::MonitorUpdateBatch, crate::PluginError> {
-        self.ensure_registered_monitor_specs(current, Arc::clone(&host), session_id)
-            .await?;
-        current
-            .plugins
-            .call_plugin_action::<crate::MonitorTakeUpdatesOp>(
                 crate::MonitorEmptyArgs {},
                 Some(session_id.to_string()),
                 false,

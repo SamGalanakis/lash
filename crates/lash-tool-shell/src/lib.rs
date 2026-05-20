@@ -2366,7 +2366,7 @@ mod tests {
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = lash_core::testing::mock_tool_context().with_async_task("test", token.clone());
+        let ctx = lash_core::testing::mock_tool_context().with_async_process("test", token.clone());
 
         // A long-running sleep that would otherwise hold the tool call for
         // 5s. The dispatcher must return promptly once the token fires, and
@@ -2422,7 +2422,7 @@ mod tests {
 
         let shell = test_shell();
         let token = CancellationToken::new();
-        let ctx = lash_core::testing::mock_tool_context().with_async_task("test", token.clone());
+        let ctx = lash_core::testing::mock_tool_context().with_async_process("test", token.clone());
 
         // Open a long-lived child. `echo $$` reports the shell's pid, then
         // `exec sleep 5` replaces the shell with sleep so the printed pid is

@@ -6,7 +6,7 @@ use lash::{
     messages::MessageRole,
     persistence::SessionStateEnvelope,
     plugins::{
-        BuiltinMonitorToolPluginFactory, BuiltinTaskControlsPluginFactory, PluginSpec,
+        BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginSpec,
         StaticPluginFactory,
     },
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
@@ -124,7 +124,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .background_tasks()
+            .processes()
             .await_all()
             .await?;
         Ok(())
@@ -261,7 +261,7 @@ pub(crate) async fn build_runtime_with_store(
         standard_context_approach: standard_context_approach.clone(),
         tavily_api_key: None,
     });
-    plugin_stack.push(Arc::new(BuiltinTaskControlsPluginFactory::new()));
+    plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
     plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
@@ -480,8 +480,8 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
                 .map(|(_, text)| text)
                 .unwrap_or("runtime perf benchmark ok")
         ),
-        RuntimePerfScenario::RlmAsyncHandles => format!(
-            "Turn {} in RLM mode. Exercise start/await/cancel async handles, then submit exactly: {}",
+        RuntimePerfScenario::RlmProcessHandles => format!(
+            "Turn {} in RLM mode. Exercise start/await/cancel process handles, then submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

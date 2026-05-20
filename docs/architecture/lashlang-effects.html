@@ -17,7 +17,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lashlang<span class="slash">/</span>effects</h1>
-    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, tool calls, async handles, parallel blocks, builtins, and type literals.</p>
+    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, tool calls, process handles, parallel blocks, builtins, and type literals.</p>
   </section>
 
   <main class="body" id="content">
@@ -48,7 +48,7 @@
 
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
-            <h2>Tool Calls And Async Handles</h2>
+            <h2>Tool Calls And Process Handles</h2>
             <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
           </div>
           <dl class="def-list">
@@ -59,7 +59,7 @@
             <dt><code>await</code></dt>
             <dd><code>await handle</code> resolves one handle. <code>await [h1, h2]</code> resolves a list and returns wrapper records in order; <code>await { a: h1, b: h2 }</code> resolves a record of handles and returns a record of wrappers. <code>(await handle)?</code> unwraps the resolved result.</dd>
             <dt><code>cancel</code></dt>
-            <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_async_handles</code>.</dd>
+            <dd><code>cancel handle</code> asks the host to stop background work. Cancellation is best-effort and uses the same handle identity exposed by <code>list_process_handles</code>.</dd>
           </dl>
           <p>Use <code>?</code> for the happy path and inspect the wrapper when failures are expected. Mixing both styles in one block keeps fatal errors fail-fast while letting probes branch on outcome.</p>
           <pre><code>// Fail-fast: the block aborts if the file can't be read.

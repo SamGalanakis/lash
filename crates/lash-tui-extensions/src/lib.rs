@@ -6,9 +6,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use lash::control::PluginAction;
 use lash::tools::{
-    AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec,
-    MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp,
-    MonitorUpdateBatch, StartMonitorArgs, StopMonitorArgs,
+    MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
+    MonitorStatusOp, MonitorStopOp, StartMonitorArgs, StopMonitorArgs,
 };
 use lash::{PluginActions, TurnEvent};
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
@@ -747,7 +746,6 @@ struct MonitorTuiExtension {
 struct MonitorTuiState {
     snapshot: MonitorSnapshot,
     overlay_open: bool,
-    outstanding_wakes: std::collections::BTreeSet<String>,
 }
 
 impl MonitorTuiExtension {
@@ -769,37 +767,12 @@ impl TuiExtension for MonitorTuiExtension {
     }
 
     async fn snapshot(&self, ctx: TuiExtensionContext<'_>) -> Result<Vec<TuiHostEffect>, String> {
-        let updates = monitor_updates(ctx.actions).await?;
         let snapshot = monitor_status(ctx.actions).await?;
-        let (effects, ack_ids) = {
+        let effects = {
             let mut state = self.lock_state()?;
             state.snapshot = snapshot.clone();
-            let mut effects = monitor_effects(&state);
-            let mut ack_ids = Vec::new();
-            for event in updates.events {
-                if let Some(input) = event.queue_turn_input.as_ref() {
-                    if state.outstanding_wakes.insert(event.monitor_id.clone()) {
-                        effects.push(TuiHostEffect::PushSystemMessage(format!(
-                            "Monitor event: \"{}\"",
-                            event.message
-                        )));
-                        effects.push(TuiHostEffect::WakeSession {
-                            input: input.clone(),
-                        });
-                        ack_ids.push(event.monitor_id.clone());
-                    }
-                } else if event.message.contains("failed") || event.message.contains("exited") {
-                    effects.push(TuiHostEffect::PushSystemMessage(format!(
-                        "Monitor {}: {}",
-                        event.monitor_id, event.message
-                    )));
-                }
-            }
-            (effects, ack_ids)
+            monitor_effects(&state)
         };
-        if !ack_ids.is_empty() {
-            monitor_ack_wakes(ctx.actions, ack_ids).await?;
-        }
         Ok(effects)
     }
 
@@ -938,18 +911,11 @@ impl TuiExtension for MonitorTuiExtension {
     }
 
     fn handle_turn_event(&self, event: &TurnEvent) -> Vec<TuiHostEffect> {
-        if matches!(event, TurnEvent::Error { .. })
-            && let Ok(mut state) = self.state.lock()
-        {
-            state.outstanding_wakes.clear();
-        }
+        let _ = event;
         Vec::new()
     }
 
     fn handle_turn_finished(&self) -> Vec<TuiHostEffect> {
-        if let Ok(mut state) = self.state.lock() {
-            state.outstanding_wakes.clear();
-        }
         Vec::new()
     }
 }
@@ -1024,14 +990,6 @@ fn format_monitor_summary(snapshot: &MonitorSnapshot) -> String {
 
 async fn monitor_status(session: &PluginActions) -> Result<MonitorSnapshot, String> {
     call_plugin_action::<MonitorStatusOp>(session, MonitorEmptyArgs {}).await
-}
-
-async fn monitor_updates(session: &PluginActions) -> Result<MonitorUpdateBatch, String> {
-    call_plugin_action::<MonitorTakeUpdatesOp>(session, MonitorEmptyArgs {}).await
-}
-
-async fn monitor_ack_wakes(session: &PluginActions, ids: Vec<String>) -> Result<(), String> {
-    call_plugin_action::<MonitorAckWakeOp>(session, AckWakeArgs { ids }).await
 }
 
 async fn monitor_stop(session: &PluginActions, id: &str) -> Result<(), String> {

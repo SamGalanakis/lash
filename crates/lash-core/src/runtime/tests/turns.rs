@@ -686,7 +686,7 @@ async fn external_invoke_can_create_session_from_current_snapshot() {
 }
 
 #[tokio::test]
-async fn session_manager_can_stream_and_await_child_session_turns() {
+async fn session_manager_can_run_child_session_turn() {
     let transport = mock_provider(vec![MockCall {
         stream_events: vec![
             LlmStreamEvent::Delta("child ".to_string()),
@@ -729,8 +729,8 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
         })
         .await
         .expect("child session");
-    let mut turn = manager
-        .start_turn_stream(
+    let assembled = manager
+        .start_turn(
             &handle.session_id,
             TurnInput {
                 items: vec![InputItem::Text {
@@ -745,26 +745,8 @@ async fn session_manager_can_stream_and_await_child_session_turns() {
         )
         .await
         .expect("child turn");
-
-    let mut saw_stream_event = false;
-    while let Some(event) = turn.events.recv().await {
-        if matches!(
-            event,
-            SessionEvent::TextDelta { .. }
-                | SessionEvent::Message { .. }
-                | SessionEvent::TokenUsage { .. }
-                | SessionEvent::Done
-        ) {
-            saw_stream_event = true;
-        }
-    }
-
-    let assembled = manager.await_turn(&turn.turn_id).await.expect("assembled");
     assert_eq!(handle.session_id, "child");
     assert_eq!(handle.policy.model, "mock-model");
-    assert_eq!(turn.session_id, "child");
-    assert_eq!(turn.policy.model, "mock-model");
-    assert!(saw_stream_event);
     assert_eq!(assembled.state.session_id, "child");
 }
 
@@ -1046,7 +1028,7 @@ async fn runtime_can_activate_managed_child_session() {
     assert_eq!(seed.content, "run child");
     assert!(
         manager
-            .start_turn_stream(
+            .start_turn(
                 "child",
                 TurnInput {
                     items: vec![InputItem::Text {

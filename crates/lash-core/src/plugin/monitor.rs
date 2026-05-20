@@ -3,15 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::select;
 
 use crate::ToolResult;
-use crate::monitor::{
-    MonitorArmOn, MonitorEvent, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStatus,
-    MonitorUpdateBatch, MonitorWakePolicy,
-};
+use crate::monitor::{MonitorArmOn, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStatus};
 use crate::plugin::{
     PluginAction, PluginActionContext, PluginActionFailure, PluginActionKind, PluginError,
     PluginFactory, PluginRegistrar, PluginSessionContext, PluginSnapshotMeta, SessionParam,
@@ -66,8 +60,6 @@ struct MonitorSnapshotState {
     #[serde(default)]
     revision: u64,
     #[serde(default)]
-    sequence: u64,
-    #[serde(default)]
     monitors: BTreeMap<String, MonitorEntry>,
 }
 
@@ -76,8 +68,6 @@ struct MonitorEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owner_plugin_id: Option<String>,
     status: MonitorStatus,
-    #[serde(default)]
-    pending_wake: bool,
     #[serde(skip, default)]
     runtime_pid: Option<u32>,
 }
@@ -85,7 +75,6 @@ struct MonitorEntry {
 #[derive(Default)]
 struct MonitorPluginState {
     snapshot: MonitorSnapshotState,
-    updates: Vec<MonitorEvent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, crate::JsonSchema)]
@@ -114,16 +103,8 @@ pub struct StopMonitorArgs {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, crate::JsonSchema)]
 pub struct MonitorEmptyArgs {}
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, crate::JsonSchema)]
-pub struct AckWakeArgs {
-    #[serde(default)]
-    pub ids: Vec<String>,
-}
-
 pub struct MonitorRegisterSpecsOp;
 pub struct MonitorStatusOp;
-pub struct MonitorTakeUpdatesOp;
-pub struct MonitorAckWakeOp;
 pub struct MonitorStartOp;
 pub struct MonitorStopOp;
 
@@ -143,24 +124,6 @@ impl PluginAction for MonitorStatusOp {
     const SESSION_PARAM: SessionParam = SessionParam::Required;
     type Args = MonitorEmptyArgs;
     type Output = MonitorSnapshot;
-}
-
-impl PluginAction for MonitorTakeUpdatesOp {
-    const NAME: &'static str = "monitor.take_updates";
-    const DESCRIPTION: &'static str = "Drain pending monitor updates.";
-    const KIND: PluginActionKind = PluginActionKind::Task;
-    const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = MonitorEmptyArgs;
-    type Output = MonitorUpdateBatch;
-}
-
-impl PluginAction for MonitorAckWakeOp {
-    const NAME: &'static str = "monitor.ack_wake";
-    const DESCRIPTION: &'static str = "Acknowledge pending monitor wake-ups.";
-    const KIND: PluginActionKind = PluginActionKind::Command;
-    const SESSION_PARAM: SessionParam = SessionParam::Required;
-    type Args = AckWakeArgs;
-    type Output = ();
 }
 
 impl PluginAction for MonitorStartOp {
@@ -202,11 +165,69 @@ impl MonitorPlugin {
     }
 
     fn snapshot_from_state(state: &MonitorPluginState) -> MonitorSnapshot {
+        Self::snapshot_from_state_and_processes(state, &[])
+    }
+
+    fn snapshot_from_state_and_processes(
+        state: &MonitorPluginState,
+        processes: &[crate::ProcessRecord],
+    ) -> MonitorSnapshot {
+        let by_id = processes
+            .iter()
+            .filter(|record| record.tags.iter().any(|tag| tag == "monitor"))
+            .map(|record| (record.id.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
         let mut monitors = state
             .snapshot
             .monitors
             .values()
-            .map(|entry| entry.status.clone())
+            .map(|entry| {
+                let mut status = entry.status.clone();
+                if let Some(record) = by_id.get(format!("monitor:{}", status.spec.id).as_str()) {
+                    status.state = match record.state {
+                        crate::ProcessState::Pending
+                        | crate::ProcessState::Scheduled
+                        | crate::ProcessState::Running
+                        | crate::ProcessState::Waiting
+                        | crate::ProcessState::CancelRequested => MonitorRunState::Running,
+                        crate::ProcessState::Completed => MonitorRunState::Exited,
+                        crate::ProcessState::Failed => MonitorRunState::Failed,
+                        crate::ProcessState::Cancelled => MonitorRunState::Stopped,
+                    };
+                    status.event_count = record
+                        .latest_event
+                        .as_ref()
+                        .map(|event| event.sequence as usize)
+                        .unwrap_or(status.event_count);
+                    if let Some(event) = record.latest_event.as_ref() {
+                        if event.event_type == "monitor.line" {
+                            status.last_event = event
+                                .payload
+                                .get("line")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned);
+                        }
+                    }
+                    if let Some(terminal) = record.terminal.as_ref() {
+                        match &terminal.await_output {
+                            crate::ProcessAwaitOutput::Failure { message, .. } => {
+                                status.last_error = Some(message.clone());
+                            }
+                            crate::ProcessAwaitOutput::Cancelled { message, .. } => {
+                                status.last_error = Some(message.clone());
+                            }
+                            crate::ProcessAwaitOutput::Success { value, .. } => {
+                                status.last_error = None;
+                                status.last_exit_status = value
+                                    .get("exit_status")
+                                    .and_then(serde_json::Value::as_i64)
+                                    .and_then(|code| i32::try_from(code).ok());
+                            }
+                        }
+                    }
+                }
+                status
+            })
             .collect::<Vec<_>>();
         monitors.sort_by(|left, right| left.spec.id.cmp(&right.spec.id));
         MonitorSnapshot {
@@ -219,22 +240,10 @@ impl MonitorPlugin {
         }
     }
 
-    fn queue_update(
-        state: &mut MonitorPluginState,
-        monitor_id: &str,
-        message: String,
-        queue_turn_input: Option<String>,
-    ) {
-        state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
-        state.updates.push(MonitorEvent {
-            sequence: state.snapshot.sequence,
-            monitor_id: monitor_id.to_string(),
-            message,
-            queue_turn_input,
-        });
-        if state.updates.len() > 128 {
-            let drop_count = state.updates.len() - 128;
-            state.updates.drain(0..drop_count);
+    fn record_monitor_notice(state: &mut MonitorPluginState, monitor_id: &str, message: String) {
+        if let Some(entry) = state.snapshot.monitors.get_mut(monitor_id) {
+            entry.status.last_event = Some(message);
+            entry.status.event_count = entry.status.event_count.saturating_add(1);
         }
         Self::bump_revision(state);
     }
@@ -279,7 +288,6 @@ impl MonitorPlugin {
                             last_exit_status: None,
                             event_count: 0,
                         },
-                        pending_wake: false,
                         runtime_pid: None,
                     },
                 );
@@ -319,69 +327,66 @@ impl MonitorPlugin {
         host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
         spec: MonitorSpec,
     ) -> Result<(), PluginError> {
-        let task_id = format!("monitor:{}", spec.id);
-        let state = Arc::clone(&self.state);
-        let session_id_owned = session_id.to_string();
-        let spec_clone = spec.clone();
-        let task_host = host.clone();
-        let managed_spec = crate::BackgroundTaskRegistration {
-            id: task_id.clone(),
-            kind: crate::BackgroundTaskKind::Monitor,
-            producer: "monitor".to_string(),
-            scope: crate::BackgroundTaskScope {
+        let process_id = format!("monitor:{}", spec.id);
+        let mut properties = serde_json::Map::new();
+        properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
+        properties.insert(
+            "stream".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+        properties.insert(
+            "timestamp".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+        properties.insert(
+            "wake_input".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+        let line_event = crate::ProcessEventType {
+            name: "monitor.line".to_string(),
+            payload_schema: crate::LashSchema::object(
+                properties,
+                vec![
+                    "line".to_string(),
+                    "stream".to_string(),
+                    "timestamp".to_string(),
+                ],
+            ),
+            semantics: crate::ProcessEventSemanticsSpec {
+                wake: Some(crate::ProcessWakeSpec {
+                    when: Some(crate::ProcessValueSelector::Present(
+                        "/wake_input".to_string(),
+                    )),
+                    input: crate::ProcessValueSelector::Pointer("/wake_input".to_string()),
+                    dedupe_key: crate::ProcessWakeDedupeKey::EventIdentity,
+                }),
+                ..crate::ProcessEventSemanticsSpec::default()
+            },
+        };
+        let managed_spec = crate::ProcessRegistration::new(
+            process_id.clone(),
+            "monitor",
+            crate::ProcessScope {
                 session_id: session_id.to_string(),
             },
-            child_session_id: None,
-            parent_task_id: None,
-            input: crate::BackgroundTaskInput::Monitor { spec: spec.clone() },
-            attempt: crate::BackgroundTaskAttempt::default(),
-            cancel_policy: crate::BackgroundCancelPolicy::Cooperative,
-            close_policy: crate::BackgroundClosePolicy::Cancel,
-        };
-        match host
-            .start_background_task(
-                session_id,
-                managed_spec,
-                crate::BackgroundTaskLocalExecutor::new(move |cancellation| async move {
-                    let result = run_monitor_task(
-                        state,
-                        session_id_owned,
-                        spec_clone,
-                        task_host,
-                        cancellation,
-                    )
-                    .await;
-                    match result {
-                        Ok(exit) if exit.cancelled => crate::BackgroundTaskCompletion {
-                            state: crate::BackgroundTaskState::Cancelled,
-                            summary: Some("monitor stopped".to_string()),
-                            output: Some(crate::ToolCallOutput::cancelled(
-                                crate::ToolCancellation::runtime("monitor stopped"),
-                            )),
-                        },
-                        Ok(_) => crate::BackgroundTaskCompletion {
-                            state: crate::BackgroundTaskState::Completed,
-                            summary: Some("monitor exited".to_string()),
-                            output: Some(crate::ToolCallOutput::success(serde_json::json!({
-                                "task_id": task_id,
-                                "kind": "monitor",
-                                "state": "completed",
-                            }))),
-                        },
-                        Err(err) => crate::BackgroundTaskCompletion {
-                            state: crate::BackgroundTaskState::Failed,
-                            summary: Some(err.to_string()),
-                            output: Some(crate::ToolCallOutput::failure(crate::ToolFailure::tool(
-                                crate::ToolFailureClass::Execution,
-                                "monitor_failed",
-                                err.to_string(),
-                            ))),
-                        },
-                    }
-                }),
-            )
-            .await
-        {
+            crate::ProcessInput::Command {
+                command: spec.command.clone(),
+                cwd: spec.cwd.clone(),
+                env: spec.env.clone(),
+                timeout_ms: spec.timeout_ms,
+                persistent: spec.persistent,
+            },
+        )
+        .with_extra_event_types([line_event])
+        .with_tags(["monitor"])
+        .with_metadata(serde_json::json!({
+            "monitor_id": spec.id,
+            "wake_policy": spec.wake_policy,
+        }))
+        .with_handle_visible(true)
+        .with_cancel_policy(crate::ProcessCancelPolicy::Cooperative)
+        .with_close_policy(crate::ProcessClosePolicy::Cancel);
+        match host.start_process(session_id, managed_spec).await {
             Ok(_) => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
@@ -408,11 +413,10 @@ impl MonitorPlugin {
                     entry.status.last_error = Some(err.to_string());
                     entry.status.armed = false;
                 }
-                Self::queue_update(
+                Self::record_monitor_notice(
                     &mut state,
                     &spec.id,
                     format!("Failed to start monitor: {err}"),
-                    None,
                 );
                 Err(err)
             }
@@ -448,53 +452,17 @@ impl MonitorPlugin {
         if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
             return ToolResult::err_fmt(err.to_string());
         }
+        let processes = match ctx.host.list_processes(session_id).await {
+            Ok(processes) => processes,
+            Err(err) => return ToolResult::err_fmt(err.to_string()),
+        };
         let state = match self.lock_state() {
             Ok(state) => state,
             Err(err) => return ToolResult::err_fmt(err.to_string()),
         };
-        ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
-    }
-
-    async fn handle_take_updates(&self, ctx: PluginActionContext) -> ToolResult {
-        let Some(session_id) = ctx.session_id.as_deref() else {
-            return ToolResult::err_fmt("monitor.take_updates requires a session");
-        };
-        if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
-            return ToolResult::err_fmt(err.to_string());
-        }
-        let mut state = match self.lock_state() {
-            Ok(state) => state,
-            Err(err) => return ToolResult::err_fmt(err.to_string()),
-        };
-        let active_count = state
-            .snapshot
-            .monitors
-            .values()
-            .filter(|entry| entry.status.state == MonitorRunState::Running)
-            .count();
-        ToolResult::ok(serde_json::json!(MonitorUpdateBatch {
-            revision: state.snapshot.revision,
-            active_count,
-            events: std::mem::take(&mut state.updates),
-        }))
-    }
-
-    async fn handle_ack_wake(&self, args: serde_json::Value) -> ToolResult {
-        let parsed = match serde_json::from_value::<AckWakeArgs>(args) {
-            Ok(parsed) => parsed,
-            Err(err) => return ToolResult::err_fmt(format_args!("invalid ack payload: {err}")),
-        };
-        let mut state = match self.lock_state() {
-            Ok(state) => state,
-            Err(err) => return ToolResult::err_fmt(err.to_string()),
-        };
-        for id in parsed.ids {
-            if let Some(entry) = state.snapshot.monitors.get_mut(&id) {
-                entry.pending_wake = false;
-            }
-        }
-        Self::bump_revision(&mut state);
-        ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
+        ToolResult::ok(serde_json::json!(Self::snapshot_from_state_and_processes(
+            &state, &processes
+        )))
     }
 
     async fn handle_start(&self, ctx: PluginActionContext, args: serde_json::Value) -> ToolResult {
@@ -546,7 +514,7 @@ impl MonitorPlugin {
             Ok(parsed) => parsed,
             Err(err) => return ToolResult::err_fmt(format_args!("invalid stop payload: {err}")),
         };
-        let (monitor_id, runtime_pid) = {
+        let monitor_id = {
             let state = match self.lock_state() {
                 Ok(state) => state,
                 Err(err) => return ToolResult::err_fmt(err.to_string()),
@@ -554,26 +522,13 @@ impl MonitorPlugin {
             let Some(entry) = state.snapshot.monitors.get(&parsed.id) else {
                 return ToolResult::err_fmt(format_args!("unknown monitor `{}`", parsed.id));
             };
-            (entry.status.spec.id.clone(), entry.runtime_pid)
+            entry.status.spec.id.clone()
         };
 
-        if let Err(err) = terminate_monitor_process_tree(runtime_pid).await {
-            return ToolResult::err_fmt(err.to_string());
-        }
-
-        let task_id = format!("monitor:{}", parsed.id);
+        let process_id = format!("monitor:{}", parsed.id);
         if let Err(err) = ctx
             .host
-            .complete_background_task(
-                &task_id,
-                crate::BackgroundTaskCompletion {
-                    state: crate::BackgroundTaskState::Cancelled,
-                    summary: Some("monitor stopped".to_string()),
-                    output: Some(crate::ToolCallOutput::cancelled(
-                        crate::ToolCancellation::runtime("monitor stopped"),
-                    )),
-                },
-            )
+            .cancel_process(ctx.session_id.as_deref().unwrap_or_default(), &process_id)
             .await
         {
             return ToolResult::err_fmt(err.to_string());
@@ -588,11 +543,14 @@ impl MonitorPlugin {
         };
         entry.status.armed = false;
         entry.status.state = MonitorRunState::Stopped;
-        entry.pending_wake = false;
         entry.runtime_pid = None;
         entry.status.last_error = None;
         entry.status.last_exit_status = None;
-        MonitorPlugin::queue_update(&mut state, &monitor_id, "Monitor stopped".to_string(), None);
+        MonitorPlugin::record_monitor_notice(
+            &mut state,
+            &monitor_id,
+            "Monitor stopped".to_string(),
+        );
         ToolResult::ok(serde_json::json!(Self::snapshot_from_state(&state)))
     }
 }
@@ -629,30 +587,6 @@ impl SessionPlugin for MonitorPlugin {
                     state: Arc::clone(&state),
                 };
                 async move { tool_result_output(plugin.handle_status(ctx).await) }
-            })?;
-
-        let state = Arc::clone(&self.state);
-        reg.actions()
-            .typed::<MonitorTakeUpdatesOp, _, _>(move |ctx, _args| {
-                let plugin = MonitorPlugin {
-                    state: Arc::clone(&state),
-                };
-                async move { tool_result_output(plugin.handle_take_updates(ctx).await) }
-            })?;
-
-        let state = Arc::clone(&self.state);
-        reg.actions()
-            .typed::<MonitorAckWakeOp, _, _>(move |_ctx, args| {
-                let plugin = MonitorPlugin {
-                    state: Arc::clone(&state),
-                };
-                async move {
-                    tool_result_unit(
-                        plugin
-                            .handle_ack_wake(serde_json::to_value(args).unwrap_or_default())
-                            .await,
-                    )
-                }
             })?;
 
         let state = Arc::clone(&self.state);
@@ -716,9 +650,7 @@ impl SessionPlugin for MonitorPlugin {
             .unwrap_or_default();
         let mut state = self.lock_state()?;
         state.snapshot = snapshot;
-        state.updates.clear();
         for entry in state.snapshot.monitors.values_mut() {
-            entry.pending_wake = false;
             entry.runtime_pid = None;
             if entry.status.armed && entry.status.spec.restart_on_restore {
                 entry.status.state = MonitorRunState::Idle;
@@ -738,273 +670,9 @@ impl SessionPlugin for MonitorPlugin {
     }
 }
 
-async fn run_monitor_task(
-    state: Arc<Mutex<MonitorPluginState>>,
-    _session_id: String,
-    spec: MonitorSpec,
-    _host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost>,
-    cancellation: tokio_util::sync::CancellationToken,
-) -> Result<MonitorTaskExit, PluginError> {
-    let timeout_deadline = (!spec.persistent)
-        .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(spec.timeout_ms));
-    let mut command = Command::new("bash");
-    command.arg("-lc").arg(&spec.command);
-    if let Some(cwd) = spec.cwd.as_ref() {
-        command.current_dir(cwd);
-    }
-    if !spec.env.is_empty() {
-        command.envs(spec.env.iter());
-    }
-    command.kill_on_drop(true);
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
-    configure_monitor_command(&mut command);
-
-    let mut child = command
-        .spawn()
-        .map_err(|err| PluginError::Session(format!("failed to start monitor process: {err}")))?;
-    let runtime_pid = child.id();
-    {
-        let mut guard = state
-            .lock()
-            .map_err(|_| PluginError::Session("monitor state poisoned".to_string()))?;
-        if let Some(entry) = guard.snapshot.monitors.get_mut(&spec.id) {
-            entry.runtime_pid = runtime_pid;
-        }
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| PluginError::Session("monitor stdout unavailable".to_string()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| PluginError::Session("monitor stderr unavailable".to_string()))?;
-    let mut stdout_lines = BufReader::new(stdout).lines();
-    let mut stderr_lines = BufReader::new(stderr).lines();
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-    let mut timeout = timeout_deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
-    let mut timed_out = false;
-    let mut cancelled = false;
-
-    let id = spec.id.clone();
-    let wake_policy = spec.wake_policy;
-
-    while !stdout_done || !stderr_done {
-        select! {
-            _ = timeout.as_mut().unwrap(), if timeout.is_some() => {
-                timed_out = true;
-                break;
-            }
-            _ = cancellation.cancelled() => {
-                cancelled = true;
-                break;
-            }
-            line = stdout_lines.next_line(), if !stdout_done => {
-                match line.map_err(|err| PluginError::Session(format!("monitor stdout read failed: {err}")))? {
-                    Some(line) => record_monitor_line(&state, &spec, &id, wake_policy, line, true)?,
-                    None => stdout_done = true,
-                }
-            }
-            line = stderr_lines.next_line(), if !stderr_done => {
-                match line.map_err(|err| PluginError::Session(format!("monitor stderr read failed: {err}")))? {
-                    Some(line) => record_monitor_line(
-                        &state,
-                        &spec,
-                        &id,
-                        MonitorWakePolicy::Notify,
-                        line,
-                        false,
-                    )?,
-                    None => stderr_done = true,
-                }
-            }
-        }
-    }
-
-    let exit =
-        if timed_out || cancelled {
-            terminate_monitor_process_tree(runtime_pid).await?;
-            child
-                .wait()
-                .await
-                .map_err(|err| PluginError::Session(format!("monitor wait failed: {err}")))?
-        } else if let Some(deadline) = timeout_deadline {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(remaining, child.wait()).await {
-                Ok(result) => result
-                    .map_err(|err| PluginError::Session(format!("monitor wait failed: {err}")))?,
-                Err(_) => {
-                    timed_out = true;
-                    terminate_monitor_process_tree(runtime_pid).await?;
-                    child.wait().await.map_err(|err| {
-                        PluginError::Session(format!("monitor wait failed: {err}"))
-                    })?
-                }
-            }
-        } else {
-            child
-                .wait()
-                .await
-                .map_err(|err| PluginError::Session(format!("monitor wait failed: {err}")))?
-        };
-
-    let mut state = state
-        .lock()
-        .map_err(|_| PluginError::Session("monitor state poisoned".to_string()))?;
-    if let Some(entry) = state.snapshot.monitors.get_mut(&id) {
-        let was_stopped = entry.status.state == MonitorRunState::Stopped;
-        entry.status.state = if was_stopped || cancelled {
-            MonitorRunState::Stopped
-        } else if timed_out || !exit.success() {
-            MonitorRunState::Failed
-        } else {
-            MonitorRunState::Exited
-        };
-        entry.status.last_exit_status = exit.code();
-        entry.status.armed = false;
-        entry.runtime_pid = None;
-        if timed_out {
-            entry.status.last_error =
-                Some(format!("monitor timed out after {}ms", spec.timeout_ms));
-        } else if cancelled {
-            entry.status.last_error = None;
-        } else if !exit.success() && !was_stopped {
-            entry.status.last_error = Some(format!(
-                "monitor exited with status {}",
-                exit.code().unwrap_or_default()
-            ));
-        }
-        entry.pending_wake = false;
-    }
-    if state
-        .snapshot
-        .monitors
-        .get(&id)
-        .map(|entry| entry.status.state != MonitorRunState::Stopped)
-        .unwrap_or(false)
-    {
-        MonitorPlugin::queue_update(
-            &mut state,
-            &id,
-            if timed_out {
-                format!("Monitor timed out after {}ms", spec.timeout_ms)
-            } else if exit.success() {
-                "Monitor exited".to_string()
-            } else {
-                format!(
-                    "Monitor failed with status {}",
-                    exit.code().unwrap_or_default()
-                )
-            },
-            None,
-        );
-    }
-    Ok(MonitorTaskExit { cancelled })
-}
-
-struct MonitorTaskExit {
-    cancelled: bool,
-}
-
-#[cfg(unix)]
-fn configure_monitor_command(command: &mut Command) {
-    // Put each monitor under its own session/process group so stop can
-    // terminate the whole command tree instead of just the shell wrapper.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn configure_monitor_command(_command: &mut Command) {}
-
-#[cfg(unix)]
-async fn terminate_monitor_process_tree(runtime_pid: Option<u32>) -> Result<(), PluginError> {
-    let Some(pid) = runtime_pid else {
-        return Ok(());
-    };
-    let pgid = -(pid as i32);
-    send_process_group_signal(pgid, libc::SIGTERM)?;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    if process_group_exists(pgid) {
-        send_process_group_signal(pgid, libc::SIGKILL)?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn terminate_monitor_process_tree(_runtime_pid: Option<u32>) -> Result<(), PluginError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn process_group_exists(pgid: i32) -> bool {
-    // `kill(pgid, 0)` probes whether any process in the group still exists.
-    let rc = unsafe { libc::kill(pgid, 0) };
-    if rc == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    !matches!(err.raw_os_error(), Some(libc::ESRCH))
-}
-
-#[cfg(unix)]
-fn send_process_group_signal(pgid: i32, signal: libc::c_int) -> Result<(), PluginError> {
-    let rc = unsafe { libc::kill(pgid, signal) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    if matches!(err.raw_os_error(), Some(libc::ESRCH)) {
-        return Ok(());
-    }
-    Err(PluginError::Session(format!(
-        "failed to signal monitor process group {pgid}: {err}"
-    )))
-}
-
-fn record_monitor_line(
-    state: &Arc<Mutex<MonitorPluginState>>,
-    spec: &MonitorSpec,
-    id: &str,
-    wake_policy: MonitorWakePolicy,
-    line: String,
-    from_stdout: bool,
-) -> Result<(), PluginError> {
-    let message = line.trim().to_string();
-    if message.is_empty() {
-        return Ok(());
-    }
-    let mut state = state
-        .lock()
-        .map_err(|_| PluginError::Session("monitor state poisoned".to_string()))?;
-    let Some(entry) = state.snapshot.monitors.get_mut(id) else {
-        return Ok(());
-    };
-    entry.status.last_event = Some(message.clone());
-    entry.status.event_count = entry.status.event_count.saturating_add(1);
-    let queue_turn_input =
-        if from_stdout && wake_policy == MonitorWakePolicy::QueueTurn && !entry.pending_wake {
-            entry.pending_wake = true;
-            Some(format!("Monitor event \"{}\": {}", spec.id, message))
-        } else {
-            None
-        };
-    MonitorPlugin::queue_update(&mut state, id, message, queue_turn_input);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::MockSessionManager;
 
     fn seeded_monitor_state(spec: &MonitorSpec) -> Arc<Mutex<MonitorPluginState>> {
         let mut monitors = BTreeMap::new();
@@ -1021,22 +689,19 @@ mod tests {
                     last_exit_status: None,
                     event_count: 0,
                 },
-                pending_wake: false,
                 runtime_pid: None,
             },
         );
         Arc::new(Mutex::new(MonitorPluginState {
             snapshot: MonitorSnapshotState {
                 revision: 0,
-                sequence: 0,
                 monitors,
             },
-            updates: Vec::new(),
         }))
     }
 
-    #[tokio::test]
-    async fn non_persistent_monitor_times_out_and_records_failure() {
+    #[test]
+    fn status_projection_reads_process_terminal_state() {
         let spec = MonitorSpec {
             id: "slow".to_string(),
             command: "sleep 5".to_string(),
@@ -1045,39 +710,31 @@ mod tests {
             ..Default::default()
         };
         let state = seeded_monitor_state(&spec);
-        let host: Arc<dyn crate::plugin::runtime_host::RuntimeSessionHost> =
-            Arc::new(MockSessionManager::default());
-
-        run_monitor_task(
-            state.clone(),
-            "root".to_string(),
-            spec,
-            host,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .expect("monitor task should complete after timeout");
+        let mut record = crate::ProcessRecord::local_session(
+            "root",
+            "monitor:slow",
+            "monitor",
+            crate::ProcessState::Failed,
+        );
+        record.tags = vec!["monitor".to_string()];
+        record.terminal = Some(crate::ProcessTerminalSemantics {
+            state: crate::ProcessTerminalState::Failed,
+            await_output: crate::ProcessAwaitOutput::Failure {
+                class: crate::ToolFailureClass::Execution,
+                code: "process_command_timeout".to_string(),
+                message: "monitor timed out after 50ms".to_string(),
+                raw: None,
+                control: None,
+            },
+        });
 
         let guard = state.lock().expect("monitor state");
-        let entry = guard
-            .snapshot
-            .monitors
-            .get("slow")
-            .expect("seeded monitor entry");
-        assert_eq!(entry.status.state, MonitorRunState::Failed);
-        assert!(!entry.status.armed);
-        assert!(
-            entry
-                .status
-                .last_error
-                .as_deref()
-                .is_some_and(|error| error.contains("timed out after 50ms"))
-        );
-        assert!(
-            guard
-                .updates
-                .iter()
-                .any(|event| event.message.contains("timed out after 50ms"))
+        let snapshot = MonitorPlugin::snapshot_from_state_and_processes(&guard, &[record]);
+
+        assert_eq!(snapshot.monitors[0].state, MonitorRunState::Failed);
+        assert_eq!(
+            snapshot.monitors[0].last_error.as_deref(),
+            Some("monitor timed out after 50ms")
         );
     }
 }

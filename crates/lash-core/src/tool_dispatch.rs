@@ -12,8 +12,9 @@ use crate::plugin::{
 use crate::tool_executor::execute_tool_call;
 use crate::tool_schema::validate_tool_input;
 use crate::{
-    ProgressSender, SessionEvent, ToolCallRecord, ToolContext, ToolExecutionMode, ToolFailure,
-    ToolFailureClass, ToolManifest, ToolProvider, ToolResult, ToolSurface, TurnInjectionBridge,
+    PreparedToolCall, ProgressSender, SessionEvent, ToolCallRecord, ToolContext, ToolExecutionMode,
+    ToolFailure, ToolFailureClass, ToolManifest, ToolPrepareCall, ToolPrepareContext, ToolProvider,
+    ToolResult, ToolSurface, TurnInjectionBridge,
 };
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub struct ToolDispatchContext<'run> {
     pub host: Arc<dyn RuntimeSessionHost>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
+    pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub session_id: String,
     pub event_tx: mpsc::Sender<SessionEvent>,
     pub turn_injection_bridge: TurnInjectionBridge,
@@ -34,6 +36,11 @@ pub struct ToolDispatchContext<'run> {
 #[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
+}
+
+pub(crate) enum ToolPreparationOutcome {
+    Prepared(PreparedToolCall),
+    Completed(ToolDispatchOutcome),
 }
 
 #[derive(Clone)]
@@ -61,6 +68,7 @@ pub(crate) async fn dispatch_tool_call(
         context.turn_context.clone(),
         Arc::clone(&context.attachment_store),
         context.direct_completions.clone(),
+        context.effect_controller.clone_scoped(),
         None,
     );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
@@ -74,19 +82,55 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolDispatchOutcome {
+    let pending = crate::sansio::PendingToolCall {
+        call_id: tool_context
+            .tool_call_id()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("tool:{}", uuid::Uuid::new_v4())),
+        tool_name,
+        args,
+        replay: None,
+    };
+    match prepare_tool_call_with_context(
+        context,
+        pending,
+        tool_context.tool_call_id().map(str::to_string),
+    )
+    .await
+    {
+        ToolPreparationOutcome::Prepared(prepared) => {
+            dispatch_prepared_tool_call_with_execution_context(
+                context,
+                prepared,
+                progress,
+                tool_context,
+            )
+            .await
+        }
+        ToolPreparationOutcome::Completed(outcome) => outcome,
+    }
+}
+
+pub(crate) async fn prepare_tool_call_with_context(
+    context: &ToolDispatchContext<'_>,
+    pending: crate::sansio::PendingToolCall,
+    tool_call_id: Option<String>,
+) -> ToolPreparationOutcome {
+    let tool_name = pending.tool_name.clone();
     let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
-        return outcome(
+        return ToolPreparationOutcome::Completed(outcome(
             tool_name,
-            args,
+            pending.args,
             runtime_failure(
                 ToolFailureClass::Unavailable,
                 "tool_unavailable",
                 "Tool is unavailable in this session",
             ),
             0,
-        );
+        ));
     };
-    let mut args = args;
+    let mut pending = pending;
+    let mut args = pending.args;
 
     let directives = match context
         .plugins
@@ -102,7 +146,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
     {
         Ok(directives) => directives,
         Err(err) => {
-            return outcome(
+            return ToolPreparationOutcome::Completed(outcome(
                 tool_name,
                 args,
                 runtime_failure(
@@ -111,7 +155,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
                     err.to_string(),
                 ),
                 0,
-            );
+            ));
         }
     };
 
@@ -172,7 +216,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
         }
     }
     if let Some(result) = short_circuit {
-        return outcome(tool_name, args, result, 0);
+        return ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0));
     }
 
     let contract = context
@@ -182,7 +226,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
         .find_map(|provider| provider.resolve_contract(&tool_name))
         .or_else(|| context.tools.resolve_contract(&tool_name));
     let Some(contract) = contract else {
-        return outcome(
+        return ToolPreparationOutcome::Completed(outcome(
             tool_name,
             args,
             runtime_failure(
@@ -191,25 +235,73 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
                 "Tool contract is unavailable in this session",
             ),
             0,
-        );
+        ));
     };
     if let Err(err) = validate_tool_input(&contract, &args) {
-        return outcome(
+        return ToolPreparationOutcome::Completed(outcome(
             tool_name,
             args,
             runtime_failure(ToolFailureClass::InvalidRequest, "invalid_tool_args", err),
             0,
-        );
+        ));
     }
+
+    pending.args = args.clone();
+    let is_mode_native = context
+        .plugins
+        .mode_native_tools()
+        .iter()
+        .any(|provider| provider.resolve_manifest(&tool_name).is_some());
+    if is_mode_native {
+        return ToolPreparationOutcome::Prepared(PreparedToolCall::identity(pending));
+    }
+    let prepare_context = ToolPrepareContext::new(
+        context.session_id.clone(),
+        Arc::clone(&context.host),
+        context.turn_context.clone(),
+        tool_call_id,
+    );
+    match context
+        .tools
+        .prepare_tool_call(ToolPrepareCall {
+            pending,
+            context: &prepare_context,
+        })
+        .await
+    {
+        Ok(prepared) => ToolPreparationOutcome::Prepared(prepared),
+        Err(result) => ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0)),
+    }
+}
+
+pub(crate) async fn dispatch_prepared_tool_call_with_execution_context<'run>(
+    context: &ToolDispatchContext<'run>,
+    prepared: PreparedToolCall,
+    progress: Option<&ProgressSender>,
+    tool_context: ToolContext<'run>,
+) -> ToolDispatchOutcome {
+    let tool_name = prepared.tool_name.clone();
+    let args = prepared.args.clone();
+    let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
+        return outcome(
+            tool_name,
+            args,
+            runtime_failure(
+                ToolFailureClass::Unavailable,
+                "tool_unavailable",
+                "Tool is unavailable in this session",
+            ),
+            0,
+        );
+    };
 
     let tool_start = Instant::now();
     let result = execute_tool_call(
         context,
         &manifest,
-        &tool_name,
-        &args,
+        &prepared,
         progress,
-        tool_context,
+        tool_context.with_prepared_payload(prepared.prepared_payload.clone()),
     )
     .await;
     let duration_ms = tool_start.elapsed().as_millis() as u64;
@@ -788,6 +880,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -825,6 +918,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -870,6 +964,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1019,6 +1114,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1045,6 +1141,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1097,6 +1194,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1320,27 +1418,6 @@ mod tests {
                 .push(envelope.metadata);
             Ok(crate::RuntimeEffectOutcome::Sleep)
         }
-
-        async fn start_background_task(
-            &self,
-            _registry: Arc<dyn crate::BackgroundTaskRegistry>,
-            registration: crate::BackgroundTaskRegistration,
-            _local_executor: crate::BackgroundTaskLocalExecutor,
-        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-            Err(crate::PluginError::Session(format!(
-                "sleep recording controller cannot start background task `{}`",
-                registration.id
-            )))
-        }
-
-        async fn request_background_task_cancel(
-            &self,
-            registry: Arc<dyn crate::BackgroundTaskRegistry>,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-            registry.request_cancel(task_id, reason).await
-        }
     }
 
     struct FailingSleepEffectController;
@@ -1356,27 +1433,6 @@ mod tests {
                 "test_sleep_rejected",
                 format!("rejected {}", envelope.command.kind().as_str()),
             ))
-        }
-
-        async fn start_background_task(
-            &self,
-            _registry: Arc<dyn crate::BackgroundTaskRegistry>,
-            registration: crate::BackgroundTaskRegistration,
-            _local_executor: crate::BackgroundTaskLocalExecutor,
-        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-            Err(crate::PluginError::Session(format!(
-                "failing controller cannot start background task `{}`",
-                registration.id
-            )))
-        }
-
-        async fn request_background_task_cancel(
-            &self,
-            registry: Arc<dyn crate::BackgroundTaskRegistry>,
-            task_id: &str,
-            reason: Option<String>,
-        ) -> Result<crate::BackgroundTaskRecord, crate::PluginError> {
-            registry.request_cancel(task_id, reason).await
         }
     }
 
@@ -1400,6 +1456,7 @@ mod tests {
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
+            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1442,6 +1499,7 @@ mod tests {
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
+            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1533,6 +1591,7 @@ mod tests {
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
+            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
         let outcome = dispatch_tool_call_with_execution_context(
@@ -1774,6 +1833,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -1918,6 +1978,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),
@@ -2048,6 +2109,7 @@ mod tests {
             direct_completions: crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
+            tool_effect_metadata: None,
             session_id: "session".to_string(),
             event_tx,
             turn_injection_bridge: crate::TurnInjectionBridge::new(),

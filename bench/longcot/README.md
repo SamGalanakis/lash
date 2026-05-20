@@ -22,9 +22,9 @@ All runtime artifacts live under ignored `.benchmarks/longcot/`.
 
 The Rust runner registers an explicit RLM tool surface for benchmark hygiene, mirroring the continual-learning-bench setup:
 
-- **registered (model-visible):** `llm_query`, `spawn_agent` with `capability: "default"`, `continue_as`, `list_async_handles`
+- **registered (model-visible):** `llm_query`, `spawn_agent` with `capability: "default"`, `continue_as`, `list_process_handles`
 - **inherited by `spawn_agent` children:** the same four tools, so recursive descents stay inside the same surface
-- **not registered:** local shell, filesystem, search, web, editing, MCP, monitor, task-controls, AppWorld, and standard-mode context plugins (rolling-history / observational-memory)
+- **not registered:** local shell, filesystem, search, web, editing, MCP, monitor, process-controls, AppWorld, and standard-mode context plugins (rolling-history / observational-memory)
 
 LongCoT prompts explicitly forbid external tool use; this stack honors that while keeping recursive decomposition (via `spawn_agent`) available.
 
@@ -99,7 +99,7 @@ bench/longcot/run.sh --provider-id codex --model gpt-5.2
 bench/longcot/run.sh --variant xhigh
 ```
 
-> Execution mode is fixed to `rlm`; `--execution-mode` and `--standard-context-approach` are no longer accepted. Standard-mode context plugins (rolling-history / observational-memory) and the monitor / task-controls tool surface are intentionally left unregistered — see "Tool surface" above.
+> Execution mode is fixed to `rlm`; `--execution-mode` and `--standard-context-approach` are no longer accepted. Standard-mode context plugins (rolling-history / observational-memory) and the monitor / process-controls tool surface are intentionally left unregistered — see "Tool surface" above.
 
 ## Output layout
 

@@ -2,9 +2,42 @@ use serde_json::Value;
 
 use crate::ToolContract;
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LashSchema {
+    pub schema: Value,
+}
+
+impl LashSchema {
+    pub fn new(schema: Value) -> Self {
+        Self { schema }
+    }
+
+    pub fn any() -> Self {
+        Self::new(serde_json::json!({}))
+    }
+
+    pub fn object(properties: serde_json::Map<String, Value>, required: Vec<String>) -> Self {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), Value::String("object".to_string()));
+        schema.insert("properties".to_string(), Value::Object(properties));
+        if !required.is_empty() {
+            schema.insert(
+                "required".to_string(),
+                Value::Array(required.into_iter().map(Value::String).collect()),
+            );
+        }
+        schema.insert("additionalProperties".to_string(), Value::Bool(true));
+        Self::new(Value::Object(schema))
+    }
+
+    pub fn validate(&self, value: &Value) -> Result<(), String> {
+        let _ = jsonschema::JSONSchema::compile(&self.schema);
+        validate_schema("", &self.schema, value)
+    }
+}
+
 pub(crate) fn validate_tool_input(contract: &ToolContract, args: &Value) -> Result<(), String> {
-    let _ = jsonschema::JSONSchema::compile(&contract.input_schema);
-    validate_schema("", &contract.input_schema, args)
+    LashSchema::new(contract.input_schema.clone()).validate(args)
 }
 
 fn validate_schema(path: &str, schema: &Value, value: &Value) -> Result<(), String> {

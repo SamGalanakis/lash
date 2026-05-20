@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::monitor::{MonitorSnapshot, MonitorSpec, MonitorUpdateBatch};
+use crate::monitor::{MonitorSnapshot, MonitorSpec};
 use crate::runtime::{AssembledTurn, PersistedSessionState};
 use crate::{
     ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
@@ -58,9 +58,8 @@ pub use mode::{
     StandardCreateExtras,
 };
 pub use monitor::{
-    AckWakeArgs, MonitorAckWakeOp, MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorStartOp,
-    MonitorStatusOp, MonitorStopOp, MonitorTakeUpdatesOp, OwnedMonitorSpec, RegisterSpecsArgs,
-    StartMonitorArgs, StopMonitorArgs,
+    MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorStartOp, MonitorStatusOp, MonitorStopOp,
+    OwnedMonitorSpec, RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs,
 };
 pub use registrar::{
     HistoryRegistrations, ModeRegistrations, MonitorRegistrations, OutputRegistrations,
@@ -84,7 +83,7 @@ pub use session_obj::PluginSession;
 pub use session_types::{
     PluginOwned, SessionAppendNode, SessionContextSurface, SessionCreateRequest, SessionHandle,
     SessionPluginMode, SessionRelation, SessionSnapshot, SessionStartPoint, SessionToolAccess,
-    SessionTurnHandle, SubagentSessionContext,
+    SubagentSessionContext,
 };
 pub(crate) use snapshot::{InMemorySnapshotReader, InMemorySnapshotWriter};
 pub use snapshot::{

@@ -178,7 +178,7 @@ impl UiSnapshotWorker {
                         );
                         crate::event::UiSnapshotResult {
                             effects: Vec::new(),
-                            background_tasks: None,
+                            processes: None,
                             duration: started.elapsed(),
                             timed_out: true,
                             diagnostics: vec!["UI snapshot exceeded 200ms deadline".to_string()],

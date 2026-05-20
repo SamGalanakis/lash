@@ -8,7 +8,7 @@ pub(crate) enum RuntimePerfScenario {
     Rlm,
     StandardToolCalls,
     RlmToolCalls,
-    RlmAsyncHandles,
+    RlmProcessHandles,
     RlmLlmQuery,
     RlmToolRetry,
     RlmGlobals,
@@ -29,7 +29,7 @@ impl RuntimePerfScenario {
         Self::Rlm,
         Self::StandardToolCalls,
         Self::RlmToolCalls,
-        Self::RlmAsyncHandles,
+        Self::RlmProcessHandles,
         Self::RlmLlmQuery,
         Self::RlmToolRetry,
         Self::RlmGlobals,
@@ -48,7 +48,7 @@ impl RuntimePerfScenario {
         Self::Rlm,
         Self::StandardToolCalls,
         Self::RlmToolCalls,
-        Self::RlmAsyncHandles,
+        Self::RlmProcessHandles,
         Self::RlmLlmQuery,
         Self::RlmToolRetry,
         Self::RlmGlobals,
@@ -69,7 +69,7 @@ impl RuntimePerfScenario {
             "rlm" => Some(Self::Rlm),
             "standard_tool_calls" => Some(Self::StandardToolCalls),
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
-            "rlm_async_handles" => Some(Self::RlmAsyncHandles),
+            "rlm_process_handles" => Some(Self::RlmProcessHandles),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
             "rlm_tool_retry" => Some(Self::RlmToolRetry),
             "rlm_globals" => Some(Self::RlmGlobals),
@@ -92,7 +92,7 @@ impl RuntimePerfScenario {
             Self::Rlm => "rlm",
             Self::StandardToolCalls => "standard_tool_calls",
             Self::RlmToolCalls => "rlm_tool_calls",
-            Self::RlmAsyncHandles => "rlm_async_handles",
+            Self::RlmProcessHandles => "rlm_process_handles",
             Self::RlmLlmQuery => "rlm_llm_query",
             Self::RlmToolRetry => "rlm_tool_retry",
             Self::RlmGlobals => "rlm_globals",
@@ -121,7 +121,7 @@ impl RuntimePerfScenario {
             | Self::TurnCheckpoint => ExecutionMode::standard(),
             Self::Rlm
             | Self::RlmToolCalls
-            | Self::RlmAsyncHandles
+            | Self::RlmProcessHandles
             | Self::RlmLlmQuery
             | Self::RlmToolRetry
             | Self::RlmGlobals

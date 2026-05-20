@@ -93,36 +93,14 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    async fn start_turn_stream(
+    async fn start_turn(
         &self,
         _session_id: &str,
         _input: TurnInput,
-    ) -> Result<SessionTurnHandle, PluginError> {
-        Err(PluginError::Session(
-            "session execution is unavailable in this runtime".to_string(),
-        ))
-    }
-
-    async fn await_turn(&self, _turn_id: &str) -> Result<AssembledTurn, PluginError> {
-        Err(PluginError::Session(
-            "session execution is unavailable in this runtime".to_string(),
-        ))
-    }
-
-    async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-        Err(PluginError::Session(
-            "session execution is unavailable in this runtime".to_string(),
-        ))
-    }
-
-    async fn start_turn(
-        &self,
-        session_id: &str,
-        input: TurnInput,
     ) -> Result<AssembledTurn, PluginError> {
-        let handle = self.start_turn_stream(session_id, input).await?;
-        drop(handle.events);
-        self.await_turn(&handle.turn_id).await
+        Err(PluginError::Session(
+            "session execution is unavailable in this runtime".to_string(),
+        ))
     }
 
     /// Push a user-visible message into the target session's turn-input
@@ -139,86 +117,98 @@ pub trait RuntimeSessionHost: Send + Sync {
         ))
     }
 
-    async fn spawn_hidden_task(
+    async fn start_process(
         &self,
         _session_id: &str,
-        _label: &str,
-        _task: PluginSessionTask,
-    ) -> Result<(), PluginError> {
+        _registration: crate::ProcessRegistration,
+    ) -> Result<crate::ProcessRecord, PluginError> {
         Err(PluginError::Session(
-            "background tasks are unavailable in this session".to_string(),
+            "processes are unavailable in this session".to_string(),
         ))
     }
 
-    async fn await_hidden_tasks(&self, _session_id: &str) -> Result<(), PluginError> {
-        Ok(())
-    }
-
-    async fn start_background_task(
-        &self,
-        _session_id: &str,
-        _registration: crate::BackgroundTaskRegistration,
-        _executor: crate::BackgroundTaskLocalExecutor,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        Err(PluginError::Session(
-            "background tasks are unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn await_background_task(
-        &self,
-        _task_id: &str,
-    ) -> Result<crate::BackgroundTaskCompletion, PluginError> {
-        Err(PluginError::Session(
-            "background task awaiting is unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn complete_background_task(
-        &self,
-        _task_id: &str,
-        _completion: crate::BackgroundTaskCompletion,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        Err(PluginError::Session(
-            "background task completion is unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn list_background_tasks(
-        &self,
-        _session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
-        Err(PluginError::Session(
-            "background task registry is unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn cancel_background_task(
-        &self,
-        _session_id: &str,
-        _task_id: &str,
-    ) -> Result<crate::BackgroundTaskRecord, PluginError> {
-        Err(PluginError::Session(
-            "background task registry is unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn cancel_all_background_tasks(
+    async fn start_process_scoped(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
-        let tasks = self.list_background_tasks(session_id).await?;
+        registration: crate::ProcessRegistration,
+        _effect_metadata: Option<crate::EffectInvocationMetadata>,
+        _effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        self.start_process(session_id, registration).await
+    }
+
+    async fn await_process(
+        &self,
+        _process_id: &str,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
+        Err(PluginError::Session(
+            "process awaiting is unavailable in this session".to_string(),
+        ))
+    }
+
+    async fn await_process_scoped(
+        &self,
+        process_id: &str,
+        _effect_metadata: Option<crate::EffectInvocationMetadata>,
+        _effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
+        self.await_process(process_id).await
+    }
+
+    async fn list_processes(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        Err(PluginError::Session(
+            "process registry is unavailable in this session".to_string(),
+        ))
+    }
+
+    async fn list_processes_scoped(
+        &self,
+        session_id: &str,
+        _effect_metadata: Option<crate::EffectInvocationMetadata>,
+        _effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        self.list_processes(session_id).await
+    }
+
+    async fn cancel_process(
+        &self,
+        _session_id: &str,
+        _process_id: &str,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        Err(PluginError::Session(
+            "process registry is unavailable in this session".to_string(),
+        ))
+    }
+
+    async fn cancel_process_scoped(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        _effect_metadata: Option<crate::EffectInvocationMetadata>,
+        _effect_controller: Option<&dyn crate::RuntimeEffectController>,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        self.cancel_process(session_id, process_id).await
+    }
+
+    async fn cancel_all_processes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        let tasks = self.list_processes(session_id).await?;
         let mut cancelled = Vec::new();
         for task in tasks {
             if task.state.is_terminal() {
                 continue;
             }
-            cancelled.push(self.cancel_background_task(session_id, &task.id).await?);
+            cancelled.push(self.cancel_process(session_id, &task.id).await?);
         }
         Ok(cancelled)
     }
 
-    async fn validate_async_handles_visible(
+    async fn validate_process_handles_visible(
         &self,
         _session_id: &str,
         _handle_ids: &[String],
@@ -226,7 +216,7 @@ pub trait RuntimeSessionHost: Send + Sync {
         Ok(())
     }
 
-    async fn transfer_async_handles(
+    async fn transfer_process_handles(
         &self,
         _from_session_id: &str,
         _to_session_id: &str,
@@ -235,24 +225,15 @@ pub trait RuntimeSessionHost: Send + Sync {
         Ok(())
     }
 
-    async fn cancel_unreferenced_async_handles(
+    async fn cancel_unreferenced_process_handles(
         &self,
         _session_id: &str,
         _keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::BackgroundTaskRecord>, PluginError> {
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
         Ok(Vec::new())
     }
 
     async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {
-        Err(PluginError::Session(
-            "monitors are unavailable in this session".to_string(),
-        ))
-    }
-
-    async fn take_monitor_updates(
-        &self,
-        _session_id: &str,
-    ) -> Result<MonitorUpdateBatch, PluginError> {
         Err(PluginError::Session(
             "monitors are unavailable in this session".to_string(),
         ))

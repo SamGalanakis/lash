@@ -71,7 +71,7 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Host Capabilities</h2>
-            <p><code>RuntimeSessionManager</code> implements one concrete <code>RuntimeSessionHost</code> boundary with typed operations for plugin and tool needs. Tool authors do not receive the runtime handle directly; <code>ToolContext</code> projects host capabilities into explicit methods such as <code>session_model()</code>, <code>tool_catalog()</code>, <code>sessions()</code>, <code>tasks()</code>, and <code>direct_completion(...)</code>.</p>
+            <p><code>RuntimeSessionManager</code> implements one concrete <code>RuntimeSessionHost</code> boundary with typed operations for plugin and tool needs. Tool authors do not receive the runtime handle directly; <code>ToolContext</code> projects host capabilities into explicit methods such as <code>session_model()</code>, <code>tool_catalog()</code>, <code>sessions()</code>, <code>processes()</code>, and <code>direct_completion(...)</code>.</p>
           </div>
           <div class="table">
             <table>
@@ -81,7 +81,7 @@ flowchart TD
                 <tr><td>Tool state</td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
                 <tr><td>Session lifecycle and turns</td><td>Create, fork, continue, and stream managed sessions.</td></tr>
                 <tr><td>Session graph writes</td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
-                <tr><td>Tasks and monitors</td><td>Register background tasks, monitors, async handles, wakeups, and cancellation.</td></tr>
+                <tr><td>Tasks and monitors</td><td>Register processes, monitors, process handles, wakeups, and cancellation.</td></tr>
                 <tr><td>Trace access</td><td>Expose trace sinks to hooks without exposing session internals. Human input is provided by host tools such as the CLI <code>ask</code> implementation, not by a runtime prompt event.</td></tr>
                 <tr><td>Direct completions</td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>
               </tbody>

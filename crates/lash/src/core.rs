@@ -58,7 +58,7 @@ pub struct LashCoreBuilder {
     plugin_stack: PluginStack,
     plugin_host: Option<PluginHost>,
     residency: Option<Residency>,
-    background_task_registry: Option<Arc<dyn BackgroundTaskRegistry>>,
+    process_registry: Option<Arc<dyn ProcessRegistry>>,
 }
 
 impl LashCoreBuilder {
@@ -276,12 +276,12 @@ impl LashCoreBuilder {
         };
         let plugin_host = PluginHost::new(plugin_factories.clone());
 
-        let background_task_registry = self
-            .background_task_registry
-            .unwrap_or_else(|| Arc::new(LocalBackgroundTaskRegistry::default()));
+        let process_registry = self
+            .process_registry
+            .unwrap_or_else(|| Arc::new(LocalProcessRegistry::default()));
         let mut env_builder = RuntimeEnvironment::builder()
-            .with_plugin_host(Arc::new(plugin_host.with_background_tasks()))
-            .with_background_task_registry(background_task_registry)
+            .with_plugin_host(Arc::new(plugin_host.with_processes()))
+            .with_process_registry(process_registry)
             .with_runtime_core_config(self.core);
         if let Some(residency) = self.residency {
             env_builder = env_builder.with_residency(residency);
@@ -308,11 +308,8 @@ impl LashCoreBuilder {
         AdvancedLashCoreBuilder { builder: self }
     }
 
-    pub fn background_task_registry(
-        mut self,
-        background_task_registry: Arc<dyn BackgroundTaskRegistry>,
-    ) -> Self {
-        self.background_task_registry = Some(background_task_registry);
+    pub fn process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
+        self.process_registry = Some(process_registry);
         self
     }
 }
@@ -337,11 +334,8 @@ impl AdvancedLashCoreBuilder {
         self
     }
 
-    pub fn background_task_registry(
-        mut self,
-        background_task_registry: Arc<dyn BackgroundTaskRegistry>,
-    ) -> Self {
-        self.builder.background_task_registry = Some(background_task_registry);
+    pub fn process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
+        self.builder.process_registry = Some(process_registry);
         self
     }
 

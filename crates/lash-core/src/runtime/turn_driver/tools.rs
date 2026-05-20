@@ -9,19 +9,12 @@ use crate::tool_dispatch::schedule_tool_batch;
 /// per-call execution side effects.
 async fn run_one_tool_call(
     index: usize,
-    pending_tool: crate::sansio::PendingToolCall,
+    prepared_tool: crate::PreparedToolCall,
     effect_metadata: crate::EffectInvocationMetadata,
     context: crate::ModeExecutionContext<'_>,
 ) -> crate::sansio::CompletedToolCall {
     let executed = context
-        .execute_tool_call(
-            pending_tool.call_id,
-            pending_tool.tool_name,
-            pending_tool.args,
-            index,
-            pending_tool.replay,
-            Some(effect_metadata),
-        )
+        .execute_prepared_tool_call(prepared_tool, index, Some(effect_metadata))
         .await;
     debug_assert_eq!(executed.index, index);
     executed.completed
@@ -55,10 +48,7 @@ fn cancelled_completed_tool_call(
 impl RuntimeTurnDriver<'_> {
     pub(in crate::runtime) async fn run_tool_calls(
         &mut self,
-        pending_tools: Vec<(
-            crate::sansio::PendingToolCall,
-            crate::EffectInvocationMetadata,
-        )>,
+        pending_tools: Vec<(crate::PreparedToolCall, crate::EffectInvocationMetadata)>,
         event_tx: &mpsc::Sender<RuntimeStreamEvent>,
         cancel: &CancellationToken,
     ) -> Result<Vec<crate::sansio::CompletedToolCall>, crate::RuntimeEffectControllerError> {
@@ -88,7 +78,6 @@ impl RuntimeTurnDriver<'_> {
             &self.session_id,
             manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
             effect_controller,
-            Arc::clone(&self.host.core.effect_controller),
             direct_completions,
             tool_event_tx.clone(),
             Arc::new(crate::ChronologicalProjection::default()),

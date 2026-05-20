@@ -19,6 +19,7 @@ lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.6" }
 lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.6" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.6" }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 

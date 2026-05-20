@@ -21,13 +21,13 @@ impl RlmControlToolsProvider {
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
-        let referenced_handles = collect_seed_async_handle_ids(args.get("seed"));
+        let referenced_handles = collect_seed_process_handle_ids(args.get("seed"));
         let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
         context
-            .tasks()
-            .validate_async_handles_visible(&referenced_handles_vec)
+            .processes()
+            .validate_process_handles_visible(&referenced_handles_vec)
             .await
-            .map_err(|err| format!("continue_as async handle validation failed: {err}"))?;
+            .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
 
         let current_snapshot = context
             .session_snapshot()
@@ -47,19 +47,19 @@ impl RlmControlToolsProvider {
         )
         .await?;
         if let Err(err) = context
-            .tasks()
-            .transfer_async_handles_to_session(&successor_session_id, &referenced_handles_vec)
+            .processes()
+            .transfer_process_handles_to_session(&successor_session_id, &referenced_handles_vec)
             .await
         {
             let _ = context
                 .sessions()
                 .close_session(&successor_session_id)
                 .await;
-            return Err(format!("continue_as async handle transfer failed: {err}"));
+            return Err(format!("continue_as process handle transfer failed: {err}"));
         }
         if let Err(err) = context
-            .tasks()
-            .cancel_unreferenced_async_handles(&referenced_handles_vec)
+            .processes()
+            .cancel_unreferenced_process_handles(&referenced_handles_vec)
             .await
         {
             let _ = context
@@ -67,7 +67,7 @@ impl RlmControlToolsProvider {
                 .close_session(&successor_session_id)
                 .await;
             return Err(format!(
-                "continue_as async handle cleanup failed after successor creation: {err}"
+                "continue_as process handle cleanup failed after successor creation: {err}"
             ));
         }
 
@@ -106,7 +106,7 @@ impl ToolProvider for RlmControlToolsProvider {
 pub fn continue_as_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "continue_as",
-        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `list_async_handles`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `continue_as` succeeds.",
+        "Tail-call into a fresh RLM successor with a clean window.\n\nThe successor inherits **nothing** automatically — no globals, no projected bindings, no message history. Pass everything it needs via `seed: { name: value, ... }`. Each entry's kind is preserved: if the value's lashlang source root is a host-projected binding (e.g. `seed: { problem: input.prompt }`), it stays projected on the successor (read-only `Host Projected Variables`); other sources land as regular RLM globals. Computed expressions default to global.\n\n- Use when the current trajectory is stale, dominated by failed attempts, or the context budget is tight.\n- Treat `continue_as` as a terminal control action: make it the last meaningful statement in the lashlang block, and do not call `submit` or perform more work after it.\n- `task` packs the concrete goal, constraints, and next steps the successor must act on.\n- `seed` packs the concrete state (paths, facts already learned, partial results, projected sources) the successor needs in scope; leave bulky raw output behind.\n- If live async work is needed after handoff, include its handle in `seed` (for example from `list_process_handles`). Referenced handles transfer to the successor and can be awaited there. Live handles not included in `seed` are cancelled when `continue_as` succeeds.",
         continue_as_input_schema(),
         json!({ "type": "object", "additionalProperties": true }),
     )
@@ -119,12 +119,12 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-pub(crate) fn collect_seed_async_handle_ids(seed: Option<&Value>) -> BTreeSet<String> {
+pub(crate) fn collect_seed_process_handle_ids(seed: Option<&Value>) -> BTreeSet<String> {
     fn visit(value: &Value, out: &mut BTreeSet<String>) {
         if let Some(id) = value
             .get("__handle__")
             .and_then(Value::as_str)
-            .filter(|kind| *kind == "task")
+            .filter(|kind| *kind == "process")
             .and_then(|_| value.get("id"))
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
@@ -251,10 +251,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
-    use lash_core::plugin::{PluginError, SessionHandle, SessionTurnHandle};
-    use lash_core::{
-        PersistedSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint, TurnInput,
-    };
+    use lash_core::plugin::{PluginError, SessionHandle};
+    use lash_core::{PersistedSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
     #[derive(Default)]
@@ -313,25 +311,7 @@ mod tests {
                 .push(session_id.to_string());
             Ok(())
         }
-        async fn start_turn_stream(
-            &self,
-            _session_id: &str,
-            _input: TurnInput,
-        ) -> Result<SessionTurnHandle, PluginError> {
-            Err(PluginError::Session("not used".to_string()))
-        }
-
-        async fn await_turn(
-            &self,
-            _turn_id: &str,
-        ) -> Result<lash_core::AssembledTurn, PluginError> {
-            Err(PluginError::Session("not used".to_string()))
-        }
-
-        async fn cancel_turn(&self, _turn_id: &str) -> Result<(), PluginError> {
-            Ok(())
-        }
-        async fn validate_async_handles_visible(
+        async fn validate_process_handles_visible(
             &self,
             _session_id: &str,
             handle_ids: &[String],
@@ -343,7 +323,7 @@ mod tests {
             Ok(())
         }
 
-        async fn transfer_async_handles(
+        async fn transfer_process_handles(
             &self,
             from_session_id: &str,
             to_session_id: &str,
@@ -357,11 +337,11 @@ mod tests {
             Ok(())
         }
 
-        async fn cancel_unreferenced_async_handles(
+        async fn cancel_unreferenced_process_handles(
             &self,
             _session_id: &str,
             keep_handle_ids: &[String],
-        ) -> Result<Vec<lash_core::BackgroundTaskRecord>, PluginError> {
+        ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
             self.cleanup_keep
                 .lock()
                 .expect("cleanup keep")
@@ -567,8 +547,8 @@ mod tests {
                 args: &json!({
                     "task": "continue with background work",
                     "seed": {
-                        "one": { "__handle__": "task", "id": "h1", "tool": "slow" },
-                        "nested": [{ "h": { "__handle__": "task", "id": "h2", "tool": "slow" } }]
+                        "one": { "__handle__": "process", "id": "h1", "tool": "slow" },
+                        "nested": [{ "h": { "__handle__": "process", "id": "h2", "tool": "slow" } }]
                     }
                 }),
                 context: &context,
@@ -620,7 +600,7 @@ mod tests {
                 name: "continue_as",
                 args: &json!({
                     "task": "continue",
-                    "seed": { "h": { "__handle__": "task", "id": "missing", "tool": "slow" } }
+                    "seed": { "h": { "__handle__": "process", "id": "missing", "tool": "slow" } }
                 }),
                 context: &context,
                 progress: None,

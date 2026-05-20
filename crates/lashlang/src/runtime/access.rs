@@ -66,7 +66,7 @@ pub(crate) fn unwrap_tool_result(value: Value) -> Result<Value, RuntimeError> {
     }
 }
 
-pub(crate) fn is_async_handle_record(record: &Record) -> bool {
+pub(crate) fn is_process_handle_record(record: &Record) -> bool {
     record.get("__handle__").is_some() || record.get("handle").is_some()
 }
 

@@ -771,10 +771,10 @@ pub(crate) async fn collect_ui_snapshot(
 ) -> crate::event::UiSnapshotResult {
     let started = std::time::Instant::now();
     let mut diagnostics = Vec::new();
-    let background_tasks = match session.background_tasks().list().await {
+    let processes = match session.processes().list().await {
         Ok(tasks) => Some(tasks),
         Err(err) => {
-            diagnostics.push(format!("background task snapshot failed: {err}"));
+            diagnostics.push(format!("process snapshot failed: {err}"));
             None
         }
     };
@@ -792,7 +792,7 @@ pub(crate) async fn collect_ui_snapshot(
     };
     crate::event::UiSnapshotResult {
         effects,
-        background_tasks,
+        processes,
         duration: started.elapsed(),
         timed_out: false,
         diagnostics,

@@ -456,7 +456,10 @@ impl LashRuntime {
         let (event_tx, mut event_rx) = mpsc::channel::<RuntimeStreamEvent>(100);
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let manager = self
-            .runtime_session_manager_for_turn(Some(child_usage_event_relay.clone()))
+            .runtime_session_manager_for_turn_with_lease(
+                Some(child_usage_event_relay.clone()),
+                Some(turn_lease.clone()),
+            )
             .map_err(|err| {
                 RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
             })?;
@@ -1283,6 +1286,14 @@ impl LashRuntime {
         } else {
             None
         };
+        let manager = self
+            .runtime_session_manager_for_turn_with_lease(
+                Some(child_usage_event_relay.clone()),
+                turn_lease.clone(),
+            )
+            .map_err(|err| {
+                RuntimeError::new(RuntimeErrorCode::PluginSessionManager, err.to_string())
+            })?;
         let cancel_state = cancel.clone();
         let session = self
             .session

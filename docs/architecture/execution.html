@@ -55,7 +55,7 @@ flowchart TD
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>Standard mode interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches mode-native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
             <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>RLM mode extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. <code>continue_as</code> is a mode-provided control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::Handoff { session_id }</code> and the successor session is created with <code>SessionRelation::Handoff</code> so the runtime can carry parent ids, turn index, trace continuity, and projected seed refs. App hosts call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows handoffs and returns the final <code>TurnResult</code>.</p></article>
           </div>
-          <p>Background work — subagents, monitor tasks, and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either mode can spawn handles; RLM additionally discovers live handles via <code>list_async_handles</code> and resolves them with <code>await</code>.</p>
+          <p>Background work — subagents, monitor tasks, and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either mode can spawn handles; RLM additionally discovers live handles via <code>list_process_handles</code> and resolves them with <code>await</code>.</p>
         </div>
 
         <div class="section">
@@ -113,7 +113,7 @@ let result = session
         <div class="section">
           <div class="section-header">
             <h2>Background Work</h2>
-            <p>Subagents are sessions. Monitors are background tasks that wake future turns from stdout lines. Async tool calls are tracked inside the session.</p>
+            <p>Subagents are sessions. Monitors are processes that wake future turns from stdout lines. Async tool calls are tracked inside the session.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">Subagent and monitor path</div>
@@ -123,13 +123,13 @@ flowchart LR
   Provider --> Host["ToolContext sessions/tasks<br/>+ MonitorHost"]
   Host --> Manager["RuntimeSessionManager"]
   Manager --> Child["start_turn -> stream_turn"]
-  Manager --> Registry["background task registry"]
-  Registry --> Handles["list_async_handles<br/>monitor.*, tool.*"]
+  Manager --> Registry["process registry"]
+  Registry --> Handles["list_process_handles<br/>monitor.*, tool.*"]
   Handles --> Await["await / cancel / submit_error"]
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. <code>BuiltinMonitorToolPluginFactory</code> and <code>BuiltinTaskControlsPluginFactory</code> live in <code>lash_core::runtime_controls</code> (re-exported by the <code>lash</code> facade as <code>lash::plugins::*</code>). A child can fail terminally with <code>call submit_error { reason }</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. <code>BuiltinMonitorToolPluginFactory</code> and <code>BuiltinProcessControlsPluginFactory</code> live in <code>lash_core::runtime_controls</code> (re-exported by the <code>lash</code> facade as <code>lash::plugins::*</code>). A child can fail terminally with <code>call submit_error { reason }</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">

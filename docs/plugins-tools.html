@@ -38,7 +38,7 @@
         <div class="section" id="tool-capabilities">
           <div class="section-header">
             <h2>Tool Capabilities</h2>
-            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session control, background-task control, or a direct completion.</p>
+            <p><code>ToolContext</code> exposes named capabilities instead of a broad runtime host handle. Tools ask for exactly the capability they need: the current model, the current session snapshot, the searchable tool catalog, dynamic tool availability, child-session control, process control, or a direct completion.</p>
           </div>
           <div class="table">
             <table>
@@ -49,8 +49,8 @@
                 <tr><td><code>context.snapshot_session(session_id).await?</code></td><td>Read another session snapshot through the tool context when the host grants that runtime capability.</td></tr>
                 <tr><td><code>context.tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
                 <tr><td><code>context.set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
-                <tr><td><code>context.sessions()</code></td><td>Cloneable child-session and turn control: <code>create_session</code>, <code>close_session</code>, <code>start_turn_stream</code>, <code>await_turn</code>, and <code>cancel_turn</code>.</td></tr>
-                <tr><td><code>context.tasks()</code></td><td>Cloneable background-task registry control for tools that spawn long-lived work visible through task/async-handle surfaces.</td></tr>
+                <tr><td><code>context.sessions()</code></td><td>Cloneable child-session control: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses task handles, not child-turn handles.</td></tr>
+                <tr><td><code>context.processes()</code></td><td>Cloneable process registry control for tools that spawn long-lived work visible through process-handle surfaces.</td></tr>
                 <tr><td><code>context.direct_completion(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>originating_tool_call_id</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect keys; set <code>DirectRequest::idempotency_key</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
               </tbody>
             </table>

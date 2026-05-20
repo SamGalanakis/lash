@@ -4,36 +4,31 @@ use super::*;
 fn background_subagent_terminal_state_is_transient_and_freezes_duration() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
     let created_at = std::time::SystemTime::now() - std::time::Duration::from_secs(125);
-    let mut running = lash_core::BackgroundTaskRecord::local_session(
+    let mut running = lash_core::ProcessRecord::local_session(
         "test-session-id",
         "subagent:smoke",
-        lash_core::BackgroundTaskKind::SessionTurn,
         "subagent",
-        lash_core::BackgroundTaskState::Running,
+        lash_core::ProcessState::Running,
     );
     running.created_at = created_at;
-    app.update_background_tasks(vec![running]);
-    assert_eq!(app.background_tasks.len(), 1);
-    assert_eq!(app.background_tasks[0].terminal_duration, None);
+    app.update_processes(vec![running]);
+    assert_eq!(app.processes.len(), 1);
+    assert_eq!(app.processes[0].terminal_duration, None);
 
-    let mut completed = lash_core::BackgroundTaskRecord::local_session(
+    let mut completed = lash_core::ProcessRecord::local_session(
         "test-session-id",
         "subagent:smoke",
-        lash_core::BackgroundTaskKind::SessionTurn,
         "subagent",
-        lash_core::BackgroundTaskState::Completed,
+        lash_core::ProcessState::Completed,
     );
     completed.created_at = created_at;
-    app.update_background_tasks(vec![completed]);
+    app.update_processes(vec![completed]);
 
-    assert_eq!(app.background_tasks.len(), 1);
-    assert_eq!(
-        app.background_tasks[0].state,
-        lash_core::BackgroundTaskState::Completed
-    );
-    assert!(app.background_tasks[0].transient_until.is_some());
+    assert_eq!(app.processes.len(), 1);
+    assert_eq!(app.processes[0].state, lash_core::ProcessState::Completed);
+    assert!(app.processes[0].transient_until.is_some());
     assert!(
-        app.background_tasks[0]
+        app.processes[0]
             .terminal_duration
             .is_some_and(|duration| duration.as_secs() >= 125)
     );
