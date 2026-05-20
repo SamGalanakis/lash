@@ -1,6 +1,6 @@
 use lashlang::{
-    ExecuteError, ExecutionOutcome, Record, RuntimeError, State, ToolHost, ToolHostError, Value,
-    execute, parse,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, Record,
+    RuntimeError, State, Value, parse,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,14 +22,36 @@ impl TestHost {
     }
 }
 
-impl ToolHost for TestHost {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        match name.as_str() {
+impl ExecutionHost for TestHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => {
+                self.call_tool(&name, &args).await.map(AbilityResult::Value)
+            }
+            AbilityOp::StartToolCall { name, args } => {
+                self.call_tool(&name, &args).await.map(AbilityResult::Value)
+            }
+            AbilityOp::Await(handle) => Ok(AbilityResult::Value(handle)),
+            AbilityOp::Print(value) => {
+                self.observations
+                    .lock()
+                    .expect("observation mutex")
+                    .push(value);
+                Ok(AbilityResult::Unit)
+            }
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
+        }
+    }
+}
+
+impl TestHost {
+    async fn call_tool(&self, name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
+        match name {
             "read_file" => {
                 let path = expect_string(&args, "path")?;
                 match self.files.get(path) {
                     Some(content) => Ok(Value::String(content.clone().into())),
-                    None => Err(ToolHostError::new(format!("missing file: {path}"))),
+                    None => Err(ExecutionHostError::new(format!("missing file: {path}"))),
                 }
             }
             "glob" => {
@@ -65,24 +87,8 @@ impl ToolHost for TestHost {
                     expect_string(&args, "value")?.to_string().into(),
                 ))
             }
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+            _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
         }
-    }
-
-    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        self.call(name, args).await
-    }
-
-    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
-        Ok(handle)
-    }
-
-    async fn print(&self, value: Value) -> Result<(), ToolHostError> {
-        self.observations
-            .lock()
-            .expect("observation mutex")
-            .push(value);
-        Ok(())
     }
 }
 
@@ -90,6 +96,33 @@ fn finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
         ExecutionOutcome::Continued => panic!("expected `submit`"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+enum ExecuteError {
+    #[error(transparent)]
+    Parse(#[from] lashlang::ParseError),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+}
+
+async fn execute<H: ExecutionHost>(
+    source: &str,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, ExecuteError> {
+    let compiled = lashlang::compile(source)?;
+    lashlang::execute(&compiled, state, host)
+        .await
+        .map_err(ExecuteError::Runtime)
+}
+
+fn program_len(program: &lashlang::Program) -> usize {
+    match &program.expr {
+        lashlang::Expr::Block(expressions) => expressions.len(),
+        _ => 1,
     }
 }
 
@@ -106,20 +139,20 @@ async fn runtime_error(source: &str) -> RuntimeError {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parser_handles_precedence_and_parallel() {
+async fn parser_handles_precedence_and_await_record() {
     let program = parse(
         r#"
         total = 1 + 2 * 3
-        parallel {
-          left = call glob { pattern: "src/*.rs" }
-          right = call read_file { path: "src/lib.rs" }
+        fanout = await {
+          left: start call glob { pattern: "src/*.rs" },
+          right: start call read_file { path: "src/lib.rs" }
         }
         submit total
         "#,
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 3);
+    assert_eq!(program_len(&program), 3);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -134,7 +167,10 @@ async fn parser_accepts_double_slash_comments() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    let lashlang::Expr::Block(expressions) = &program.expr else {
+        panic!("program should be a block");
+    };
+    assert_eq!(expressions.len(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -147,7 +183,7 @@ async fn parser_accepts_semicolons_as_statement_separators() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 3);
+    assert_eq!(program_len(&program), 3);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -288,15 +324,15 @@ async fn parser_accepts_trailing_semicolon_after_raw_string() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    assert_eq!(program_len(&program), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn parser_treats_semicolon_like_whitespace_between_idents() {
     let with_semi = parse("x = 1;y = 2").expect("semicolon-separated should parse");
     let with_newline = parse("x = 1\ny = 2").expect("newline-separated should parse");
-    assert_eq!(with_semi.statements.len(), with_newline.statements.len());
-    assert_eq!(with_semi.statements.len(), 2);
+    assert_eq!(program_len(&with_semi), program_len(&with_newline));
+    assert_eq!(program_len(&with_semi), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -389,7 +425,7 @@ async fn parser_accepts_comment_only_program() {
     )
     .expect("program should parse");
 
-    assert!(program.statements.is_empty());
+    assert!(program_len(&program) == 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -406,7 +442,7 @@ async fn parser_accepts_inline_trailing_comments_in_blocks() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    assert_eq!(program_len(&program), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -425,23 +461,23 @@ async fn parser_accepts_else_if_chains() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    assert_eq!(program_len(&program), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parser_allows_parallel_in_expression_position() {
+async fn parser_allows_await_record_in_expression_position() {
     let program = parse(
         r#"
-        results = parallel {
-          left = call glob { pattern: "src/*.rs" }
-          right = call read_file { path: "src/lib.rs" }
+        results = await {
+          left: start call glob { pattern: "src/*.rs" },
+          right: start call read_file { path: "src/lib.rs" }
         }
         submit results
         "#,
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    assert_eq!(program_len(&program), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -454,8 +490,11 @@ async fn parser_allows_bare_expression_statements() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
-    assert!(matches!(program.statements[0], lashlang::Stmt::Expr(_)));
+    let lashlang::Expr::Block(expressions) = &program.expr else {
+        panic!("program should be a block");
+    };
+    assert_eq!(expressions.len(), 2);
+    assert!(matches!(expressions[0], lashlang::Expr::String(_)));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -470,12 +509,15 @@ async fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
     )
     .expect("program should parse");
 
+    let lashlang::Expr::Block(expressions) = &program.expr else {
+        panic!("program should be a block");
+    };
     assert!(matches!(
-        program.statements.as_slice(),
+        expressions.as_slice(),
         [
-            lashlang::Stmt::If { then_block, .. },
-            lashlang::Stmt::Submit(None)
-        ] if matches!(then_block.as_slice(), [lashlang::Stmt::Submit(None)])
+            lashlang::Expr::If { then_block, .. },
+            lashlang::Expr::Submit(None)
+        ] if matches!(then_block.as_ref(), lashlang::Expr::Block(items) if matches!(items.as_slice(), [lashlang::Expr::Submit(None)]))
     ));
 }
 
@@ -575,7 +617,7 @@ async fn parser_accepts_ternary_in_call_arguments() {
     )
     .expect("program should parse");
 
-    assert_eq!(program.statements.len(), 2);
+    assert_eq!(program_len(&program), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1271,18 +1313,17 @@ async fn tool_calls_return_result_records() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_executes_concurrently_and_merges_distinct_bindings() {
+async fn explicit_start_and_await_merges_distinct_results() {
     let host = TestHost::default();
     let mut state = State::new();
 
     let value = finished(
         execute(
             r#"
-        parallel {
-          left = call sleep_echo { value: "a" }
-          right = call sleep_echo { value: "b" }
-        }
-        submit { left: left, right: right }
+        left = start call sleep_echo { value: "a" }
+        right = start call sleep_echo { value: "b" }
+        results = await { left: left, right: right }
+        submit { left: results.left?, right: results.right? }
         "#,
             &mut state,
             &host,
@@ -1294,30 +1335,23 @@ async fn parallel_executes_concurrently_and_merges_distinct_bindings() {
     let Value::Record(record) = value else {
         panic!("expected record");
     };
-    assert_eq!(
-        record["left"].as_record().unwrap()["value"],
-        Value::String("a".to_string().into())
-    );
-    assert_eq!(
-        record["right"].as_record().unwrap()["value"],
-        Value::String("b".to_string().into())
-    );
-    assert!(host.max_active.load(Ordering::SeqCst) >= 2);
+    assert_eq!(record["left"], Value::String("a".to_string().into()));
+    assert_eq!(record["right"], Value::String("b".to_string().into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_expression_returns_branch_results_in_order() {
+async fn await_list_returns_branch_results_in_order() {
     let host = TestHost::default();
     let mut state = State::new();
 
     let value = finished(
         execute(
             r#"
-        results = parallel {
-          left = call sleep_echo { value: "a" }
-          right = call sleep_echo { value: "b" }
-        }
-        submit { results: results, left: left, right: right }
+        results = await [
+          start call sleep_echo { value: "a" },
+          start call sleep_echo { value: "b" }
+        ]
+        submit results
         "#,
             &mut state,
             &host,
@@ -1326,10 +1360,7 @@ async fn parallel_expression_returns_branch_results_in_order() {
         .expect("execution should succeed"),
     );
 
-    let Value::Record(record) = value else {
-        panic!("expected record");
-    };
-    let Value::List(results) = &record["results"] else {
+    let Value::List(results) = value else {
         panic!("expected result list");
     };
     assert_eq!(results.len(), 2);
@@ -1341,34 +1372,23 @@ async fn parallel_expression_returns_branch_results_in_order() {
         results[1].as_record().unwrap()["value"],
         Value::String("b".to_string().into())
     );
-    assert_eq!(
-        record["left"].as_record().unwrap()["value"],
-        Value::String("a".to_string().into())
-    );
-    assert_eq!(
-        record["right"].as_record().unwrap()["value"],
-        Value::String("b".to_string().into())
-    );
-    assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn named_parallel_expression_returns_record_results() {
+async fn await_record_returns_record_results() {
     let host = TestHost::default();
     let mut state = State::new();
 
     let value = finished(
         execute(
             r#"
-        results = parallel {
-          first: call sleep_echo { value: "a" }
-          second: call sleep_echo { value: "b" }
-          computed: 40 + 2
+        results = await {
+          first: start call sleep_echo { value: "a" },
+          second: start call sleep_echo { value: "b" }
         }
         submit {
           first: results.first?,
-          second: results.second?,
-          computed: results.computed
+          second: results.second?
         }
         "#,
             &mut state,
@@ -1383,43 +1403,19 @@ async fn named_parallel_expression_returns_record_results() {
     };
     assert_eq!(record["first"], Value::String("a".to_string().into()));
     assert_eq!(record["second"], Value::String("b".to_string().into()));
-    assert_eq!(record["computed"], Value::Number(42.0));
-    assert!(host.max_active.load(Ordering::SeqCst) >= 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_expression_accepts_bare_expression_branches() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let value = finished(
-        execute(
-            r#"
-        results = parallel {
-          "branch_a"
-          40 + 2
-          len([1,2,3])
+async fn removed_parallel_keyword_is_parse_error() {
+    let err = lashlang::compile(
+        r#"
+        parallel {
+          start call sleep_echo { value: "a" }
         }
-        submit results
         "#,
-            &mut state,
-            &host,
-        )
-        .await
-        .expect("execution should succeed"),
-    );
-
-    assert_eq!(
-        value,
-        Value::List(
-            vec![
-                Value::String("branch_a".to_string().into()),
-                Value::Number(42.0),
-                Value::Number(3.0),
-            ]
-            .into()
-        )
-    );
+    )
+    .expect_err("parallel keyword should be removed");
+    assert!(format!("{err}").contains("unexpected `parallel`"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1689,32 +1685,6 @@ async fn path_assignment_reports_invalid_targets() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_path_assignment_conflicts_on_root_slot() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let error = execute(
-        r#"
-        record = {}
-        parallel {
-          record.a = 1
-          record.b = 2
-        }
-        submit record
-        "#,
-        &mut state,
-        &host,
-    )
-    .await
-    .expect_err("execution should fail");
-
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "record"
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn else_if_chains_execute_without_extra_braces() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -1920,21 +1890,20 @@ async fn for_loop_assignments_carry_across_iterations() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
+async fn await_record_accepts_commas_and_keyword_record_keys_execute() {
     let host = TestHost::default();
     let mut state = State::new();
 
     let value = finished(
         execute(
             r#"
-        result = parallel {
-          parallel: { parallel: "ok" },
-          quoted: { "with space": 2 },
+        result = await {
+          fanout: start call sleep_echo { value: "ok" },
+          "with space": start call sleep_echo { value: "quoted" },
         }
         submit {
-          branch: result.parallel.parallel,
-          quoted_key: keys(result.quoted)[0],
-          quoted_value: values(result.quoted)[0]
+          branch: result.fanout?,
+          quoted_value: result["with space"]?
         }
         "#,
             &mut state,
@@ -1948,8 +1917,7 @@ async fn named_parallel_accepts_commas_and_keyword_record_keys_execute() {
         panic!("expected record");
     };
     assert_eq!(record["branch"], Value::String("ok".into()));
-    assert_eq!(record["quoted_key"], Value::String("with space".into()));
-    assert_eq!(record["quoted_value"], Value::Number(2.0));
+    assert_eq!(record["quoted_value"], Value::String("quoted".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2017,83 +1985,6 @@ async fn stringification_preserves_integer_format_inside_containers() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_rejects_conflicting_assignments() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let error = execute(
-        r#"
-        parallel {
-          result = call sleep_echo { value: "a" }
-          result = call sleep_echo { value: "b" }
-        }
-        submit result
-        "#,
-        &mut state,
-        &host,
-    )
-    .await
-    .expect_err("execution should fail");
-
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { .. })
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn optimized_parallel_tool_calls_reject_conflicts_across_three_branches() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let error = execute(
-        r#"
-        parallel {
-          result = call sleep_echo { value: "a" }
-          other = call sleep_echo { value: "b" }
-          result = call sleep_echo { value: "c" }
-        }
-        submit result
-        "#,
-        &mut state,
-        &host,
-    )
-    .await
-    .expect_err("execution should fail");
-
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "result"
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn optimized_parallel_expression_tool_calls_reject_conflicts_across_three_branches() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let error = execute(
-        r#"
-        values = parallel {
-          result = call sleep_echo { value: "a" }
-          other = call sleep_echo { value: "b" }
-          result = call sleep_echo { value: "c" }
-        }
-        submit values
-        "#,
-        &mut state,
-        &host,
-    )
-    .await
-    .expect_err("execution should fail");
-
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::ParallelConflict { name }) if name == "result"
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn snapshot_round_trip_preserves_repl_like_state() {
     let host = TestHost::default();
     let mut state = State::new();
@@ -2154,30 +2045,6 @@ async fn json_and_record_helpers_work() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn finish_inside_parallel_is_rejected() {
-    let host = TestHost::default();
-    let mut state = State::new();
-
-    let error = execute(
-        r#"
-        parallel {
-          submit "nope"
-        }
-        submit "done"
-        "#,
-        &mut state,
-        &host,
-    )
-    .await
-    .expect_err("execution should fail");
-
-    assert!(matches!(
-        error,
-        lashlang::ExecuteError::Runtime(RuntimeError::FinishInsideParallel)
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn parse_errors_are_surface_level_and_precise() {
     let error = parse(
         r#"
@@ -2193,10 +2060,12 @@ async fn parse_errors_are_surface_level_and_precise() {
     }
 }
 
-fn expect_string<'a>(args: &'a Record, key: &str) -> Result<&'a str, ToolHostError> {
+fn expect_string<'a>(args: &'a Record, key: &str) -> Result<&'a str, ExecutionHostError> {
     match args.get(key) {
         Some(Value::String(value)) => Ok(value),
-        _ => Err(ToolHostError::new(format!("missing string arg: {key}"))),
+        _ => Err(ExecutionHostError::new(format!(
+            "missing string arg: {key}"
+        ))),
     }
 }
 
@@ -2224,7 +2093,7 @@ async fn end_to_end_type_value_is_json_schema_shaped() {
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome = lashlang::execute_program(&program, &mut state, &host)
+    let outcome = lashlang::execute(&program, &mut state, &host)
         .await
         .expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
@@ -2248,10 +2117,13 @@ async fn type_is_usable_as_a_tool_call_argument() {
     struct CaptureHost {
         captured: std::sync::Mutex<Option<Value>>,
     }
-    impl ToolHost for CaptureHost {
-        async fn call(&self, _: String, args: Record) -> Result<Value, ToolHostError> {
+    impl ExecutionHost for CaptureHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            let AbilityOp::CallTool { args, .. } = op else {
+                return Err(ExecutionHostError::new("unsupported host ability"));
+            };
             *self.captured.lock().unwrap() = args.get("output").cloned();
-            Ok(Value::Null)
+            Ok(AbilityResult::Value(Value::Null))
         }
     }
     let host = CaptureHost::default();
@@ -2264,7 +2136,7 @@ async fn type_is_usable_as_a_tool_call_argument() {
     )
     .expect("should parse");
     let mut state = State::new();
-    lashlang::execute_program(&program, &mut state, &host)
+    lashlang::execute(&program, &mut state, &host)
         .await
         .expect("should run");
     let captured = host.captured.lock().unwrap().clone().expect("captured arg");
@@ -2340,7 +2212,7 @@ async fn undefined_ref_in_type_produces_runtime_error() {
     let program = parse("submit Type { inner: Missing }").expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let err = lashlang::execute_program(&program, &mut state, &host)
+    let err = lashlang::execute(&program, &mut state, &host)
         .await
         .expect_err("Missing is undefined");
     assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
@@ -2357,7 +2229,7 @@ async fn snapshot_round_trip_preserves_type_values() {
     .expect("should parse");
     let host = TestHost::default();
     let mut state = State::new();
-    let outcome = lashlang::execute_program(&program, &mut state, &host)
+    let outcome = lashlang::execute(&program, &mut state, &host)
         .await
         .expect("should run");
     let ExecutionOutcome::Finished(value) = outcome else {
@@ -2370,7 +2242,7 @@ async fn snapshot_round_trip_preserves_type_values() {
     // Re-execute a program that references Books — the ref should still resolve.
     let program2 = parse("submit Books").expect("parse");
     let mut state2 = restored_state;
-    let outcome2 = lashlang::execute_program(&program2, &mut state2, &host)
+    let outcome2 = lashlang::execute(&program2, &mut state2, &host)
         .await
         .expect("run");
     let ExecutionOutcome::Finished(v2) = outcome2 else {

@@ -6,6 +6,7 @@ use crate::common::{output_contract_field, round_score, string_field, string_vec
 #[derive(Clone, Debug)]
 pub(crate) struct CatalogTool {
     pub(crate) raw: Value,
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) namespace: Option<String>,
     pub(crate) aliases: Vec<String>,
@@ -15,6 +16,7 @@ pub(crate) struct CatalogTool {
 impl CatalogTool {
     pub(crate) fn from_value(raw: Value) -> Option<Self> {
         let obj = raw.as_object()?;
+        let id = obj.get("id")?.as_str()?.to_string();
         let name = obj.get("name")?.as_str()?.to_string();
         let namespace = obj
             .get("namespace")
@@ -29,6 +31,7 @@ impl CatalogTool {
             .unwrap_or(true);
         Some(Self {
             raw,
+            id,
             name,
             namespace,
             aliases,
@@ -56,6 +59,7 @@ impl CatalogTool {
 
     pub(crate) fn compact_definition(&self) -> ToolDefinition {
         ToolDefinition::raw(
+            self.id.clone(),
             self.name.clone(),
             string_field(&self.raw, "description"),
             self.raw

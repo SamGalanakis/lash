@@ -10,7 +10,14 @@ async fn session_operations_delegate_to_runtime() -> Result<()> {
     assert_eq!(usage.usage.output_tokens, 2);
     session.control().tools().refresh_surface().await?;
     session.control().state().await_background_work().await?;
-    assert!(session.control().state().list_processes().await?.is_empty());
+    assert!(
+        session
+            .control()
+            .state()
+            .list_process_handles()
+            .await?
+            .is_empty()
+    );
     assert!(
         session
             .control()
@@ -52,7 +59,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         let _ = session.usage_report();
         let _ = session.control().tools().state().await?;
         let _ = session.control().tools().active_definitions().await?;
-        let _ = session.control().state().list_processes().await?;
+        let _ = session.control().state().list_process_handles().await?;
         Result::<()>::Ok(())
     })
     .await

@@ -119,6 +119,11 @@
 /* ── base ───────────────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* Paint the root with --bg too: while body is FOUC-hidden (visibility:hidden
+   below until fonts settle), without this rule the browser's default white
+   background flashes through. theme.js sets data-theme on <html> pre-paint,
+   so var(--bg) resolves immediately. */
+html { background: var(--bg); }
 body {
   background: var(--bg);
   color: var(--ink-mid);
@@ -2042,51 +2047,81 @@ html.cmdk-open { overflow: hidden; }
   .band__btn--search .cmdk-label { display: none; }
 }
 
-/* ── landing — hero on top, cover at bottom, stacked in flow.
-   The cover SVG's sky-rect is transparent (set in index.html) so
-   the cover blends seamlessly with the page background — no visible
-   rectangle bounding the scene. The scene's strands stay within the
-   SVG viewBox; the page bg shows through everything that isn't a
-   mountain, brazier, figure, or strand. ─────────────────────── */
+/* ── landing — cover SVG is the full-viewport backdrop; hero + band
+   sit on top via z-index. Sharing flex space caused the figure +
+   brazier (near the viewBox bottom) to get clipped at wide+short
+   viewports — layering removes the aspect-mismatch problem entirely.
+   The scene's sky-rect is transparent so it blends with the page bg;
+   only mountains, brazier, figure, and strands are visible. ─────── */
 body.landing {
   /* Fit landing in one viewport — no scrollbar. 100vh fallback,
      100svh override for mobile (small viewport units don't shrink
      when the browser's chrome bars appear/disappear). */
+  position: relative;
   height: 100vh;
   height: 100svh;
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
 }
-body.landing .band { width: 100%; justify-content: flex-end; }
+body.landing .band {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  justify-content: flex-end;
+  /* Let clicks fall through the band's empty space to suns in the
+     sky behind it. The actual buttons (search, github, theme) on the
+     right re-enable pointer-events. */
+  pointer-events: none;
+}
+body.landing .band__right {
+  pointer-events: none;
+}
+body.landing .band a,
+body.landing .band button {
+  pointer-events: auto;
+}
 .landing__hero {
-  /* hero shrinks to fit so the cover always has room below */
-  flex: 0 1 auto;
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   align-items: flex-start;
   gap: var(--space-md);
   max-width: var(--page-max);
   margin: 0 auto;
-  padding: var(--space-xl) var(--space-xl);
+  padding: var(--space-xl);
   width: 100%;
   box-sizing: border-box;
+  /* Let clicks fall through the hero's empty space to suns + the
+     regenerate-on-click landscape underneath. Actual interactive
+     elements (CTA, skip-link) re-enable pointer-events explicitly. */
+  pointer-events: none;
+}
+.landing__hero .cta,
+.landing__hero a,
+.landing__hero button {
+  pointer-events: auto;
 }
 body.landing .cover {
-  /* cover takes whatever vertical space remains; the SVG inside
-     stretches to fill it, with preserveAspectRatio="xMidYMid slice"
-     cropping the sides on tall viewports rather than the scene
-     bottom (which is flush by config). */
+  /* Backdrop layer: full viewport behind hero + band. scene.js sizes
+     the SVG viewBox to match this element's actual dimensions, so the
+     scene's positions (sun, mountains, brazier, figure) always sit
+     exactly where the layout puts them — no preserveAspectRatio
+     cropping, no aspect-mismatch clipping at any viewport. */
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   margin: 0;
-  flex: 1 1 0;
-  min-height: 0;
   display: flex;
+  pointer-events: none;
 }
+/* Interactive elements inside the scene (regenerate-on-sun-click, the
+   spine pull, etc.) need to receive clicks again — re-enable on the
+   actual SVG element. */
 body.landing .cover__svg {
   width: 100%;
   height: 100%;
   display: block;
+  pointer-events: auto;
 }
 .landing__eyebrow {
   margin: 0;
@@ -2133,9 +2168,4 @@ body.landing .cover__svg {
 }
 .landing__cta-row {
   margin-top: var(--space-sm);
-}
-body.landing .cover {
-  /* on the landing the cover takes its natural aspect from the scene
-     script — scaled tall enough to keep the brazier above the fold */
-  margin-top: 0;
 }

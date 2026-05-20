@@ -20,6 +20,7 @@ pub(crate) trait ProcessRunner: Send + Sync {
     async fn run_process(
         &self,
         registration: crate::ProcessRegistration,
+        execution_context: crate::ProcessExecutionContext,
         registry: Arc<dyn ProcessRegistry>,
         cancellation: CancellationToken,
     ) -> crate::ProcessAwaitOutput;

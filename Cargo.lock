@@ -2494,6 +2494,7 @@ dependencies = [
  "jsonschema",
  "lash-sansio",
  "lash-trace",
+ "lashlang",
  "libc",
  "regex",
  "reqwest 0.13.3",

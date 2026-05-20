@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod chronological;
 pub mod direct;
+pub mod lashlang_bridge;
 pub mod llm;
 pub mod model_info;
 pub mod monitor;
@@ -58,7 +59,7 @@ pub use lash_sansio::{
     ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig,
     ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
     ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolFailure, ToolFailureClass, ToolFailureSource, ToolManifest, ToolOutputContract,
+    ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
     ToolRetryDisposition, ToolRetryPolicy, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
     ToolSurfaceOverride, ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
     append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
@@ -189,24 +190,24 @@ pub use runtime::{
     AssembledTurn, AssistantOutput, CodeOutputRecord, DirectCompletionClient, DirectRequestSpec,
     EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink,
     ExecutionSummary, FollowedTurn, InlineRuntimeEffectController, InputItem, LashRuntime,
-    LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry, ModeSessionExtension,
-    ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle, NoopEventSink,
-    NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState, ProcessAttempt,
-    ProcessAwaitOutput, ProcessCancelPolicy, ProcessClosePolicy, ProcessCommand,
-    ProcessEffectOutcome, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessExternalRef, ProcessFilter, ProcessId, ProcessInput, ProcessOutcome,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRuntimeHost, ProcessScope,
-    ProcessStartReceipt, ProcessState, ProcessStateSpec, ProcessTerminalSemantics,
-    ProcessTerminalSpec, ProcessTerminalState, ProcessTransfer, ProcessTransferSpec,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec, PromptUsage,
-    Residency, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
+    LashlangProcessToolBinding, LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry,
+    ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle,
+    NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState,
+    ProcessAwaitOutput, ProcessCommand, ProcessCommandLineEventSpec, ProcessEffectOutcome,
+    ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
+    ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
+    ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessRuntimeHost, ProcessStartGrant, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeSpec, PromptUsage, Residency, RuntimeCoreConfig,
+    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectEnvelope, RuntimeEffectKind,
+    RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
     RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle, RuntimeObservation,
     SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory, SessionUsageReport,
     TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId, TurnActivitySink,
     TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals, diff_token_ledger,
-    diff_usage_reports,
+    diff_usage_reports, lashlang_process_event_types,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory};
 pub use schemars::JsonSchema;

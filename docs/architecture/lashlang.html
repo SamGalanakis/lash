@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lashlang · language - lash architecture</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -24,17 +26,17 @@
 <div class="section" id="language-reference">
           <div class="section-header">
             <h2>Language Reference</h2>
-            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (statements inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The shape of the language, though, is its own: tool calls go through <code>(call name { ... })?</code>, fail-fast unwrap uses Rust-style <code>?</code>, async work uses the contextual <code>start call</code> form plus <code>await</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> / <code>parallel</code> are statement-level keywords. Effects are routed through explicit host calls, typed values, and persistent runtime state.</p>
+            <p>Lashlang is a compact CodeAct language for model-authored REPL blocks. Syntax is brace-delimited (expressions inside <code>{ ... }</code>, no significant whitespace), with familiar token-level cues for agents — <code>if</code> / <code>else</code> / <code>for x in xs</code>, <code>and</code> / <code>or</code> / <code>not</code>, raw <code>r"""..."""</code> strings. The shape of the language, though, is its own: tool calls go through <code>(call name { ... })?</code>, fail-fast unwrap uses Rust-style <code>?</code>, async work uses the contextual <code>start call</code> form plus <code>await</code>, the ternary is <code>cond ? yes : no</code>, and <code>submit</code> / <code>print</code> are effect expressions. Effects are routed through explicit host calls, typed values, and persistent runtime state.</p>
           </div>
           <dl class="def-list">
             <dt>Values</dt>
             <dd><code>null</code>, booleans, numbers, strings, lists, records, projected host values, result wrappers, process handles, and immutable <code>Image</code> handles. Lists and records are value-shaped and copy-on-write at mutation roots.</dd>
-            <dt>Statements</dt>
-            <dd>Simple and path assignment, bare expression statements, <code>call</code>, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>parallel</code>, <code>cancel</code>, and <code>submit</code>.</dd>
+            <dt>Program form</dt>
+            <dd>A program is one root <code>Block</code> expression. Simple and path assignment, <code>call</code>, <code>print</code>, <code>if</code>/<code>else</code>, <code>for</code>, <code>break</code>, <code>continue</code>, <code>cancel</code>, and <code>submit</code> are all expression nodes; assignment and <code>for</code> evaluate to <code>null</code>.</dd>
             <dt>Expressions</dt>
             <dd>Literals, variables, builtin calls, tool calls, <code>start call</code>, <code>await</code>, field/index access, unary operators, binary operators, ternaries, result unwrap with <code>?</code>, and <code>Type { ... }</code> literals.</dd>
             <dt>Effects</dt>
-            <dd>All external work crosses <code>ToolHost</code>. Synchronous calls return wrapper records, background starts return handles, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations.</dd>
+            <dd>All external work crosses <code>ExecutionHost</code>. Foreground calls return wrapper records, background starts return handles, <code>await</code> resolves handles, and <code>print</code> creates model-visible observations.</dd>
           </dl>
         </div>
 
@@ -72,7 +74,7 @@ call continue_as {
         <div class="section" id="syntax-and-values">
           <div class="section-header">
             <h2>Syntax And Values</h2>
-            <p>The language accepts newline-separated statements. Commas are accepted in lists, records, type fields, and parallel branch lists where they make generated code easier to read.</p>
+            <p>The language accepts newline-separated expressions. Commas are accepted in lists, records, type fields, and handle-fanout records/lists where they make generated code easier to read.</p>
           </div>
           <dl class="def-list">
             <dt>Literals</dt>
@@ -128,17 +130,17 @@ submit counts</code></pre>
         <div class="section" id="control-flow">
           <div class="section-header">
             <h2>Control Flow</h2>
-            <p>Control flow is statement-oriented. Loop cleanup is part of the runtime path, so loop escapes are explicit statements rather than arbitrary jumps.</p>
+            <p>Control flow is expression-backed but source-oriented. Loop cleanup is part of the runtime path, so loop escapes are explicit forms rather than arbitrary jumps.</p>
           </div>
           <dl class="def-list">
             <dt><code>if</code> / <code>else</code></dt>
-            <dd>Conditionals use statement blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</dd>
+            <dd>Conditionals use blocks. <code>else if</code> parses as an <code>else</code> block containing another <code>if</code>.</dd>
             <dt><code>for</code></dt>
             <dd><code>for item in iterable { ... }</code> iterates lists. Non-list iteration is a runtime error. <code>range</code> is the usual integer-loop helper.</dd>
             <dt><code>break</code> / <code>continue</code></dt>
-            <dd><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops and cannot cross <code>parallel</code> branch boundaries.</dd>
+            <dd><code>break</code> exits the nearest loop through the iterator cleanup path. <code>continue</code> skips to the next iteration. They are rejected outside loops.</dd>
             <dt><code>submit</code></dt>
-            <dd><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control statement, and <code>submit</code> inside <code>parallel</code> is rejected.</dd>
+            <dd><code>submit value</code> ends the whole program or turn. <code>submit</code> inside a loop is not a loop control form.</dd>
           </dl>
           <p>A short walkthrough that exercises iteration, <code>else if</code> chains, <code>break</code>/<code>continue</code>, and <code>format</code>. Loop variables are scoped to the loop body and the prior binding of <code>label</code> is restored on <code>break</code>.</p>
           <pre><code>nums = [1, 2, 3, 4, 5, 6]

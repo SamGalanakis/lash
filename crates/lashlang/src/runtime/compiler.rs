@@ -1,11 +1,11 @@
 //! Bytecode compiler: lowers `crate::ast::Program` into a `Chunk` of
-//! instructions plus the supporting compile-time tables (slot maps,
-//! parallel-call branches, format templates, schema cache).
+//! instructions plus the supporting compile-time tables (slot maps, format
+//! templates, schema cache).
 //!
 //! All compile-time-only helpers live here too: `is_pure_expr` /
-//! `contains_type_literal` (used by the parallel-call optimization to
-//! decide whether an expression can be evaluated without entering the VM)
-//! and the `fold_type` / `interned_scalar_schema` machinery (used to
+//! `contains_type_literal` (used to decide whether an expression can be
+//! evaluated without entering the VM) and the `fold_type` /
+//! `interned_scalar_schema` machinery (used to
 //! convert `TypeExpr` AST nodes into JSON-Schema-shaped `Value` literals
 //! at compile time).
 
@@ -17,8 +17,8 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::ast::{
-    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ParallelBranches, Program, Stmt,
-    TypeExpr, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
+    ToolCallMode, TypeExpr, UnaryOp,
 };
 use crate::lexer::Span;
 
@@ -27,8 +27,7 @@ use super::schema::{ValidationPlan, compile_schema_value};
 use super::{
     Chunk, CompileStats, CompiledAssignPath, CompiledAssignPathStep, CompiledFormatTemplate,
     Instruction, IntrinsicOp, LASH_TYPE_KEY, LoopExpr, LoopIterable, LoopOp, LoweredLoop, Name,
-    NamedBranchChunk, NamedParallelCallBranch, ParallelCallBranch, PureExpr, RuntimeError, Value,
-    as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
+    Value, as_number, compile_format_template, eval_binary_values, execute_integer_div_builtin,
     execute_len_direct, execute_range_builtin, is_comparison_binary_op, is_numeric_binary_op,
     is_truthy, read_field_direct, read_index_direct, transient_name, unwrap_type_value,
 };
@@ -43,14 +42,9 @@ pub(crate) struct Compiler {
     key_lists: Vec<Box<[usize]>>,
     format_templates: Vec<CompiledFormatTemplate>,
     compiled_schemas: Vec<ValidationPlan>,
-    parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
-    named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
-    pure_parallel_sets: Vec<Box<[PureExpr]>>,
-    pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
-    branch_sets: Vec<Box<[Chunk]>>,
-    named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
     assign_paths: Vec<CompiledAssignPath>,
     lowered_loops: Vec<LoweredLoop>,
+    process_blocks: Vec<super::CompiledProcessBlock>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
@@ -68,24 +62,27 @@ struct LoopLowerer<'a, 'b> {
 }
 
 impl LoopLowerer<'_, '_> {
-    fn lower_block(&mut self, statements: &[Stmt]) -> Option<Vec<LoopOp>> {
-        statements
-            .iter()
-            .map(|statement| self.lower_stmt(statement))
-            .collect()
+    fn lower_block(&mut self, block: &Expr) -> Option<Vec<LoopOp>> {
+        match block {
+            Expr::Block(expressions) => expressions
+                .iter()
+                .map(|expression| self.lower_expr(expression))
+                .collect(),
+            expression => Some(vec![self.lower_expr(expression)?]),
+        }
     }
 
-    fn lower_stmt(&mut self, statement: &Stmt) -> Option<LoopOp> {
-        match statement {
-            Stmt::Assign { target, expr } if target.root.as_str() == self.binding_name => None,
-            Stmt::Assign { target, expr } if target.is_simple() => {
+    fn lower_expr(&mut self, expression: &Expr) -> Option<LoopOp> {
+        match expression {
+            Expr::Assign { target, expr } if target.root.as_str() == self.binding_name => None,
+            Expr::Assign { target, expr } if target.is_simple() => {
                 let slot = self.compiler.push_slot(&target.root);
                 self.assigned_slots.push(slot);
                 if let Expr::Binary {
                     left,
                     op: BinaryOp::Add,
                     right,
-                } = expr
+                } = expr.as_ref()
                     && matches!(left.as_ref(), Expr::Variable(var) if var.as_str() == target.root.as_str())
                 {
                     if let Expr::List(items) = right.as_ref()
@@ -112,7 +109,7 @@ impl LoopLowerer<'_, '_> {
                 if let Expr::BuiltinCall {
                     name: builtin_name,
                     args,
-                } = expr
+                } = expr.as_ref()
                     && builtin_name == "push"
                     && let [Expr::Variable(first_arg), item] = args.as_slice()
                     && first_arg.as_str() == target.root.as_str()
@@ -127,7 +124,7 @@ impl LoopLowerer<'_, '_> {
                     expr: self.compiler.lower_loop_expr(expr)?,
                 })
             }
-            Stmt::Assign { target, expr } => {
+            Expr::Assign { target, expr } => {
                 let slot = self.compiler.push_slot(&target.root);
                 self.assigned_slots.push(slot);
                 if let [AssignPathStep::Index(index)] = target.steps.as_slice()
@@ -135,7 +132,7 @@ impl LoopLowerer<'_, '_> {
                         left,
                         op: BinaryOp::Add,
                         right,
-                    } = expr
+                    } = expr.as_ref()
                     && let Expr::Index {
                         target: left_target,
                         index: left_index,
@@ -172,8 +169,7 @@ impl LoopLowerer<'_, '_> {
                     expr: self.compiler.lower_loop_expr(expr)?,
                 })
             }
-            Stmt::Expr(expr) => Some(LoopOp::Expr(self.compiler.lower_loop_expr(expr)?)),
-            Stmt::If {
+            Expr::If {
                 condition,
                 then_block,
                 else_block,
@@ -187,7 +183,7 @@ impl LoopLowerer<'_, '_> {
                     else_ops,
                 })
             }
-            Stmt::For {
+            Expr::For {
                 binding,
                 iterable,
                 body,
@@ -211,13 +207,20 @@ impl LoopLowerer<'_, '_> {
                     body,
                 })))
             }
-            Stmt::Break => Some(LoopOp::Break),
-            Stmt::Continue => Some(LoopOp::Continue),
-            Stmt::Call(_)
-            | Stmt::Cancel(_)
-            | Stmt::Print(_)
-            | Stmt::Parallel { .. }
-            | Stmt::Submit(_) => None,
+            Expr::Break => Some(LoopOp::Break),
+            Expr::Continue => Some(LoopOp::Continue),
+            Expr::Block(_)
+            | Expr::ToolCall { .. }
+            | Expr::Cancel(_)
+            | Expr::Print(_)
+            | Expr::Submit(_)
+            | Expr::Yield(_)
+            | Expr::Wake(_)
+            | Expr::Finish(_)
+            | Expr::Fail(_)
+            | Expr::StartProcess(_)
+            | Expr::Await(_) => None,
+            expr => Some(LoopOp::Expr(self.compiler.lower_loop_expr(expr)?)),
         }
     }
 }
@@ -253,14 +256,9 @@ impl Compiler {
             key_lists: Vec::new(),
             format_templates: Vec::new(),
             compiled_schemas: Vec::new(),
-            parallel_call_sets: Vec::new(),
-            named_parallel_call_sets: Vec::new(),
-            pure_parallel_sets: Vec::new(),
-            pure_named_parallel_sets: Vec::new(),
-            branch_sets: Vec::new(),
-            named_branch_sets: Vec::new(),
             assign_paths: Vec::new(),
             lowered_loops: Vec::new(),
+            process_blocks: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
             loop_contexts: Vec::new(),
@@ -280,14 +278,9 @@ impl Compiler {
             key_lists: self.key_lists,
             format_templates: self.format_templates,
             compiled_schemas: self.compiled_schemas,
-            parallel_call_sets: self.parallel_call_sets,
-            named_parallel_call_sets: self.named_parallel_call_sets,
-            pure_parallel_sets: self.pure_parallel_sets,
-            pure_named_parallel_sets: self.pure_named_parallel_sets,
-            branch_sets: self.branch_sets,
-            named_branch_sets: self.named_branch_sets,
             assign_paths: self.assign_paths,
             lowered_loops: self.lowered_loops,
+            process_blocks: self.process_blocks,
         }
     }
 
@@ -390,47 +383,15 @@ impl Compiler {
         index
     }
 
-    fn push_branch_set(&mut self, branches: Vec<Chunk>) -> usize {
-        let index = self.branch_sets.len();
-        self.branch_sets.push(branches.into_boxed_slice());
-        index
-    }
-
-    fn push_named_branch_set(&mut self, branches: Vec<NamedBranchChunk>) -> usize {
-        let index = self.named_branch_sets.len();
-        self.named_branch_sets.push(branches.into_boxed_slice());
-        index
-    }
-
     fn push_lowered_loop(&mut self, lowered_loop: LoweredLoop) -> usize {
         let index = self.lowered_loops.len();
         self.lowered_loops.push(lowered_loop);
         index
     }
 
-    fn push_parallel_call_set(&mut self, branches: Vec<ParallelCallBranch>) -> usize {
-        let index = self.parallel_call_sets.len();
-        self.parallel_call_sets.push(branches.into_boxed_slice());
-        index
-    }
-
-    fn push_named_parallel_call_set(&mut self, branches: Vec<NamedParallelCallBranch>) -> usize {
-        let index = self.named_parallel_call_sets.len();
-        self.named_parallel_call_sets
-            .push(branches.into_boxed_slice());
-        index
-    }
-
-    fn push_pure_parallel_set(&mut self, branches: Vec<PureExpr>) -> usize {
-        let index = self.pure_parallel_sets.len();
-        self.pure_parallel_sets.push(branches.into_boxed_slice());
-        index
-    }
-
-    fn push_pure_named_parallel_set(&mut self, branches: Vec<(usize, PureExpr)>) -> usize {
-        let index = self.pure_named_parallel_sets.len();
-        self.pure_named_parallel_sets
-            .push(branches.into_boxed_slice());
+    fn push_process_block(&mut self, block: super::CompiledProcessBlock) -> usize {
+        let index = self.process_blocks.len();
+        self.process_blocks.push(block);
         index
     }
 
@@ -511,243 +472,266 @@ impl Compiler {
     }
 
     fn compile_program_block(&mut self, program: &Program) {
-        for (index, statement) in program.statements.iter().enumerate() {
-            let span = program.statement_spans.get(index).copied();
-            self.compile_stmt_with_span(statement, span);
+        match &program.expr {
+            Expr::Block(expressions) => {
+                self.compile_block_value_with_spans(expressions, &program.expression_spans);
+            }
+            expression => self.compile_expr(expression),
+        }
+        if !is_terminal_expr(&program.expr) {
+            let pop = self.code.len();
+            self.code.push(Instruction::Pop);
+            if let Some(span) = program.expression_spans.last().copied() {
+                self.mark_instruction_spans(pop, self.code.len(), span);
+            }
         }
     }
 
-    fn compile_block(&mut self, statements: &[Stmt]) {
-        for statement in statements {
-            self.compile_stmt_with_span(statement, None);
+    fn compile_block_value(&mut self, expressions: &[Expr]) {
+        let Some((last, prefix)) = expressions.split_last() else {
+            self.code.push(Instruction::PushNull);
+            return;
+        };
+        for expression in prefix {
+            self.compile_expr_discarding_value(expression);
         }
+        self.compile_expr(last);
     }
 
-    fn compile_stmt_with_span(&mut self, statement: &Stmt, span: Option<Span>) {
+    fn compile_block_value_with_spans(&mut self, expressions: &[Expr], spans: &[Span]) {
+        let Some((last, prefix)) = expressions.split_last() else {
+            self.code.push(Instruction::PushNull);
+            return;
+        };
+        for (index, expression) in prefix.iter().enumerate() {
+            let span = spans.get(index).copied();
+            self.compile_expr_discarding_value_with_span(expression, span);
+        }
+        self.compile_expr_with_span(last, spans.get(expressions.len() - 1).copied());
+    }
+
+    fn compile_expr_with_span(&mut self, expression: &Expr, span: Option<Span>) {
         let start = self.code.len();
-        self.compile_stmt(statement);
-        if self.spans.len() < self.code.len() {
-            self.spans.resize(self.code.len(), None);
-        }
-        for entry in &mut self.spans[start..self.code.len()] {
-            *entry = span;
+        self.compile_expr(expression);
+        if let Some(span) = span {
+            self.mark_instruction_spans(start, self.code.len(), span);
         }
     }
 
-    fn compile_stmt(&mut self, statement: &Stmt) {
-        match statement {
-            Stmt::Assign { target, expr } if target.is_simple() => {
-                let name = &target.root;
-                let slot = self.push_slot(name);
-                let has_type_literal = contains_type_literal(expr);
-                let const_value = if let Expr::TypeLiteral(ty) = expr {
-                    fold_type(ty).map(wrap_type_schema_value)
-                } else if has_type_literal {
-                    None
-                } else {
-                    self.fold_compile_time_expr(expr)
-                };
-                if let Expr::Binary {
-                    left,
-                    op: BinaryOp::Add,
-                    right,
-                } = expr
-                    && matches!(left.as_ref(), Expr::Variable(var) if var == name)
-                {
-                    if let Expr::List(items) = right.as_ref()
-                        && items.len() == 1
-                    {
-                        self.compile_expr(&items[0]);
-                        self.code.push(Instruction::AppendAssign(slot));
-                        self.set_const_slot(slot, None);
-                        return;
-                    }
-                    if let Some(Value::Number(right)) = self.fold_compile_time_expr(right) {
-                        self.code.push(Instruction::AddAssignNumber { slot, right });
-                        self.set_const_slot(slot, None);
-                        return;
-                    }
-                    if let Expr::Variable(right_name) = right.as_ref() {
-                        let right = self.push_slot(right_name);
-                        self.code.push(Instruction::AddAssignSlot { slot, right });
-                        self.set_const_slot(slot, None);
-                        return;
-                    }
-                    self.compile_expr(right);
-                    self.code.push(Instruction::AddAssign(slot));
-                    self.set_const_slot(slot, None);
-                    return;
-                }
-                if let Expr::BuiltinCall {
-                    name: builtin_name,
-                    args,
-                } = expr
-                    && builtin_name == "push"
-                    && let [Expr::Variable(first_arg), item] = args.as_slice()
-                    && first_arg == name
-                {
-                    self.compile_expr(item);
-                    self.code
-                        .push(Instruction::Intrinsic(IntrinsicOp::PushAssign(slot)));
-                    self.set_const_slot(slot, None);
-                    return;
-                }
-                if let Some(value) = const_value.clone()
-                    && !has_type_literal
-                {
-                    let constant = self.push_const(value);
-                    self.code.push(Instruction::StoreConst { slot, constant });
-                    self.set_const_slot(slot, const_value);
-                    return;
-                }
+    fn compile_expr_discarding_value_with_span(&mut self, expression: &Expr, span: Option<Span>) {
+        let start = self.code.len();
+        self.compile_expr_discarding_value(expression);
+        if let Some(span) = span {
+            self.mark_instruction_spans(start, self.code.len(), span);
+        }
+    }
 
-                self.compile_expr(expr);
-                self.code.push(Instruction::StoreName(slot));
-                self.set_const_slot(slot, const_value);
-            }
-            Stmt::Assign { target, expr } => {
-                let slot = self.push_slot(&target.root);
-                if let [AssignPathStep::Index(index)] = target.steps.as_slice()
-                    && is_pure_expr(index)
-                    && let Expr::Binary {
-                        left,
-                        op: BinaryOp::Add,
-                        right,
-                    } = expr
-                    && let Expr::Index {
-                        target: left_target,
-                        index: left_index,
-                    } = left.as_ref()
-                    && matches!(left_target.as_ref(), Expr::Variable(name) if name == target.root)
-                    && left_index.as_ref() == index
-                    && let Some(Value::Number(right)) = self.fold_compile_time_expr(right)
-                {
-                    if let Expr::Variable(index_name) = index {
-                        let index = self.push_slot(index_name);
-                        self.code.push(Instruction::AddAssignIndexSlotNumber {
-                            slot,
-                            index,
-                            right,
-                        });
-                    } else {
-                        self.compile_expr(index);
-                        self.code
-                            .push(Instruction::AddAssignIndexNumber { slot, right });
-                    }
-                    self.set_const_slot(slot, None);
-                    return;
+    fn compile_expr_discarding_value(&mut self, expression: &Expr) {
+        match expression {
+            Expr::Block(expressions) => {
+                for expression in expressions {
+                    self.compile_expr_discarding_value(expression);
                 }
-                for step in &target.steps {
-                    if let AssignPathStep::Index(index) = step {
-                        self.compile_expr(index);
-                    }
-                }
-                self.compile_expr(expr);
-                let path = self.push_assign_path(&target.steps);
-                self.code.push(Instruction::PathAssign { slot, path });
-                self.set_const_slot(slot, None);
             }
-            Stmt::Expr(expr) => {
-                self.compile_expr(expr);
-                self.code.push(Instruction::Pop);
-            }
-            Stmt::Call(call) => {
-                self.compile_call_expr(call);
-                self.code.push(Instruction::Pop);
-            }
-            Stmt::Cancel(handle) => {
-                self.compile_expr(handle);
-                self.code.push(Instruction::CancelHandle);
-            }
-            Stmt::Print(expr) => {
-                self.compile_expr(expr);
-                self.code.push(Instruction::Print);
-            }
-            Stmt::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                let jump_to_else = self.compile_condition_jump_if_false(condition);
-                self.compile_block(then_block);
-                if else_block.is_empty() {
-                    self.patch_jump(jump_to_else, self.code.len());
-                } else {
-                    let jump_to_end = self.emit_jump();
-                    self.patch_jump(jump_to_else, self.code.len());
-                    self.compile_block(else_block);
-                    self.patch_jump(jump_to_end, self.code.len());
-                }
-                self.clear_const_slots();
-            }
-            Stmt::For {
+            Expr::Assign { target, expr } => self.compile_assignment_expr(target, expr, false),
+            Expr::For {
                 binding,
                 iterable,
                 body,
-            } => {
-                if let Some(loop_id) = self.compile_lowered_for(binding, iterable, body) {
-                    self.clear_const_slots();
-                    self.code.push(Instruction::LoweredLoop(loop_id));
-                    return;
-                }
-
-                let binding = self.push_slot(binding);
-                if let Expr::BuiltinCall { name, args } = iterable
-                    && name.as_str() == "range"
-                {
-                    for arg in args {
-                        self.compile_expr(arg);
-                    }
-                    self.clear_const_slots();
-                    self.set_const_slot(binding, None);
-                    self.code.push(Instruction::BeginRangeIter {
-                        binding,
-                        argc: args.len(),
-                    });
-                    self.compile_for_loop_body(body);
-                    return;
-                }
-
-                self.compile_expr(iterable);
-                self.clear_const_slots();
-                self.set_const_slot(binding, None);
-                self.code.push(Instruction::BeginIter(binding));
-                self.compile_for_loop_body(body);
+            } => self.compile_for_expr(binding, iterable, body, false),
+            Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) | Expr::Break | Expr::Continue => {
+                self.compile_expr(expression);
             }
-            Stmt::Break => {
-                let jump = self.emit_jump();
-                self.loop_contexts
-                    .last_mut()
-                    .expect("parser rejects `break` outside loops")
-                    .break_jumps
-                    .push(jump);
-                self.clear_const_slots();
-            }
-            Stmt::Continue => {
-                let continue_target = self
-                    .loop_contexts
-                    .last()
-                    .expect("parser rejects `continue` outside loops")
-                    .continue_target;
-                self.code.push(Instruction::Jump(continue_target));
-                self.clear_const_slots();
-            }
-            Stmt::Parallel { branches } => {
-                self.compile_parallel(branches, false);
-                self.clear_const_slots();
-            }
-            Stmt::Submit(expr) => {
-                if let Some(expr) = expr {
-                    self.compile_expr(expr);
-                } else {
-                    self.compile_expr(&Expr::Null);
-                }
-                self.code.push(Instruction::Submit);
+            expression => {
+                self.compile_expr(expression);
+                self.code.push(Instruction::Pop);
             }
         }
     }
 
-    fn compile_for_loop_body(&mut self, body: &[Stmt]) {
+    fn mark_instruction_spans(&mut self, start: usize, end: usize, span: Span) {
+        if self.spans.len() < end {
+            self.spans.resize(end, None);
+        }
+        for instruction_span in &mut self.spans[start..end] {
+            *instruction_span = Some(span);
+        }
+    }
+
+    fn compile_block_discarding_values(&mut self, block: &Expr) {
+        match block {
+            Expr::Block(expressions) => {
+                for expression in expressions {
+                    self.compile_expr_discarding_value(expression);
+                }
+            }
+            expression => {
+                self.compile_expr_discarding_value(expression);
+            }
+        }
+    }
+
+    fn push_null_if(&mut self, leave_value: bool) {
+        if leave_value {
+            self.code.push(Instruction::PushNull);
+        }
+    }
+
+    fn compile_assignment_expr(&mut self, target: &AssignTarget, expr: &Expr, leave_value: bool) {
+        if target.is_simple() {
+            let name = &target.root;
+            let slot = self.push_slot(name);
+            let has_type_literal = contains_type_literal(expr);
+            let const_value = if let Expr::TypeLiteral(ty) = expr {
+                fold_type(ty).map(wrap_type_schema_value)
+            } else if has_type_literal {
+                None
+            } else {
+                self.fold_compile_time_expr(expr)
+            };
+            if let Expr::Binary {
+                left,
+                op: BinaryOp::Add,
+                right,
+            } = expr
+                && matches!(left.as_ref(), Expr::Variable(var) if var == name)
+            {
+                if let Expr::List(items) = right.as_ref()
+                    && items.len() == 1
+                {
+                    self.compile_expr(&items[0]);
+                    self.code.push(Instruction::AppendAssign(slot));
+                    self.set_const_slot(slot, None);
+                    self.push_null_if(leave_value);
+                    return;
+                }
+                if let Some(Value::Number(right)) = self.fold_compile_time_expr(right) {
+                    self.code.push(Instruction::AddAssignNumber { slot, right });
+                    self.set_const_slot(slot, None);
+                    self.push_null_if(leave_value);
+                    return;
+                }
+                if let Expr::Variable(right_name) = right.as_ref() {
+                    let right = self.push_slot(right_name);
+                    self.code.push(Instruction::AddAssignSlot { slot, right });
+                    self.set_const_slot(slot, None);
+                    self.push_null_if(leave_value);
+                    return;
+                }
+                self.compile_expr(right);
+                self.code.push(Instruction::AddAssign(slot));
+                self.set_const_slot(slot, None);
+                self.push_null_if(leave_value);
+                return;
+            }
+            if let Expr::BuiltinCall {
+                name: builtin_name,
+                args,
+            } = expr
+                && builtin_name == "push"
+                && let [Expr::Variable(first_arg), item] = args.as_slice()
+                && first_arg == name
+            {
+                self.compile_expr(item);
+                self.code
+                    .push(Instruction::Intrinsic(IntrinsicOp::PushAssign(slot)));
+                self.set_const_slot(slot, None);
+                self.push_null_if(leave_value);
+                return;
+            }
+            if let Some(value) = const_value.clone()
+                && !has_type_literal
+            {
+                let constant = self.push_const(value);
+                self.code.push(Instruction::StoreConst { slot, constant });
+                self.set_const_slot(slot, const_value);
+                self.push_null_if(leave_value);
+                return;
+            }
+
+            self.compile_expr(expr);
+            self.code.push(Instruction::StoreName(slot));
+            self.set_const_slot(slot, const_value);
+            self.push_null_if(leave_value);
+            return;
+        }
+
+        let slot = self.push_slot(&target.root);
+        if let [AssignPathStep::Index(index)] = target.steps.as_slice()
+            && is_pure_expr(index)
+            && let Expr::Binary {
+                left,
+                op: BinaryOp::Add,
+                right,
+            } = expr
+            && let Expr::Index {
+                target: left_target,
+                index: left_index,
+            } = left.as_ref()
+            && matches!(left_target.as_ref(), Expr::Variable(name) if name == target.root)
+            && left_index.as_ref() == index
+            && let Some(Value::Number(right)) = self.fold_compile_time_expr(right)
+        {
+            if let Expr::Variable(index_name) = index {
+                let index = self.push_slot(index_name);
+                self.code
+                    .push(Instruction::AddAssignIndexSlotNumber { slot, index, right });
+            } else {
+                self.compile_expr(index);
+                self.code
+                    .push(Instruction::AddAssignIndexNumber { slot, right });
+            }
+            self.set_const_slot(slot, None);
+            self.push_null_if(leave_value);
+            return;
+        }
+        for step in &target.steps {
+            if let AssignPathStep::Index(index) = step {
+                self.compile_expr(index);
+            }
+        }
+        self.compile_expr(expr);
+        let path = self.push_assign_path(&target.steps);
+        self.code.push(Instruction::PathAssign { slot, path });
+        self.set_const_slot(slot, None);
+        self.push_null_if(leave_value);
+    }
+
+    fn compile_for_expr(&mut self, binding: &str, iterable: &Expr, body: &Expr, leave_value: bool) {
+        if let Some(loop_id) = self.compile_lowered_for(binding, iterable, body) {
+            self.clear_const_slots();
+            self.code.push(Instruction::LoweredLoop(loop_id));
+            self.push_null_if(leave_value);
+            return;
+        }
+
+        let binding = self.push_slot(binding);
+        if let Expr::BuiltinCall { name, args } = iterable
+            && name.as_str() == "range"
+        {
+            for arg in args {
+                self.compile_expr(arg);
+            }
+            self.clear_const_slots();
+            self.set_const_slot(binding, None);
+            self.code.push(Instruction::BeginRangeIter {
+                binding,
+                argc: args.len(),
+            });
+            self.compile_for_loop_body(body);
+            self.push_null_if(leave_value);
+            return;
+        }
+
+        self.compile_expr(iterable);
+        self.clear_const_slots();
+        self.set_const_slot(binding, None);
+        self.code.push(Instruction::BeginIter(binding));
+        self.compile_for_loop_body(body);
+        self.push_null_if(leave_value);
+    }
+
+    fn compile_for_loop_body(&mut self, body: &Expr) {
         let loop_start = self.code.len();
         let iter_next = self.code.len();
         self.code.push(Instruction::IterNext {
@@ -757,7 +741,7 @@ impl Compiler {
             continue_target: loop_start,
             break_jumps: SmallVec::new(),
         });
-        self.compile_block(body);
+        self.compile_block_discarding_values(body);
         let loop_context = self
             .loop_contexts
             .pop()
@@ -776,7 +760,7 @@ impl Compiler {
         &mut self,
         binding_name: &str,
         iterable: &Expr,
-        body: &[Stmt],
+        body: &Expr,
     ) -> Option<usize> {
         let binding = self.push_slot(binding_name);
         let iterable = self.lower_loop_iterable(iterable)?;
@@ -877,210 +861,37 @@ impl Compiler {
                 op: *op,
                 expr: Box::new(self.lower_loop_expr(expr)?),
             }),
-            Expr::Conditional {
+            Expr::If {
                 condition,
-                then_expr,
-                else_expr,
+                then_block,
+                else_block,
             } => Some(LoopExpr::Conditional {
                 condition: Box::new(self.lower_loop_expr(condition)?),
-                then_expr: Box::new(self.lower_loop_expr(then_expr)?),
-                else_expr: Box::new(self.lower_loop_expr(else_expr)?),
+                then_expr: Box::new(self.lower_loop_expr(then_block)?),
+                else_expr: Box::new(self.lower_loop_expr(else_block)?),
             }),
             Expr::Binary { left, op, right } => Some(LoopExpr::Binary {
                 left: Box::new(self.lower_loop_expr(left)?),
                 op: *op,
                 right: Box::new(self.lower_loop_expr(right)?),
             }),
-            Expr::ToolCall(_)
-            | Expr::StartToolCall(_)
-            | Expr::Parallel { .. }
+            Expr::Block(_)
+            | Expr::Assign { .. }
+            | Expr::For { .. }
+            | Expr::Break
+            | Expr::Continue
+            | Expr::ToolCall { .. }
+            | Expr::StartProcess(_)
             | Expr::Await(_)
             | Expr::ResultUnwrap(_)
+            | Expr::Cancel(_)
+            | Expr::Print(_)
+            | Expr::Submit(_)
+            | Expr::Yield(_)
+            | Expr::Wake(_)
+            | Expr::Finish(_)
+            | Expr::Fail(_)
             | Expr::TypeLiteral(_) => None,
-        }
-    }
-
-    fn compile_parallel_calls(&mut self, branches: &[Stmt]) -> Option<Vec<ParallelCallBranch>> {
-        let mut compiled = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let Stmt::Assign { target, expr } = branch else {
-                return None;
-            };
-            if !target.is_simple() {
-                return None;
-            }
-            let Expr::ToolCall(call) = expr else {
-                return None;
-            };
-            if call.args.iter().any(|(_, expr)| !is_pure_expr(expr)) {
-                return None;
-            }
-
-            let slot = self.push_slot(&target.root);
-            let args = PureExpr::Record(
-                call.args
-                    .iter()
-                    .map(|(key, expr)| Ok((self.push_name(key), self.compile_pure_expr(expr)?)))
-                    .collect::<Result<Vec<_>, RuntimeError>>()
-                    .ok()?
-                    .into_boxed_slice(),
-            );
-            let name = self.push_name(&call.name);
-            compiled.push(ParallelCallBranch { slot, name, args });
-        }
-        Some(compiled)
-    }
-
-    fn compile_pure_parallel_exprs(&mut self, branches: &[Stmt]) -> Option<Vec<PureExpr>> {
-        let mut compiled = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let Stmt::Expr(expr) = branch else {
-                return None;
-            };
-            compiled.push(self.compile_pure_expr(expr).ok()?);
-        }
-        Some(compiled)
-    }
-
-    fn compile_named_parallel_calls(
-        &mut self,
-        branches: &[crate::ast::NamedParallelBranch],
-    ) -> Option<Vec<NamedParallelCallBranch>> {
-        let mut compiled = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let call = match &branch.stmt {
-                Stmt::Call(call) | Stmt::Expr(Expr::ToolCall(call)) => call,
-                _ => return None,
-            };
-            if call.args.iter().any(|(_, expr)| !is_pure_expr(expr)) {
-                return None;
-            }
-            let args = PureExpr::Record(
-                call.args
-                    .iter()
-                    .map(|(key, expr)| Ok((self.push_name(key), self.compile_pure_expr(expr)?)))
-                    .collect::<Result<Vec<_>, RuntimeError>>()
-                    .ok()?
-                    .into_boxed_slice(),
-            );
-            compiled.push(NamedParallelCallBranch {
-                output_name: self.push_name(&branch.name),
-                name: self.push_name(&call.name),
-                args,
-            });
-        }
-        Some(compiled)
-    }
-
-    fn compile_pure_named_parallel_exprs(
-        &mut self,
-        branches: &[crate::ast::NamedParallelBranch],
-    ) -> Option<Vec<(usize, PureExpr)>> {
-        let mut compiled = Vec::with_capacity(branches.len());
-        for branch in branches {
-            let Stmt::Expr(expr) = &branch.stmt else {
-                return None;
-            };
-            let expr = self.compile_pure_expr(expr).ok()?;
-            compiled.push((self.push_name(&branch.name), expr));
-        }
-        Some(compiled)
-    }
-
-    fn compile_pure_expr(&mut self, expr: &Expr) -> Result<PureExpr, RuntimeError> {
-        match expr {
-            Expr::Null => Ok(PureExpr::Const(Value::Null)),
-            Expr::Bool(value) => Ok(PureExpr::Const(Value::Bool(*value))),
-            Expr::Number(value) => Ok(PureExpr::Const(Value::Number(*value))),
-            Expr::String(value) => Ok(PureExpr::Const(Value::String(value.clone()))),
-            Expr::Variable(name) => Ok(PureExpr::Slot(self.push_slot(name))),
-            Expr::List(items) => Ok(PureExpr::List(
-                items
-                    .iter()
-                    .map(|item| self.compile_pure_expr(item))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_boxed_slice(),
-            )),
-            Expr::Record(entries) => Ok(PureExpr::Record(
-                entries
-                    .iter()
-                    .map(|(key, expr)| Ok((self.push_name(key), self.compile_pure_expr(expr)?)))
-                    .collect::<Result<Vec<_>, RuntimeError>>()?
-                    .into_boxed_slice(),
-            )),
-            Expr::ToolCall(_) => Err(RuntimeError::ValueError {
-                message: "tool calls are not allowed in pure expressions".to_string(),
-            }),
-            Expr::StartToolCall(_) => Err(RuntimeError::ValueError {
-                message: "async tool starts are not allowed in pure expressions".to_string(),
-            }),
-            Expr::Parallel { .. } => Err(RuntimeError::ValueError {
-                message: "`parallel` is not allowed in pure expressions".to_string(),
-            }),
-            Expr::Await(_) => Err(RuntimeError::ValueError {
-                message: "`await` is not allowed in pure expressions".to_string(),
-            }),
-            Expr::ResultUnwrap(expr) => Ok(PureExpr::ResultUnwrap(Box::new(
-                self.compile_pure_expr(expr)?,
-            ))),
-            Expr::BuiltinCall { name, args } => {
-                if name == "format"
-                    && let Some((Expr::String(template), value_args)) = args.split_first()
-                {
-                    return Ok(PureExpr::Format {
-                        template: compile_format_template(template, value_args.len()),
-                        args: value_args
-                            .iter()
-                            .map(|arg| self.compile_pure_expr(arg))
-                            .collect::<Result<Vec<_>, _>>()?
-                            .into_boxed_slice(),
-                    });
-                }
-
-                Ok(PureExpr::Intrinsic {
-                    op: self.resolve_intrinsic(name, args.len()),
-                    args: args
-                        .iter()
-                        .map(|arg| self.compile_pure_expr(arg))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                })
-            }
-            Expr::Field { target, field } => Ok(PureExpr::Field {
-                target: Box::new(self.compile_pure_expr(target)?),
-                field: self.push_name(field),
-            }),
-            Expr::Index { target, index } => Ok(PureExpr::Index {
-                target: Box::new(self.compile_pure_expr(target)?),
-                index: Box::new(self.compile_pure_expr(index)?),
-            }),
-            Expr::Unary { op, expr } => Ok(PureExpr::Unary {
-                op: *op,
-                expr: Box::new(self.compile_pure_expr(expr)?),
-            }),
-            Expr::Conditional {
-                condition,
-                then_expr,
-                else_expr,
-            } => Ok(PureExpr::Conditional {
-                condition: Box::new(self.compile_pure_expr(condition)?),
-                then_expr: Box::new(self.compile_pure_expr(then_expr)?),
-                else_expr: Box::new(self.compile_pure_expr(else_expr)?),
-            }),
-            Expr::Binary { left, op, right } => Ok(PureExpr::Binary {
-                left: Box::new(self.compile_pure_expr(left)?),
-                op: *op,
-                right: Box::new(self.compile_pure_expr(right)?),
-            }),
-            Expr::TypeLiteral(ty) => {
-                let schema = fold_type(ty).ok_or_else(|| RuntimeError::ValueError {
-                    message: "Type literals with `Ref` are not allowed in pure expressions"
-                        .to_string(),
-                })?;
-                let mut wrapper = record_with_capacity(1);
-                wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
-                Ok(PureExpr::Const(Value::Record(Arc::new(wrapper))))
-            }
         }
     }
 
@@ -1179,15 +990,15 @@ impl Compiler {
                     UnaryOp::Not => Some(Value::Bool(!is_truthy(&value))),
                 }
             }
-            Expr::Conditional {
+            Expr::If {
                 condition,
-                then_expr,
-                else_expr,
+                then_block,
+                else_block,
             } => {
                 if is_truthy(&self.fold_compile_time_expr(condition)?) {
-                    self.fold_compile_time_expr(then_expr)
+                    self.fold_compile_time_expr(then_block)
                 } else {
-                    self.fold_compile_time_expr(else_expr)
+                    self.fold_compile_time_expr(else_block)
                 }
             }
             Expr::Binary { left, op, right } => match op {
@@ -1219,11 +1030,22 @@ impl Compiler {
                 wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
                 Some(Value::Record(Arc::new(wrapper)))
             }
-            Expr::ToolCall(_)
-            | Expr::StartToolCall(_)
-            | Expr::Parallel { .. }
+            Expr::Block(_)
+            | Expr::Assign { .. }
+            | Expr::For { .. }
+            | Expr::Break
+            | Expr::Continue
+            | Expr::ToolCall { .. }
+            | Expr::StartProcess(_)
             | Expr::Await(_)
-            | Expr::ResultUnwrap(_) => None,
+            | Expr::ResultUnwrap(_)
+            | Expr::Cancel(_)
+            | Expr::Print(_)
+            | Expr::Submit(_)
+            | Expr::Yield(_)
+            | Expr::Wake(_)
+            | Expr::Finish(_)
+            | Expr::Fail(_) => None,
         }
     }
 
@@ -1326,6 +1148,31 @@ impl Compiler {
         }
 
         match expr {
+            Expr::Block(expressions) => self.compile_block_value(expressions),
+            Expr::Assign { target, expr } => self.compile_assignment_expr(target, expr, true),
+            Expr::For {
+                binding,
+                iterable,
+                body,
+            } => self.compile_for_expr(binding, iterable, body, true),
+            Expr::Break => {
+                let jump = self.emit_jump();
+                self.loop_contexts
+                    .last_mut()
+                    .expect("parser rejects `break` outside loops")
+                    .break_jumps
+                    .push(jump);
+                self.clear_const_slots();
+            }
+            Expr::Continue => {
+                let continue_target = self
+                    .loop_contexts
+                    .last()
+                    .expect("parser rejects `continue` outside loops")
+                    .continue_target;
+                self.code.push(Instruction::Jump(continue_target));
+                self.clear_const_slots();
+            }
             Expr::Null => {
                 self.code.push(Instruction::PushNull);
             }
@@ -1360,15 +1207,21 @@ impl Compiler {
                 let keys = self.push_key_list(entries.iter().map(|(key, _)| key.as_str()));
                 self.code.push(Instruction::BuildRecord(keys));
             }
-            Expr::ToolCall(call) => self.compile_call_expr(call),
-            Expr::StartToolCall(call) => self.compile_start_call_expr(call),
-            Expr::Parallel { branches } => self.compile_parallel(branches, true),
+            Expr::ToolCall { mode, call } => match mode {
+                ToolCallMode::Call => self.compile_call_expr(call),
+                ToolCallMode::Start => self.compile_start_call_expr(call),
+            },
+            Expr::StartProcess(process) => self.compile_start_process_expr(process),
             Expr::Await(handle) => {
                 self.compile_expr(handle);
                 self.code.push(Instruction::AwaitHandle);
             }
             Expr::ResultUnwrap(expr) => {
-                if let Expr::ToolCall(call) = expr.as_ref() {
+                if let Expr::ToolCall {
+                    mode: ToolCallMode::Call,
+                    call,
+                } = expr.as_ref()
+                {
                     self.compile_call_unwrap_expr(call);
                 } else if let Expr::Await(handle) = expr.as_ref() {
                     self.compile_expr(handle);
@@ -1407,17 +1260,56 @@ impl Compiler {
                 self.compile_expr(expr);
                 self.code.push(Instruction::Unary(*op));
             }
-            Expr::Conditional {
+            Expr::If {
                 condition,
-                then_expr,
-                else_expr,
+                then_block,
+                else_block,
             } => {
                 let jump_to_else = self.compile_condition_jump_if_false(condition);
-                self.compile_expr(then_expr);
+                let const_slots_before_branches = self.const_slots.clone();
+                self.compile_expr(then_block);
                 let jump_to_end = self.emit_jump();
                 self.patch_jump(jump_to_else, self.code.len());
-                self.compile_expr(else_expr);
+                self.const_slots = const_slots_before_branches;
+                self.compile_expr(else_block);
                 self.patch_jump(jump_to_end, self.code.len());
+                self.clear_const_slots();
+            }
+            Expr::Cancel(handle) => {
+                self.compile_expr(handle);
+                self.code.push(Instruction::CancelHandle);
+            }
+            Expr::Print(expr) => {
+                self.compile_expr(expr);
+                self.code.push(Instruction::Print);
+            }
+            Expr::Submit(expr) => {
+                if let Some(expr) = expr {
+                    self.compile_expr(expr);
+                } else {
+                    self.compile_expr(&Expr::Null);
+                }
+                self.code.push(Instruction::Submit);
+            }
+            Expr::Yield(expr) => {
+                self.compile_expr(expr);
+                self.code.push(Instruction::ProcessYield);
+            }
+            Expr::Wake(expr) => {
+                self.compile_expr(expr);
+                self.code.push(Instruction::ProcessWake);
+            }
+            Expr::Finish(expr) => {
+                if let Some(expr) = expr {
+                    self.compile_expr(expr);
+                } else {
+                    self.compile_expr(&Expr::Null);
+                }
+                self.code.push(Instruction::ProcessFinish);
+            }
+            Expr::Fail(expr) => {
+                self.compile_expr(expr);
+                self.code.push(Instruction::ProcessFail);
             }
             Expr::TypeLiteral(ty) => self.compile_type_literal(ty),
             Expr::Binary { left, op, right } => match op {
@@ -1526,82 +1418,36 @@ impl Compiler {
         self.code.push(Instruction::StartCallTool { name, keys });
     }
 
-    fn compile_parallel(&mut self, branches: &ParallelBranches, want_value: bool) {
-        match branches {
-            ParallelBranches::Positional(branches) => {
-                if let Some(branches) = self.compile_parallel_calls(branches) {
-                    let branches = self.push_parallel_call_set(branches);
-                    self.code.push(if want_value {
-                        Instruction::ParallelCallsValue(branches)
-                    } else {
-                        Instruction::ParallelCalls(branches)
-                    });
-                    return;
-                }
-
-                if want_value && let Some(branches) = self.compile_pure_parallel_exprs(branches) {
-                    let branches = self.push_pure_parallel_set(branches);
-                    self.code.push(Instruction::PureParallelValue(branches));
-                    return;
-                }
-
-                let branches = branches
-                    .iter()
-                    .map(|branch| {
-                        let mut compiler = Self::with_slots_and_stats(
-                            self.slots.clone(),
-                            self.compile_stats.clone(),
-                        );
-                        compiler.compile_stmt(branch);
-                        compiler.finish()
-                    })
-                    .collect::<Vec<_>>();
-                let branches = self.push_branch_set(branches);
-                self.code.push(if want_value {
-                    Instruction::ParallelValue(branches)
-                } else {
-                    Instruction::Parallel(branches)
-                });
-            }
-            ParallelBranches::Named(branches) => {
-                if want_value && let Some(branches) = self.compile_named_parallel_calls(branches) {
-                    let branches = self.push_named_parallel_call_set(branches);
-                    self.code
-                        .push(Instruction::ParallelNamedCallsValue(branches));
-                    return;
-                }
-
-                if want_value
-                    && let Some(branches) = self.compile_pure_named_parallel_exprs(branches)
-                {
-                    let branches = self.push_pure_named_parallel_set(branches);
-                    self.code
-                        .push(Instruction::PureParallelNamedValue(branches));
-                    return;
-                }
-
-                let branches = branches
-                    .iter()
-                    .map(|branch| {
-                        let mut compiler = Self::with_slots_and_stats(
-                            self.slots.clone(),
-                            self.compile_stats.clone(),
-                        );
-                        compiler.compile_stmt(&branch.stmt);
-                        NamedBranchChunk {
-                            name: self.push_name(&branch.name),
-                            chunk: compiler.finish(),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let branches = self.push_named_branch_set(branches);
-                self.code.push(if want_value {
-                    Instruction::ParallelNamedValue(branches)
-                } else {
-                    Instruction::ParallelNamed(branches)
-                });
-            }
+    fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) {
+        if let Some(name) = process.name.as_ref() {
+            self.compile_expr(name);
         }
+        if let Some(timeout_ms) = process.timeout_ms.as_ref() {
+            self.compile_expr(timeout_ms);
+        }
+        if let Some(input) = process.input.as_ref() {
+            self.compile_expr(input);
+        }
+        let mut tool_names = std::collections::BTreeSet::new();
+        collect_tool_names_in_expr(&process.body, &mut tool_names);
+        let tool_names = tool_names
+            .into_iter()
+            .map(|name| transient_name(&name))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let block = self.push_process_block(super::CompiledProcessBlock {
+            program: Program {
+                expr: process.body.as_ref().clone(),
+                expression_spans: Vec::new(),
+            },
+            tool_names,
+        });
+        self.code.push(Instruction::StartProcess {
+            block,
+            has_name: process.name.is_some(),
+            has_timeout_ms: process.timeout_ms.is_some(),
+            has_input: process.input.is_some(),
+        });
     }
 
     fn emit_jump_if_false(&mut self) -> usize {
@@ -1794,100 +1640,191 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => true,
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
-        Expr::ToolCall(_) => false,
-        Expr::StartToolCall(_) => false,
-        Expr::Parallel { .. } => false,
-        Expr::Await(_) => false,
         Expr::ResultUnwrap(expr) => is_pure_expr(expr),
         Expr::BuiltinCall { args, .. } => args.iter().all(is_pure_expr),
         Expr::Field { target, .. } => is_pure_expr(target),
         Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),
         Expr::Unary { expr, .. } => is_pure_expr(expr),
-        Expr::Conditional {
+        Expr::If {
             condition,
-            then_expr,
-            else_expr,
-        } => is_pure_expr(condition) && is_pure_expr(then_expr) && is_pure_expr(else_expr),
+            then_block,
+            else_block,
+        } => is_pure_expr(condition) && is_pure_expr(then_block) && is_pure_expr(else_block),
         Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
         Expr::TypeLiteral(ty) => fold_type(ty).is_some(),
+        Expr::Block(_)
+        | Expr::Assign { .. }
+        | Expr::For { .. }
+        | Expr::Break
+        | Expr::Continue
+        | Expr::ToolCall { .. }
+        | Expr::StartProcess(_)
+        | Expr::Await(_)
+        | Expr::Cancel(_)
+        | Expr::Print(_)
+        | Expr::Submit(_)
+        | Expr::Yield(_)
+        | Expr::Wake(_)
+        | Expr::Finish(_)
+        | Expr::Fail(_) => false,
     }
 }
 
 fn contains_type_literal(expr: &Expr) -> bool {
     match expr {
         Expr::TypeLiteral(_) => true,
+        Expr::Block(expressions) => expressions.iter().any(contains_type_literal),
+        Expr::Assign { target, expr } => {
+            assign_target_contains_type_literal(target) || contains_type_literal(expr)
+        }
         Expr::List(items) => items.iter().any(contains_type_literal),
         Expr::Record(entries) => entries
             .iter()
             .any(|(_, value)| contains_type_literal(value)),
-        Expr::ToolCall(call) | Expr::StartToolCall(call) => call
+        Expr::ToolCall { call, .. } => call
             .args
             .iter()
             .any(|(_, value)| contains_type_literal(value)),
-        Expr::Parallel { branches } => match branches {
-            ParallelBranches::Positional(statements) => {
-                statements.iter().any(stmt_contains_type_literal)
-            }
-            ParallelBranches::Named(branches) => branches
-                .iter()
-                .any(|branch| stmt_contains_type_literal(&branch.stmt)),
-        },
-        Expr::Await(expr) | Expr::ResultUnwrap(expr) | Expr::Unary { expr, .. } => {
-            contains_type_literal(expr)
+        Expr::StartProcess(process) => {
+            process.name.as_deref().is_some_and(contains_type_literal)
+                || process
+                    .timeout_ms
+                    .as_deref()
+                    .is_some_and(contains_type_literal)
+                || process.input.as_deref().is_some_and(contains_type_literal)
+                || contains_type_literal(&process.body)
         }
+        Expr::Await(expr)
+        | Expr::ResultUnwrap(expr)
+        | Expr::Unary { expr, .. }
+        | Expr::Cancel(expr)
+        | Expr::Print(expr)
+        | Expr::Yield(expr)
+        | Expr::Wake(expr)
+        | Expr::Fail(expr) => contains_type_literal(expr),
         Expr::BuiltinCall { args, .. } => args.iter().any(contains_type_literal),
         Expr::Field { target, .. } => contains_type_literal(target),
         Expr::Index { target, index } => {
             contains_type_literal(target) || contains_type_literal(index)
         }
-        Expr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            contains_type_literal(condition)
-                || contains_type_literal(then_expr)
-                || contains_type_literal(else_expr)
-        }
-        Expr::Binary { left, right, .. } => {
-            contains_type_literal(left) || contains_type_literal(right)
-        }
-        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => false,
-    }
-}
-
-fn stmt_contains_type_literal(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Assign { target, expr } => {
-            assign_target_contains_type_literal(target) || contains_type_literal(expr)
-        }
-        Stmt::Expr(expr) | Stmt::Cancel(expr) | Stmt::Print(expr) => contains_type_literal(expr),
-        Stmt::Call(call) => call
-            .args
-            .iter()
-            .any(|(_, expr)| contains_type_literal(expr)),
-        Stmt::If {
+        Expr::If {
             condition,
             then_block,
             else_block,
         } => {
             contains_type_literal(condition)
-                || then_block.iter().any(stmt_contains_type_literal)
-                || else_block.iter().any(stmt_contains_type_literal)
+                || contains_type_literal(then_block)
+                || contains_type_literal(else_block)
         }
-        Stmt::For { iterable, body, .. } => {
-            contains_type_literal(iterable) || body.iter().any(stmt_contains_type_literal)
+        Expr::Binary { left, right, .. } => {
+            contains_type_literal(left) || contains_type_literal(right)
         }
-        Stmt::Break | Stmt::Continue => false,
-        Stmt::Parallel { branches } => match branches {
-            ParallelBranches::Positional(statements) => {
-                statements.iter().any(stmt_contains_type_literal)
+        Expr::For { iterable, body, .. } => {
+            contains_type_literal(iterable) || contains_type_literal(body)
+        }
+        Expr::Submit(expr) | Expr::Finish(expr) => {
+            expr.as_deref().is_some_and(contains_type_literal)
+        }
+        Expr::Break | Expr::Continue => false,
+        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => false,
+    }
+}
+
+fn collect_tool_names_in_call(call: &CallExpr, out: &mut std::collections::BTreeSet<String>) {
+    out.insert(call.name.to_string());
+    for (_, expr) in &call.args {
+        collect_tool_names_in_expr(expr, out);
+    }
+}
+
+fn collect_tool_names_in_expr(expr: &Expr, out: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        Expr::ToolCall { call, .. } => collect_tool_names_in_call(call, out),
+        Expr::StartProcess(process) => {
+            if let Some(name) = process.name.as_deref() {
+                collect_tool_names_in_expr(name, out);
             }
-            ParallelBranches::Named(branches) => branches
-                .iter()
-                .any(|branch| stmt_contains_type_literal(&branch.stmt)),
-        },
-        Stmt::Submit(expr) => expr.as_ref().is_some_and(contains_type_literal),
+            if let Some(timeout_ms) = process.timeout_ms.as_deref() {
+                collect_tool_names_in_expr(timeout_ms, out);
+            }
+            if let Some(input) = process.input.as_deref() {
+                collect_tool_names_in_expr(input, out);
+            }
+            collect_tool_names_in_expr(&process.body, out);
+        }
+        Expr::Block(expressions) => {
+            for expression in expressions {
+                collect_tool_names_in_expr(expression, out);
+            }
+        }
+        Expr::Assign { target, expr } => {
+            for step in &target.steps {
+                if let AssignPathStep::Index(index) = step {
+                    collect_tool_names_in_expr(index, out);
+                }
+            }
+            collect_tool_names_in_expr(expr, out);
+        }
+        Expr::List(items) => {
+            for item in items {
+                collect_tool_names_in_expr(item, out);
+            }
+        }
+        Expr::Record(entries) => {
+            for (_, value) in entries {
+                collect_tool_names_in_expr(value, out);
+            }
+        }
+        Expr::Await(expr)
+        | Expr::ResultUnwrap(expr)
+        | Expr::Unary { expr, .. }
+        | Expr::Cancel(expr)
+        | Expr::Print(expr)
+        | Expr::Yield(expr)
+        | Expr::Wake(expr)
+        | Expr::Fail(expr) => {
+            collect_tool_names_in_expr(expr, out);
+        }
+        Expr::BuiltinCall { args, .. } => {
+            for arg in args {
+                collect_tool_names_in_expr(arg, out);
+            }
+        }
+        Expr::Field { target, .. } => collect_tool_names_in_expr(target, out),
+        Expr::Index { target, index } => {
+            collect_tool_names_in_expr(target, out);
+            collect_tool_names_in_expr(index, out);
+        }
+        Expr::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_tool_names_in_expr(condition, out);
+            collect_tool_names_in_expr(then_block, out);
+            collect_tool_names_in_expr(else_block, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_tool_names_in_expr(left, out);
+            collect_tool_names_in_expr(right, out);
+        }
+        Expr::For { iterable, body, .. } => {
+            collect_tool_names_in_expr(iterable, out);
+            collect_tool_names_in_expr(body, out);
+        }
+        Expr::Submit(expr) | Expr::Finish(expr) => {
+            if let Some(expr) = expr {
+                collect_tool_names_in_expr(expr, out);
+            }
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::Break
+        | Expr::Continue
+        | Expr::TypeLiteral(_) => {}
     }
 }
 
@@ -1957,6 +1894,19 @@ fn wrap_type_schema_value(schema: Value) -> Value {
     let mut wrapper = record_with_capacity(1);
     wrapper.insert(LASH_TYPE_KEY.to_string(), schema);
     Value::Record(Arc::new(wrapper))
+}
+
+fn is_terminal_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Submit(_) | Expr::Finish(_) | Expr::Fail(_) => true,
+        Expr::Block(expressions) => expressions.last().is_some_and(is_terminal_expr),
+        Expr::If {
+            then_block,
+            else_block,
+            ..
+        } => is_terminal_expr(then_block) && is_terminal_expr(else_block),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy)]

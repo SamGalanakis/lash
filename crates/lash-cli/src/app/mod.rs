@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use lash_core::{
-    Message, MessageRole, PartKind, PluginMessage, ProcessRecord, ProcessState, PromptUsage,
-    TokenUsage, ToolCallRecord,
+    Message, MessageRole, PartKind, PluginMessage, ProcessHandleGrantEntry, ProcessRecord,
+    ProcessTerminalState, PromptUsage, TokenUsage, ToolCallRecord,
 };
 use lash_tui::{Line, Rect};
 use lash_tui_extensions::TuiExtensions;
@@ -97,33 +97,40 @@ impl PlanDockState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessView {
     pub process_id: String,
-    pub producer: String,
+    pub kind: String,
     pub label: String,
-    pub state: ProcessState,
-    pub created_at: std::time::SystemTime,
+    pub terminal: Option<ProcessTerminalState>,
+    pub first_seen: std::time::Instant,
     pub terminal_duration: Option<std::time::Duration>,
     pub transient_until: Option<std::time::Instant>,
 }
 
 impl ProcessView {
     fn from_status(
+        grant: lash_core::ProcessHandleGrant,
         status: ProcessRecord,
+        first_seen: std::time::Instant,
         terminal_duration: Option<std::time::Duration>,
         transient_until: Option<std::time::Instant>,
     ) -> Self {
+        let kind = grant
+            .descriptor
+            .kind
+            .unwrap_or_else(|| "process".to_string());
+        let label = grant.descriptor.label.unwrap_or_else(|| status.id.clone());
         Self {
             process_id: status.id.clone(),
-            producer: status.producer,
-            label: status.id,
-            state: status.state,
-            created_at: status.created_at,
+            kind,
+            label,
+            terminal: status.terminal.map(|terminal| terminal.state),
+            first_seen,
             terminal_duration,
             transient_until,
         }
     }
 
     pub fn is_visible(&self) -> bool {
-        !self.state.is_terminal()
+        self.terminal.is_none()
             || self
                 .transient_until
                 .is_some_and(|until| until > std::time::Instant::now())
@@ -733,7 +740,7 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn update_processes(&mut self, tasks: Vec<ProcessRecord>) {
+    pub fn update_processes(&mut self, tasks: Vec<ProcessHandleGrantEntry>) {
         let now = std::time::Instant::now();
         let previous: HashMap<String, ProcessView> = self
             .processes
@@ -742,24 +749,30 @@ impl App {
             .map(|task| (task.process_id.clone(), task))
             .collect();
         let mut next = Vec::new();
-        for task in tasks {
-            let old_state = previous.get(&task.id).map(|item| item.state);
-            let terminal_duration = if task.state.is_terminal() {
+        for (grant, task) in tasks {
+            let old_terminal = previous.get(&task.id).and_then(|item| item.terminal);
+            let terminal = task.terminal.as_ref().map(|terminal| terminal.state);
+            let first_seen = previous
+                .get(&task.id)
+                .map(|item| item.first_seen)
+                .unwrap_or(now);
+            let terminal_duration = if terminal.is_some() {
                 previous
                     .get(&task.id)
                     .and_then(|item| item.terminal_duration)
-                    .or_else(|| task.created_at.elapsed().ok())
+                    .or_else(|| Some(first_seen.elapsed()))
             } else {
                 None
             };
-            let transient_until =
-                if task.state.is_terminal() && old_state.is_some_and(|state| state != task.state) {
-                    Some(now + std::time::Duration::from_secs(10))
-                } else {
-                    previous.get(&task.id).and_then(|item| item.transient_until)
-                };
+            let transient_until = if terminal.is_some() && old_terminal != terminal {
+                Some(now + std::time::Duration::from_secs(10))
+            } else {
+                previous.get(&task.id).and_then(|item| item.transient_until)
+            };
             next.push(ProcessView::from_status(
+                grant,
                 task,
+                first_seen,
                 terminal_duration,
                 transient_until,
             ));

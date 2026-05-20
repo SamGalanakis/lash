@@ -170,12 +170,12 @@ impl MonitorPlugin {
 
     fn snapshot_from_state_and_processes(
         state: &MonitorPluginState,
-        processes: &[crate::ProcessRecord],
+        processes: &[crate::ProcessHandleGrantEntry],
     ) -> MonitorSnapshot {
         let by_id = processes
             .iter()
-            .filter(|record| record.tags.iter().any(|tag| tag == "monitor"))
-            .map(|record| (record.id.as_str(), record))
+            .filter(|(grant, _)| grant.descriptor.kind.as_deref() == Some("monitor"))
+            .map(|(_, record)| (record.id.as_str(), record))
             .collect::<BTreeMap<_, _>>();
         let mut monitors = state
             .snapshot
@@ -184,30 +184,12 @@ impl MonitorPlugin {
             .map(|entry| {
                 let mut status = entry.status.clone();
                 if let Some(record) = by_id.get(format!("monitor:{}", status.spec.id).as_str()) {
-                    status.state = match record.state {
-                        crate::ProcessState::Pending
-                        | crate::ProcessState::Scheduled
-                        | crate::ProcessState::Running
-                        | crate::ProcessState::Waiting
-                        | crate::ProcessState::CancelRequested => MonitorRunState::Running,
-                        crate::ProcessState::Completed => MonitorRunState::Exited,
-                        crate::ProcessState::Failed => MonitorRunState::Failed,
-                        crate::ProcessState::Cancelled => MonitorRunState::Stopped,
+                    status.state = match record.terminal.as_ref().map(|terminal| terminal.state) {
+                        None => MonitorRunState::Running,
+                        Some(crate::ProcessTerminalState::Completed) => MonitorRunState::Exited,
+                        Some(crate::ProcessTerminalState::Failed) => MonitorRunState::Failed,
+                        Some(crate::ProcessTerminalState::Cancelled) => MonitorRunState::Stopped,
                     };
-                    status.event_count = record
-                        .latest_event
-                        .as_ref()
-                        .map(|event| event.sequence as usize)
-                        .unwrap_or(status.event_count);
-                    if let Some(event) = record.latest_event.as_ref() {
-                        if event.event_type == "monitor.line" {
-                            status.last_event = event
-                                .payload
-                                .get("line")
-                                .and_then(serde_json::Value::as_str)
-                                .map(ToOwned::to_owned);
-                        }
-                    }
                     if let Some(terminal) = record.terminal.as_ref() {
                         match &terminal.await_output {
                             crate::ProcessAwaitOutput::Failure { message, .. } => {
@@ -365,28 +347,37 @@ impl MonitorPlugin {
         };
         let managed_spec = crate::ProcessRegistration::new(
             process_id.clone(),
-            "monitor",
-            crate::ProcessScope {
-                session_id: session_id.to_string(),
-            },
             crate::ProcessInput::Command {
                 command: spec.command.clone(),
                 cwd: spec.cwd.clone(),
                 env: spec.env.clone(),
                 timeout_ms: spec.timeout_ms,
                 persistent: spec.persistent,
+                line_event: Some(crate::ProcessCommandLineEventSpec {
+                    event_type: "monitor.line".to_string(),
+                    wake_input_template: if spec.wake_policy == crate::MonitorWakePolicy::Notify {
+                        None
+                    } else {
+                        Some(format!("Monitor event \"{}\": {{line}}", spec.id))
+                    },
+                }),
             },
         )
-        .with_extra_event_types([line_event])
-        .with_tags(["monitor"])
-        .with_metadata(serde_json::json!({
-            "monitor_id": spec.id,
-            "wake_policy": spec.wake_policy,
-        }))
-        .with_handle_visible(true)
-        .with_cancel_policy(crate::ProcessCancelPolicy::Cooperative)
-        .with_close_policy(crate::ProcessClosePolicy::Cancel);
-        match host.start_process(session_id, managed_spec).await {
+        .with_extra_event_types([line_event]);
+        let execution_context =
+            crate::ProcessExecutionContext::default().with_wake_session_id(session_id);
+        match host
+            .start_process(
+                session_id,
+                managed_spec,
+                Some(crate::ProcessHandleDescriptor::new(
+                    Some("monitor"),
+                    Some(spec.id.clone()),
+                )),
+                execution_context,
+            )
+            .await
+        {
             Ok(_) => {
                 let mut state = self.lock_state()?;
                 if let Some(entry) = state.snapshot.monitors.get_mut(&spec.id) {
@@ -452,7 +443,7 @@ impl MonitorPlugin {
         if let Err(err) = self.ensure_running(session_id, ctx.host.clone()).await {
             return ToolResult::err_fmt(err.to_string());
         }
-        let processes = match ctx.host.list_processes(session_id).await {
+        let processes = match ctx.host.list_process_handles(session_id).await {
             Ok(processes) => processes,
             Err(err) => return ToolResult::err_fmt(err.to_string()),
         };
@@ -710,13 +701,12 @@ mod tests {
             ..Default::default()
         };
         let state = seeded_monitor_state(&spec);
-        let mut record = crate::ProcessRecord::local_session(
-            "root",
+        let mut record = crate::ProcessRecord::from_registration(crate::ProcessRegistration::new(
             "monitor:slow",
-            "monitor",
-            crate::ProcessState::Failed,
-        );
-        record.tags = vec!["monitor".to_string()];
+            crate::ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+        ));
         record.terminal = Some(crate::ProcessTerminalSemantics {
             state: crate::ProcessTerminalState::Failed,
             await_output: crate::ProcessAwaitOutput::Failure {
@@ -727,9 +717,14 @@ mod tests {
                 control: None,
             },
         });
+        let grant = crate::ProcessHandleGrant {
+            session_id: "root".to_string(),
+            process_id: "monitor:slow".to_string(),
+            descriptor: crate::ProcessHandleDescriptor::new(Some("monitor"), Some("slow")),
+        };
 
         let guard = state.lock().expect("monitor state");
-        let snapshot = MonitorPlugin::snapshot_from_state_and_processes(&guard, &[record]);
+        let snapshot = MonitorPlugin::snapshot_from_state_and_processes(&guard, &[(grant, record)]);
 
         assert_eq!(snapshot.monitors[0].state, MonitorRunState::Failed);
         assert_eq!(

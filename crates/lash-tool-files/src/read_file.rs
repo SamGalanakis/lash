@@ -133,6 +133,7 @@ impl ToolProvider for ReadFile {
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:read_file",
                 "read_file",
                 "Read a file. Text returns lines prefixed as `LINE: text`, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `ls` for directories.",
                 object_schema(

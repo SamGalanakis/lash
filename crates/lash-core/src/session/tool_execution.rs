@@ -249,28 +249,23 @@ impl ModeExecutionContext<'_> {
     ) -> ToolDispatchOutcome {
         let started = std::time::Instant::now();
         let process_id = prepared.call_id.clone();
-        let mut registration = crate::ProcessRegistration::new(
+        let registration = crate::ProcessRegistration::new(
             process_id.clone(),
-            prepared.tool_name.clone(),
-            crate::ProcessScope {
-                session_id: self.dispatch.session_id.clone(),
-            },
             crate::ProcessInput::ToolCall {
                 call: prepared.clone(),
             },
-        )
-        .with_tags(["tool"]);
-        if let Some(metadata) = effect_metadata.as_ref() {
-            registration = registration.with_metadata(serde_json::json!({
-                "tool_effect_metadata": metadata,
-            }));
-        }
+        );
+        let execution_context = crate::ProcessExecutionContext::default()
+            .with_tool_effect_metadata(effect_metadata.clone())
+            .with_wake_session_id(self.dispatch.session_id.clone());
         let output = match self
             .dispatch
             .host
             .start_process_scoped(
                 &self.dispatch.session_id,
                 registration,
+                None,
+                execution_context,
                 effect_metadata.clone(),
                 Some(self.dispatch.effect_controller.as_controller()),
             )

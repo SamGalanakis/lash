@@ -4,63 +4,21 @@ mod parser;
 mod runtime;
 
 pub use ast::{
-    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, NamedParallelBranch, ParallelBranches,
-    Program, Stmt, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
+    ToolCallMode, TypeExpr, TypeField, UnaryOp,
 };
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    CompileStats, CompiledProgram, CompiledProgramCache, CompiledProgramCacheStats,
-    ExecutionOutcome, ExecutionScratch, ImageValue, LASH_TYPE_KEY, ListValue, ProfileReport,
-    ProfileStat, ProjectedBindingError, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
-    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, RuntimeError,
-    RuntimeFailure, Snapshot, State, ToolHost, ToolHostCall, ToolHostError, Value, compile_program,
-    compile_source, execute_compiled, execute_compiled_traced,
-    execute_compiled_traced_with_projected_bindings, execute_compiled_traced_with_scratch,
-    execute_compiled_traced_with_scratch_and_projected_bindings,
-    execute_compiled_with_projected_bindings, execute_compiled_with_scratch,
-    execute_compiled_with_scratch_and_projected_bindings, execute_program, from_json, prewarm,
-    profile_compiled, profile_compiled_with_projected_bindings, profile_compiled_with_scratch,
-    profile_compiled_with_scratch_and_projected_bindings, unwrap_type_value,
+    AbilityOp, AbilityResult, CompileStats, CompiledProgram, CompiledProgramCache,
+    CompiledProgramCacheStats, ExecutableProgram, ExecutionEnvironment, ExecutionHost,
+    ExecutionHostError, ExecutionMode, ExecutionOutcome, ExecutionScratch, ImageValue,
+    LASH_TYPE_KEY, ListValue, ProcessBlockEvent, ProcessBlockEventKind, ProcessBlockStart,
+    ProfileReport, ProfileStat, ProjectedBindingError, ProjectedBindings, ProjectedFuture,
+    ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record,
+    RuntimeError, RuntimeFailure, Snapshot, State, Value, compile, execute, from_json, prewarm,
+    unwrap_type_value,
 };
-
-pub async fn execute<H: ToolHost>(
-    source: &str,
-    state: &mut State,
-    host: &H,
-) -> Result<ExecutionOutcome, ExecuteError> {
-    let program = parse(source)?;
-    execute_program(&program, state, host)
-        .await
-        .map_err(ExecuteError::Runtime)
-}
-
-pub async fn execute_with_diagnostics<H: ToolHost>(
-    source: &str,
-    state: &mut State,
-    host: &H,
-) -> Result<ExecutionOutcome, ExecuteError> {
-    let compiled = compile_source(source)?;
-    execute_compiled_traced(&compiled, state, host)
-        .await
-        .map_err(|failure| {
-            ExecuteError::Runtime(RuntimeError::ValueError {
-                message: format_runtime_diagnostic(source, &failure.error, failure.span),
-            })
-        })
-}
-
-pub async fn execute_with_projected_bindings<H: ToolHost>(
-    source: &str,
-    state: &mut State,
-    host: &H,
-    projected: &ProjectedBindings,
-) -> Result<ExecutionOutcome, ExecuteError> {
-    let compiled = compile_source(source)?;
-    execute_compiled_with_projected_bindings(&compiled, state, host, projected)
-        .await
-        .map_err(ExecuteError::Runtime)
-}
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
     format_source_diagnostic(
@@ -169,51 +127,47 @@ fn line_column_snippet(source: &str, offset: usize) -> (usize, usize, String) {
     )
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
-pub enum ExecuteError {
-    #[error(transparent)]
-    Parse(#[from] ParseError),
-    #[error(transparent)]
-    Runtime(#[from] RuntimeError),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct Host;
 
-    impl ToolHost for Host {
-        async fn call(&self, _name: String, _args: Record) -> Result<Value, ToolHostError> {
-            Ok(Value::Null)
+    impl ExecutionHost for Host {
+        async fn perform(&self, _op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            Ok(AbilityResult::Value(Value::Null))
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn execute_wraps_parse_errors() {
-        let mut state = State::new();
-        let err = execute("if true", &mut state, &Host)
-            .await
-            .expect_err("parse should fail");
-        assert!(matches!(err, ExecuteError::Parse(_)));
+    async fn compile_reports_parse_errors() {
+        let err = compile("if true").expect_err("parse should fail");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn execute_wraps_runtime_errors() {
+    async fn execute_reports_runtime_errors() {
+        let compiled = compile("submit missing").expect("source should compile");
         let mut state = State::new();
-        let err = execute("submit missing", &mut state, &Host)
+        let err = execute(&compiled, &mut state, &Host)
             .await
             .expect_err("runtime should fail");
-        assert!(matches!(err, ExecuteError::Runtime(_)));
+        assert!(matches!(err, RuntimeError::UndefinedVariable { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn execute_with_diagnostics_includes_source_location() {
+    async fn traced_environment_records_source_location() {
+        let source = "x = 1\nsubmit missing";
+        let compiled = compile(source).expect("source should compile");
         let mut state = State::new();
-        let err = execute_with_diagnostics("x = 1\nsubmit missing", &mut state, &Host)
+        let env = ExecutionEnvironment::new(&Host).traced();
+        execute(&compiled, &mut state, &env)
             .await
             .expect_err("runtime should fail");
-        let message = diagnostic_message(err);
+        let failure = env
+            .take_runtime_failure()
+            .expect("traced host should receive runtime failure");
+        let message = format_runtime_diagnostic(source, &failure.error, failure.span);
         assert!(message.contains("unknown name `missing`"), "{message}");
         assert!(message.contains("--> line 2, column 1"), "{message}");
         assert!(message.contains("submit missing"), "{message}");
@@ -221,16 +175,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compile_source_prewarm_and_traced_scratch_execution_work_together() {
+    async fn compile_prewarm_and_environment_scratch_execution_work_together() {
         prewarm();
-        let compiled = compile_source("submit 7").expect("source should compile");
+        let compiled = compile("submit 7").expect("source should compile");
         let mut state = State::new();
-        let mut scratch = ExecutionScratch::new();
-        let outcome =
-            execute_compiled_traced_with_scratch(&compiled, &mut state, &Host, &mut scratch)
-                .await
-                .expect("execution should succeed");
+        let env = ExecutionEnvironment::new(&Host)
+            .traced()
+            .with_scratch(ExecutionScratch::new());
+        let outcome = execute(&compiled, &mut state, &env)
+            .await
+            .expect("execution should succeed");
         assert_eq!(outcome, ExecutionOutcome::Finished(Value::Number(7.0)));
+        assert!(env.take_recycled_scratch().is_some());
     }
 
     #[test]
@@ -275,11 +231,16 @@ mod tests {
         ];
 
         for (source, expected_error, expected_snippet) in cases {
+            let compiled = compile(source).expect("source should compile");
             let mut state = State::new();
-            let err = execute_with_diagnostics(source, &mut state, &Host)
+            let env = ExecutionEnvironment::new(&Host).traced();
+            execute(&compiled, &mut state, &env)
                 .await
                 .expect_err("runtime should fail");
-            let message = diagnostic_message(err);
+            let failure = env
+                .take_runtime_failure()
+                .expect("traced host should receive runtime failure");
+            let message = format_runtime_diagnostic(source, &failure.error, failure.span);
             assert!(message.contains(expected_error), "{message}");
             assert!(message.contains("--> line 2, column 1"), "{message}");
             assert!(message.contains(expected_snippet), "{message}");
@@ -288,8 +249,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_success_path_uses_host() {
+        let compiled = compile("v = call anything {} submit v").expect("source should compile");
         let mut state = State::new();
-        let outcome = execute("v = call anything {} submit v", &mut state, &Host)
+        let outcome = execute(&compiled, &mut state, &Host)
             .await
             .expect("should succeed");
         let ExecutionOutcome::Finished(value) = outcome else {
@@ -303,20 +265,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_allows_bare_finish() {
+        let compiled = compile("submit").expect("source should compile");
         let mut state = State::new();
-        let outcome = execute("submit", &mut state, &Host)
+        let outcome = execute(&compiled, &mut state, &Host)
             .await
             .expect("should succeed");
         let ExecutionOutcome::Finished(value) = outcome else {
             panic!("expected finish");
         };
         assert_eq!(value, Value::Null);
-    }
-
-    fn diagnostic_message(err: ExecuteError) -> String {
-        let ExecuteError::Runtime(RuntimeError::ValueError { message }) = err else {
-            panic!("expected diagnostic runtime error");
-        };
-        message
     }
 }

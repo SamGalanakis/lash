@@ -20,11 +20,11 @@ Every completed turn lands as one lease-fenced `RuntimeCommit` against a `Sessio
 
 ### Two execution modes, one commit unit
 
-`standard` uses the provider's native tool-calling protocol — the model emits multiple independent tool calls in a single response, the runtime dispatches them in parallel. `rlm` runs `lashlang` programs in a sandboxed VM with no filesystem, process, or network surface; every effect crosses `ToolHost`. Use RLM when the model should compose multiple tool calls per turn instead of one.
+`standard` uses the provider's native tool-calling protocol — the model emits multiple independent tool calls in a single response, and the runtime dispatches them concurrently. `rlm` runs `lashlang` programs in a sandboxed VM with no filesystem, process, or network surface; every effect crosses the Lashlang `ExecutionHost`. Use RLM when the model should compose multiple tool calls per turn instead of one.
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. `parallel { }` blocks for concurrent tool batches, projected read-only bindings from stable host projection refs, no syscalls, fully checkpointable.
+A small typed DSL the model can emit and the runtime can execute deterministically. Explicit `start call` + `await` fanout for concurrent tool batches, projected read-only bindings from stable host projection refs, no syscalls, fully checkpointable.
 
 ### Plugin architecture
 

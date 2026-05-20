@@ -149,6 +149,7 @@ impl ToolProvider for TestTools {
 
 fn typed_probe_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:typed_probe",
         "typed_probe",
         "Probe typed turn input.",
         json!({

@@ -290,8 +290,8 @@ impl SessionControl {
         Ok(state)
     }
 
-    async fn list_processes(&self) -> Result<Vec<ProcessRecord>> {
-        Ok(self.runtime.observe().list_processes().await)
+    async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        Ok(self.runtime.observe().list_process_handles().await)
     }
 
     async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {
@@ -630,8 +630,8 @@ impl Processes {
         Self { control }
     }
 
-    pub async fn list(&self) -> Result<Vec<ProcessRecord>> {
-        self.control.list_processes().await
+    pub async fn list(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_process_handles().await
     }
 
     pub async fn await_all(&self) -> Result<()> {
@@ -707,8 +707,8 @@ impl StateControl {
         self.control.persist_current_state().await
     }
 
-    pub async fn list_processes(&self) -> Result<Vec<ProcessRecord>> {
-        self.control.list_processes().await
+    pub async fn list_process_handles(&self) -> Result<Vec<ProcessHandleGrantEntry>> {
+        self.control.list_process_handles().await
     }
 
     pub async fn session_manager(&self) -> Result<Arc<dyn RuntimeSessionHost>> {

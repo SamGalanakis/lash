@@ -131,6 +131,7 @@ fn test_tool(
     execution_mode: lash_core::ToolExecutionMode,
 ) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         description,
         ToolDefinition::default_input_schema(),

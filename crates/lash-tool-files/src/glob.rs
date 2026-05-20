@@ -124,6 +124,7 @@ impl ToolProvider for Glob {
 
 fn glob_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:glob",
                 "glob",
                 [
                     "Find filesystem entries by glob. ",

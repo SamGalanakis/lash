@@ -4,32 +4,21 @@ use super::execution_context::ModeExecutionContext;
 use super::tool_execution::ModeToolReply;
 
 impl ModeExecutionContext<'_> {
-    pub(super) async fn live_processes(&self) -> Vec<crate::ProcessRecord> {
+    pub(super) async fn live_processes(&self) -> Vec<crate::ProcessHandleGrantEntry> {
         self.dispatch
             .host
-            .list_processes(&self.session_id)
+            .list_process_handles(&self.session_id)
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|process| !process.state.is_terminal() && process.handle_visible)
+            .filter(|(_, process)| !process.is_terminal())
             .collect()
     }
 
     pub(super) fn process_status_value(status: &crate::ProcessRecord) -> serde_json::Value {
         json!({
             "process_id": status.id,
-            "producer": status.producer,
-            "tags": status.tags,
-            "state": match status.state {
-                crate::ProcessState::Pending => "pending",
-                crate::ProcessState::Scheduled => "scheduled",
-                crate::ProcessState::Running => "running",
-                crate::ProcessState::Waiting => "idle",
-                crate::ProcessState::Completed => "completed",
-                crate::ProcessState::Failed => "failed",
-                crate::ProcessState::CancelRequested => "cancel_requested",
-                crate::ProcessState::Cancelled => "cancelled",
-            },
+            "terminal": terminal_status_label(status.terminal.as_ref()),
         })
     }
 
@@ -73,30 +62,29 @@ impl ModeExecutionContext<'_> {
 
     pub(super) fn list_process_handles(
         &self,
-        live_processes: Vec<crate::ProcessRecord>,
+        live_processes: Vec<crate::ProcessHandleGrantEntry>,
     ) -> ModeToolReply {
         let mut monitor = serde_json::Map::new();
         let mut tool = serde_json::Map::new();
         let mut subagent = serde_json::Map::new();
         let mut process = serde_json::Map::new();
 
-        for record in live_processes {
-            let handle_tool = if record.tags.iter().any(|tag| tag == "monitor") {
-                "monitor"
-            } else if record.tags.iter().any(|tag| tag == "subagent") {
-                "spawn_agent"
-            } else {
-                record.producer.as_str()
-            };
-            let value = Self::process_handle_value(&record.id, handle_tool);
-            if record.tags.iter().any(|tag| tag == "monitor") {
-                monitor.insert(Self::monitor_handle_identifier(&record.id), value);
-            } else if record.tags.iter().any(|tag| tag == "tool") {
-                tool.insert(record.id, value);
-            } else if record.tags.iter().any(|tag| tag == "subagent") {
-                subagent.insert(record.id, value);
-            } else {
-                process.insert(record.id, value);
+        for (grant, record) in live_processes {
+            let kind = grant.descriptor.kind.as_deref().unwrap_or("process");
+            let value = Self::process_handle_value(&record.id, kind);
+            match kind {
+                "monitor" => {
+                    monitor.insert(Self::monitor_handle_identifier(&record.id), value);
+                }
+                "tool" => {
+                    tool.insert(record.id, value);
+                }
+                "subagent" => {
+                    subagent.insert(record.id, value);
+                }
+                _ => {
+                    process.insert(record.id, value);
+                }
             }
         }
 
@@ -106,5 +94,14 @@ impl ModeExecutionContext<'_> {
             "subagent": subagent,
             "process": process,
         }))
+    }
+}
+
+fn terminal_status_label(terminal: Option<&crate::ProcessTerminalSemantics>) -> &'static str {
+    match terminal.map(|terminal| terminal.state) {
+        None => "running",
+        Some(crate::ProcessTerminalState::Completed) => "completed",
+        Some(crate::ProcessTerminalState::Failed) => "failed",
+        Some(crate::ProcessTerminalState::Cancelled) => "cancelled",
     }
 }

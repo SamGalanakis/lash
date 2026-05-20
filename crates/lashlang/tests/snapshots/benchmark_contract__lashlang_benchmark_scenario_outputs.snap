@@ -1,6 +1,5 @@
 ---
 source: crates/lashlang/tests/benchmark_contract.rs
-assertion_line: 29
 expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs should serialize\")"
 ---
 {
@@ -22,7 +21,20 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "task": "continue from compact state"
   },
   "direct_unwrap": "alpha,alpha:beta",
-  "general_parallel": "alpha:3|beta:3",
+  "fanout_expression_surface": {
+    "batched_computed": 42,
+    "computed": 42,
+    "discarded": [
+      "branch_a",
+      42,
+      3
+    ],
+    "first": "left",
+    "left": "left",
+    "right": "right",
+    "second": "right"
+  },
+  "general_fanout": "alpha:3|beta:3",
   "image_surface": {
     "descriptor_has_id": true,
     "descriptor_has_type": true,
@@ -234,19 +246,6 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
     "kept": 43,
     "outer": "restored",
     "skipped": 32
-  },
-  "parallel_statement_surface": {
-    "batched_computed": 42,
-    "computed": 42,
-    "discarded": [
-      "branch_a",
-      42,
-      3
-    ],
-    "first": "left",
-    "left": "left",
-    "right": "right",
-    "second": "right"
   },
   "projected_operations": {
     "as_float": 4,

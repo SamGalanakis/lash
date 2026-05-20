@@ -815,9 +815,9 @@ fn rlm_checkpoint_redrives_pending_exec_code_with_driver_state() {
 }
 
 #[test]
-fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes() {
+fn rlm_checkpoint_after_exec_fanout_tool_outputs_preserves_structured_outcomes() {
     let config = test_config(ExecutionMode::new("rlm"));
-    let msgs = vec![user_message("run parallel tools")];
+    let msgs = vec![user_message("run fanout tools")];
     let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
 
     let effects = drain_effects(&mut machine);
@@ -826,9 +826,9 @@ fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes
         id: llm_id,
         text_streamed: false,
         result: Ok(LlmResponse {
-            full_text: "```lashlang\nresults = parallel { a: call ok {}, b: call fail {}, c: call stop {} }\n```".to_string(),
+            full_text: "```lashlang\nresults = await { a: start call ok {}, b: start call fail {}, c: start call stop {} }\n```".to_string(),
             parts: vec![LlmOutputPart::Text {
-                text: "```lashlang\nresults = parallel { a: call ok {}, b: call fail {}, c: call stop {} }\n```".to_string(),
+                text: "```lashlang\nresults = await { a: start call ok {}, b: start call fail {}, c: start call stop {} }\n```".to_string(),
                 response_meta: None,
             }],
             ..LlmResponse::default()
@@ -847,18 +847,18 @@ fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes
         id: exec_id,
         result: Ok(lash_sansio::ExecResponse {
             output: String::new(),
-            observations: vec!["parallel done".to_string()],
+            observations: vec!["fanout done".to_string()],
             observation_truncation: Vec::new(),
             tool_calls: vec![
                 lash_core::ToolCallRecord {
-                    call_id: Some("parallel-ok".to_string()),
+                    call_id: Some("fanout-ok".to_string()),
                     tool: "ok".to_string(),
                     args: serde_json::json!({}),
                     output: lash_core::ToolCallOutput::success(serde_json::json!("ok")),
                     duration_ms: 1,
                 },
                 lash_core::ToolCallRecord {
-                    call_id: Some("parallel-fail".to_string()),
+                    call_id: Some("fanout-fail".to_string()),
                     tool: "fail".to_string(),
                     args: serde_json::json!({}),
                     output: lash_core::ToolCallOutput::failure(lash_core::ToolFailure::tool(
@@ -869,7 +869,7 @@ fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes
                     duration_ms: 2,
                 },
                 lash_core::ToolCallRecord {
-                    call_id: Some("parallel-cancel".to_string()),
+                    call_id: Some("fanout-cancel".to_string()),
                     tool: "stop".to_string(),
                     args: serde_json::json!({}),
                     output: lash_core::ToolCallOutput::cancelled(
@@ -900,12 +900,12 @@ fn rlm_checkpoint_after_exec_parallel_tool_outputs_preserves_structured_outcomes
     assert_eq!(
         entry.tool_call_ids,
         vec![
-            "parallel-ok".to_string(),
-            "parallel-fail".to_string(),
-            "parallel-cancel".to_string()
+            "fanout-ok".to_string(),
+            "fanout-fail".to_string(),
+            "fanout-cancel".to_string()
         ]
     );
-    assert_eq!(entry.output, vec!["parallel done".to_string()]);
+    assert_eq!(entry.output, vec!["fanout done".to_string()]);
     let (_, checkpoint) = find_checkpoint(&effects).expect("after-work checkpoint");
     assert_eq!(checkpoint, CheckpointKind::AfterWork);
 }

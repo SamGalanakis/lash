@@ -4,7 +4,7 @@ mod bench_support;
 use std::collections::BTreeMap;
 
 use bench_support::{BenchHost, Scenario, benchmark_program, projected_bindings, seeded_state_for};
-use lashlang::{ExecutionOutcome, Value, compile_source, execute_compiled_with_projected_bindings};
+use lashlang::{ExecutionEnvironment, ExecutionOutcome, Value, compile, execute};
 
 #[tokio::test(flavor = "current_thread")]
 async fn benchmark_scenarios_have_golden_outputs() {
@@ -12,14 +12,14 @@ async fn benchmark_scenarios_have_golden_outputs() {
     let mut outputs = BTreeMap::new();
 
     for scenario in Scenario::ALL {
-        let compiled = compile_source(benchmark_program(*scenario))
+        let compiled = compile(benchmark_program(*scenario))
             .unwrap_or_else(|err| panic!("{scenario} benchmark should compile: {err}"));
         let mut state = seeded_state_for(*scenario);
         let projected = projected_bindings(*scenario);
-        let outcome =
-            execute_compiled_with_projected_bindings(&compiled, &mut state, &host, &projected)
-                .await
-                .unwrap_or_else(|err| panic!("{scenario} benchmark should execute: {err}"));
+        let env = ExecutionEnvironment::new(&host).with_projected_bindings(projected);
+        let outcome = execute(&compiled, &mut state, &env)
+            .await
+            .unwrap_or_else(|err| panic!("{scenario} benchmark should execute: {err}"));
         let ExecutionOutcome::Finished(value) = outcome else {
             panic!("{scenario} benchmark must finish");
         };

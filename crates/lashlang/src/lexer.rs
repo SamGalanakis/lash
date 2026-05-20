@@ -49,7 +49,6 @@ pub enum TokenKind {
     Else,
     For,
     In,
-    Parallel,
     Await,
     Cancel,
     Submit,
@@ -322,7 +321,6 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Else,
             "for" => TokenKind::For,
             "in" => TokenKind::In,
-            "parallel" => TokenKind::Parallel,
             "await" => TokenKind::Await,
             "cancel" => TokenKind::Cancel,
             "submit" => TokenKind::Submit,
@@ -433,7 +431,7 @@ mod tests {
         let tokens = lex(r#"
             # comment
             // comment
-            if else for in parallel submit print call and or not true false null start
+            if else for in await cancel submit print call and or not true false null start
             name _x a1 "hi\n\t\"\\\r\q" 12 3.5 { } ( ) [ ] , : ? . ! = == != && || | < <= > >= + - * / %
             "#)
         .expect("lexing should succeed");
@@ -446,7 +444,8 @@ mod tests {
                 TokenKind::Else,
                 TokenKind::For,
                 TokenKind::In,
-                TokenKind::Parallel,
+                TokenKind::Await,
+                TokenKind::Cancel,
                 TokenKind::Submit,
                 TokenKind::Print,
                 TokenKind::Call,

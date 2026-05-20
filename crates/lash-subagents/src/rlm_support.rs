@@ -247,6 +247,7 @@ pub(crate) fn tool_definition(
     execution_mode: ToolExecutionMode,
 ) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         description,
         input_schema,
@@ -294,6 +295,7 @@ pub(crate) const MAX_SUBAGENT_DEPTH: u8 = 5;
 
 pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:submit_error",
         "submit_error",
         "End the current subagent task as a terminal failure with a concise reason. Use `call submit_error { reason: \"...\" }` when the child cannot produce a valid result.",
         json!({

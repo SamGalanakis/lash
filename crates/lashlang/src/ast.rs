@@ -1,42 +1,37 @@
-use crate::lexer::Span;
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
+use crate::lexer::Span;
+
 pub type AstString = CompactString;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Program {
-    pub statements: Vec<Stmt>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub statement_spans: Vec<Span>,
+    pub expr: Expr,
+    #[serde(default, skip)]
+    pub expression_spans: Vec<Span>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Stmt {
-    Assign {
-        target: AssignTarget,
-        expr: Expr,
-    },
-    Expr(Expr),
-    Call(CallExpr),
-    Cancel(Expr),
-    Print(Expr),
-    If {
-        condition: Expr,
-        then_block: Vec<Stmt>,
-        else_block: Vec<Stmt>,
-    },
-    For {
-        binding: AstString,
-        iterable: Expr,
-        body: Vec<Stmt>,
-    },
-    Break,
-    Continue,
-    Parallel {
-        branches: ParallelBranches,
-    },
-    Submit(Option<Expr>),
+impl Program {
+    pub fn block(expressions: Vec<Expr>) -> Self {
+        Self {
+            expr: Expr::Block(expressions),
+            expression_spans: Vec::new(),
+        }
+    }
+
+    pub(crate) fn block_with_spans(expressions: Vec<Expr>, expression_spans: Vec<Span>) -> Self {
+        Self {
+            expr: Expr::Block(expressions),
+            expression_spans,
+        }
+    }
+}
+
+impl PartialEq for Program {
+    fn eq(&self, other: &Self) -> bool {
+        self.expr == other.expr
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,19 +61,8 @@ pub enum AssignPathStep {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ParallelBranches {
-    Positional(Vec<Stmt>),
-    Named(Vec<NamedParallelBranch>),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NamedParallelBranch {
-    pub name: AstString,
-    pub stmt: Stmt,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
+    Block(Vec<Expr>),
     Null,
     Bool(bool),
     Number(f64),
@@ -86,13 +70,36 @@ pub enum Expr {
     Variable(AstString),
     List(Vec<Expr>),
     Record(Vec<(AstString, Expr)>),
-    ToolCall(CallExpr),
-    StartToolCall(CallExpr),
-    Parallel {
-        branches: ParallelBranches,
+    Assign {
+        target: AssignTarget,
+        expr: Box<Expr>,
     },
+    If {
+        condition: Box<Expr>,
+        then_block: Box<Expr>,
+        else_block: Box<Expr>,
+    },
+    For {
+        binding: AstString,
+        iterable: Box<Expr>,
+        body: Box<Expr>,
+    },
+    Break,
+    Continue,
+    ToolCall {
+        mode: ToolCallMode,
+        call: CallExpr,
+    },
+    StartProcess(ProcessStartExpr),
     Await(Box<Expr>),
     ResultUnwrap(Box<Expr>),
+    Cancel(Box<Expr>),
+    Print(Box<Expr>),
+    Submit(Option<Box<Expr>>),
+    Yield(Box<Expr>),
+    Wake(Box<Expr>),
+    Finish(Option<Box<Expr>>),
+    Fail(Box<Expr>),
     BuiltinCall {
         name: AstString,
         args: Vec<Expr>,
@@ -109,17 +116,18 @@ pub enum Expr {
         op: UnaryOp,
         expr: Box<Expr>,
     },
-    Conditional {
-        condition: Box<Expr>,
-        then_expr: Box<Expr>,
-        else_expr: Box<Expr>,
-    },
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
         right: Box<Expr>,
     },
     TypeLiteral(Box<TypeExpr>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolCallMode {
+    Call,
+    Start,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -154,6 +162,17 @@ pub struct TypeField {
 pub struct CallExpr {
     pub name: AstString,
     pub args: Vec<(AstString, Expr)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessStartExpr {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Box<Expr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<Box<Expr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Box<Expr>>,
+    pub body: Box<Expr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

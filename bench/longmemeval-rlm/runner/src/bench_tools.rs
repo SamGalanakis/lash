@@ -199,6 +199,7 @@ impl LongMemEvalSessionTools {
 
 fn bench_tool(name: &str, description: &str, input_schema: serde_json::Value) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         description,
         input_schema,

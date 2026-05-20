@@ -292,6 +292,7 @@ impl ToolProvider for Grep {
 
 fn grep_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:grep",
                 "grep",
                 "Search file contents. Search for bare identifiers (e.g. 'InProgressQuote', 'ActorAuth'), NOT code syntax or regex. By default searches the current workspace. Pass `path` to point the search at a specific file or directory anywhere on the filesystem (including outside the workspace). If `query` accidentally starts with an obvious filesystem path followed by search text, grep treats that prefix as `path`. Within a search root, use inline constraints in the query as a leading token: `*.rs term` (extension), `src/ term` (path segment), `**/foo/* term` (glob), `!*.test.ts term` (negate). Constraints AND together; one search term per query.",
                 object_schema(

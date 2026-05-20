@@ -266,6 +266,7 @@ fn list_process_handles_tool_definition() -> ToolDefinition {
 
 fn clbench_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:list_process_handles",
         "list_process_handles",
         "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted. In CLBench, use this to rediscover live `start call` handles after a handoff or long-running fan-out.",
         ToolDefinition::default_input_schema(),

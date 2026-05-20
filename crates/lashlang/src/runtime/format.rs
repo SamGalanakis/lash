@@ -381,20 +381,6 @@ pub(crate) async fn execute_compiled_format(
     Ok(output)
 }
 
-pub(crate) fn execute_compiled_format_blocking(
-    template: &CompiledFormatTemplate,
-    args: &[Value],
-) -> Result<String, RuntimeError> {
-    if args
-        .iter()
-        .any(|value| matches!(value, Value::Projected(_)))
-    {
-        futures_executor::block_on(execute_compiled_format(template, args))
-    } else {
-        execute_compiled_format_direct(template, args)
-    }
-}
-
 pub(crate) fn execute_compiled_format_direct(
     template: &CompiledFormatTemplate,
     args: &[Value],

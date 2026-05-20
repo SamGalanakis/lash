@@ -337,9 +337,15 @@ fn import_tools(
             prefixed.clone(),
             ImportedTool {
                 original_name,
-                definition: ToolDefinition::raw(prefixed, description, input_schema, output_schema)
-                    .with_discovery(discovery)
-                    .with_execution_mode(ToolExecutionMode::Parallel),
+                definition: ToolDefinition::raw(
+                    format!("mcp:{server_name}/{prefixed}"),
+                    prefixed,
+                    description,
+                    input_schema,
+                    output_schema,
+                )
+                .with_discovery(discovery)
+                .with_execution_mode(ToolExecutionMode::Parallel),
             },
         );
     }

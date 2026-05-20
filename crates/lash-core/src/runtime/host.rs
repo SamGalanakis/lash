@@ -3,10 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use futures_util::stream::{self, BoxStream, StreamExt};
 use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
 
 use crate::plugin::PluginError;
 
@@ -16,32 +15,23 @@ use super::{
 
 pub type ProcessId = String;
 
-/// Lifecycle state projected from process events.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessState {
-    Pending,
-    Scheduled,
-    Running,
-    Waiting,
-    Completed,
-    Failed,
-    CancelRequested,
-    Cancelled,
-}
-
-impl ProcessState {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
 /// Durable executable input for a process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProcessInput {
     ToolCall {
         call: crate::PreparedToolCall,
+    },
+    LashlangBlock {
+        program: serde_json::Value,
+        #[serde(default)]
+        input: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        tool_bindings: Vec<LashlangProcessToolBinding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     SessionTurn {
         create_request: Box<crate::SessionCreateRequest>,
@@ -56,11 +46,56 @@ pub enum ProcessInput {
         env: BTreeMap<String, String>,
         timeout_ms: u64,
         persistent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line_event: Option<ProcessCommandLineEventSpec>,
     },
     External {
         #[serde(default)]
         metadata: serde_json::Value,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LashlangProcessToolBinding {
+    pub name: String,
+    pub tool_id: crate::ToolId,
+}
+
+/// Optional line-event projection for command-backed processes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessCommandLineEventSpec {
+    pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_input_template: Option<String>,
+}
+
+/// Execution-local context for a process start effect. This is not part of the
+/// durable process row.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProcessExecutionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_session_id: Option<String>,
+}
+
+impl ProcessExecutionContext {
+    pub fn with_tool_effect_metadata(
+        mut self,
+        metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> Self {
+        self.tool_effect_metadata = metadata;
+        self
+    }
+
+    pub fn with_wake_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.wake_session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tool_effect_metadata.is_none() && self.wake_session_id.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,18 +108,9 @@ pub struct ProcessEventType {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessEventSemanticsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<ProcessStateSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<ProcessTerminalSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake: Option<ProcessWakeSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<ProcessTransferSpec>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProcessStateSpec {
-    pub state: ProcessState,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,11 +139,6 @@ pub enum ProcessWakeDedupeKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProcessTransferSpec {
-    pub session_id: ProcessValueSelector,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessValueSelector {
     Payload,
@@ -134,13 +155,9 @@ pub enum ProcessValueSelector {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessEventSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<ProcessState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<ProcessTerminalSemantics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake: Option<ProcessWake>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<ProcessTransfer>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,16 +166,6 @@ pub enum ProcessTerminalState {
     Completed,
     Failed,
     Cancelled,
-}
-
-impl ProcessTerminalState {
-    pub fn process_state(self) -> ProcessState {
-        match self {
-            Self::Completed => ProcessState::Completed,
-            Self::Failed => ProcessState::Failed,
-            Self::Cancelled => ProcessState::Cancelled,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -265,73 +272,22 @@ pub struct ProcessWake {
     pub dedupe_key: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessTransfer {
-    pub session_id: String,
-}
-
 /// Serializable process spec used to start or recover a runtime process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcessRegistration {
     pub id: ProcessId,
-    pub producer: String,
-    pub scope: ProcessScope,
-    pub child_session_id: Option<String>,
-    pub parent_process_id: Option<ProcessId>,
     pub input: ProcessInput,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    #[serde(default)]
-    pub handle_visible: bool,
-    pub attempt: ProcessAttempt,
-    pub cancel_policy: ProcessCancelPolicy,
-    pub close_policy: ProcessClosePolicy,
 }
 
 impl ProcessRegistration {
-    pub fn new(
-        id: impl Into<ProcessId>,
-        producer: impl Into<String>,
-        scope: ProcessScope,
-        input: ProcessInput,
-    ) -> Self {
+    pub fn new(id: impl Into<ProcessId>, input: ProcessInput) -> Self {
         Self {
             id: id.into(),
-            producer: producer.into(),
-            scope,
-            child_session_id: None,
-            parent_process_id: None,
             input,
             event_types: default_process_event_types(),
-            tags: Vec::new(),
-            metadata: serde_json::Value::Null,
-            handle_visible: false,
-            attempt: ProcessAttempt::default(),
-            cancel_policy: ProcessCancelPolicy::Cooperative,
-            close_policy: ProcessClosePolicy::Keep,
         }
-    }
-
-    pub fn with_child_session_id(mut self, child_session_id: impl Into<String>) -> Self {
-        self.child_session_id = Some(child_session_id.into());
-        self
-    }
-
-    pub fn with_parent_process_id(mut self, parent_process_id: impl Into<ProcessId>) -> Self {
-        self.parent_process_id = Some(parent_process_id.into());
-        self
-    }
-
-    pub fn with_optional_parent_process_id(
-        mut self,
-        parent_process_id: Option<impl Into<ProcessId>>,
-    ) -> Self {
-        self.parent_process_id = parent_process_id.map(Into::into);
-        self
     }
 
     pub fn with_event_types(
@@ -349,150 +305,57 @@ impl ProcessRegistration {
         self.event_types.extend(event_types);
         self
     }
-
-    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.tags = tags.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
-        self.metadata = metadata;
-        self
-    }
-
-    pub fn with_handle_visible(mut self, visible: bool) -> Self {
-        self.handle_visible = visible;
-        self
-    }
-
-    pub fn with_attempt(mut self, attempt: ProcessAttempt) -> Self {
-        self.attempt = attempt;
-        self
-    }
-
-    pub fn with_cancel_policy(mut self, cancel_policy: ProcessCancelPolicy) -> Self {
-        self.cancel_policy = cancel_policy;
-        self
-    }
-
-    pub fn with_close_policy(mut self, close_policy: ProcessClosePolicy) -> Self {
-        self.close_policy = close_policy;
-        self
-    }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ProcessScope {
-    pub session_id: String,
+pub fn lashlang_process_event_types() -> Vec<ProcessEventType> {
+    vec![
+        ProcessEventType {
+            name: "process.yield".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec::default(),
+        },
+        ProcessEventType {
+            name: "process.wake".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec {
+                wake: Some(ProcessWakeSpec {
+                    when: None,
+                    input: ProcessValueSelector::Pointer("/text".to_string()),
+                    dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+                }),
+                ..ProcessEventSemanticsSpec::default()
+            },
+        },
+    ]
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessCancelPolicy {
-    #[default]
-    Cooperative,
-    External,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessClosePolicy {
-    #[default]
-    Keep,
-    Cancel,
-    Transfer,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ProcessAttempt {
-    pub attempt: u32,
-    pub max_attempts: Option<u32>,
-    pub idempotency_key: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ProcessOutcome {
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub await_output: Option<ProcessAwaitOutput>,
-}
-
-/// Event-sourced process record projected from registration plus events.
+/// Durable process row. Session-visible addressability lives in
+/// [`ProcessHandleGrant`], not in the process record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcessRecord {
     pub id: ProcessId,
-    pub producer: String,
-    pub scope: ProcessScope,
-    pub parent_process_id: Option<ProcessId>,
-    pub child_session_id: Option<String>,
     pub input: ProcessInput,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
-    #[serde(default)]
-    pub handle_visible: bool,
-    pub state: ProcessState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal: Option<ProcessTerminalSemantics>,
-    pub cancel_policy: ProcessCancelPolicy,
-    pub close_policy: ProcessClosePolicy,
-    pub attempt: ProcessAttempt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<String>,
-    pub result: Option<ProcessOutcome>,
-    pub failure: Option<ProcessOutcome>,
-    #[serde(default)]
-    pub event_count: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_event: Option<ProcessEvent>,
-    pub created_at: SystemTime,
-    pub updated_at: SystemTime,
-    pub completed_at: Option<SystemTime>,
+    pub terminal: Option<ProcessTerminalSemantics>,
 }
 
 impl ProcessRecord {
-    pub fn local_session(
-        session_id: impl Into<String>,
-        id: impl Into<ProcessId>,
-        producer: impl Into<String>,
-        state: ProcessState,
-    ) -> Self {
-        let now = SystemTime::now();
+    pub fn from_registration(registration: ProcessRegistration) -> Self {
         Self {
-            id: id.into(),
-            producer: producer.into(),
-            scope: ProcessScope {
-                session_id: session_id.into(),
-            },
-            parent_process_id: None,
-            child_session_id: None,
-            input: ProcessInput::External {
-                metadata: serde_json::Value::Null,
-            },
-            event_types: default_process_event_types(),
-            tags: Vec::new(),
-            metadata: serde_json::Value::Null,
-            handle_visible: false,
-            state,
-            terminal: None,
-            cancel_policy: ProcessCancelPolicy::Cooperative,
-            close_policy: ProcessClosePolicy::Keep,
-            attempt: ProcessAttempt::default(),
+            id: registration.id,
+            input: registration.input,
+            event_types: registration.event_types,
             external_ref: None,
-            progress: None,
-            result: None,
-            failure: None,
-            event_count: 0,
-            latest_event: None,
-            created_at: now,
-            updated_at: now,
-            completed_at: state.is_terminal().then_some(now),
+            terminal: None,
         }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.terminal.is_some()
     }
 }
 
@@ -505,17 +368,6 @@ pub struct ProcessExternalRef {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Serializable receipt returned by a durable process scheduler.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ProcessStartReceipt {
-    pub process_id: ProcessId,
-    pub state: ProcessState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_ref: Option<ProcessExternalRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcessEvent {
     pub process_id: ProcessId,
@@ -526,22 +378,77 @@ pub struct ProcessEvent {
     pub occurred_at: SystemTime,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ProcessFilter {
-    pub session_id: Option<String>,
-    pub producer: Option<String>,
-    pub tags: Vec<String>,
-    pub handle_visible: Option<bool>,
-    pub include_terminal: bool,
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessHandleDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl ProcessHandleDescriptor {
+    pub fn new(kind: Option<impl Into<String>>, label: Option<impl Into<String>>) -> Self {
+        Self {
+            kind: kind.map(Into::into),
+            label: label.map(Into::into),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessHandleGrant {
+    pub session_id: String,
+    pub process_id: ProcessId,
+    pub descriptor: ProcessHandleDescriptor,
+}
+
+pub type ProcessHandleGrantEntry = (ProcessHandleGrant, ProcessRecord);
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessStartGrant {
+    pub session_id: String,
+    pub descriptor: ProcessHandleDescriptor,
 }
 
 /// Durability-neutral process registry.
 #[async_trait::async_trait]
 pub trait ProcessRegistry: Send + Sync {
-    async fn register(
+    async fn register_process(
         &self,
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, PluginError>;
+
+    async fn set_external_ref(
+        &self,
+        process_id: &str,
+        external_ref: ProcessExternalRef,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    async fn grant_handle(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Result<ProcessHandleGrant, PluginError>;
+
+    async fn revoke_handle(&self, session_id: &str, process_id: &str) -> Result<(), PluginError>;
+
+    async fn transfer_handle_grants(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: &[String],
+    ) -> Result<(), PluginError>;
+
+    async fn list_handle_grants(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError>;
+
+    async fn handle_grants_for_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<ProcessHandleGrant>, PluginError>;
 
     async fn append_event(
         &self,
@@ -564,115 +471,43 @@ pub trait ProcessRegistry: Send + Sync {
 
     async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError>;
 
-    async fn mark_running(&self, process_id: &str) -> Result<ProcessRecord, PluginError> {
-        self.append_event(
-            process_id,
-            "process.running".to_string(),
-            serde_json::json!({}),
-        )
-        .await?;
-        self.get(process_id).await.ok_or_else(|| {
-            PluginError::Session(format!(
-                "unknown process `{process_id}` after running event"
-            ))
-        })
-    }
-
-    async fn mark_scheduled(
-        &self,
-        receipt: ProcessStartReceipt,
-    ) -> Result<ProcessRecord, PluginError>;
-
-    async fn complete(
+    async fn complete_process(
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
     ) -> Result<ProcessRecord, PluginError>;
 
-    async fn request_cancel(
-        &self,
-        process_id: &str,
-        reason: Option<String>,
-    ) -> Result<ProcessRecord, PluginError>;
-
-    async fn get(&self, process_id: &str) -> Option<ProcessRecord>;
-
-    async fn list(&self, filter: ProcessFilter) -> Vec<ProcessRecord>;
-
-    async fn transfer(
-        &self,
-        process_id: &str,
-        new_scope: ProcessScope,
-    ) -> Result<ProcessRecord, PluginError>;
+    async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
-
-    fn subscribe(&self, filter: ProcessFilter) -> BoxStream<'static, ProcessEvent>;
 }
 
 /// In-memory process registry shared across runtime sessions.
 pub struct LocalProcessRegistry {
     managed: Arc<Mutex<ManagedProcessMap>>,
-    events: broadcast::Sender<ProcessEvent>,
+    grants: Arc<Mutex<ManagedGrantMap>>,
 }
 
 impl Default for LocalProcessRegistry {
     fn default() -> Self {
-        let (events, _) = broadcast::channel(256);
         Self {
             managed: Arc::new(Mutex::new(HashMap::new())),
-            events,
+            grants: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
-type ManagedProcessMap = HashMap<String, HashMap<String, ManagedProcessRecord>>;
+type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
+type ManagedGrantMap = HashMap<String, HashMap<String, ProcessHandleGrant>>;
 
 struct ManagedProcessRecord {
-    registration: ProcessRegistration,
+    record: ProcessRecord,
     events: Vec<ProcessEvent>,
     acked_wakes: HashSet<u64>,
     notify: Arc<tokio::sync::Notify>,
 }
 
-fn event_matches_filter(event: &ProcessEvent, filter: &ProcessFilter) -> bool {
-    let _ = filter;
-    let _ = event;
-    true
-}
-
-fn record_matches_filter(record: &ProcessRecord, filter: &ProcessFilter) -> bool {
-    if filter
-        .session_id
-        .as_ref()
-        .is_some_and(|session_id| &record.scope.session_id != session_id)
-    {
-        return false;
-    }
-    if filter
-        .producer
-        .as_ref()
-        .is_some_and(|producer| &record.producer != producer)
-    {
-        return false;
-    }
-    if !filter.tags.iter().all(|tag| record.tags.contains(tag)) {
-        return false;
-    }
-    if filter
-        .handle_visible
-        .is_some_and(|visible| record.handle_visible != visible)
-    {
-        return false;
-    }
-    filter.include_terminal || !record.state.is_terminal()
-}
-
 impl LocalProcessRegistry {
-    fn publish(&self, event: ProcessEvent) {
-        let _ = self.events.send(event);
-    }
-
     async fn insert_process(
         &self,
         mut registration: ProcessRegistration,
@@ -680,45 +515,151 @@ impl LocalProcessRegistry {
         ensure_core_event_types(&mut registration);
         validate_process_registration(&registration)?;
         let mut managed = self.managed.lock().await;
-        let processes = managed
-            .entry(registration.scope.session_id.clone())
-            .or_default();
-        if processes
-            .get(&registration.id)
-            .is_some_and(|record| !project_process_record(record).state.is_terminal())
-        {
+        if managed.contains_key(&registration.id) {
             return Err(PluginError::Session(format!(
                 "process `{}` is already registered",
                 registration.id
             )));
         }
         let id = registration.id.clone();
-        processes.insert(
+        let record = ProcessRecord::from_registration(registration);
+        managed.insert(
             id.clone(),
             ManagedProcessRecord {
-                registration,
+                record: record.clone(),
                 events: Vec::new(),
                 acked_wakes: HashSet::new(),
                 notify: Arc::new(tokio::sync::Notify::new()),
             },
         );
-        drop(managed);
-        self.append_event(&id, "process.registered".to_string(), serde_json::json!({}))
-            .await?;
-        let record = self.get(&id).await.ok_or_else(|| {
-            PluginError::Session(format!("unknown process `{id}` after registration"))
-        })?;
         Ok(record)
     }
 }
 
 #[async_trait::async_trait]
 impl ProcessRegistry for LocalProcessRegistry {
-    async fn register(
+    async fn register_process(
         &self,
         registration: ProcessRegistration,
     ) -> Result<ProcessRecord, PluginError> {
         self.insert_process(registration).await
+    }
+
+    async fn set_external_ref(
+        &self,
+        process_id: &str,
+        external_ref: ProcessExternalRef,
+    ) -> Result<ProcessRecord, PluginError> {
+        let mut managed = self.managed.lock().await;
+        let Some(record) = managed.get_mut(process_id) else {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        };
+        record.record.external_ref = Some(external_ref);
+        Ok(record.record.clone())
+    }
+
+    async fn grant_handle(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Result<ProcessHandleGrant, PluginError> {
+        if self.get_process(process_id).await.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let grant = ProcessHandleGrant {
+            session_id: session_id.to_string(),
+            process_id: process_id.to_string(),
+            descriptor,
+        };
+        self.grants
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(process_id.to_string(), grant.clone());
+        Ok(grant)
+    }
+
+    async fn revoke_handle(&self, session_id: &str, process_id: &str) -> Result<(), PluginError> {
+        if let Some(session_grants) = self.grants.lock().await.get_mut(session_id) {
+            session_grants.remove(process_id);
+        }
+        Ok(())
+    }
+
+    async fn transfer_handle_grants(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: &[String],
+    ) -> Result<(), PluginError> {
+        let mut grants = self.grants.lock().await;
+        for process_id in process_ids {
+            let grant = grants
+                .get_mut(from_session_id)
+                .and_then(|session_grants| session_grants.remove(process_id))
+                .ok_or_else(|| {
+                    PluginError::Session(format!(
+                        "process handle `{process_id}` is not granted to session `{from_session_id}`"
+                    ))
+                })?;
+            grants.entry(to_session_id.to_string()).or_default().insert(
+                process_id.clone(),
+                ProcessHandleGrant {
+                    session_id: to_session_id.to_string(),
+                    process_id: process_id.clone(),
+                    descriptor: grant.descriptor,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn list_handle_grants(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
+        let grants = self
+            .grants
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        let managed = self.managed.lock().await;
+        let mut entries = grants
+            .into_values()
+            .filter_map(|grant| {
+                managed
+                    .get(&grant.process_id)
+                    .map(|record| (grant, record.record.clone()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.process_id.cmp(&right.process_id));
+        Ok(entries)
+    }
+
+    async fn handle_grants_for_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<ProcessHandleGrant>, PluginError> {
+        if self.get_process(process_id).await.is_none() {
+            return Err(PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let grants = self.grants.lock().await;
+        let mut entries = grants
+            .values()
+            .filter_map(|session_grants| session_grants.get(process_id).cloned())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(entries)
     }
 
     async fn append_event(
@@ -728,16 +669,13 @@ impl ProcessRegistry for LocalProcessRegistry {
         payload: serde_json::Value,
     ) -> Result<ProcessEvent, PluginError> {
         let mut managed = self.managed.lock().await;
-        let Some(record) = managed
-            .values_mut()
-            .find_map(|processes| processes.get_mut(process_id))
-        else {
+        let Some(record) = managed.get_mut(process_id) else {
             return Err(PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
         };
         let declared = record
-            .registration
+            .record
             .event_types
             .iter()
             .find(|declared| declared.name == event_type)
@@ -761,12 +699,13 @@ impl ProcessRegistry for LocalProcessRegistry {
             occurred_at: SystemTime::now(),
         };
         let terminal = event.semantics.terminal.is_some();
+        if let Some(terminal) = event.semantics.terminal.clone() {
+            record.record.terminal = Some(terminal);
+        }
         record.events.push(event.clone());
         if terminal {
             record.notify.notify_waiters();
         }
-        drop(managed);
-        self.publish(event.clone());
         Ok(event)
     }
 
@@ -776,10 +715,7 @@ impl ProcessRegistry for LocalProcessRegistry {
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError> {
         let managed = self.managed.lock().await;
-        let Some(record) = managed
-            .values()
-            .find_map(|processes| processes.get(process_id))
-        else {
+        let Some(record) = managed.get(process_id) else {
             return Err(PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
@@ -798,10 +734,7 @@ impl ProcessRegistry for LocalProcessRegistry {
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError> {
         let managed = self.managed.lock().await;
-        let Some(record) = managed
-            .values()
-            .find_map(|processes| processes.get(process_id))
-        else {
+        let Some(record) = managed.get(process_id) else {
             return Err(PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
@@ -820,10 +753,7 @@ impl ProcessRegistry for LocalProcessRegistry {
         loop {
             let notify = {
                 let managed = self.managed.lock().await;
-                let Some(record) = managed
-                    .values()
-                    .find_map(|processes| processes.get(process_id))
-                else {
+                let Some(record) = managed.get(process_id) else {
                     return Err(PluginError::Session(format!(
                         "unknown process `{process_id}`"
                     )));
@@ -841,35 +771,7 @@ impl ProcessRegistry for LocalProcessRegistry {
         }
     }
 
-    async fn mark_scheduled(
-        &self,
-        receipt: ProcessStartReceipt,
-    ) -> Result<ProcessRecord, PluginError> {
-        let state = if receipt.state == ProcessState::Pending {
-            ProcessState::Scheduled
-        } else {
-            receipt.state
-        };
-        self.append_event(
-            &receipt.process_id,
-            match state {
-                ProcessState::Running => "process.running",
-                ProcessState::Waiting => "process.waiting",
-                _ => "process.scheduled",
-            }
-            .to_string(),
-            serde_json::json!({
-                "external_ref": receipt.external_ref,
-                "message": receipt.message,
-            }),
-        )
-        .await?;
-        self.get(&receipt.process_id).await.ok_or_else(|| {
-            PluginError::Session(format!("unknown process `{}`", receipt.process_id))
-        })
-    }
-
-    async fn complete(
+    async fn complete_process(
         &self,
         process_id: &str,
         await_output: ProcessAwaitOutput,
@@ -885,72 +787,21 @@ impl ProcessRegistry for LocalProcessRegistry {
             serde_json::json!({ "await_output": await_output }),
         )
         .await?;
-        self.get(process_id).await.ok_or_else(|| {
+        self.get_process(process_id).await.ok_or_else(|| {
             PluginError::Session(format!(
                 "unknown process `{process_id}` after terminal event"
             ))
         })
     }
 
-    async fn request_cancel(
-        &self,
-        process_id: &str,
-        reason: Option<String>,
-    ) -> Result<ProcessRecord, PluginError> {
-        self.append_event(
-            process_id,
-            "process.cancel_requested".to_string(),
-            serde_json::json!({ "reason": reason }),
-        )
-        .await?;
-        self.get(process_id).await.ok_or_else(|| {
-            PluginError::Session(format!(
-                "unknown process `{process_id}` after cancel request"
-            ))
-        })
-    }
-
-    async fn get(&self, process_id: &str) -> Option<ProcessRecord> {
+    async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
         let managed = self.managed.lock().await;
-        managed
-            .values()
-            .find_map(|processes| processes.get(process_id).map(project_process_record))
-    }
-
-    async fn list(&self, filter: ProcessFilter) -> Vec<ProcessRecord> {
-        let managed = self.managed.lock().await;
-        let mut out = managed
-            .values()
-            .flat_map(|processes| processes.values())
-            .map(project_process_record)
-            .filter(|record| record_matches_filter(record, &filter))
-            .collect::<Vec<_>>();
-        out.sort_by_key(|record| record.created_at);
-        out
-    }
-
-    async fn transfer(
-        &self,
-        process_id: &str,
-        new_scope: ProcessScope,
-    ) -> Result<ProcessRecord, PluginError> {
-        self.append_event(
-            process_id,
-            "process.transferred".to_string(),
-            serde_json::json!({ "session_id": new_scope.session_id }),
-        )
-        .await?;
-        self.get(process_id).await.ok_or_else(|| {
-            PluginError::Session(format!("unknown process `{process_id}` after transfer"))
-        })
+        managed.get(process_id).map(|record| record.record.clone())
     }
 
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {
         let mut managed = self.managed.lock().await;
-        let Some(record) = managed
-            .values_mut()
-            .find_map(|processes| processes.get_mut(process_id))
-        else {
+        let Some(record) = managed.get_mut(process_id) else {
             return Err(PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
@@ -958,57 +809,14 @@ impl ProcessRegistry for LocalProcessRegistry {
         record.acked_wakes.insert(sequence);
         Ok(())
     }
-
-    fn subscribe(&self, filter: ProcessFilter) -> BoxStream<'static, ProcessEvent> {
-        let rx = self.events.subscribe();
-        stream::unfold((rx, filter), |(mut rx, filter)| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) if event_matches_filter(&event, &filter) => {
-                        return Some((event, (rx, filter)));
-                    }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        })
-        .boxed()
-    }
 }
 
 fn default_process_event_types() -> Vec<ProcessEventType> {
     vec![
-        state_event_type("process.registered", ProcessState::Pending),
-        state_event_type("process.scheduled", ProcessState::Scheduled),
-        state_event_type("process.running", ProcessState::Running),
-        state_event_type("process.waiting", ProcessState::Waiting),
-        state_event_type("process.cancel_requested", ProcessState::CancelRequested),
         terminal_event_type("process.completed", ProcessTerminalState::Completed),
         terminal_event_type("process.failed", ProcessTerminalState::Failed),
         terminal_event_type("process.cancelled", ProcessTerminalState::Cancelled),
-        ProcessEventType {
-            name: "process.transferred".to_string(),
-            payload_schema: crate::LashSchema::any(),
-            semantics: ProcessEventSemanticsSpec {
-                transfer: Some(ProcessTransferSpec {
-                    session_id: ProcessValueSelector::Pointer("/session_id".to_string()),
-                }),
-                ..ProcessEventSemanticsSpec::default()
-            },
-        },
     ]
-}
-
-fn state_event_type(name: &str, state: ProcessState) -> ProcessEventType {
-    ProcessEventType {
-        name: name.to_string(),
-        payload_schema: crate::LashSchema::any(),
-        semantics: ProcessEventSemanticsSpec {
-            state: Some(ProcessStateSpec { state }),
-            ..ProcessEventSemanticsSpec::default()
-        },
-    }
 }
 
 fn terminal_event_type(name: &str, state: ProcessTerminalState) -> ProcessEventType {
@@ -1077,7 +885,6 @@ fn materialize_event_semantics(
     payload: &serde_json::Value,
     spec: &ProcessEventSemanticsSpec,
 ) -> Result<ProcessEventSemantics, PluginError> {
-    let state = spec.state.as_ref().map(|state| state.state);
     let terminal = spec
         .terminal
         .as_ref()
@@ -1089,22 +896,7 @@ fn materialize_event_semantics(
         .map(|wake| materialize_wake(process_id, sequence, payload, wake))
         .transpose()?
         .flatten();
-    let transfer = spec
-        .transfer
-        .as_ref()
-        .map(|transfer| {
-            let session_id = select_value(payload, &transfer.session_id)?;
-            Ok::<ProcessTransfer, PluginError>(ProcessTransfer {
-                session_id: selector_value_to_string(&session_id),
-            })
-        })
-        .transpose()?;
-    Ok(ProcessEventSemantics {
-        state,
-        terminal,
-        wake,
-        transfer,
-    })
+    Ok(ProcessEventSemantics { terminal, wake })
 }
 
 fn materialize_terminal_semantics(
@@ -1223,81 +1015,6 @@ fn selector_value_is_truthy(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(value) => !value.is_empty(),
         serde_json::Value::Number(_) => true,
     }
-}
-
-fn project_process_record(record: &ManagedProcessRecord) -> ProcessRecord {
-    let now = SystemTime::now();
-    let mut projected = ProcessRecord::local_session(
-        record.registration.scope.session_id.clone(),
-        record.registration.id.clone(),
-        record.registration.producer.clone(),
-        ProcessState::Pending,
-    );
-    projected.parent_process_id = record.registration.parent_process_id.clone();
-    projected.child_session_id = record.registration.child_session_id.clone();
-    projected.input = record.registration.input.clone();
-    projected.event_types = record.registration.event_types.clone();
-    projected.tags = record.registration.tags.clone();
-    projected.metadata = record.registration.metadata.clone();
-    projected.handle_visible = record.registration.handle_visible;
-    projected.cancel_policy = record.registration.cancel_policy.clone();
-    projected.close_policy = record.registration.close_policy.clone();
-    projected.attempt = record.registration.attempt.clone();
-    projected.event_count = record.events.len() as u64;
-    projected.latest_event = record.events.last().cloned();
-    projected.created_at = record
-        .events
-        .first()
-        .map(|event| event.occurred_at)
-        .unwrap_or(now);
-    projected.updated_at = record
-        .events
-        .last()
-        .map(|event| event.occurred_at)
-        .unwrap_or(projected.created_at);
-
-    for event in &record.events {
-        if let Some(state) = event.semantics.state {
-            projected.state = state;
-        }
-        if let Some(transfer) = &event.semantics.transfer {
-            projected.scope.session_id = transfer.session_id.clone();
-        }
-        if let Some(message) = event
-            .payload
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .filter(|message| !message.is_empty())
-        {
-            projected.progress = Some(message.to_string());
-        }
-        if let Some(external_ref) = event
-            .payload
-            .get("external_ref")
-            .and_then(|value| serde_json::from_value::<ProcessExternalRef>(value.clone()).ok())
-        {
-            projected.external_ref = Some(external_ref);
-        }
-        if let Some(terminal) = event.semantics.terminal.clone() {
-            projected.state = terminal.state.process_state();
-            projected.terminal = Some(terminal.clone());
-            projected.completed_at = Some(event.occurred_at);
-            let outcome = ProcessOutcome {
-                summary: event
-                    .payload
-                    .get("summary")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned),
-                await_output: Some(terminal.await_output),
-            };
-            if projected.state == ProcessState::Failed {
-                projected.failure = Some(outcome);
-            } else {
-                projected.result = Some(outcome);
-            }
-        }
-    }
-    projected
 }
 
 /// Required host configuration for all runtimes.
@@ -1473,16 +1190,10 @@ mod tests {
     fn registration(id: &str) -> ProcessRegistration {
         ProcessRegistration::new(
             id,
-            "test",
-            ProcessScope {
-                session_id: "s1".to_string(),
-            },
             ProcessInput::External {
                 metadata: serde_json::Value::Null,
             },
         )
-        .with_tags(["demo"])
-        .with_handle_visible(true)
     }
 
     #[test]
@@ -1558,7 +1269,7 @@ mod tests {
             },
         };
         registry
-            .register(registration("proc-1").with_extra_event_types([event_type]))
+            .register_process(registration("proc-1").with_extra_event_types([event_type]))
             .await
             .expect("register");
 
@@ -1574,7 +1285,7 @@ mod tests {
             .await
             .expect("append");
 
-        assert_eq!(event.sequence, 2);
+        assert_eq!(event.sequence, 1);
         assert_eq!(
             event
                 .semantics
@@ -1618,12 +1329,11 @@ mod tests {
     async fn await_process_reads_terminal_event_materialized_output() {
         let registry = LocalProcessRegistry::default();
         registry
-            .register(registration("proc-2"))
+            .register_process(registration("proc-2"))
             .await
             .expect("register");
-        registry.mark_running("proc-2").await.expect("running");
         registry
-            .complete(
+            .complete_process(
                 "proc-2",
                 ProcessAwaitOutput::Success {
                     value: serde_json::json!({ "ok": true }),
@@ -1642,43 +1352,125 @@ mod tests {
         );
         assert!(
             registry
-                .list(ProcessFilter {
-                    session_id: Some("s1".to_string()),
-                    producer: Some("test".to_string()),
-                    tags: vec!["demo".to_string()],
-                    handle_visible: Some(true),
-                    include_terminal: false,
-                })
+                .get_process("proc-2")
                 .await
-                .is_empty()
+                .expect("record")
+                .is_terminal()
         );
     }
 
     #[tokio::test]
-    async fn transfer_scope_is_event_sourced() {
+    async fn transfer_handle_grants_moves_addressability_without_process_events() {
         let registry = LocalProcessRegistry::default();
         registry
-            .register(registration("proc-3"))
+            .register_process(registration("proc-3"))
             .await
             .expect("register");
         registry
-            .transfer(
+            .grant_handle(
+                "s1",
                 "proc-3",
-                ProcessScope {
-                    session_id: "s2".to_string(),
-                },
+                ProcessHandleDescriptor::new(Some("tool"), Some("demo")),
             )
+            .await
+            .expect("grant");
+        registry
+            .transfer_handle_grants("s1", "s2", &["proc-3".to_string()])
             .await
             .expect("transfer");
 
         assert_eq!(
             registry
-                .get("proc-3")
+                .list_handle_grants("s1")
                 .await
-                .expect("record")
-                .scope
-                .session_id,
-            "s2"
+                .expect("grants")
+                .len(),
+            0
+        );
+        assert_eq!(
+            registry
+                .list_handle_grants("s2")
+                .await
+                .expect("grants")
+                .len(),
+            1
+        );
+        assert!(
+            registry
+                .events_after("proc-3", 0)
+                .await
+                .expect("events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_sessions_can_hold_grants_to_one_process() {
+        let registry = LocalProcessRegistry::default();
+        registry
+            .register_process(registration("proc-5"))
+            .await
+            .expect("register");
+        registry
+            .grant_handle(
+                "s1",
+                "proc-5",
+                ProcessHandleDescriptor::new(Some("tool"), Some("demo")),
+            )
+            .await
+            .expect("grant s1");
+        registry
+            .grant_handle(
+                "s2",
+                "proc-5",
+                ProcessHandleDescriptor::new(Some("monitor"), Some("demo")),
+            )
+            .await
+            .expect("grant s2");
+
+        let grant_sessions = registry
+            .handle_grants_for_process("proc-5")
+            .await
+            .expect("process grants")
+            .into_iter()
+            .map(|grant| grant.session_id)
+            .collect::<Vec<_>>();
+        assert_eq!(grant_sessions, vec!["s1".to_string(), "s2".to_string()]);
+
+        registry
+            .transfer_handle_grants("s1", "s3", &["proc-5".to_string()])
+            .await
+            .expect("transfer s1");
+        let grant_sessions = registry
+            .handle_grants_for_process("proc-5")
+            .await
+            .expect("process grants")
+            .into_iter()
+            .map(|grant| grant.session_id)
+            .collect::<Vec<_>>();
+        assert_eq!(grant_sessions, vec!["s2".to_string(), "s3".to_string()]);
+        assert!(
+            registry
+                .events_after("proc-5", 0)
+                .await
+                .expect("events")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn processes_can_exist_with_zero_grants() {
+        let registry = LocalProcessRegistry::default();
+        registry
+            .register_process(registration("proc-4"))
+            .await
+            .expect("register");
+        assert!(
+            registry
+                .list_handle_grants("s1")
+                .await
+                .expect("grants")
+                .is_empty()
         );
     }
 }

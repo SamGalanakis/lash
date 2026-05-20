@@ -7,8 +7,8 @@
 //! is now a lie.
 
 use lashlang::{
-    ExecuteError, ExecutionOutcome, ParseError, Record, State, ToolHost, ToolHostError, Value,
-    execute, parse,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, ParseError,
+    ProcessBlockStart, Record, State, Value, parse,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -45,9 +45,58 @@ impl MockHost {
     }
 }
 
-impl ToolHost for MockHost {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        match name.as_str() {
+impl ExecutionHost for MockHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => {
+                self.call_tool(&name, args).await.map(AbilityResult::Value)
+            }
+            AbilityOp::StartToolCall { name, args } => self
+                .start_tool_call(name, args)
+                .await
+                .map(AbilityResult::Value),
+            AbilityOp::StartProcess(start) => {
+                self.start_process(start).await.map(AbilityResult::Value)
+            }
+            AbilityOp::Await(handle) => self
+                .await_handle_value(handle)
+                .await
+                .map(AbilityResult::Value),
+            AbilityOp::Cancel(handle) => self
+                .cancel_handle_value(handle)
+                .await
+                .map(AbilityResult::Value),
+            AbilityOp::Print(value) => {
+                self.record_observation(value);
+                Ok(AbilityResult::Unit)
+            }
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+enum ExecuteError {
+    #[error(transparent)]
+    Parse(#[from] lashlang::ParseError),
+    #[error(transparent)]
+    Runtime(#[from] lashlang::RuntimeError),
+}
+
+async fn execute<H: ExecutionHost>(
+    source: &str,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, ExecuteError> {
+    let compiled = lashlang::compile(source)?;
+    lashlang::execute(&compiled, state, host)
+        .await
+        .map_err(ExecuteError::Runtime)
+}
+
+impl MockHost {
+    async fn call_tool(&self, name: &str, args: Record) -> Result<Value, ExecutionHostError> {
+        match name {
             "read_file" => {
                 let path = args
                     .get("path")
@@ -55,12 +104,12 @@ impl ToolHost for MockHost {
                         Value::String(s) => Some(s.to_string()),
                         _ => None,
                     })
-                    .ok_or_else(|| ToolHostError::new("missing path"))?;
+                    .ok_or_else(|| ExecutionHostError::new("missing path"))?;
                 self.files
                     .get(&path)
                     .cloned()
                     .map(|s| Value::String(s.into()))
-                    .ok_or_else(|| ToolHostError::new(format!("no such file: {path}")))
+                    .ok_or_else(|| ExecutionHostError::new(format!("no such file: {path}")))
             }
             "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
             "exec_command" => {
@@ -70,7 +119,7 @@ impl ToolHost for MockHost {
                         Value::String(s) => Some(s.as_str()),
                         _ => None,
                     })
-                    .ok_or_else(|| ToolHostError::new("missing cmd"))?;
+                    .ok_or_else(|| ExecutionHostError::new("missing cmd"))?;
                 let mut record = Record::default();
                 let exit_code = if cmd == "test -f Cargo.lock" { 1 } else { 0 };
                 record.insert("status".into(), Value::String("completed".into()));
@@ -99,19 +148,23 @@ impl ToolHost for MockHost {
                 out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
             }
-            "boom" => Err(ToolHostError::new("explicit failure for tests")),
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+            "boom" => Err(ExecutionHostError::new("explicit failure for tests")),
+            _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
         }
     }
 
-    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+    async fn start_tool_call(
+        &self,
+        name: String,
+        args: Record,
+    ) -> Result<Value, ExecutionHostError> {
         // Allocate a handle id, run the sync call now, stash the result.
         let handle_id = {
             let mut counter = self.next_handle.lock().unwrap();
             *counter += 1;
             format!("h{}", *counter)
         };
-        let result = self.call(name.clone(), args.clone()).await?;
+        let result = self.call_tool(&name, args.clone()).await?;
         self.pending
             .lock()
             .unwrap()
@@ -123,36 +176,47 @@ impl ToolHost for MockHost {
         Ok(Value::Record(record.into()))
     }
 
-    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
+    async fn start_process(&self, _start: ProcessBlockStart) -> Result<Value, ExecutionHostError> {
+        let handle_id = {
+            let mut counter = self.next_handle.lock().unwrap();
+            *counter += 1;
+            format!("p{}", *counter)
+        };
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(handle_id.clone(), Value::Null);
+        let mut record = Record::default();
+        record.insert("__handle__".into(), Value::String("process".into()));
+        record.insert("id".into(), Value::String(handle_id.into()));
+        Ok(Value::Record(record.into()))
+    }
+
+    async fn await_handle_value(&self, handle: Value) -> Result<Value, ExecutionHostError> {
         let record = handle
             .as_record()
-            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
+            .ok_or_else(|| ExecutionHostError::new("expected handle record"))?;
         let id = record
             .get("id")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.to_string()),
                 _ => None,
             })
-            .ok_or_else(|| ToolHostError::new("handle record missing `id` field"))?;
+            .ok_or_else(|| ExecutionHostError::new("handle record missing `id` field"))?;
         self.pending
             .lock()
             .unwrap()
             .remove(&id)
-            .ok_or_else(|| ToolHostError::new(format!("unknown handle: {id}")))
+            .ok_or_else(|| ExecutionHostError::new(format!("unknown handle: {id}")))
     }
 
-    async fn cancel_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
+    async fn cancel_handle_value(&self, handle: Value) -> Result<Value, ExecutionHostError> {
         if let Some(record) = handle.as_record()
             && let Some(Value::String(id)) = record.get("id")
         {
             self.pending.lock().unwrap().remove(id.as_str());
         }
         Ok(Value::Null)
-    }
-
-    async fn print(&self, value: Value) -> Result<(), ToolHostError> {
-        self.record_observation(value);
-        Ok(())
     }
 }
 
@@ -163,6 +227,7 @@ fn run(host: &MockHost, source: &str) -> Value {
     {
         ExecutionOutcome::Finished(value) => value,
         ExecutionOutcome::Continued => Value::Null,
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
 
@@ -356,6 +421,27 @@ submit h"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn prompt_claim_start_block_returns_unwrapped_handle() {
+    let host = MockHost::default();
+    let Value::Record(handle) = run(
+        &host,
+        r#"root = "."
+h = start(name: "scan", timeout_ms: 1000, input: { root: root }) {
+  finish root
+}
+submit h"#,
+    ) else {
+        panic!("expected handle record");
+    };
+    assert!(handle.get("ok").is_none());
+    assert_eq!(
+        handle.get("__handle__"),
+        Some(&Value::String("process".into()))
+    );
+    assert!(matches!(handle.get("id"), Some(Value::String(_))));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_await_handle_wraps_result_with_ok_value() {
     let host = MockHost::default().with_file("a.txt", "body");
     let Value::Record(r) = run(
@@ -444,70 +530,6 @@ async fn prompt_claim_cancel_handle_runs_without_error() {
 cancel h
 submit "done""#,
     );
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "`parallel { ... }` returns a list of branch results in
-// order. Do not use it when one branch needs another branch's output."
-// Plus: "Bare expressions are valid statements. Inside `parallel { ... }`,
-// a bare expression contributes its value to the result list."
-// ─────────────────────────────────────────────────────────────────────
-
-#[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_parallel_expression_returns_branch_list_in_order() {
-    let host = MockHost::default()
-        .with_file("a.txt", "A")
-        .with_file("b.txt", "B");
-    let Value::List(items) = run(
-        &host,
-        r#"results = parallel {
-  a = call read_file { path: "a.txt" }
-  b = call read_file { path: "b.txt" }
-}
-submit results"#,
-    ) else {
-        panic!("expected list");
-    };
-    assert_eq!(items.len(), 2);
-    // Branches return wrapped tool results.
-    let a = items[0].as_record().expect("wrapper");
-    assert_eq!(a["value"], Value::String("A".to_string().into()));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_named_parallel_expression_returns_record() {
-    let host = MockHost::default()
-        .with_file("a.txt", "A")
-        .with_file("b.txt", "B");
-    let Value::Record(items) = run(
-        &host,
-        r#"results = parallel {
-  a: call read_file { path: "a.txt" }
-  b: call read_file { path: "b.txt" }
-}
-submit results"#,
-    ) else {
-        panic!("expected record");
-    };
-    assert_eq!(
-        items["a"].as_record().unwrap()["value"],
-        Value::String("A".into())
-    );
-    assert_eq!(
-        items["b"].as_record().unwrap()["value"],
-        Value::String("B".into())
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_bare_expressions_are_valid_parallel_branches() {
-    let host = MockHost::default();
-    let Value::List(items) = run(&host, "submit parallel {\n  1 + 1\n  \"lit\"\n}") else {
-        panic!("expected list");
-    };
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0], Value::Number(2.0));
-    assert_eq!(items[1], Value::String("lit".to_string().into()));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1008,11 +1030,10 @@ async fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
         &host,
         r#"a = start call spawn_agent { task: "chunk_1", capability: "explore" }
 b = start call spawn_agent { task: "chunk_2", capability: "explore" }
-results = parallel {
-  a: (await a)?,
-  b: (await b)?,
-}
-submit [results.a.claim, results.b.claim]"#,
+results = await { a: a, b: b }
+a_result = results.a?
+b_result = results.b?
+submit [a_result.claim, b_result.claim]"#,
     ) else {
         panic!("expected list");
     };

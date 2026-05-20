@@ -110,6 +110,7 @@ impl ToolProvider for UpdatePlanTool {
 
 fn update_plan_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+                "tool:update_plan",
                 "update_plan",
                 "Publish or replace the current plan: a list of short ordered steps with statuses (pending, in_progress, completed), plus an optional explanation. At most one step can be in_progress at a time. Each call fully replaces the previous plan. Use this for substantial multi-step work to keep progress visible to the user. After updating, briefly summarize what changed and what comes next instead of repeating the full checklist.",
                 serde_json::json!({

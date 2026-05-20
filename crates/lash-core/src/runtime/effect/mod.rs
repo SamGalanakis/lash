@@ -107,10 +107,6 @@ mod tests {
     fn process_effect_envelope_round_trips_prepared_tool_call() {
         let registration = crate::ProcessRegistration::new(
             "call-123",
-            "echo",
-            crate::ProcessScope {
-                session_id: "session".to_string(),
-            },
             crate::ProcessInput::ToolCall {
                 call: crate::PreparedToolCall {
                     call_id: "call-123".to_string(),
@@ -135,7 +131,11 @@ mod tests {
         let envelope = RuntimeEffectEnvelope::new(
             metadata,
             RuntimeEffectCommand::Process {
-                command: ProcessCommand::Start { registration },
+                command: ProcessCommand::Start {
+                    registration,
+                    grant: None,
+                    execution_context: crate::ProcessExecutionContext::default(),
+                },
             },
         );
 
@@ -147,11 +147,17 @@ mod tests {
         assert_eq!(decoded.command.kind(), RuntimeEffectKind::Process);
         assert_eq!(decoded.stable_hash().expect("decoded hash"), hash);
         let RuntimeEffectCommand::Process {
-            command: ProcessCommand::Start { registration },
+            command:
+                ProcessCommand::Start {
+                    registration,
+                    grant: None,
+                    execution_context,
+                },
         } = decoded.command
         else {
             panic!("wrong process command");
         };
+        assert!(execution_context.is_empty());
         let crate::ProcessInput::ToolCall { call } = registration.input else {
             panic!("wrong process input");
         };

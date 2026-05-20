@@ -741,6 +741,7 @@ impl ToolProvider for PlanModeTools {
 
 fn plan_exit_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:plan_exit",
         "plan_exit",
         "Ask whether to exit plan mode.",
         ToolDefinition::default_input_schema(),

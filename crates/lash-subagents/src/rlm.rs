@@ -126,19 +126,11 @@ async fn run_child_session(
     if let Err(err) = context
         .processes()
         .start_process(
-            ProcessRegistration::new(
-                process_id.clone(),
-                "subagent",
-                lash_core::ProcessScope {
-                    session_id: context.session_id().to_string(),
-                },
-                registration_input,
-            )
-            .with_child_session_id(child_session_id.clone())
-            .with_tags(["subagent"])
-            .with_handle_visible(true)
-            .with_close_policy(lash_core::ProcessClosePolicy::Cancel)
-            .with_optional_parent_process_id(context.async_process_id().map(str::to_string)),
+            ProcessRegistration::new(process_id.clone(), registration_input),
+            Some(lash_core::ProcessHandleDescriptor::new(
+                Some("subagent"),
+                Some(child_session_id.clone()),
+            )),
         )
         .await
     {

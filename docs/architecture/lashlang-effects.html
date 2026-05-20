@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<style>html,body{background:#141412}@media(prefers-color-scheme:light){html,body{background:#f5efe0}}</style>
 <title>lashlang · effects - lash architecture</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -17,7 +19,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lashlang<span class="slash">/</span>effects</h1>
-    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, tool calls, process handles, parallel blocks, builtins, and type literals.</p>
+    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, tool calls, process handles, async fanout, builtins, and type literals.</p>
   </section>
 
   <main class="body" id="content">
@@ -49,7 +51,7 @@
         <div class="section" id="tool-calls-and-async-handles">
           <div class="section-header">
             <h2>Tool Calls And Process Handles</h2>
-            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ToolHost</code>.</p>
+            <p>Host work is explicit and typed at the boundary. Lashlang itself does not know provider APIs, file systems, shells, or subagents; it asks the registered <code>ExecutionHost</code>.</p>
           </div>
           <dl class="def-list">
             <dt><code>call</code></dt>
@@ -102,21 +104,21 @@ submit {
 }</code></pre>
         </div>
 
-        <div class="section" id="parallel-blocks">
+        <div class="section" id="fanout-with-await">
           <div class="section-header">
-            <h2>Parallel Blocks</h2>
-            <p><code>parallel</code> is for independent work. Branches must not depend on each other's output, and branch-local assignments are merged only when unambiguous.</p>
+            <h2>Fanout With Await</h2>
+            <p>Independent work starts as handles and joins through <code>await</code>. Records and lists of handles are the concurrency join path.</p>
           </div>
           <dl class="def-list">
-            <dt>Named branches</dt>
-            <dd><code>parallel { first: call ... second: call ... }</code> returns a record when used as an expression. Named branches are preferred because results can be read as <code>results.first</code>.</dd>
-            <dt>Positional branches</dt>
-            <dd><code>parallel { call ..., call ... }</code> (or with newlines as separators) returns a list when used as an expression. Bare expressions inside a parallel block contribute values to that list.</dd>
+            <dt>Named joins</dt>
+            <dd><code>await { first: h1, second: h2 }</code> resolves handles concurrently and returns wrapper records keyed by name. Named joins are preferred because results can be read as <code>results.first</code>.</dd>
+            <dt>Positional joins</dt>
+            <dd><code>await [h1, h2]</code> resolves handles concurrently and returns wrappers in list order. Use ordinary list/record expressions for computed values; fanout branches must naturally produce handles.</dd>
           </dl>
           <pre><code>a = start call spawn_agent { task: "Read file A", capability: "explore" }
 b = start call spawn_agent { task: "Read file B", capability: "explore" }
-results = parallel { one: (await a)?, two: (await b)? }
-submit { a: results.one, b: results.two }</code></pre>
+results = await { one: a, two: b }
+submit { a: results.one?, b: results.two? }</code></pre>
         </div>
 
         <div class="section" id="builtins">

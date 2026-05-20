@@ -856,6 +856,7 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
 
     fn direct_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:direct_tool",
             "direct_tool",
             "Issue a direct completion from inside a tool",
             serde_json::json!({
@@ -969,6 +970,7 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
 
     fn retry_once_tool_definition() -> crate::ToolDefinition {
         crate::ToolDefinition::raw(
+            "tool:retry_once",
             "retry_once",
             "Fails once with a safe retry.",
             serde_json::json!({

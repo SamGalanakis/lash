@@ -25,7 +25,7 @@ impl<'run> ModeExecutionContext<'run> {
         clippy::too_many_arguments,
         reason = "mode execution bridge carries explicit per-turn runtime dependencies"
     )]
-    pub(super) fn new(
+    pub(crate) fn new(
         session_id: String,
         execution_mode: crate::ExecutionMode,
         dispatch: Arc<ToolDispatchContext<'run>>,
@@ -106,11 +106,126 @@ impl<'run> ModeExecutionContext<'run> {
         crate::tool_dispatch::resolve_tool_execution_mode(&self.dispatch, name)
     }
 
+    pub fn callable_tool_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
+        crate::tool_dispatch::resolve_callable_manifest(&self.dispatch, name)
+    }
+
+    pub fn callable_tool_manifest_by_id(&self, id: &crate::ToolId) -> Option<crate::ToolManifest> {
+        crate::tool_dispatch::resolve_callable_manifest_by_id(&self.dispatch, id)
+    }
+
+    pub fn prepare_lashlang_process_start(
+        &self,
+        start: lashlang::ProcessBlockStart,
+    ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
+        let display_name = start.name.as_ref().map(lashlang_process_name).transpose()?;
+        let timeout_ms = start
+            .timeout_ms
+            .as_ref()
+            .map(lashlang_process_timeout_ms)
+            .transpose()?;
+        let input = start
+            .input
+            .as_ref()
+            .map(lashlang_process_input)
+            .transpose()?
+            .unwrap_or_default();
+        let mut tool_bindings = Vec::with_capacity(start.tool_names.len());
+        for name in start.tool_names {
+            let manifest = self
+                .callable_tool_manifest(&name)
+                .ok_or_else(|| format!("tool `{name}` is unavailable in this session"))?;
+            tool_bindings.push(crate::LashlangProcessToolBinding {
+                name,
+                tool_id: manifest.id.clone(),
+            });
+        }
+        let program = serde_json::to_value(&start.program)
+            .map_err(|err| format!("failed to serialize lashlang process block: {err}"))?;
+        let process_id = format!("process:{}", uuid::Uuid::new_v4());
+        let registration = crate::ProcessRegistration::new(
+            process_id,
+            crate::ProcessInput::LashlangBlock {
+                program,
+                input,
+                tool_bindings,
+                timeout_ms,
+                display_name: display_name.clone(),
+            },
+        )
+        .with_extra_event_types(crate::lashlang_process_event_types());
+        Ok((registration, display_name))
+    }
+
     pub fn tool_argument_projection_policy(
         &self,
         name: &str,
     ) -> crate::ToolArgumentProjectionPolicy {
         crate::tool_dispatch::resolve_tool_argument_projection_policy(&self.dispatch, name)
+    }
+
+    pub async fn start_lashlang_process(
+        &self,
+        registration: crate::ProcessRegistration,
+        label: Option<String>,
+    ) -> crate::ModeToolReply {
+        let process_id = registration.id.clone();
+        let execution_context = crate::ProcessExecutionContext::default()
+            .with_tool_effect_metadata(self.effect_metadata.clone())
+            .with_wake_session_id(self.session_id.clone());
+        match self
+            .dispatch
+            .host
+            .start_process_scoped(
+                &self.session_id,
+                registration,
+                Some(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
+                execution_context,
+                self.effect_metadata.clone(),
+                Some(self.dispatch.effect_controller.as_controller()),
+            )
+            .await
+        {
+            Ok(_) => crate::ModeToolReply::success(crate::lashlang_bridge::process_handle_json(
+                &process_id,
+            )),
+            Err(err) => crate::ModeToolReply::error(serde_json::json!(err.to_string())),
+        }
+    }
+}
+
+fn lashlang_process_name(value: &lashlang::Value) -> Result<String, String> {
+    match value {
+        lashlang::Value::String(value) => Ok(value.to_string()),
+        _ => Err("process `name` must be a string".to_string()),
+    }
+}
+
+fn lashlang_process_timeout_ms(value: &lashlang::Value) -> Result<u64, String> {
+    match value {
+        lashlang::Value::Number(value)
+            if value.is_finite()
+                && *value >= 0.0
+                && value.fract() == 0.0
+                && *value <= u64::MAX as f64 =>
+        {
+            Ok(*value as u64)
+        }
+        _ => Err("process `timeout_ms` must be a non-negative integer".to_string()),
+    }
+}
+
+fn lashlang_process_input(
+    value: &lashlang::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    if value.as_record().is_none() {
+        return Err("process `input` must be a record".to_string());
+    }
+    match serde_json::to_value(value)
+        .map_err(|err| format!("failed to serialize process input: {err}"))?
+    {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Err("process `input` must be a record".to_string()),
     }
 }
 
@@ -140,6 +255,7 @@ mod tests {
     #[test]
     fn tool_argument_projection_policy_resolves_from_active_surface_and_defaults_unknown() {
         let tool = crate::ToolDefinition::raw(
+            "tool:seedy",
             "seedy",
             "Seed-aware",
             crate::ToolDefinition::default_input_schema(),
@@ -192,5 +308,86 @@ mod tests {
             ctx.tool_argument_projection_policy("missing"),
             crate::ToolArgumentProjectionPolicy::MaterializeProjectedValues
         );
+    }
+
+    #[test]
+    fn prepare_lashlang_process_start_captures_tool_ids_and_explicit_input() {
+        let tool = crate::ToolDefinition::raw(
+            "tool:alpha",
+            "alpha",
+            "Alpha tool.",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        );
+        let plugins = crate::plugin::PluginHost::empty()
+            .build_standard_session("session", None)
+            .expect("plugin session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: Arc::new(NoopTools),
+            surface: Arc::new(crate::ToolSurface::from_tools(
+                vec![tool.manifest()],
+                ExecutionMode::standard(),
+                std::collections::BTreeMap::new(),
+            )),
+            host: Arc::new(crate::testing::MockSessionManager::default()),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            tool_effect_metadata: None,
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let ctx = ModeExecutionContext::new(
+            "session".to_string(),
+            ExecutionMode::standard(),
+            dispatch,
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+        let mut input = lashlang::Record::new();
+        input.insert("root".to_string(), lashlang::Value::String(".".into()));
+        let (registration, label) = ctx
+            .prepare_lashlang_process_start(lashlang::ProcessBlockStart {
+                program: lashlang::Program::block(Vec::new()),
+                tool_names: vec!["alpha".to_string()],
+                name: Some(lashlang::Value::String("scan".into())),
+                timeout_ms: Some(lashlang::Value::Number(42.0)),
+                input: Some(lashlang::Value::Record(Arc::new(input))),
+            })
+            .expect("process start should prepare");
+
+        assert_eq!(label.as_deref(), Some("scan"));
+        assert!(
+            registration
+                .event_types
+                .iter()
+                .any(|event_type| event_type.name == "process.wake")
+        );
+        let crate::ProcessInput::LashlangBlock {
+            input,
+            tool_bindings,
+            timeout_ms,
+            display_name,
+            ..
+        } = registration.input
+        else {
+            panic!("expected lashlang process input");
+        };
+        assert_eq!(input.get("root"), Some(&serde_json::json!(".")));
+        assert_eq!(timeout_ms, Some(42));
+        assert_eq!(display_name.as_deref(), Some("scan"));
+        assert_eq!(tool_bindings.len(), 1);
+        assert_eq!(tool_bindings[0].name, "alpha");
+        assert_eq!(tool_bindings[0].tool_id, crate::ToolId::new("tool:alpha"));
     }
 }

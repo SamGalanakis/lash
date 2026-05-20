@@ -70,7 +70,7 @@
         pattern: /\/\/.*|\/\*[\s\S]*?\*\//,
         greedy: true,
       },
-      "keyword": /\b(?:and|await|break|call|cancel|continue|else|false|for|if|in|let|not|null|or|parallel|print|return|start|submit|true|while)\b/,
+      "keyword": /\b(?:and|await|break|call|cancel|continue|else|false|for|if|in|let|not|null|or|print|return|start|submit|true|while)\b/,
       "builtin": /\b(?:contains|len|push|glob|read_file|continue_as)\b/,
       "function": /\b[a-z_][a-z0-9_]*(?=\s*\()/i,
       "number": /\b\d+(?:\.\d+)?\b/,

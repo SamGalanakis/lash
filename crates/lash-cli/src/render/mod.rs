@@ -269,35 +269,24 @@ pub fn process_lines_snapshot(app: &App, _frame_width: u16) -> Option<Vec<Line<'
         theme::text_faint_style().add_modifier(Modifier::Dim),
     )]));
     for task in &app.processes {
-        let state = match task.state {
-            lash_core::ProcessState::Pending => "pending",
-            lash_core::ProcessState::Scheduled => "scheduled",
-            lash_core::ProcessState::Running => "running",
-            lash_core::ProcessState::Waiting => "idle",
-            lash_core::ProcessState::Completed => "success",
-            lash_core::ProcessState::Failed => "error",
-            lash_core::ProcessState::CancelRequested => "cancelling",
-            lash_core::ProcessState::Cancelled => "cancelled",
+        let state = match task.terminal {
+            None => "running",
+            Some(lash_core::ProcessTerminalState::Completed) => "success",
+            Some(lash_core::ProcessTerminalState::Failed) => "error",
+            Some(lash_core::ProcessTerminalState::Cancelled) => "cancelled",
         };
-        let producer = task.producer.as_str();
+        let producer = task.kind.as_str();
         let elapsed_duration = task
             .terminal_duration
-            .or_else(|| task.created_at.elapsed().ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| task.first_seen.elapsed());
         let elapsed =
             crate::util::format_duration_ms_if_visible(elapsed_duration.as_millis() as u64)
                 .unwrap_or_else(|| "0:00".to_string());
-        let state_style = match task.state {
-            lash_core::ProcessState::Pending | lash_core::ProcessState::Scheduled => {
-                theme::text_subtle_style()
-            }
-            lash_core::ProcessState::Running => theme::turn_status_state(),
-            lash_core::ProcessState::Waiting => theme::text_subtle_style(),
-            lash_core::ProcessState::Completed => theme::tool_success(),
-            lash_core::ProcessState::CancelRequested => theme::text_subtle_style(),
-            lash_core::ProcessState::Failed | lash_core::ProcessState::Cancelled => {
-                theme::tool_failure()
-            }
+        let state_style = match task.terminal {
+            None => theme::turn_status_state(),
+            Some(lash_core::ProcessTerminalState::Completed) => theme::tool_success(),
+            Some(lash_core::ProcessTerminalState::Failed)
+            | Some(lash_core::ProcessTerminalState::Cancelled) => theme::tool_failure(),
         };
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", theme::text_faint_style()),

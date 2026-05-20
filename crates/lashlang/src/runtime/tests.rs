@@ -1,5 +1,5 @@
 use super::*;
-use crate::ast::Stmt;
+use crate::ast::{Expr, Program};
 use std::fmt::Write as _;
 use std::sync::{
     Arc, Mutex,
@@ -9,20 +9,51 @@ use std::sync::{
 #[derive(Default)]
 struct Host;
 
-impl ToolHost for Host {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        match name.as_str() {
-            "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-            "err" => Err(ToolHostError::new("boom")),
-            "panic" => panic!("boom"),
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+impl ExecutionHost for Host {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => match name.as_str() {
+                "echo" => Ok(AbilityResult::Value(
+                    args.get("value").cloned().unwrap_or(Value::Null),
+                )),
+                "err" => Err(ExecutionHostError::new("boom")),
+                "panic" => panic!("boom"),
+                _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
+            },
+            AbilityOp::Await(handle) => match handle {
+                Value::Record(_) => Ok(AbilityResult::Value(Value::Null)),
+                _ => Err(ExecutionHostError::new("expected handle record")),
+            },
+            AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
+}
 
-    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
-        match handle {
-            Value::Record(_) => Ok(Value::Null),
-            _ => Err(ToolHostError::new("expected handle record")),
+#[derive(Default)]
+struct RecordingProcessHost {
+    starts: Mutex<Vec<ProcessBlockStart>>,
+    events: Mutex<Vec<ProcessBlockEvent>>,
+}
+
+impl ExecutionHost for RecordingProcessHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, .. } => {
+                Err(ExecutionHostError::new(format!("unknown tool: {name}")))
+            }
+            AbilityOp::StartProcess(start) => {
+                self.starts.lock().expect("starts lock").push(start);
+                let mut handle = Record::new();
+                handle.insert("__handle__".to_string(), Value::String("process".into()));
+                handle.insert("id".to_string(), Value::String("proc-1".into()));
+                Ok(AbilityResult::Value(Value::Record(Arc::new(handle))))
+            }
+            AbilityOp::ProcessEvent(event) => {
+                self.events.lock().expect("events lock").push(event);
+                Ok(AbilityResult::Unit)
+            }
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
 }
@@ -33,6 +64,7 @@ async fn exec(source: &str) -> Result<Value, RuntimeError> {
     match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
 
@@ -40,6 +72,103 @@ async fn exec_outcome(source: &str) -> Result<ExecutionOutcome, RuntimeError> {
     let program = crate::parse(source).expect("program should parse");
     let mut state = State::new();
     execute_program(&program, &mut state, &Host).await
+}
+
+fn compile_source(source: &str) -> Result<CompiledProgram, crate::ParseError> {
+    crate::compile(source)
+}
+
+fn compile_program(program: &Program) -> CompiledProgram {
+    super::entry_points::compile_program_internal(program)
+}
+
+async fn execute_program<H: ExecutionHost>(
+    program: &Program,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    super::execute(program, state, host).await
+}
+
+async fn execute_compiled<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    super::execute(program, state, host).await
+}
+
+async fn execute_compiled_with_projected_bindings<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    let env = ExecutionEnvironment::new(host).with_projected_bindings(projected.clone());
+    super::execute(program, state, &env).await
+}
+
+async fn execute_compiled_with_scratch<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    scratch: &mut ExecutionScratch,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    let env = ExecutionEnvironment::new(host).with_scratch(std::mem::take(scratch));
+    let result = super::execute(program, state, &env).await;
+    *scratch = env.take_recycled_scratch().unwrap_or_default();
+    result
+}
+
+async fn execute_compiled_traced<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
+    let env = ExecutionEnvironment::new(host).traced();
+    match super::execute(program, state, &env).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => Err(env
+            .take_runtime_failure()
+            .unwrap_or(RuntimeFailure { error, span: None })),
+    }
+}
+
+async fn execute_compiled_traced_with_projected_bindings<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+    projected: &ProjectedBindings,
+) -> Result<ExecutionOutcome, RuntimeFailure> {
+    let env = ExecutionEnvironment::new(host)
+        .traced()
+        .with_projected_bindings(projected.clone());
+    match super::execute(program, state, &env).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => Err(env
+            .take_runtime_failure()
+            .unwrap_or(RuntimeFailure { error, span: None })),
+    }
+}
+
+async fn execute_compiled_process<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, RuntimeError> {
+    let env = ExecutionEnvironment::new(host).process();
+    super::execute(program, state, &env).await
+}
+
+async fn profile_compiled<H: ExecutionHost>(
+    program: &CompiledProgram,
+    state: &mut State,
+    host: &H,
+) -> Result<(ExecutionOutcome, ProfileReport), RuntimeError> {
+    let env = ExecutionEnvironment::new(host).profiled();
+    let outcome = super::execute(program, state, &env).await?;
+    let profile = env.take_profile().expect("profile should be recorded");
+    Ok((outcome, profile))
 }
 
 const GOLDEN_CONTRACT_SOURCE: &str = r#"
@@ -80,12 +209,9 @@ fn golden_compiled_bytecode_contract_covers_lashlang_surface() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn golden_runtime_diagnostic_contract_is_exact() {
-    let err = crate::execute_with_diagnostics("x = 1\nsubmit len(true)", &mut State::new(), &Host)
-        .await
-        .expect_err("runtime should fail");
     insta::assert_snapshot!(
         "lashlang_runtime_diagnostic_contract",
-        diagnostic_message(err)
+        runtime_diagnostic("x = 1\nsubmit len(true)").await
     );
 }
 
@@ -122,8 +248,8 @@ async fn golden_lashlang_diagnostic_corpus_is_exact() {
         format_parse_diagnostic("Payload = Type { nested: { ok: bool } }"),
     ));
     cases.push(diagnostic_case(
-        "runtime_finish_inside_parallel",
-        runtime_diagnostic("parallel {\n  submit \"nope\"\n}\nsubmit \"done\"").await,
+        "parse_removed_parallel_keyword",
+        format_parse_diagnostic("parallel {\n  start call echo {}\n}"),
     ));
     cases.push(diagnostic_case(
         "runtime_bad_wrapper_unwrap",
@@ -192,13 +318,6 @@ submit Payload
         "lashlang_serialized_state_snapshot_contract",
         serde_json::to_string_pretty(&state.snapshot()).expect("snapshot should serialize")
     );
-}
-
-fn diagnostic_message(err: crate::ExecuteError) -> String {
-    let crate::ExecuteError::Runtime(RuntimeError::ValueError { message }) = err else {
-        panic!("expected diagnostic runtime error");
-    };
-    message
 }
 
 fn format_parse_diagnostic(source: &str) -> String {
@@ -380,6 +499,14 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
             name_text(chunk, name),
             keys_snapshot(chunk, keys)
         ),
+        Instruction::StartProcess {
+            block,
+            has_name,
+            has_timeout_ms,
+            has_input,
+        } => format!(
+            "start_process block#{block} name={has_name} timeout_ms={has_timeout_ms} input={has_input}"
+        ),
         Instruction::AwaitHandle => "await_handle".to_string(),
         Instruction::AwaitHandleUnwrap => "await_handle_unwrap".to_string(),
         Instruction::CancelHandle => "cancel_handle".to_string(),
@@ -410,6 +537,10 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         }
         Instruction::Print => "print".to_string(),
         Instruction::Submit => "submit".to_string(),
+        Instruction::ProcessYield => "process_yield".to_string(),
+        Instruction::ProcessWake => "process_wake".to_string(),
+        Instruction::ProcessFinish => "process_finish".to_string(),
+        Instruction::ProcessFail => "process_fail".to_string(),
         Instruction::Pop => "pop".to_string(),
         Instruction::BeginIter(slot) => format!("begin_iter {slot}:{}", slot_name(chunk, slot)),
         Instruction::BeginRangeIter { binding, argc } => {
@@ -421,21 +552,6 @@ fn instruction_snapshot(chunk: &Chunk, instruction: Instruction) -> String {
         Instruction::LoweredLoop(index) => lowered_loop_snapshot(chunk, index),
         Instruction::IterNext { jump_to } => format!("iter_next {jump_to}"),
         Instruction::EndIter => "end_iter".to_string(),
-        Instruction::ParallelCalls(index) => format!("parallel_calls set#{index}"),
-        Instruction::ParallelCallsValue(index) => format!("parallel_calls_value set#{index}"),
-        Instruction::ParallelNamedCallsValue(index) => {
-            format!("parallel_named_calls_value set#{index}")
-        }
-        Instruction::PureParallelValue(index) => format!("pure_parallel_value set#{index}"),
-        Instruction::PureParallelNamedValue(index) => {
-            format!("pure_parallel_named_value set#{index}")
-        }
-        Instruction::Parallel(index) => format!("parallel chunk_set#{index}"),
-        Instruction::ParallelValue(index) => format!("parallel_value chunk_set#{index}"),
-        Instruction::ParallelNamed(index) => format!("parallel_named chunk_set#{index}"),
-        Instruction::ParallelNamedValue(index) => {
-            format!("parallel_named_value chunk_set#{index}")
-        }
         Instruction::ResolveTypeRef(slot) => {
             format!("resolve_type_ref {slot}:{}", slot_name(chunk, slot))
         }
@@ -1786,6 +1902,7 @@ async fn exec_with_global(name: &str, value: Value, source: &str) -> Result<Valu
     match execute_program(&program, &mut state, &Host).await? {
         ExecutionOutcome::Finished(value) => Ok(value),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
 
@@ -2137,6 +2254,7 @@ async fn exec_with_global_state(
     match outcome {
         ExecutionOutcome::Finished(value) => Ok((value, state)),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
 
@@ -2194,6 +2312,7 @@ async fn exec_with_projected(
     match outcome {
         ExecutionOutcome::Finished(value) => Ok((value, state)),
         ExecutionOutcome::Continued => panic!("expected `submit` in test program"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
 }
 
@@ -2925,48 +3044,36 @@ async fn false_if_branch_and_finish_inside_loop_are_covered() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn parallel_branch_panics_are_reported_as_runtime_errors() {
-    let err = exec(
-        r#"
-        parallel {
-          crash = call panic {}
-        }
-        submit 1
-        "#,
-    )
-    .await
-    .expect_err("parallel panic should be reported");
-
-    assert_eq!(
-        err,
-        RuntimeError::ValueError {
-            message: "parallel branch panicked".to_string()
-        }
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn parallel_tool_calls_use_host_batch_when_available() {
+async fn await_record_tool_calls_start_and_join_handles() {
     struct BatchHost {
         calls: AtomicUsize,
         batches: AtomicUsize,
     }
 
-    impl ToolHost for BatchHost {
-        async fn call(&self, _name: String, _args: Record) -> Result<Value, ToolHostError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Err(ToolHostError::new("single call should not be used"))
-        }
-
-        async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<Value, ToolHostError>> {
-            self.batches.fetch_add(1, Ordering::Relaxed);
-            calls
-                .into_iter()
-                .map(|call| match call.name.as_str() {
-                    "echo" => Ok(call.args.get("value").cloned().unwrap_or(Value::Null)),
-                    other => Err(ToolHostError::new(format!("unknown tool: {other}"))),
-                })
-                .collect()
+    impl ExecutionHost for BatchHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            match op {
+                AbilityOp::StartToolCall { name, args } => {
+                    self.calls.fetch_add(1, Ordering::Relaxed);
+                    let mut handle = Record::new();
+                    handle.insert("__handle__".to_string(), Value::String("process".into()));
+                    handle.insert("tool".to_string(), Value::String(name.into()));
+                    handle.insert(
+                        "value".to_string(),
+                        args.get("value").cloned().unwrap_or(Value::Null),
+                    );
+                    Ok(AbilityResult::Value(Value::Record(Arc::new(handle))))
+                }
+                AbilityOp::Await(handle) => {
+                    let value = handle
+                        .as_record()
+                        .and_then(|record| record.get("value"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    Ok(AbilityResult::Value(value))
+                }
+                _ => Err(ExecutionHostError::new("unsupported host ability")),
+            }
         }
     }
 
@@ -2976,9 +3083,9 @@ async fn parallel_tool_calls_use_host_batch_when_available() {
     };
     let program = crate::parse(
         r#"
-        result = parallel {
-          left: call echo { value: "a" }
-          right: call echo { value: "b" }
+        result = await {
+          left: start call echo { value: "a" },
+          right: start call echo { value: "b" }
         }
         submit [result.left?, result.right?]
         "#,
@@ -2995,8 +3102,8 @@ async fn parallel_tool_calls_use_host_batch_when_available() {
             vec![Value::String("a".into()), Value::String("b".into())].into()
         ))
     );
-    assert_eq!(host.calls.load(Ordering::Relaxed), 0);
-    assert_eq!(host.batches.load(Ordering::Relaxed), 1);
+    assert_eq!(host.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(host.batches.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3013,31 +3120,34 @@ async fn truthiness_covers_scalar_and_container_values() {
 
 struct AsyncHost;
 
-impl ToolHost for AsyncHost {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        Host.call(name, args).await
-    }
-
-    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        let mut record = Record::default();
-        record.insert("__handle__".to_string(), Value::String("process".into()));
-        record.insert("tool".to_string(), Value::String(name.into()));
-        record.insert(
-            "value".to_string(),
-            args.get("value").cloned().unwrap_or(Value::Null),
-        );
-        Ok(Value::Record(Arc::new(record)))
-    }
-
-    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
-        let record = handle
-            .as_record()
-            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
-        Ok(record.get("value").cloned().unwrap_or(Value::Null))
-    }
-
-    async fn cancel_handle(&self, _handle: Value) -> Result<Value, ToolHostError> {
-        Ok(Value::Null)
+impl ExecutionHost for AsyncHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => {
+                Host.perform(AbilityOp::CallTool { name, args }).await
+            }
+            AbilityOp::StartToolCall { name, args } => {
+                let mut record = Record::default();
+                record.insert("__handle__".to_string(), Value::String("process".into()));
+                record.insert("tool".to_string(), Value::String(name.into()));
+                record.insert(
+                    "value".to_string(),
+                    args.get("value").cloned().unwrap_or(Value::Null),
+                );
+                Ok(AbilityResult::Value(Value::Record(Arc::new(record))))
+            }
+            AbilityOp::Await(handle) => {
+                let record = handle
+                    .as_record()
+                    .ok_or_else(|| ExecutionHostError::new("expected handle record"))?;
+                Ok(AbilityResult::Value(
+                    record.get("value").cloned().unwrap_or(Value::Null),
+                ))
+            }
+            AbilityOp::Cancel(_) => Ok(AbilityResult::Value(Value::Null)),
+            AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
+        }
     }
 }
 
@@ -3064,6 +3174,151 @@ async fn process_handles_can_be_started_awaited_and_cancelled() {
         .expect("await should return wrapped result");
     assert_eq!(record["ok"], Value::Bool(true));
     assert_eq!(record["value"], Value::String("done".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn start_process_returns_raw_handle_and_passes_explicit_input() {
+    let host = RecordingProcessHost::default();
+    let program = crate::parse(
+        r#"
+        parent = "not captured"
+        handle = start(name: "scan", timeout_ms: 5, input: { root: "." }) {
+          finish root
+        }
+        submit handle
+        "#,
+    )
+    .expect("program should parse");
+    let mut state = State::new();
+    let outcome = execute_program(&program, &mut state, &host)
+        .await
+        .expect("program should run");
+    let ExecutionOutcome::Finished(value) = outcome else {
+        panic!("expected finish");
+    };
+    let handle = value.as_record().expect("start should return a handle");
+    assert_eq!(handle["__handle__"], Value::String("process".into()));
+    assert_eq!(handle["id"], Value::String("proc-1".into()));
+
+    let starts = host.starts.lock().expect("starts lock");
+    assert_eq!(starts.len(), 1);
+    let start = &starts[0];
+    assert_eq!(start.name, Some(Value::String("scan".into())));
+    assert_eq!(start.timeout_ms, Some(Value::Number(5.0)));
+    let input = start
+        .input
+        .as_ref()
+        .and_then(Value::as_record)
+        .expect("input should be a record");
+    assert_eq!(input["root"], Value::String(".".into()));
+    let Expr::Block(expressions) = &start.program.expr else {
+        panic!("process program should be a block");
+    };
+    assert_eq!(expressions.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_controls_emit_events_and_terminal_outcomes() {
+    let host = RecordingProcessHost::default();
+    let program = Program::block(vec![
+        Expr::Yield(Box::new(Expr::String("checkpoint".into()))),
+        Expr::Wake(Box::new(Expr::String("ready".into()))),
+        Expr::Finish(Some(Box::new(Expr::String("done".into())))),
+    ]);
+    let mut state = State::new();
+    let compiled = compile_program(&program);
+    let outcome = execute_compiled_process(&compiled, &mut state, &host)
+        .await
+        .expect("process controls should run");
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Finished(Value::String("done".into()))
+    );
+    let events = host.events.lock().expect("events lock");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, ProcessBlockEventKind::Yield);
+    assert_eq!(events[0].value, Value::String("checkpoint".into()));
+    assert_eq!(events[1].kind, ProcessBlockEventKind::Wake);
+    assert_eq!(events[1].value, Value::String("ready".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_fail_returns_terminal_failure_outcome() {
+    let host = RecordingProcessHost::default();
+    let program = Program::block(vec![Expr::Fail(Box::new(Expr::Record(vec![(
+        "reason".into(),
+        Expr::String("bad".into()),
+    )])))]);
+    let mut state = State::new();
+    let compiled = compile_program(&program);
+    let outcome = execute_compiled_process(&compiled, &mut state, &host)
+        .await
+        .expect("process fail should run");
+    let ExecutionOutcome::Failed(value) = outcome else {
+        panic!("expected process failure");
+    };
+    let failure = value
+        .as_record()
+        .expect("failure should preserve raw value");
+    assert_eq!(failure["reason"], Value::String("bad".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_mode_falling_off_end_finishes_null() {
+    let host = RecordingProcessHost::default();
+    let program = Program::block(vec![Expr::String("ignored".into())]);
+    let compiled = compile_program(&program);
+    let mut state = State::new();
+
+    let outcome = execute_compiled_process(&compiled, &mut state, &host)
+        .await
+        .expect("process should run");
+
+    assert_eq!(outcome, ExecutionOutcome::Finished(Value::Null));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn foreground_rejects_programmatic_process_controls() {
+    for (keyword, stmt) in [
+        ("yield", Expr::Yield(Box::new(Expr::String("event".into())))),
+        ("wake", Expr::Wake(Box::new(Expr::String("event".into())))),
+        (
+            "finish",
+            Expr::Finish(Some(Box::new(Expr::String("done".into())))),
+        ),
+        ("fail", Expr::Fail(Box::new(Expr::String("bad".into())))),
+    ] {
+        let program = Program::block(vec![stmt]);
+        let mut state = State::new();
+        let host = RecordingProcessHost::default();
+        let err = execute_program(&program, &mut state, &host)
+            .await
+            .expect_err("foreground mode should reject process controls");
+        assert_eq!(err, RuntimeError::ProcessControlOutsideProcess { keyword });
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_mode_rejects_programmatic_foreground_controls() {
+    for (keyword, stmt) in [
+        (
+            "submit",
+            Expr::Submit(Some(Box::new(Expr::String("done".into())))),
+        ),
+        ("print", Expr::Print(Box::new(Expr::String("debug".into())))),
+    ] {
+        let program = Program::block(vec![stmt]);
+        let compiled = compile_program(&program);
+        let mut state = State::new();
+        let host = RecordingProcessHost::default();
+        let err = execute_compiled_process(&compiled, &mut state, &host)
+            .await
+            .expect_err("process mode should reject foreground controls");
+        assert_eq!(
+            err,
+            RuntimeError::ForegroundControlInsideProcess { keyword }
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3263,7 +3518,7 @@ async fn await_record_of_handles_returns_record_of_wrappers() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
+async fn result_unwrap_extracts_awaited_handles_and_joined_results() {
     let program = crate::parse(
         r#"
         handle = start call echo { value: "done" }
@@ -3283,10 +3538,10 @@ async fn result_unwrap_extracts_awaited_handles_and_parallel_results() {
 
     let program = crate::parse(
         r#"
-        results = parallel {
-          call echo { value: "left" }
-          call echo { value: "right" }
-        }
+        results = await [
+          start call echo { value: "left" },
+          start call echo { value: "right" }
+        ]
         submit [(results[0])?, (results[1])?]
         "#,
     )
@@ -3507,7 +3762,7 @@ async fn compile_stats_count_const_folded_and_dynamic_literals() {
         submit B
     "#;
     let program = crate::parse(src).expect("should parse");
-    let compiled = crate::compile_program(&program);
+    let compiled = compile_program(&program);
     let stats = compiled.compile_stats();
     assert_eq!(stats.type_literals_total, 3);
     assert_eq!(
@@ -3529,9 +3784,9 @@ async fn profile_report_surfaces_resolve_type_ref_counts() {
         submit checked
     "#;
     let program = crate::parse(src).expect("should parse");
-    let compiled = crate::compile_program(&program);
+    let compiled = compile_program(&program);
     let mut state = State::new();
-    let (_outcome, report) = crate::profile_compiled(&compiled, &mut state, &Host)
+    let (_outcome, report) = profile_compiled(&compiled, &mut state, &Host)
         .await
         .expect("profile should succeed");
     let names: Vec<_> = report.instruction_stats().iter().map(|s| s.name).collect();
@@ -3564,17 +3819,20 @@ async fn type_literal_inside_tool_call_args_passes_through_as_record() {
     struct CaptureHost {
         captured: std::sync::Mutex<Option<Value>>,
     }
-    impl ToolHost for CaptureHost {
-        async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
+    impl ExecutionHost for CaptureHost {
+        async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+            let AbilityOp::CallTool { name, args } = op else {
+                return Err(ExecutionHostError::new("unsupported host ability"));
+            };
             if name == "spawn" {
                 let schema = args
                     .get("output")
                     .cloned()
                     .expect("output arg must be present");
                 *self.captured.lock().unwrap() = Some(schema);
-                return Ok(Value::Null);
+                return Ok(AbilityResult::Value(Value::Null));
             }
-            Err(ToolHostError::new(format!("unknown: {name}")))
+            Err(ExecutionHostError::new(format!("unknown: {name}")))
         }
     }
     let host = CaptureHost {
@@ -3589,7 +3847,7 @@ async fn type_literal_inside_tool_call_args_passes_through_as_record() {
     )
     .expect("should parse");
     let mut state = State::new();
-    crate::execute_program(&program, &mut state, &host)
+    execute_program(&program, &mut state, &host)
         .await
         .expect("should run");
 
@@ -3618,7 +3876,10 @@ async fn unknown_type_constructor_becomes_ref_not_error_at_parse() {
     // Unknown identifiers in type position are treated as refs; runtime
     // resolution is what errors out.
     let program = crate::parse("submit Type { x: Unknown }").expect("should parse as ref");
-    assert!(matches!(program.statements.last(), Some(Stmt::Submit(_))));
+    let Expr::Block(expressions) = program.expr else {
+        panic!("program should be a block");
+    };
+    assert!(matches!(expressions.last(), Some(Expr::Submit(_))));
 }
 
 #[tokio::test(flavor = "current_thread")]

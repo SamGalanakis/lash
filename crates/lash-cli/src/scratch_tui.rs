@@ -696,26 +696,15 @@ fn process_summary(app: &App) -> Option<String> {
     let running = app
         .processes
         .iter()
-        .filter(|task| task.state == lash_core::ProcessState::Running)
+        .filter(|task| task.terminal.is_none())
         .count();
-    let idle = app
-        .processes
-        .iter()
-        .filter(|task| task.state == lash_core::ProcessState::Waiting)
-        .count();
-    match (running, idle) {
-        (0, 0) => None,
-        (running, 0) => Some(format!(
+    match running {
+        0 => None,
+        running => Some(format!(
             "{} process{} running",
             running,
             if running == 1 { "" } else { "s" }
         )),
-        (0, idle) => Some(format!(
-            "{} process{} idle",
-            idle,
-            if idle == 1 { "" } else { "s" }
-        )),
-        (running, idle) => Some(format!("{running} running · {idle} idle")),
     }
 }
 

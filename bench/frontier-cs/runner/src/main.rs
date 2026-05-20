@@ -929,6 +929,7 @@ impl ToolProvider for FrontierProcessHandlesTool {
 
 fn frontier_list_process_handles_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+            "tool:list_process_handles",
             "list_process_handles",
             "List live lashlang process handles only. Returns `{ monitor: { monitor_id: handle }, tool: { id: handle } }`; terminal, awaited, or cancelled handles are omitted.",
             ToolDefinition::default_input_schema(),

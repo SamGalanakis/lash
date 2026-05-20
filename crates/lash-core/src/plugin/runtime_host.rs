@@ -121,6 +121,8 @@ pub trait RuntimeSessionHost: Send + Sync {
         &self,
         _session_id: &str,
         _registration: crate::ProcessRegistration,
+        _descriptor: Option<crate::ProcessHandleDescriptor>,
+        _execution_context: crate::ProcessExecutionContext,
     ) -> Result<crate::ProcessRecord, PluginError> {
         Err(PluginError::Session(
             "processes are unavailable in this session".to_string(),
@@ -131,10 +133,13 @@ pub trait RuntimeSessionHost: Send + Sync {
         &self,
         session_id: &str,
         registration: crate::ProcessRegistration,
+        descriptor: Option<crate::ProcessHandleDescriptor>,
+        execution_context: crate::ProcessExecutionContext,
         _effect_metadata: Option<crate::EffectInvocationMetadata>,
         _effect_controller: Option<&dyn crate::RuntimeEffectController>,
     ) -> Result<crate::ProcessRecord, PluginError> {
-        self.start_process(session_id, registration).await
+        self.start_process(session_id, registration, descriptor, execution_context)
+            .await
     }
 
     async fn await_process(
@@ -155,22 +160,22 @@ pub trait RuntimeSessionHost: Send + Sync {
         self.await_process(process_id).await
     }
 
-    async fn list_processes(
+    async fn list_process_handles(
         &self,
         _session_id: &str,
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
         Err(PluginError::Session(
             "process registry is unavailable in this session".to_string(),
         ))
     }
 
-    async fn list_processes_scoped(
+    async fn list_process_handles_scoped(
         &self,
         session_id: &str,
         _effect_metadata: Option<crate::EffectInvocationMetadata>,
         _effect_controller: Option<&dyn crate::RuntimeEffectController>,
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        self.list_processes(session_id).await
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
+        self.list_process_handles(session_id).await
     }
 
     async fn cancel_process(
@@ -197,13 +202,13 @@ pub trait RuntimeSessionHost: Send + Sync {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        let tasks = self.list_processes(session_id).await?;
+        let tasks = self.list_process_handles(session_id).await?;
         let mut cancelled = Vec::new();
-        for task in tasks {
-            if task.state.is_terminal() {
+        for (grant, record) in tasks {
+            if record.is_terminal() {
                 continue;
             }
-            cancelled.push(self.cancel_process(session_id, &task.id).await?);
+            cancelled.push(self.cancel_process(session_id, &grant.process_id).await?);
         }
         Ok(cancelled)
     }
@@ -213,7 +218,9 @@ pub trait RuntimeSessionHost: Send + Sync {
         _session_id: &str,
         _handle_ids: &[String],
     ) -> Result<(), PluginError> {
-        Ok(())
+        Err(PluginError::Session(
+            "process handle validation is unavailable in this runtime".to_string(),
+        ))
     }
 
     async fn transfer_process_handles(
@@ -222,7 +229,9 @@ pub trait RuntimeSessionHost: Send + Sync {
         _to_session_id: &str,
         _handle_ids: &[String],
     ) -> Result<(), PluginError> {
-        Ok(())
+        Err(PluginError::Session(
+            "process handle transfer is unavailable in this runtime".to_string(),
+        ))
     }
 
     async fn cancel_unreferenced_process_handles(
@@ -230,7 +239,9 @@ pub trait RuntimeSessionHost: Send + Sync {
         _session_id: &str,
         _keep_handle_ids: &[String],
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        Ok(Vec::new())
+        Err(PluginError::Session(
+            "process handle cleanup is unavailable in this runtime".to_string(),
+        ))
     }
 
     async fn monitor_snapshot(&self, _session_id: &str) -> Result<MonitorSnapshot, PluginError> {
@@ -275,6 +286,55 @@ pub trait RuntimeSessionHost: Send + Sync {
         _event: lash_trace::TraceEvent,
     ) -> Result<(), PluginError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefaultHost;
+
+    impl RuntimeSessionHost for DefaultHost {}
+
+    fn assert_session_error(err: PluginError, expected: &str) {
+        match err {
+            PluginError::Session(message) => assert!(
+                message.contains(expected),
+                "expected `{message}` to contain `{expected}`"
+            ),
+            other => panic!("expected session error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_process_handle_validation_fails_loudly() {
+        let err = DefaultHost
+            .validate_process_handles_visible("session", &["process".to_string()])
+            .await
+            .expect_err("default host must reject process grant validation");
+
+        assert_session_error(err, "process handle validation is unavailable");
+    }
+
+    #[tokio::test]
+    async fn default_process_handle_transfer_fails_loudly() {
+        let err = DefaultHost
+            .transfer_process_handles("source", "target", &["process".to_string()])
+            .await
+            .expect_err("default host must reject process grant transfer");
+
+        assert_session_error(err, "process handle transfer is unavailable");
+    }
+
+    #[tokio::test]
+    async fn default_process_handle_cleanup_fails_loudly() {
+        let err = DefaultHost
+            .cancel_unreferenced_process_handles("session", &["process".to_string()])
+            .await
+            .expect_err("default host must reject process grant cleanup");
+
+        assert_session_error(err, "process handle cleanup is unavailable");
     }
 }
 

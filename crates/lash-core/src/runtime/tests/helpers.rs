@@ -916,6 +916,7 @@ pub(crate) struct EchoTool;
 
 fn echo_tool_definition() -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
+        "tool:echo_tool",
         "echo_tool",
         "Return a tool payload",
         serde_json::json!({
@@ -988,6 +989,7 @@ impl TerminalControlTool {
 
 fn terminal_tool_definition(index: usize) -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
+        format!("tool:terminal_tool_{index}"),
         format!("terminal_tool_{index}"),
         "Return a terminal control result",
         crate::ToolDefinition::default_input_schema(),
@@ -1034,6 +1036,7 @@ impl crate::ToolProvider for SlowTool {
 
 fn slow_tool_definition() -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
+        "tool:slow_tool",
         "slow_tool",
         "Sleep for a long time; respects cancellation.",
         crate::ToolDefinition::default_input_schema(),
@@ -1060,6 +1063,7 @@ impl crate::ToolProvider for MemoryProbeTool {
 
 fn memory_probe_tool_definition() -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
+        "tool:memory_probe",
         "memory_probe",
         "probe",
         crate::ToolDefinition::default_input_schema(),
@@ -1135,6 +1139,7 @@ impl crate::ToolProvider for ChildSessionTool {
 
 fn child_session_tool_definition() -> crate::ToolDefinition {
     crate::ToolDefinition::raw(
+        "tool:spawn_child",
         "spawn_child",
         "spawn a child session",
         crate::ToolDefinition::default_input_schema(),

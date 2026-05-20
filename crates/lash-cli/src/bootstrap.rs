@@ -672,6 +672,7 @@ mod tests {
 
     fn dummy_tool(name: &str) -> ToolDefinition {
         ToolDefinition::raw(
+            format!("tool:{name}"),
             name,
             format!("{name} description"),
             ToolDefinition::default_input_schema(),

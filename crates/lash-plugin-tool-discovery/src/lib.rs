@@ -196,6 +196,7 @@ mod tests {
 
     fn catalog_tool(name: &str, description: &str) -> Value {
         json!({
+            "id": format!("tool:{name}"),
             "name": name,
             "description": description,
             "params": [],
@@ -1507,6 +1508,7 @@ mod tests {
         let tools = [
             search_tools_definition(),
             ToolDefinition::raw(
+                "tool:fetch_url",
                 "fetch_url",
                 "Fetch URL",
                 ToolDefinition::default_input_schema(),

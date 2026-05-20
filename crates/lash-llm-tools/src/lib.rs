@@ -299,6 +299,7 @@ fn tool_definition(
     execution_mode: ToolExecutionMode,
 ) -> ToolDefinition {
     ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         description,
         input_schema,

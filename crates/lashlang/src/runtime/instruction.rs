@@ -1,8 +1,7 @@
 //! Bytecode instruction set + the inert data types that flow from the
 //! compiler to the VM: `Chunk`, `Name`, `Instruction`, `IntrinsicOp`, the
 //! profile-tag enums and accumulator, the format-template / assign-path
-//! shapes, and the pure-expression form used by the parallel-call
-//! optimization.
+//! shapes, and the pure-expression form used by lowered loop execution.
 //!
 //! Everything here is internal to the runtime crate — the visibility is
 //! `pub(crate)` because compiler.rs produces these structures and vm.rs
@@ -10,7 +9,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::ast::{BinaryOp, UnaryOp};
+use crate::ast::{BinaryOp, Program, UnaryOp};
 use crate::lexer::Span;
 
 use super::record::{Symbol, intern_symbol, symbol_name};
@@ -27,20 +26,21 @@ pub(crate) struct Chunk {
     pub(crate) key_lists: Vec<Box<[usize]>>,
     pub(crate) format_templates: Vec<CompiledFormatTemplate>,
     pub(crate) compiled_schemas: Vec<ValidationPlan>,
-    pub(crate) parallel_call_sets: Vec<Box<[ParallelCallBranch]>>,
-    pub(crate) named_parallel_call_sets: Vec<Box<[NamedParallelCallBranch]>>,
-    pub(crate) pure_parallel_sets: Vec<Box<[PureExpr]>>,
-    pub(crate) pure_named_parallel_sets: Vec<Box<[(usize, PureExpr)]>>,
-    pub(crate) branch_sets: Vec<Box<[Chunk]>>,
-    pub(crate) named_branch_sets: Vec<Box<[NamedBranchChunk]>>,
     pub(crate) assign_paths: Vec<CompiledAssignPath>,
     pub(crate) lowered_loops: Vec<LoweredLoop>,
+    pub(crate) process_blocks: Vec<CompiledProcessBlock>,
 }
 
 #[derive(Clone)]
 pub(crate) struct Name {
     pub(crate) symbol: Symbol,
     pub(crate) text: Arc<str>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledProcessBlock {
+    pub(crate) program: Program,
+    pub(crate) tool_names: Box<[Name]>,
 }
 
 #[derive(Clone)]
@@ -177,6 +177,12 @@ pub(crate) enum Instruction {
         name: usize,
         keys: usize,
     },
+    StartProcess {
+        block: usize,
+        has_name: bool,
+        has_timeout_ms: bool,
+        has_input: bool,
+    },
     AwaitHandle,
     AwaitHandleUnwrap,
     CancelHandle,
@@ -204,6 +210,10 @@ pub(crate) enum Instruction {
     AppendAssign(usize),
     Print,
     Submit,
+    ProcessYield,
+    ProcessWake,
+    ProcessFinish,
+    ProcessFail,
     Pop,
     BeginIter(usize),
     BeginRangeIter {
@@ -215,15 +225,6 @@ pub(crate) enum Instruction {
         jump_to: usize,
     },
     EndIter,
-    ParallelCalls(usize),
-    ParallelCallsValue(usize),
-    ParallelNamedCallsValue(usize),
-    PureParallelValue(usize),
-    PureParallelNamedValue(usize),
-    Parallel(usize),
-    ParallelValue(usize),
-    ParallelNamed(usize),
-    ParallelNamedValue(usize),
     ResolveTypeRef(usize),
     WrapTypeLiteral,
 }
@@ -314,6 +315,7 @@ impl Instruction {
                 InstructionProfileTag::CallTool
             }
             Instruction::StartCallTool { .. } => InstructionProfileTag::StartCallTool,
+            Instruction::StartProcess { .. } => InstructionProfileTag::StartProcess,
             Instruction::AwaitHandle | Instruction::AwaitHandleUnwrap => {
                 InstructionProfileTag::AwaitHandle
             }
@@ -327,6 +329,10 @@ impl Instruction {
             Instruction::AppendAssign(_) => InstructionProfileTag::AppendAssign,
             Instruction::Print => InstructionProfileTag::Print,
             Instruction::Submit => InstructionProfileTag::Submit,
+            Instruction::ProcessYield
+            | Instruction::ProcessWake
+            | Instruction::ProcessFinish
+            | Instruction::ProcessFail => InstructionProfileTag::ProcessControl,
             Instruction::Pop => InstructionProfileTag::Pop,
             Instruction::BeginIter(_) | Instruction::BeginRangeIter { .. } => {
                 InstructionProfileTag::BeginIter
@@ -334,15 +340,6 @@ impl Instruction {
             Instruction::LoweredLoop(_) => InstructionProfileTag::LoweredLoop,
             Instruction::IterNext { .. } => InstructionProfileTag::IterNext,
             Instruction::EndIter => InstructionProfileTag::EndIter,
-            Instruction::ParallelCalls(_) => InstructionProfileTag::Parallel,
-            Instruction::ParallelCallsValue(_) => InstructionProfileTag::Parallel,
-            Instruction::ParallelNamedCallsValue(_) => InstructionProfileTag::Parallel,
-            Instruction::PureParallelValue(_) => InstructionProfileTag::Parallel,
-            Instruction::PureParallelNamedValue(_) => InstructionProfileTag::Parallel,
-            Instruction::Parallel(_) => InstructionProfileTag::Parallel,
-            Instruction::ParallelValue(_) => InstructionProfileTag::Parallel,
-            Instruction::ParallelNamed(_) => InstructionProfileTag::Parallel,
-            Instruction::ParallelNamedValue(_) => InstructionProfileTag::Parallel,
             Instruction::ResolveTypeRef(_) => InstructionProfileTag::ResolveTypeRef,
             Instruction::WrapTypeLiteral => InstructionProfileTag::WrapTypeLiteral,
         }
@@ -439,6 +436,7 @@ pub(crate) enum InstructionProfileTag {
     JumpIfTrue,
     CallTool,
     StartCallTool,
+    StartProcess,
     AwaitHandle,
     CancelHandle,
     Intrinsic,
@@ -446,12 +444,12 @@ pub(crate) enum InstructionProfileTag {
     AppendAssign,
     Print,
     Submit,
+    ProcessControl,
     Pop,
     BeginIter,
     LoweredLoop,
     IterNext,
     EndIter,
-    Parallel,
     ResolveTypeRef,
     WrapTypeLiteral,
 }
@@ -489,12 +487,22 @@ pub(crate) enum BuiltinProfileTag {
 
 const BUILTIN_PROFILE_COUNT: usize = BuiltinProfileTag::Unknown as usize + 1;
 
-#[derive(Default)]
 pub(crate) struct ProfileAccumulator {
     pub(crate) instruction_counts: [u64; INSTRUCTION_PROFILE_COUNT],
     pub(crate) instruction_times: [u128; INSTRUCTION_PROFILE_COUNT],
     pub(crate) builtin_counts: [u64; BUILTIN_PROFILE_COUNT],
     pub(crate) builtin_times: [u128; BUILTIN_PROFILE_COUNT],
+}
+
+impl Default for ProfileAccumulator {
+    fn default() -> Self {
+        Self {
+            instruction_counts: [0; INSTRUCTION_PROFILE_COUNT],
+            instruction_times: [0; INSTRUCTION_PROFILE_COUNT],
+            builtin_counts: [0; BUILTIN_PROFILE_COUNT],
+            builtin_times: [0; BUILTIN_PROFILE_COUNT],
+        }
+    }
 }
 
 impl ProfileAccumulator {
@@ -532,6 +540,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "jump_if_true",
     "call_tool",
     "start_call_tool",
+    "start_process",
     "await_handle",
     "cancel_handle",
     "intrinsic",
@@ -539,12 +548,12 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "append_assign",
     "print",
     "submit",
+    "process_control",
     "pop",
     "begin_iter",
     "lowered_loop",
     "iter_next",
     "end_iter",
-    "parallel",
     "resolve_type_ref",
     "wrap_type_literal",
 ];
@@ -615,26 +624,6 @@ pub(crate) fn merge_stats(target: &mut Vec<ProfileStat>, source: &[ProfileStat])
             .cmp(&a.total_ns)
             .then_with(|| b.count.cmp(&a.count))
     });
-}
-
-#[derive(Clone)]
-pub(crate) struct ParallelCallBranch {
-    pub(crate) slot: usize,
-    pub(crate) name: usize,
-    pub(crate) args: PureExpr,
-}
-
-#[derive(Clone)]
-pub(crate) struct NamedParallelCallBranch {
-    pub(crate) output_name: usize,
-    pub(crate) name: usize,
-    pub(crate) args: PureExpr,
-}
-
-#[derive(Clone)]
-pub(crate) struct NamedBranchChunk {
-    pub(crate) name: usize,
-    pub(crate) chunk: Chunk,
 }
 
 #[derive(Clone)]
@@ -735,44 +724,5 @@ pub(crate) enum LoopExpr {
         left: Box<LoopExpr>,
         op: BinaryOp,
         right: Box<LoopExpr>,
-    },
-}
-
-#[derive(Clone)]
-pub(crate) enum PureExpr {
-    Const(Value),
-    Slot(usize),
-    List(Box<[PureExpr]>),
-    Record(Box<[(usize, PureExpr)]>),
-    Intrinsic {
-        op: IntrinsicOp,
-        args: Box<[PureExpr]>,
-    },
-    Format {
-        template: CompiledFormatTemplate,
-        args: Box<[PureExpr]>,
-    },
-    ResultUnwrap(Box<PureExpr>),
-    Field {
-        target: Box<PureExpr>,
-        field: usize,
-    },
-    Index {
-        target: Box<PureExpr>,
-        index: Box<PureExpr>,
-    },
-    Unary {
-        op: UnaryOp,
-        expr: Box<PureExpr>,
-    },
-    Conditional {
-        condition: Box<PureExpr>,
-        then_expr: Box<PureExpr>,
-        else_expr: Box<PureExpr>,
-    },
-    Binary {
-        left: Box<PureExpr>,
-        op: BinaryOp,
-        right: Box<PureExpr>,
     },
 }

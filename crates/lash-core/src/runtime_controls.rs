@@ -16,8 +16,8 @@ use crate::plugin::{
 };
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{
-    MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec, ProcessState, ProgressSender,
-    ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
+    MAX_MONITOR_TIMEOUT_MS, MonitorRunState, MonitorSpec, ProgressSender, ToolContract,
+    ToolDefinition, ToolExecutionMode, ToolManifest, ToolResult,
 };
 
 /// Plugin factory for mode-agnostic process-control tools.
@@ -160,6 +160,7 @@ impl ModeNativeToolsPlugin for MonitorNativeTool {
 /// Build the `monitor` tool definition.
 pub fn monitor_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:monitor",
         "monitor",
         "Run a background script that turns each stdout line into a process event and optional turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, run the command synchronously instead. This returns a process handle; use `list_process_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input — do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first matching line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) — stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals ≥30s for remote APIs, 0.5–1s for local checks.\n\n**Coverage — silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit — and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nSet `persistent: true` for session-length watches. Timeout → killed; exit ends the watch (exit code is reported).",
         serde_json::json!({
@@ -200,8 +201,9 @@ pub fn monitor_tool_definition() -> ToolDefinition {
 
 pub fn process_list_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:list_process_handles",
         "list_process_handles",
-        "List every model-visible process handle in this session with its process id, producer, tags, and state.",
+        "List every process handle granted to this session with its process id, descriptor, and terminal status.",
         ToolDefinition::default_input_schema(),
         serde_json::json!({ "type": "object", "additionalProperties": true }),
     )
@@ -218,6 +220,7 @@ fn process_control_tool_definitions() -> Vec<ToolDefinition> {
 
 pub fn process_cancel_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
+        "tool:cancel_process",
         "cancel_process",
         "Request cancellation for a durable process by `process_id`.",
         serde_json::json!({
@@ -338,26 +341,21 @@ pub async fn execute_monitor_tool_call(
 pub async fn execute_process_list_tool_call(context: &ToolDispatchContext<'_>) -> ToolResult {
     match context
         .host
-        .list_processes_scoped(
+        .list_process_handles_scoped(
             &context.session_id,
             context.tool_effect_metadata.clone(),
             Some(context.effect_controller.as_controller()),
         )
         .await
     {
-        Ok(processes) => {
-            let entries: Vec<Value> = processes
+        Ok(entries) => {
+            let entries: Vec<Value> = entries
                 .into_iter()
-                .filter(|process| process.handle_visible)
-                .map(|process| {
-                    let created_at_iso = chrono::DateTime::<chrono::Utc>::from(process.created_at)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                .map(|(grant, process)| {
                     serde_json::json!({
                         "process_id": process.id,
-                        "producer": process.producer,
-                        "tags": process.tags,
-                        "state": state_label(process.state),
-                        "created_at": created_at_iso,
+                        "descriptor": grant.descriptor,
+                        "terminal": terminal_label(process.terminal.as_ref()),
                     })
                 })
                 .collect();
@@ -379,6 +377,13 @@ pub async fn execute_process_cancel_tool_call(
     else {
         return ToolResult::err_fmt("cancel_process requires `process_id`");
     };
+    if let Err(err) = context
+        .host
+        .validate_process_handles_visible(&context.session_id, &[id.to_string()])
+        .await
+    {
+        return ToolResult::err_fmt(err.to_string());
+    }
     match context
         .host
         .cancel_process_scoped(
@@ -391,22 +396,17 @@ pub async fn execute_process_cancel_tool_call(
     {
         Ok(status) => ToolResult::ok(serde_json::json!({
             "process_id": status.id,
-            "producer": status.producer,
-            "state": state_label(status.state),
+            "terminal": terminal_label(status.terminal.as_ref()),
         })),
         Err(err) => ToolResult::err_fmt(err.to_string()),
     }
 }
 
-fn state_label(state: ProcessState) -> &'static str {
-    match state {
-        ProcessState::Pending => "pending",
-        ProcessState::Scheduled => "scheduled",
-        ProcessState::Running => "running",
-        ProcessState::Waiting => "idle",
-        ProcessState::Completed => "completed",
-        ProcessState::Failed => "failed",
-        ProcessState::CancelRequested => "cancel_requested",
-        ProcessState::Cancelled => "cancelled",
+fn terminal_label(terminal: Option<&crate::ProcessTerminalSemantics>) -> &'static str {
+    match terminal.map(|terminal| terminal.state) {
+        None => "running",
+        Some(crate::ProcessTerminalState::Completed) => "completed",
+        Some(crate::ProcessTerminalState::Failed) => "failed",
+        Some(crate::ProcessTerminalState::Cancelled) => "cancelled",
     }
 }

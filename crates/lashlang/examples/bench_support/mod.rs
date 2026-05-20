@@ -1,8 +1,8 @@
 use compact_str::ToCompactString;
 use lashlang::{
-    ImageValue, ListValue, ProjectedBindings, ProjectedFuture, ProjectedHostValue,
-    ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record, State, ToolHost,
-    ToolHostCall, ToolHostError, Value, from_json,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ImageValue, ListValue,
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedReadResponse, ProjectedValue, Record, State, Value, from_json,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ pub enum Scenario {
     LanguageSurface,
     AsyncAwait,
     DirectUnwrap,
-    GeneralParallel,
+    GeneralFanout,
     LoopControl,
     IndexedAssignment,
     ProjectedValues,
@@ -27,7 +27,7 @@ pub enum Scenario {
     ContinueAsSeedSurface,
     SyntaxTextSurface,
     IntegerRangeSurface,
-    ParallelStatementSurface,
+    FanoutExpressionSurface,
     ImageSurface,
 }
 
@@ -37,7 +37,7 @@ impl Scenario {
         Self::LanguageSurface,
         Self::AsyncAwait,
         Self::DirectUnwrap,
-        Self::GeneralParallel,
+        Self::GeneralFanout,
         Self::LoopControl,
         Self::IndexedAssignment,
         Self::ProjectedValues,
@@ -51,7 +51,7 @@ impl Scenario {
         Self::ContinueAsSeedSurface,
         Self::SyntaxTextSurface,
         Self::IntegerRangeSurface,
-        Self::ParallelStatementSurface,
+        Self::FanoutExpressionSurface,
         Self::ImageSurface,
     ];
 
@@ -62,7 +62,7 @@ impl Scenario {
             "language_surface" => Self::LanguageSurface,
             "async_await" => Self::AsyncAwait,
             "direct_unwrap" => Self::DirectUnwrap,
-            "general_parallel" => Self::GeneralParallel,
+            "general_fanout" => Self::GeneralFanout,
             "loop_control" => Self::LoopControl,
             "indexed_assignment" => Self::IndexedAssignment,
             "projected_values" => Self::ProjectedValues,
@@ -76,7 +76,7 @@ impl Scenario {
             "continue_as_seed_surface" => Self::ContinueAsSeedSurface,
             "syntax_text_surface" => Self::SyntaxTextSurface,
             "integer_range_surface" => Self::IntegerRangeSurface,
-            "parallel_statement_surface" => Self::ParallelStatementSurface,
+            "fanout_expression_surface" => Self::FanoutExpressionSurface,
             "image_surface" => Self::ImageSurface,
             _ => return None,
         })
@@ -84,7 +84,7 @@ impl Scenario {
 
     #[allow(dead_code)]
     pub fn expected_values() -> &'static str {
-        "baseline, language_surface, async_await, direct_unwrap, general_parallel, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, syntax_text_surface, integer_range_surface, parallel_statement_surface, image_surface, or all"
+        "baseline, language_surface, async_await, direct_unwrap, general_fanout, loop_control, indexed_assignment, projected_values, large_data, cache_pressure, projected_operations, type_system_stress, wrapped_error_paths, tool_control_surface, snapshot_projected_state, continue_as_seed_surface, syntax_text_surface, integer_range_surface, fanout_expression_surface, image_surface, or all"
     }
 }
 
@@ -95,7 +95,7 @@ impl fmt::Display for Scenario {
             Self::LanguageSurface => "language_surface",
             Self::AsyncAwait => "async_await",
             Self::DirectUnwrap => "direct_unwrap",
-            Self::GeneralParallel => "general_parallel",
+            Self::GeneralFanout => "general_fanout",
             Self::LoopControl => "loop_control",
             Self::IndexedAssignment => "indexed_assignment",
             Self::ProjectedValues => "projected_values",
@@ -109,7 +109,7 @@ impl fmt::Display for Scenario {
             Self::ContinueAsSeedSurface => "continue_as_seed_surface",
             Self::SyntaxTextSurface => "syntax_text_surface",
             Self::IntegerRangeSurface => "integer_range_surface",
-            Self::ParallelStatementSurface => "parallel_statement_surface",
+            Self::FanoutExpressionSurface => "fanout_expression_surface",
             Self::ImageSurface => "image_surface",
         })
     }
@@ -179,10 +179,9 @@ for item in items {
     labels = labels + [format("{0}:{1}", item.label, item.weight)]
   }
 }
-fanout = parallel {
-  lookup: call echo { value: join(labels, ",") }
-  stats: call echo { value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) } }
-}
+lookup_handle = start call echo { value: join(labels, ",") }
+stats_handle = start call echo { value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) } }
+fanout = await { lookup: lookup_handle, stats: stats_handle }
 lookup_value = fanout.lookup?
 stats_value = validate(fanout.stats?, Type { total: int, count: int, seen: int, index_count: int })
 summary = format(
@@ -234,15 +233,17 @@ comparisons = [
 choice = logic ? "yes" : "no"
 json_text = "{\"attempt\":" + to_string(ctx.attempt) + ",\"ok\":true}"
 parsed = json_parse(json_text)
-positional = parallel {
-  format("left:{0}", tokens[0]),
-  call echo { value: tokens[1] },
-  len(tokens)
+positional_results = await [
+  start call echo { value: format("left:{0}", tokens[0]) },
+  start call echo { value: tokens[1] },
+  start call echo { value: len(tokens) }
+]
+positional = [positional_results[0]?, positional_results[1], positional_results[2]?]
+named_results = await {
+  lookup: start call echo { value: source },
+  summary: start call echo { value: format("{0}:{1}", trimmed_user, count) }
 }
-named = parallel {
-  lookup: call echo { value: source }
-  summary: format("{0}:{1}", trimmed_user, count)
-}
+named = { lookup: named_results.lookup, summary: named_results.summary? }
 cancelled = start call echo { value: "cancelled" }
 cancel cancelled
 handle = start call echo { value: "awaited" }
@@ -327,14 +328,14 @@ third = (call echo { value: join([first, second], ",") })?
 submit third
 "#
         }
-        Scenario::GeneralParallel => {
+        Scenario::GeneralFanout => {
             r#"
 seed = ["alpha", "beta", "gamma"]
-results = parallel {
-  left: format("{0}:{1}", seed[0], len(seed))
-  right: format("{0}:{1}", seed[1], len(seed))
+results = await {
+  left: start call echo { value: format("{0}:{1}", seed[0], len(seed)) },
+  right: start call echo { value: format("{0}:{1}", seed[1], len(seed)) }
 }
-submit format("{0}|{1}", results.left, results.right)
+submit format("{0}|{1}", results.left?, results.right?)
 "#
         }
         Scenario::LoopControl => {
@@ -575,11 +576,11 @@ second = start call spawn_agent { task: "inspect api", capability: "explore" }
 llm = start call llm_query { prompt: "summarize benchmark", model: "gpt-5.4-mini" }
 monitor = start call monitor { command: "tail -f app.log", description: "app log", timeout_ms: 1000 }
 handles = (call list_process_handles {})?
-results = parallel {
-  first: await first
-  second: await second
-  llm: await llm
-  monitor: await monitor
+results = await {
+  first: first,
+  second: second,
+  llm: llm,
+  monitor: monitor
 }
 cancel second
 submit {
@@ -701,23 +702,17 @@ submit {
 }
 "#
         }
-        Scenario::ParallelStatementSurface => {
+        Scenario::FanoutExpressionSurface => {
             r#"
-parallel {
-  left = call echo { value: "left" }
-  right = call echo { value: "right" }
-  computed = len(history) + 39
+left = call echo { value: "left" }
+right = call echo { value: "right" }
+computed = len(history) + 39
+discarded = ["branch_a", 40 + 2, len(history)]
+batched_results = await {
+  first: start call echo { value: left.value },
+  second: start call echo { value: right.value }
 }
-discarded = parallel {
-  "branch_a"
-  40 + 2
-  len(history)
-}
-batched = parallel {
-  first: call echo { value: left.value }
-  second: call echo { value: right.value }
-  computed: computed
-}
+batched = { first: batched_results.first, second: batched_results.second, computed: computed }
 submit {
   left: left.value,
   right: right.value,
@@ -1220,38 +1215,34 @@ fn resolve_index(index: &Value, len: usize) -> Option<usize> {
 
 pub struct BenchHost;
 
-impl ToolHost for BenchHost {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        bench_call(&name, &args)
-    }
-
-    async fn call_batch(&self, calls: Vec<ToolHostCall>) -> Vec<Result<Value, ToolHostError>> {
-        calls
-            .into_iter()
-            .map(|call| bench_call(&call.name, &call.args))
-            .collect()
-    }
-
-    async fn start_call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        Self::task_handle(&name, &args)
-    }
-
-    async fn await_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
-        let record = handle
-            .as_record()
-            .ok_or_else(|| ToolHostError::new("expected handle record"))?;
-        Ok(record.get("value").cloned().unwrap_or(Value::Null))
-    }
-
-    async fn cancel_handle(&self, handle: Value) -> Result<Value, ToolHostError> {
-        Ok(handle)
+impl ExecutionHost for BenchHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => {
+                bench_call(&name, &args).map(AbilityResult::Value)
+            }
+            AbilityOp::StartToolCall { name, args } => {
+                Self::task_handle(&name, &args).map(AbilityResult::Value)
+            }
+            AbilityOp::Await(handle) => {
+                let record = handle
+                    .as_record()
+                    .ok_or_else(|| ExecutionHostError::new("expected handle record"))?;
+                Ok(AbilityResult::Value(
+                    record.get("value").cloned().unwrap_or(Value::Null),
+                ))
+            }
+            AbilityOp::Cancel(handle) => Ok(AbilityResult::Value(handle)),
+            AbilityOp::Print(_) => Ok(AbilityResult::Unit),
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
+        }
     }
 }
 
-fn bench_call(name: &str, args: &Record) -> Result<Value, ToolHostError> {
+fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
     match name {
         "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-        "boom" => Err(ToolHostError::new("explicit failure for benchmark")),
+        "boom" => Err(ExecutionHostError::new("explicit failure for benchmark")),
         "exec_command" => {
             let mut record = Record::default();
             record.insert("status".to_string(), Value::String("completed".into()));
@@ -1419,12 +1410,12 @@ fn spawn_agent_value(name: &str) -> Value {
     Value::Record(Arc::new(record))
 }
 
-fn unknown_tool(name: &str) -> ToolHostError {
-    ToolHostError::new(format!("unknown tool: {name}"))
+fn unknown_tool(name: &str) -> ExecutionHostError {
+    ExecutionHostError::new(format!("unknown tool: {name}"))
 }
 
 impl BenchHost {
-    fn task_handle(name: &str, args: &Record) -> Result<Value, ToolHostError> {
+    fn task_handle(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
             "echo" | "llm_query" | "spawn_agent" | "monitor" | "continue_as" => {
                 let mut record = Record::default();

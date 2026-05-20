@@ -2,19 +2,25 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lashlang::{
-    ExecutionOutcome, Record, Snapshot, State, ToolHost, ToolHostError, Value, execute, parse,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, Record,
+    Snapshot, State, Value, parse,
 };
 use proptest::prelude::*;
 
 #[derive(Default)]
 struct DeterministicHost;
 
-impl ToolHost for DeterministicHost {
-    async fn call(&self, name: String, args: Record) -> Result<Value, ToolHostError> {
-        match name.as_str() {
-            "echo" => Ok(args.get("value").cloned().unwrap_or(Value::Null)),
-            "fail" => Err(ToolHostError::new("fail")),
-            _ => Err(ToolHostError::new(format!("unknown tool: {name}"))),
+impl ExecutionHost for DeterministicHost {
+    async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
+        match op {
+            AbilityOp::CallTool { name, args } => match name.as_str() {
+                "echo" => Ok(AbilityResult::Value(
+                    args.get("value").cloned().unwrap_or(Value::Null),
+                )),
+                "fail" => Err(ExecutionHostError::new("fail")),
+                _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
+            },
+            _ => Err(ExecutionHostError::new("unsupported host ability")),
         }
     }
 }
@@ -23,7 +29,7 @@ fn run_execute(
     source: &str,
     state: &mut State,
     host: &DeterministicHost,
-) -> Result<ExecutionOutcome, lashlang::ExecuteError> {
+) -> Result<ExecutionOutcome, ExecuteError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -35,7 +41,27 @@ fn finished(outcome: ExecutionOutcome) -> Value {
     match outcome {
         ExecutionOutcome::Finished(value) => value,
         ExecutionOutcome::Continued => panic!("expected `submit`"),
+        ExecutionOutcome::Failed(value) => panic!("unexpected process failure: {value}"),
     }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+enum ExecuteError {
+    #[error(transparent)]
+    Parse(#[from] lashlang::ParseError),
+    #[error(transparent)]
+    Runtime(#[from] lashlang::RuntimeError),
+}
+
+async fn execute<H: ExecutionHost>(
+    source: &str,
+    state: &mut State,
+    host: &H,
+) -> Result<ExecutionOutcome, ExecuteError> {
+    let compiled = lashlang::compile(source)?;
+    lashlang::execute(&compiled, state, host)
+        .await
+        .map_err(ExecuteError::Runtime)
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +140,6 @@ fn ident_strategy() -> impl Strategy<Value = String> {
             "if" | "else"
                 | "for"
                 | "in"
-                | "parallel"
                 | "submit"
                 | "print"
                 | "call"
@@ -352,8 +377,8 @@ fn gen_field_name() -> impl Strategy<Value = String> {
     "[a-z][a-z0-9_]{0,6}".prop_map(|s| {
         // Avoid reserved identifiers that could shadow keywords.
         const RESERVED: &[&str] = &[
-            "if", "else", "for", "in", "parallel", "start", "await", "cancel", "submit", "print",
-            "call", "and", "or", "not", "true", "false", "null",
+            "if", "else", "for", "in", "start", "await", "cancel", "submit", "print", "call",
+            "and", "or", "not", "true", "false", "null",
         ];
         if RESERVED.iter().any(|r| *r == s) {
             format!("{s}_")

@@ -1,118 +1,14 @@
 //! Binary operations, comparison, numeric coercion, range/iterator helpers,
-//! `is_truthy` / `materialize_projected` / `value_type_name`, builtin
-//! dispatch (`intrinsic` and the per-intrinsic direct paths), plus
-//! `eval_pure_expr` — the const-folder shared between `Compiler::compile_*`
-//! and `Vm::run_pure_*`.
+//! `is_truthy` / `materialize_projected` / `value_type_name`, and builtin
+//! dispatch (`intrinsic` and the per-intrinsic direct paths).
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use smallvec::SmallVec;
+use crate::ast::BinaryOp;
 
-use crate::ast::{BinaryOp, UnaryOp};
-
-use super::instruction::{Name, PureExpr};
+use super::instruction::Name;
 use super::*;
-
-pub(crate) fn eval_pure_expr(
-    expr: &PureExpr,
-    slots: &SlotState,
-    names: &[Name],
-    slot_names: &[Name],
-) -> Result<Value, RuntimeError> {
-    match expr {
-        PureExpr::Const(value) => Ok(value.clone()),
-        PureExpr::Slot(slot) => {
-            slots
-                .get(*slot)
-                .cloned()
-                .ok_or_else(|| RuntimeError::UndefinedVariable {
-                    name: slot_names[*slot].text.to_string(),
-                })
-        }
-        PureExpr::List(items) => Ok(Value::List(
-            items
-                .iter()
-                .map(|item| eval_pure_expr(item, slots, names, slot_names))
-                .collect::<Result<Vec<_>, _>>()?
-                .into(),
-        )),
-        PureExpr::Record(entries) => {
-            let mut record = record_with_capacity(entries.len());
-            for (key, value) in entries.iter() {
-                let name_entry = &names[*key];
-                record.insert_symbolized(
-                    name_entry.symbol,
-                    name_entry.text.clone(),
-                    eval_pure_expr(value, slots, names, slot_names)?,
-                );
-            }
-            Ok(Value::Record(Arc::new(record)))
-        }
-        PureExpr::Intrinsic { op, args } => {
-            let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
-            for arg in args.iter() {
-                values.push(eval_pure_expr(arg, slots, names, slot_names)?);
-            }
-            execute_intrinsic_blocking(*op, names, &values)
-        }
-        PureExpr::Format { template, args } => {
-            let mut values = SmallVec::<[Value; 8]>::with_capacity(args.len());
-            for arg in args.iter() {
-                values.push(eval_pure_expr(arg, slots, names, slot_names)?);
-            }
-            Ok(Value::String(
-                execute_compiled_format_blocking(template, &values)?.into(),
-            ))
-        }
-        PureExpr::ResultUnwrap(expr) => {
-            let value = eval_pure_expr(expr, slots, names, slot_names)?;
-            unwrap_tool_result(value)
-        }
-        PureExpr::Field { target, field } => {
-            let value = eval_pure_expr(target, slots, names, slot_names)?;
-            read_field_blocking(value, &names[*field])
-        }
-        PureExpr::Index { target, index } => {
-            let target = eval_pure_expr(target, slots, names, slot_names)?;
-            let index = eval_pure_expr(index, slots, names, slot_names)?;
-            read_index_blocking(target, index)
-        }
-        PureExpr::Unary { op, expr } => {
-            let value = eval_pure_expr(expr, slots, names, slot_names)?;
-            match op {
-                UnaryOp::Negate => Ok(Value::Number(-as_number(&value)?)),
-                UnaryOp::Not => Ok(Value::Bool(!is_truthy(&value))),
-            }
-        }
-        PureExpr::Conditional {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            if is_truthy(&eval_pure_expr(condition, slots, names, slot_names)?) {
-                eval_pure_expr(then_expr, slots, names, slot_names)
-            } else {
-                eval_pure_expr(else_expr, slots, names, slot_names)
-            }
-        }
-        PureExpr::Binary { left, op, right } => match op {
-            BinaryOp::And => Ok(Value::Bool(
-                is_truthy(&eval_pure_expr(left, slots, names, slot_names)?)
-                    && is_truthy(&eval_pure_expr(right, slots, names, slot_names)?),
-            )),
-            BinaryOp::Or => Ok(Value::Bool(
-                is_truthy(&eval_pure_expr(left, slots, names, slot_names)?)
-                    || is_truthy(&eval_pure_expr(right, slots, names, slot_names)?),
-            )),
-            _ => {
-                let left = eval_pure_expr(left, slots, names, slot_names)?;
-                let right = eval_pure_expr(right, slots, names, slot_names)?;
-                eval_binary_values(left, *op, right)
-            }
-        },
-    }
-}
 
 pub(crate) fn expect_arg_count(
     name: &str,
@@ -403,14 +299,6 @@ fn invalid_arity_message(name: &str, argc: usize) -> String {
         _ => return format!("`{name}` takes 0 arg(s), got {argc}"),
     };
     format!("`{name}` takes {expected} arg(s), got {argc}")
-}
-
-pub(crate) fn execute_intrinsic_blocking(
-    builtin: IntrinsicOp,
-    names: &[Name],
-    values: &[Value],
-) -> Result<Value, RuntimeError> {
-    futures_executor::block_on(execute_intrinsic(builtin, names, values))
 }
 
 pub(crate) async fn execute_len_builtin(value: &Value) -> Result<Value, RuntimeError> {
