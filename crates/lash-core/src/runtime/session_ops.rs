@@ -9,13 +9,13 @@ use crate::{PluginActionInvokeError, SessionError};
 
 use super::LashRuntime;
 use super::state::{
-    PersistedSessionState, SessionStateEnvelope, append_session_nodes_to_state,
+    RuntimeSessionState, SessionStateEnvelope, append_session_nodes_to_state,
     normalize_session_graph,
 };
 
 impl LashRuntime {
     /// Replace the host-owned state envelope.
-    pub fn set_persisted_state(&mut self, state: PersistedSessionState) {
+    pub fn set_persisted_state(&mut self, state: RuntimeSessionState) {
         let mut state = state;
         normalize_session_graph(&mut state);
         if let Some(session) = self.session.as_ref() {
@@ -119,7 +119,7 @@ impl LashRuntime {
     ) -> Result<SessionStateEnvelope, SessionError> {
         let mut state = self.export_state();
         state.session_graph.branch_to(node_id);
-        let mut persisted_state = PersistedSessionState::from_state(state);
+        let mut persisted_state = RuntimeSessionState::from_state(state);
         normalize_session_graph(&mut persisted_state);
 
         let policy = persisted_state.policy.clone();

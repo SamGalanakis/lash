@@ -7,7 +7,7 @@ mod direct;
 mod graph;
 mod managed;
 mod monitor;
-mod processes;
+mod process_runners;
 mod turns;
 mod usage;
 

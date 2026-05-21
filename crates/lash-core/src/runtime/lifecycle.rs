@@ -15,12 +15,12 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: RuntimeHost,
         services: RuntimeServices,
-        mut state: PersistedSessionState,
+        mut state: RuntimeSessionState,
     ) -> Result<Self, SessionError> {
         if state.session_id.is_empty() {
             state.session_id = uuid::Uuid::new_v4().to_string();
         }
-        // Defaulted state (e.g. `PersistedSessionState::default()` used
+        // Defaulted state (e.g. `RuntimeSessionState::default()` used
         // by fresh-session constructors) carries an unconfigured policy.
         // Fill it in from the caller's policy so tests and hosts that
         // pass a real policy alongside default state don't trip the
@@ -34,6 +34,24 @@ impl LashRuntime {
                 "session policy missing max_context_tokens; hosts must supply explicit model metadata"
                     .to_string(),
             ));
+        }
+        // When a persistent backend is wired in, wrap the attachment
+        // store so every `put` records a write-ahead intent row first.
+        // Crashes between put and the next turn commit then surface as
+        // uncommitted manifest rows that GC can reconcile. Ephemeral
+        // (no-store) runtimes use the inner store directly — there's
+        // nothing to reconcile against.
+        let mut host = host;
+        if let Some(store) = services.store.clone() {
+            let manifest: Arc<dyn crate::AttachmentManifest> =
+                Arc::new(crate::attachments::PersistenceManifestAdapter(store));
+            let scoped: Arc<dyn crate::AttachmentStore> =
+                Arc::new(crate::SessionScopedAttachmentStore::new(
+                    Arc::clone(&host.core.attachment_store),
+                    manifest,
+                    state.session_id.clone(),
+                ));
+            host.core = host.core.with_attachment_store(scoped);
         }
         let services = services.with_attachment_store(Arc::clone(&host.core.attachment_store));
         let mut session = Session::new(
@@ -84,6 +102,7 @@ impl LashRuntime {
             process_sync_needed: Arc::new(AtomicBool::new(false)),
             pending_first_turn_inputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
             turn_phase_probe: None,
+            residency: Residency::default(),
         })
     }
 
@@ -92,7 +111,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: EmbeddedRuntimeHost,
         services: RuntimeServices,
-        state: PersistedSessionState,
+        state: RuntimeSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services, state).await
     }
@@ -102,7 +121,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: ProcessRuntimeHost,
         services: RuntimeServices,
-        state: PersistedSessionState,
+        state: RuntimeSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services, state).await
     }
@@ -112,7 +131,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: EmbeddedRuntimeHost,
         services: PersistentRuntimeServices,
-        state: PersistedSessionState,
+        state: RuntimeSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services.into_runtime_services(), state).await
     }
@@ -122,7 +141,7 @@ impl LashRuntime {
         policy: SessionPolicy,
         host: ProcessRuntimeHost,
         services: PersistentRuntimeServices,
-        state: PersistedSessionState,
+        state: RuntimeSessionState,
     ) -> Result<Self, SessionError> {
         Self::from_host_state(policy, host.into(), services.into_runtime_services(), state).await
     }
@@ -145,7 +164,7 @@ impl LashRuntime {
     pub async fn from_environment(
         env: &RuntimeEnvironment,
         policy: SessionPolicy,
-        mut state: PersistedSessionState,
+        mut state: RuntimeSessionState,
         store: Option<Arc<dyn crate::store::RuntimePersistence>>,
     ) -> Result<Self, SessionError> {
         // ActivePathOnly without a store is a data-loss footgun: trim
@@ -184,7 +203,7 @@ impl LashRuntime {
         if let Some(factory) = env.session_store_factory.as_ref() {
             embedded = embedded.with_session_store_factory(Arc::clone(factory));
         }
-        let runtime = if let Some(store) = store {
+        let mut runtime = if let Some(store) = store {
             let services = PersistentRuntimeServices::new_with_bridges(
                 plugin_session,
                 crate::session::TurnInjectionBridge::new(),
@@ -210,6 +229,7 @@ impl LashRuntime {
                 None => Self::from_embedded_state(policy, embedded, services, state).await?,
             }
         };
+        runtime.residency = env.residency;
         Ok(runtime)
     }
 
@@ -266,10 +286,10 @@ impl LashRuntime {
             }
         }
         .map_err(|err| SessionError::Protocol(format!("failed to load runtime state: {err}")))?;
-        let state = loaded.unwrap_or_else(|| PersistedSessionState {
+        let state = loaded.unwrap_or_else(|| RuntimeSessionState {
             session_id: parked.session_id.clone(),
             policy: parked.policy.clone(),
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         });
         Self::from_environment(env, parked.policy, state, Some(parked.store)).await
     }

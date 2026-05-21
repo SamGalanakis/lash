@@ -362,6 +362,11 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
+        validate_image_attachments(
+            req,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"],
+            "OpenAI Responses",
+        )?;
         let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
         let mut body = json!({

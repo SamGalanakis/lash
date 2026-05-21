@@ -1,3 +1,50 @@
+//! # lash-sqlite-store
+//!
+//! The high-performance local **durable** persistence backend for the lash
+//! agent runtime. One SQLite database per session, opened with WAL journal
+//! mode and a 15-second busy timeout, satisfying the full
+//! [`RuntimePersistence`] + [`AttachmentManifest`] contract from `lash-core`.
+//!
+//! ## Why this is "the durable backend" not just "an option"
+//!
+//! Lash's runtime layer treats persistence as a first-class boundary, not a
+//! debug-only convenience. Every primitive that lets the runtime survive a
+//! crash — head-revision CAS, runtime turn leases with fencing tokens,
+//! effect-journal idempotency, attachment write-ahead manifests, blob
+//! content-addressing with optional compression — is implemented in this
+//! crate against SQLite for one reason: SQLite is the simplest backend that
+//! gives us *atomic multi-statement transactions on a single file* with
+//! durability guarantees we can reason about. Everything else in the
+//! `RuntimePersistence` contract (lease/fencing, optimistic concurrency,
+//! per-record `schema_version` stamps, the attachment manifest) is shaped
+//! for distributed durable backends — Restate, Postgres, hosted KV — and
+//! the SQLite impl is the reference implementation that proves those
+//! shapes work.
+//!
+//! In other words: SQLite is the local case. The lease/fencing machinery,
+//! the per-record version stamps, the `RuntimeCommit::committed_attachment_ids`
+//! plumbing — none of it is overkill for "single-process sqlite," it's the
+//! contract that *also* has to hold when a second runtime carries the same
+//! session over to Restate replay or to a different process. Treat any
+//! simplification as "would this still work over Restate?" before
+//! shipping.
+//!
+//! ## Schema cutover, not migrations
+//!
+//! There is exactly one supported schema (see [`SCHEMA`] below). Older
+//! databases must be deleted before opening — we do not carry migration
+//! code. The per-record `schema_version` stamps on
+//! [`RuntimeTurnCheckpoint`], [`RuntimeTurnLease`], and
+//! [`RuntimeEffectJournalRecord`] are the upgrade contract for the
+//! *records that cross durable boundaries* (Restate replay, cross-version
+//! workers). The SQLite schema itself is a snapshot.
+//!
+//! [`RuntimePersistence`]: lash_core::RuntimePersistence
+//! [`AttachmentManifest`]: lash_core::AttachmentManifest
+//! [`RuntimeTurnCheckpoint`]: lash_core::RuntimeTurnCheckpoint
+//! [`RuntimeTurnLease`]: lash_core::RuntimeTurnLease
+//! [`RuntimeEffectJournalRecord`]: lash_core::RuntimeEffectJournalRecord
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
@@ -7,11 +54,14 @@ use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use lash_core::{
-    BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
-    RuntimeCommit, RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence,
-    RuntimeTurnCheckpoint, RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta,
-    SessionMeta, SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest,
-    SessionStoreFactory, StoreError, VacuumReport,
+    AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
+    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
+    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
+    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
+    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
+    ensure_supported_schema_version,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -27,6 +77,15 @@ fn sqlite_error(err: rusqlite::Error) -> StoreError {
     StoreError::Backend(err.to_string())
 }
 
+/// Canonical SQLite schema for a lash session database.
+///
+/// This is the *only* schema the store supports. Older session databases —
+/// including any rolled forward through prior migration chains — must be
+/// deleted before opening with this binary; [`ensure_schema`] rejects any
+/// `PRAGMA user_version` that does not match [`SCHEMA_VERSION`] exactly. We
+/// run with no on-the-fly migrations on purpose: lash's durable contract
+/// lives one level up in the per-record `schema_version` stamps, not in
+/// SQL DDL juggling.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS blobs (
     hash    TEXT PRIMARY KEY,
@@ -58,14 +117,13 @@ CREATE TABLE IF NOT EXISTS usage_deltas (
 );
 
 CREATE TABLE IF NOT EXISTS session_meta (
-    singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
-    session_id       TEXT NOT NULL,
-    session_name     TEXT NOT NULL,
-    created_at       TEXT NOT NULL,
-    model            TEXT NOT NULL,
-    cwd              TEXT,
-    parent_session_id TEXT,
-    relation_json    TEXT
+    singleton     INTEGER PRIMARY KEY CHECK (singleton = 1),
+    session_id    TEXT NOT NULL,
+    session_name  TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    cwd           TEXT,
+    relation_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runtime_turn_checkpoints (
@@ -92,9 +150,26 @@ CREATE TABLE IF NOT EXISTS runtime_effect_journal (
     created_at_ms    INTEGER NOT NULL,
     PRIMARY KEY (session_id, turn_id, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS attachment_manifest (
+    attachment_id    TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL,
+    canonical_uri    TEXT NOT NULL,
+    intent_at_ms     INTEGER NOT NULL,
+    committed_at_ms  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachment_manifest_session
+    ON attachment_manifest(session_id, committed_at_ms);
+CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
+    ON attachment_manifest(committed_at_ms)
+    WHERE committed_at_ms IS NULL;
 ";
 
-const SCHEMA_VERSION: i32 = 17;
+/// Canonical schema version. There is no migration chain — older databases
+/// must be deleted before opening. See the [`SCHEMA`] doc comment for the
+/// rationale.
+const SCHEMA_VERSION: i32 = 1;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
@@ -274,7 +349,6 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
                 cwd: std::env::current_dir()
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string)),
-                parent_session_id: request.parent_session_id.clone(),
                 relation: request.relation.clone(),
             });
         }
@@ -420,38 +494,25 @@ fn load_session_head_meta_from_conn(conn: &Connection) -> Option<SessionHeadMeta
 }
 
 fn load_session_meta_from_conn(conn: &Connection) -> Option<SessionMeta> {
-    let has_relation_json = table_has_column(conn, "session_meta", "relation_json").ok()?;
-    let query = if has_relation_json {
-        "SELECT session_id, session_name, created_at, model, cwd, parent_session_id, relation_json
-         FROM session_meta WHERE singleton = 1"
-    } else {
-        "SELECT session_id, session_name, created_at, model, cwd, parent_session_id, NULL
-         FROM session_meta WHERE singleton = 1"
-    };
-    conn.query_row(query, [], |row| {
-        let parent_session_id: Option<String> = row.get(5)?;
-        let relation_json: Option<String> = row.get(6)?;
-        let relation = relation_json
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_else(|| {
-                parent_session_id
-                    .as_ref()
-                    .map(|parent_session_id| lash_core::SessionRelation::Child {
-                        parent_session_id: parent_session_id.clone(),
-                        originating_tool_call_id: None,
-                    })
-                    .unwrap_or_default()
-            });
-        Ok(SessionMeta {
-            session_id: row.get(0)?,
-            session_name: row.get(1)?,
-            created_at: row.get(2)?,
-            model: row.get(3)?,
-            cwd: row.get(4)?,
-            parent_session_id,
-            relation,
-        })
-    })
+    conn.query_row(
+        "SELECT session_id, session_name, created_at, model, cwd, relation_json
+         FROM session_meta WHERE singleton = 1",
+        [],
+        |row| {
+            let relation_json: Option<String> = row.get(5)?;
+            let relation = relation_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            Ok(SessionMeta {
+                session_id: row.get(0)?,
+                session_name: row.get(1)?,
+                created_at: row.get(2)?,
+                model: row.get(3)?,
+                cwd: row.get(4)?,
+                relation,
+            })
+        },
+    )
     .ok()
 }
 
@@ -475,7 +536,7 @@ fn load_runtime_turn_lease_from_conn(
                 return Ok(None);
             };
             Ok(Some(RuntimeTurnLease {
-                schema_version: lash_core::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
+                schema_version: RUNTIME_TURN_LEASE_SCHEMA_VERSION,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 owner_id,
@@ -533,17 +594,6 @@ fn ensure_runtime_turn_completion_conn(
         });
     }
     Ok(())
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for name in rows {
-        if name? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn decode_checkpoint(bytes: &[u8]) -> Option<SessionCheckpoint> {
@@ -872,14 +922,18 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let meta = conn
             .query_row(
-                "SELECT session_id, cwd, parent_session_id
+                "SELECT session_id, cwd, relation_json
                  FROM session_meta WHERE singleton = 1",
                 [],
                 |row| {
+                    let relation_json: Option<String> = row.get(2)?;
+                    let relation = relation_json
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                        .unwrap_or_default();
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        relation,
                     ))
                 },
             )
@@ -898,7 +952,7 @@ impl Store {
         Some(SessionPickerInfo {
             session_id: meta.0,
             cwd: meta.1,
-            parent_session_id: meta.2,
+            relation: meta.2,
             first_user_message: graph.first_user_message(),
             user_message_count: graph.user_message_count(),
         })
@@ -1267,15 +1321,14 @@ impl Store {
         let relation_json = serde_json::to_string(&meta.relation).ok();
         if let Err(err) = conn.execute(
             "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id, relation_json)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (singleton, session_id, session_name, created_at, model, cwd, relation_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 meta.session_id,
                 meta.session_name,
                 meta.created_at,
                 meta.model,
                 meta.cwd,
-                meta.parent_session_id,
                 relation_json
             ],
         ) {
@@ -1451,7 +1504,7 @@ impl RuntimePersistence for Store {
                 .map_err(sqlite_error)? as usize;
             let next_revision = actual_revision + 1;
             let meta = SessionHeadMeta {
-                session_id: commit.session_id,
+                session_id: commit.session_id.clone(),
                 head_revision: next_revision,
                 config: commit.config,
                 checkpoint_ref: Some(stored_checkpoint.checkpoint_ref.clone()),
@@ -1494,6 +1547,20 @@ impl RuntimePersistence for Store {
                     ],
                 )
                 .map_err(sqlite_error)?;
+            }
+            if !commit.committed_attachment_ids.is_empty() {
+                let now = current_epoch_ms() as i64;
+                let mut stmt = tx
+                    .prepare(
+                        "UPDATE attachment_manifest
+                         SET committed_at_ms = COALESCE(committed_at_ms, ?1)
+                         WHERE attachment_id = ?2 AND session_id = ?3",
+                    )
+                    .map_err(sqlite_error)?;
+                for id in &commit.committed_attachment_ids {
+                    stmt.execute(params![now, id.as_str(), commit.session_id])
+                        .map_err(sqlite_error)?;
+                }
             }
             tx.commit().map_err(sqlite_error)?;
             RuntimeCommitResult {
@@ -1541,7 +1608,7 @@ impl RuntimePersistence for Store {
             .unwrap_or(0) as u64
             + 1;
         let lease = RuntimeTurnLease {
-            schema_version: lash_core::RUNTIME_TURN_LEASE_SCHEMA_VERSION,
+            schema_version: RUNTIME_TURN_LEASE_SCHEMA_VERSION,
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             owner_id: owner_id.to_string(),
@@ -1698,6 +1765,11 @@ impl RuntimePersistence for Store {
             serde_json::from_str(&checkpoint_json).map_err(|err| {
                 StoreError::Backend(format!("failed to decode runtime turn checkpoint: {err}"))
             })?;
+        ensure_supported_schema_version(
+            "RuntimeTurnCheckpoint",
+            checkpoint.schema_version,
+            RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+        )?;
         let actual_hash = lash_core::runtime_turn_checkpoint_hash(&checkpoint.checkpoint)?;
         if checkpoint.checkpoint_hash != actual_hash {
             return Err(StoreError::RuntimeTurnCheckpointHashMismatch {
@@ -1762,12 +1834,18 @@ impl RuntimePersistence for Store {
             )
             .optional()
             .map_err(sqlite_error)?;
-        row.map(|json| {
-            serde_json::from_str(&json).map_err(|err| {
-                StoreError::Backend(format!("failed to decode runtime effect journal: {err}"))
-            })
-        })
-        .transpose()
+        let Some(json) = row else {
+            return Ok(None);
+        };
+        let record: RuntimeEffectJournalRecord = serde_json::from_str(&json).map_err(|err| {
+            StoreError::Backend(format!("failed to decode runtime effect journal: {err}"))
+        })?;
+        ensure_supported_schema_version(
+            "RuntimeEffectJournalRecord",
+            record.schema_version,
+            RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+        )?;
+        Ok(Some(record))
     }
 
     async fn save_session_meta(&self, meta: SessionMeta) -> Result<(), StoreError> {
@@ -1776,15 +1854,14 @@ impl RuntimePersistence for Store {
             .map_err(|err| StoreError::Backend(err.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO session_meta
-             (singleton, session_id, session_name, created_at, model, cwd, parent_session_id, relation_json)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (singleton, session_id, session_name, created_at, model, cwd, relation_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 meta.session_id,
                 meta.session_name,
                 meta.created_at,
                 meta.model,
                 meta.cwd,
-                meta.parent_session_id,
                 relation_json
             ],
         )
@@ -1829,6 +1906,111 @@ impl RuntimePersistence for Store {
     }
 }
 
+impl AttachmentManifest for Store {
+    fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO attachment_manifest
+                (attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(attachment_id) DO NOTHING",
+            params![
+                intent.attachment_id.as_str(),
+                intent.session_id,
+                intent.canonical_uri,
+                intent.intent_at_epoch_ms as i64,
+            ],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn commit_refs(
+        &self,
+        session_id: &str,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<(), StoreError> {
+        if attachment_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(sqlite_error)?;
+        let now = current_epoch_ms() as i64;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE attachment_manifest
+                     SET committed_at_ms = COALESCE(committed_at_ms, ?1)
+                     WHERE attachment_id = ?2 AND session_id = ?3",
+                )
+                .map_err(sqlite_error)?;
+            for id in attachment_ids {
+                stmt.execute(params![now, id.as_str(), session_id])
+                    .map_err(sqlite_error)?;
+            }
+        }
+        tx.commit().map_err(sqlite_error)?;
+        Ok(())
+    }
+
+    fn list_uncommitted(
+        &self,
+        older_than_epoch_ms: u64,
+    ) -> Result<Vec<AttachmentManifestEntry>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
+                 FROM attachment_manifest
+                 WHERE committed_at_ms IS NULL AND intent_at_ms <= ?1
+                 ORDER BY intent_at_ms ASC",
+            )
+            .map_err(sqlite_error)?;
+        let rows = stmt
+            .query_map(params![older_than_epoch_ms as i64], |row| {
+                let id: String = row.get(0)?;
+                let session_id: String = row.get(1)?;
+                let canonical_uri: String = row.get(2)?;
+                let intent_at_ms: i64 = row.get(3)?;
+                let committed_at_ms: Option<i64> = row.get(4)?;
+                Ok(AttachmentManifestEntry {
+                    attachment_id: AttachmentId::new(id),
+                    session_id,
+                    canonical_uri,
+                    intent_at_epoch_ms: intent_at_ms as u64,
+                    committed_at_epoch_ms: committed_at_ms.map(|v| v as u64),
+                })
+            })
+            .map_err(sqlite_error)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sqlite_error)?);
+        }
+        Ok(out)
+    }
+
+    fn forget(&self, attachment_id: &AttachmentId) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM attachment_manifest WHERE attachment_id = ?1",
+            params![attachment_id.as_str()],
+        )
+        .map_err(sqlite_error)?;
+        Ok(())
+    }
+}
+
+/// Initialize or verify the SQLite schema.
+///
+/// Lash's session store is a clean-cutover backend: there is exactly one
+/// supported schema, and there is no in-flight migration code.
+///
+/// - **Fresh database** (`user_version = 0` with no user-defined objects):
+///   apply [`SCHEMA`] and stamp `user_version` to [`SCHEMA_VERSION`].
+/// - **Already-current database**: ensure idempotent `CREATE TABLE IF NOT EXISTS`
+///   statements have run, then return.
+/// - **Anything else** (a database from a prior schema version or a foreign
+///   schema): fail with a clear error directing the host to delete the file.
 fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if user_version == SCHEMA_VERSION {
@@ -1837,29 +2019,6 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     if user_version == 0 && !has_user_schema_objects(conn)? {
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-
-    if user_version == 14 {
-        conn.execute_batch(
-            "ALTER TABLE session_head ADD COLUMN head_revision INTEGER NOT NULL DEFAULT 0;",
-        )?;
-        conn.execute_batch("ALTER TABLE session_meta ADD COLUMN relation_json TEXT;")?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        conn.execute_batch(SCHEMA)?;
-        return Ok(());
-    }
-
-    if user_version == 15 {
-        conn.execute_batch("ALTER TABLE session_meta ADD COLUMN relation_json TEXT;")?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        conn.execute_batch(SCHEMA)?;
-        return Ok(());
-    }
-
-    if user_version == 16 {
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
@@ -1882,5 +2041,8 @@ fn has_user_schema_objects(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 fn unsupported_schema_message() -> String {
-    "Unsupported lash session schema. Delete the session database and try again.".to_string()
+    "Unsupported lash session schema. This binary supports schema version 1 only; \
+     older databases must be deleted before opening. Delete the session database \
+     and start fresh."
+        .to_string()
 }

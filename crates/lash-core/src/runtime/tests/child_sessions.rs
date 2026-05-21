@@ -53,7 +53,7 @@ async fn inherited_child_session_carries_parent_tool_state() {
         standard_test_policy(),
         test_host_config(),
         crate::RuntimeServices::new(plugin_session),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -155,7 +155,7 @@ async fn parent_turn_receives_live_child_token_usage_events() {
     let turn_events = RecordingTurnEvents::default();
 
     let turn = runtime
-        .stream_turn_with_semantic_events(
+        .stream_turn(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: "run child".to_string(),
@@ -166,9 +166,9 @@ async fn parent_turn_receives_live_child_token_usage_events() {
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            &turn_events,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&sink)
+                .with_turn_events(&turn_events),
         )
         .await
         .expect("parent turn");
@@ -314,8 +314,7 @@ async fn parent_turn_keeps_cached_only_child_usage_live() {
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
         )
         .await
         .expect("parent turn");

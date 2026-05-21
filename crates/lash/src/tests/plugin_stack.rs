@@ -152,7 +152,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         .set_availability("app_lookup", ToolAvailability::Off)
         .await?;
     let persisted_tool_state = session.control().tools().state().await?;
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),

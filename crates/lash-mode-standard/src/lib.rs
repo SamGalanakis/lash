@@ -708,3 +708,77 @@ fn append_model_return_parts(parts: &mut Vec<Part>, model_return: lash_core::Mod
 fn conversation_event(message: Message) -> SessionEventRecord {
     SessionEventRecord::Conversation(ConversationRecord::from_message(message))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::{
+        AttachmentId, AttachmentMeta, ImageMediaType, MediaType, ModelToolReturn, ToolCallOutput,
+        ToolValue,
+    };
+
+    fn image_ref(id: &str) -> lash_core::AttachmentRef {
+        AttachmentMeta::new(
+            AttachmentId::new(id),
+            MediaType::Image(ImageMediaType::Png),
+            4,
+            Some(1),
+            Some(1),
+            Some("tiny".to_string()),
+        )
+        .as_ref()
+    }
+
+    #[test]
+    fn tool_attachment_round_trips_to_part_kind_image() {
+        let attachment = image_ref("att-1");
+        let output = ToolCallOutput::success(ToolValue::Attachment(attachment.clone()));
+        let model_return =
+            ModelToolReturn::from_output("call-9".to_string(), "screenshot".to_string(), &output);
+
+        let mut parts: Vec<Part> = Vec::new();
+        append_model_return_parts(&mut parts, model_return);
+
+        assert_eq!(parts.len(), 1, "single attachment yields single part");
+        let part = &parts[0];
+        assert!(matches!(part.kind, PartKind::Image));
+        assert_eq!(part.content, "");
+        assert_eq!(part.tool_call_id.as_deref(), Some("call-9"));
+        assert_eq!(part.tool_name.as_deref(), Some("screenshot"));
+        let part_attachment = part.attachment.as_ref().expect("attachment present");
+        assert_eq!(part_attachment.reference.id, attachment.id);
+    }
+
+    #[test]
+    fn tool_text_and_attachment_round_trip_preserves_order() {
+        let attachment = image_ref("att-2");
+        let output = ToolCallOutput::success(ToolValue::Array(vec![
+            ToolValue::String("before".into()),
+            ToolValue::Attachment(attachment.clone()),
+            ToolValue::String("after".into()),
+        ]));
+        let model_return =
+            ModelToolReturn::from_output("call-10".to_string(), "snap".to_string(), &output);
+
+        let mut parts: Vec<Part> = Vec::new();
+        append_model_return_parts(&mut parts, model_return);
+
+        // The array projection emits compact JSON text fragments around the
+        // attachment, preserving in-order position.
+        assert_eq!(parts.len(), 3, "text + image + text yields three parts");
+        assert!(matches!(parts[0].kind, PartKind::ToolResult));
+        assert!(parts[0].content.starts_with("[\"before\""));
+        assert!(matches!(parts[1].kind, PartKind::Image));
+        assert_eq!(
+            parts[1]
+                .attachment
+                .as_ref()
+                .expect("attachment")
+                .reference
+                .id,
+            attachment.id
+        );
+        assert!(matches!(parts[2].kind, PartKind::ToolResult));
+        assert!(parts[2].content.ends_with("\"after\"]"));
+    }
+}

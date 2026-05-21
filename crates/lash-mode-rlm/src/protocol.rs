@@ -24,6 +24,8 @@ use lash_core::{
 use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajectoryEntry};
 use serde_json::Value;
 
+use crate::projection::rlm_mode_event;
+
 pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Invoke documented tools as `call tool_name { ... }` from inside a fenced `lashlang` block. Start from tools listed under **Showcased Tools**; if a discovery tool is available, use it to find and load additional tools before calling them. Emit a block whenever you need to call an available tool or compute a value. Plain prose is for direct conversational replies that need no action.
 
 ### `print` vs `submit`
@@ -393,12 +395,7 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
             events.push(conversation_event(submit_required_reminder_message(
                 schema.is_some(),
             )));
-            actions.push(DriverAction::AppendEvents(events));
-            actions.push(DriverAction::AdvanceModeIteration);
-            actions.push(DriverAction::StartCheckpoint {
-                checkpoint: CheckpointKind::AfterWork,
-                on_empty: CheckpointResumeAction::PrepareIteration,
-            });
+            continue_or_stop_after_nonterminal(&ctx, &mut actions, Vec::new(), events);
             return actions;
         };
 
@@ -507,20 +504,19 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
             } = rlm_termination(ctx.termination())
                 && let Err(error_text) = validate_finish_value(finish_value, &schema)
             {
-                actions.push(DriverAction::AppendEvents(vec![
-                    trajectory_event(trajectory_entry(
+                continue_or_stop_after_nonterminal(
+                    &ctx,
+                    &mut actions,
+                    vec![trajectory_event(trajectory_entry(
                         ctx.mode_iteration(),
                         &state,
                         Some(error_text.clone()),
                         None,
-                    )),
-                    conversation_event(submit_schema_mismatch_message(&error_text)),
-                ]));
-                actions.push(DriverAction::AdvanceModeIteration);
-                actions.push(DriverAction::StartCheckpoint {
-                    checkpoint: CheckpointKind::AfterWork,
-                    on_empty: CheckpointResumeAction::PrepareIteration,
-                });
+                    ))],
+                    vec![conversation_event(submit_schema_mismatch_message(
+                        &error_text,
+                    ))],
+                );
                 return actions;
             }
 
@@ -543,27 +539,67 @@ impl ProtocolDriverHandle<lash_core::HostModeProtocol> for RlmDriver {
             return actions;
         }
 
-        actions.push(DriverAction::AppendEvents(vec![trajectory_event(
-            trajectory_entry(ctx.mode_iteration(), &state, None, None),
-        )]));
-        actions.push(DriverAction::AdvanceModeIteration);
-        if ctx.should_force_exit_after_grace_turn() {
-            actions.push(DriverAction::Finish(TurnOutcome::Stopped(
-                TurnStop::MaxTurns,
-            )));
-            return actions;
-        }
-        if let Some(max_turns) = ctx.turn_limit_final_to_schedule() {
-            actions.push(DriverAction::ScheduleTurnLimitFinal {
-                message: turn_limit_final_message(fresh_message_id(), max_turns),
-            });
-        }
-        actions.push(DriverAction::StartCheckpoint {
-            checkpoint: CheckpointKind::AfterWork,
-            on_empty: CheckpointResumeAction::PrepareIteration,
-        });
+        continue_or_stop_after_nonterminal(
+            &ctx,
+            &mut actions,
+            vec![trajectory_event(trajectory_entry(
+                ctx.mode_iteration(),
+                &state,
+                None,
+                None,
+            ))],
+            Vec::new(),
+        );
         actions
     }
+}
+
+fn continue_or_stop_after_nonterminal(
+    ctx: &DriverContextView<'_>,
+    actions: &mut Vec<DriverAction>,
+    durable_events: Vec<SessionEventRecord>,
+    retry_events: Vec<SessionEventRecord>,
+) {
+    if !durable_events.is_empty() {
+        actions.push(DriverAction::AppendEvents(durable_events));
+    }
+    actions.push(DriverAction::AdvanceModeIteration);
+
+    if ctx.should_force_exit_after_grace_turn() {
+        actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+            TurnStop::MaxTurns,
+        )));
+        return;
+    }
+
+    let next_mode_iteration = ctx.mode_iteration() + 1;
+    let reached_turn_limit = ctx
+        .max_turns()
+        .is_some_and(|max_turns| next_mode_iteration >= ctx.mode_run_offset() + max_turns);
+    if reached_turn_limit {
+        match rlm_termination(ctx.termination()) {
+            RlmTermination::SubmitRequired { .. } => {
+                actions.push(DriverAction::Finish(TurnOutcome::Stopped(
+                    TurnStop::MaxTurns,
+                )));
+                return;
+            }
+            RlmTermination::ProseOrSubmit => {
+                if let Some(max_turns) = ctx.max_turns() {
+                    actions.push(DriverAction::ScheduleTurnLimitFinal {
+                        message: turn_limit_final_message(fresh_message_id(), max_turns),
+                    });
+                }
+            }
+        }
+    } else if !retry_events.is_empty() {
+        actions.push(DriverAction::AppendEvents(retry_events));
+    }
+
+    actions.push(DriverAction::StartCheckpoint {
+        checkpoint: CheckpointKind::AfterWork,
+        on_empty: CheckpointResumeAction::PrepareIteration,
+    });
 }
 
 pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> Message {
@@ -642,13 +678,11 @@ fn conversation_event(message: Message) -> SessionEventRecord {
 }
 
 fn trajectory_event(entry: RlmTrajectoryEntry) -> SessionEventRecord {
-    SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
-        entry,
-    )))
+    SessionEventRecord::Mode(rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(entry)))
 }
 
 fn diagnostic_event(phase: &str, payload: Value) -> SessionEventRecord {
-    SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmDiagnostic(
+    SessionEventRecord::Mode(rlm_mode_event(RlmModeEvent::RlmDiagnostic(
         RlmDiagnosticEvent {
             phase: phase.to_string(),
             payload,

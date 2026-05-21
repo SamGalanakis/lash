@@ -11,7 +11,7 @@ use lash::model_info::{
 };
 use lash::messages::MessageRole;
 use lash::persistence::{
-    GcReport, GraphCommitDelta, PersistedSessionRead, PersistedSessionState, RuntimeCommit,
+    GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeSessionState, RuntimeCommit,
     RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
     RuntimeTurnLease, SessionCheckpoint, SessionMeta, SessionNodeRecord, SessionReadScope,
     StoreError, TokenLedgerEntry, VacuumReport,
@@ -32,6 +32,8 @@ use lash::tools::{
 use lash::turn::{AssistantOutput, TurnIssue};
 
 struct FacadeStore;
+
+lash_core::impl_noop_attachment_manifest!(FacadeStore);
 
 #[async_trait]
 impl RuntimePersistence for FacadeStore {
@@ -170,6 +172,7 @@ fn persistence_types_are_nameable(
         checkpoint: Default::default(),
         usage_deltas: ledger,
         completed_turn: None,
+        committed_attachment_ids: Vec::new(),
     }
 }
 
@@ -269,7 +272,7 @@ fn model_info_types_are_nameable(
 
 async fn persistence_load_helpers_are_nameable(
     store: &dyn RuntimePersistence,
-) -> Result<Option<PersistedSessionState>, StoreError> {
+) -> Result<Option<RuntimeSessionState>, StoreError> {
     let _ = load_persisted_session_state_active_path(store, None).await?;
     load_persisted_session_state(store).await
 }

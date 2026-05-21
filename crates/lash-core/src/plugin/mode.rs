@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::{SessionAppendNode, SessionCreateRequest};
-use crate::runtime::PersistedSessionState;
+use crate::runtime::RuntimeSessionState;
 use crate::{
     ExecRequest, ExecResponse, ExecutionMode, LlmRequest, ModeExecutionContext, PromptUsage,
     SessionReadView, ToolContract, ToolManifest, ToolResult,
@@ -39,7 +39,7 @@ pub trait ModeSessionPlugin: Send + Sync {
     async fn restore_session(
         &self,
         _ctx: ModeSessionContext<'_>,
-        _state: &PersistedSessionState,
+        _state: &RuntimeSessionState,
     ) -> Result<(), crate::SessionError> {
         Ok(())
     }

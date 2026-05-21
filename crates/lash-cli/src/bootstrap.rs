@@ -21,7 +21,7 @@ use lash_core::{FileAttachmentStore, LocalProcessRegistry, PromptLayer, SessionP
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
-use lash_plugin_prompt_context::{PromptContextPluginConfig, PromptContextPluginFactory};
+use crate::prompt_context_plugin::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use lash_subagents::{SubagentsPluginFactory, default_registry};
@@ -40,7 +40,7 @@ use crate::{
     parse_model_selection, parse_standard_context_approach, resolve_model_selection,
     resolve_model_variant, validate_model_selection,
 };
-use lash_plugin_prompt_context::InstructionSource;
+use crate::prompt_context_plugin::InstructionSource;
 
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
 const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";

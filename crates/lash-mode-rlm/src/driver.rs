@@ -14,6 +14,10 @@ use lash_core::{ChronologicalEntry, ChronologicalPayload};
 use lash_rlm_types::RlmHistoryItem;
 use lash_rlm_types::{RlmAttachmentRef, RlmHistoryRole, RlmImageRef, RlmTermination};
 
+use crate::projection::decode_rlm_mode_event;
+#[cfg(test)]
+use crate::projection::{rlm_history_projection, rlm_mode_event};
+
 /// Cell shared between the RLM mode plugin's turn-prepare hook (writer)
 /// and the projector (reader). The plugin's hook captures `prompt_usage`
 /// from `TurnTransformContext` each turn and stores it here so the
@@ -458,7 +462,7 @@ fn rlm_finalization_prompt(termination: &RlmTermination) -> &'static str {
 impl RlmContextProjector {
     #[cfg(test)]
     fn format_history(&self, projection: &lash_core::ChronologicalProjection) -> String {
-        let history = crate::rlm_history_projection(projection);
+        let history = rlm_history_projection(projection);
         render_history_prompt(history.history(), self.max_output_chars)
     }
 }
@@ -602,7 +606,7 @@ fn render_history_entry(entry: &ChronologicalEntry, max_output_chars: usize) -> 
         ),
         ChronologicalPayload::ModeEvent(event) => {
             let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step)) =
-                crate::decode_rlm_mode_event(event)
+                decode_rlm_mode_event(event)
             else {
                 return rendered;
             };
@@ -685,7 +689,7 @@ fn render_borrowed_history_entry(
         ),
         BorrowedChronologicalPayload::ModeEvent(event) => {
             let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(step)) =
-                crate::decode_rlm_mode_event(event)
+                decode_rlm_mode_event(event)
             else {
                 return rendered;
             };
@@ -779,7 +783,7 @@ fn append_entry_image_blocks(
         }
         lash_core::ChronologicalPayload::ModeEvent(event) => {
             if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
-                crate::decode_rlm_mode_event(event)
+                decode_rlm_mode_event(event)
             {
                 for image in &entry.images {
                     let attachment_idx = attachments.len();
@@ -810,7 +814,7 @@ fn append_borrowed_entry_image_blocks(
         }
         BorrowedChronologicalPayload::ModeEvent(event) => {
             if let Some(lash_rlm_types::RlmModeEvent::RlmTrajectoryEntry(entry)) =
-                crate::decode_rlm_mode_event(event)
+                decode_rlm_mode_event(event)
             {
                 for image in &entry.images {
                     let attachment_idx = attachments.len();
@@ -1067,7 +1071,7 @@ mod tests {
     }
 
     fn step_event(mode_iteration: usize, code: &str, output: &str) -> SessionEventRecord {
-        SessionEventRecord::Mode(crate::rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
+        SessionEventRecord::Mode(rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
             RlmTrajectoryEntry {
                 id: format!("rlm_step_{mode_iteration}"),
                 mode_iteration,
@@ -1197,8 +1201,8 @@ mod tests {
 
     #[test]
     fn printed_images_render_as_llm_image_blocks() {
-        let event = SessionEventRecord::Mode(crate::rlm_mode_event(
-            RlmModeEvent::RlmTrajectoryEntry(RlmTrajectoryEntry {
+        let event = SessionEventRecord::Mode(rlm_mode_event(RlmModeEvent::RlmTrajectoryEntry(
+            RlmTrajectoryEntry {
                 id: "rlm_step_1".to_string(),
                 mode_iteration: 1,
                 reasoning: String::new(),
@@ -1215,8 +1219,8 @@ mod tests {
                 }],
                 error: None,
                 final_output: None,
-            }),
-        ));
+            },
+        )));
         let mut attachments = Vec::new();
         let mut blocks = Vec::new();
 

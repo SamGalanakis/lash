@@ -78,7 +78,6 @@ impl SessionLogger {
             cwd: std::env::current_dir()
                 .ok()
                 .and_then(|path| path.to_str().map(str::to_string)),
-            parent_session_id: None,
             relation: lash_core::SessionRelation::Root,
         });
         Ok(Self {
@@ -144,7 +143,6 @@ impl SessionLogger {
             created_at: meta.created_at,
             model: meta.model,
             cwd: meta.cwd,
-            parent_session_id: Some(parent_session_id.to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: parent_session_id.to_string(),
                 originating_tool_call_id: None,
@@ -226,7 +224,7 @@ fn is_resumable_session_store(path: &Path) -> bool {
 fn parse_session_info(path: &Path, filename: String, modified: SystemTime) -> Option<SessionInfo> {
     let store = Store::open_readonly(path).ok()?;
     let info = store.load_picker_info()?;
-    if info.parent_session_id.is_some() {
+    if info.parent_session_id().is_some() {
         return None;
     }
 
@@ -630,7 +628,6 @@ mod tests {
                 cwd: std::env::current_dir()
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string)),
-                parent_session_id: Some("parent".to_string()),
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent".to_string(),
                     originating_tool_call_id: None,
@@ -672,7 +669,6 @@ mod tests {
                 created_at: "2026-03-25T10:00:00Z".to_string(),
                 model: "gpt-test".to_string(),
                 cwd: None,
-                parent_session_id: Some("parent-id".to_string()),
                 relation: lash_core::SessionRelation::Child {
                     parent_session_id: "parent-id".to_string(),
                     originating_tool_call_id: None,

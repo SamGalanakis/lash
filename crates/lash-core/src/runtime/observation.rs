@@ -10,7 +10,7 @@ pub struct RuntimeObservation {
     pub session_id: Arc<str>,
     pub policy: crate::SessionPolicy,
     pub read_view: crate::SessionReadView,
-    pub persisted_state: super::PersistedSessionState,
+    pub persisted_state: super::RuntimeSessionState,
     pub usage_report: super::SessionUsageReport,
     pub tool_state: Option<crate::ToolState>,
     pub tool_catalog: Arc<Vec<serde_json::Value>>,
@@ -20,10 +20,24 @@ pub struct RuntimeObservation {
 }
 
 impl RuntimeObservation {
-    fn from_runtime(runtime: &LashRuntime) -> Self {
+    fn from_runtime(runtime: &LashRuntime, previous: Option<&RuntimeObservation>) -> Self {
         let (tool_catalog, tool_catalog_error) = match runtime.active_tool_catalog_shared() {
             Ok(catalog) => (catalog, None),
             Err(err) => (Arc::new(Vec::new()), Some(err.to_string())),
+        };
+        let tool_state_generation = runtime
+            .session
+            .as_ref()
+            .map(|session| session.plugins().tool_registry().generation());
+        let tool_state = match (
+            tool_state_generation,
+            previous.and_then(|observation| observation.tool_state.as_ref()),
+        ) {
+            (Some(generation), Some(snapshot)) if snapshot.generation() == generation => {
+                Some(snapshot.clone())
+            }
+            (Some(_), _) => runtime.tool_state().ok(),
+            (None, _) => None,
         };
         Self {
             session_id: Arc::from(runtime.session_id()),
@@ -31,7 +45,7 @@ impl RuntimeObservation {
             read_view: runtime.read_view(),
             persisted_state: runtime.export_persisted_state(),
             usage_report: runtime.usage_report(),
-            tool_state: runtime.tool_state().ok(),
+            tool_state,
             tool_catalog,
             tool_catalog_error,
             runtime_scope_id: Arc::clone(&runtime.runtime_scope_id),
@@ -66,7 +80,7 @@ pub struct RuntimeHandle {
 
 impl RuntimeHandle {
     pub fn new(runtime: LashRuntime) -> Self {
-        let observation = RuntimeObservation::from_runtime(&runtime);
+        let observation = RuntimeObservation::from_runtime(&runtime, None);
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
             observation: Arc::new(ArcSwap::from_pointee(observation)),
@@ -82,8 +96,12 @@ impl RuntimeHandle {
     }
 
     pub fn publish_from(&self, runtime: &LashRuntime) {
+        let previous = self.observation.load_full();
         self.observation
-            .store(Arc::new(RuntimeObservation::from_runtime(runtime)));
+            .store(Arc::new(RuntimeObservation::from_runtime(
+                runtime,
+                Some(previous.as_ref()),
+            )));
     }
 
     pub fn try_into_runtime(self) -> Result<LashRuntime, Self> {

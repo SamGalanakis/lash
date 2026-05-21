@@ -164,7 +164,7 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
             Arc::clone(&plugins),
             store.clone() as Arc<dyn crate::store::RuntimePersistence>,
         ),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -225,10 +225,10 @@ async fn park_returns_error_when_final_commit_fails() {
             plugins,
             store as Arc<dyn crate::store::RuntimePersistence>,
         ),
-        PersistedSessionState {
+        RuntimeSessionState {
             session_id: "park-session".to_string(),
             policy: standard_test_policy(),
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         },
     )
     .await
@@ -290,7 +290,7 @@ async fn completed_turns_are_persisted_in_session_graph() {
             Arc::clone(&plugins),
             store.clone() as Arc<dyn crate::store::RuntimePersistence>,
         ),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");

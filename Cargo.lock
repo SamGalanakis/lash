@@ -2452,7 +2452,6 @@ dependencies = [
  "lash-plugin-mcp",
  "lash-plugin-observational-memory",
  "lash-plugin-plan-mode",
- "lash-plugin-prompt-context",
  "lash-provider-anthropic",
  "lash-provider-auth",
  "lash-provider-codex",
@@ -2663,17 +2662,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "lash-plugin-prompt-context"
-version = "0.1.0-alpha.7"
-dependencies = [
- "async-trait",
- "chrono",
- "lash-core",
- "serde",
- "tokio",
 ]
 
 [[package]]

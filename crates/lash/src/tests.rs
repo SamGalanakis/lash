@@ -23,7 +23,7 @@ struct SnapshotStore {
 }
 
 impl SnapshotStore {
-    fn with_state(state: PersistedSessionState) -> Self {
+    fn with_state(state: RuntimeSessionState) -> Self {
         let turn_state = state.turn_state();
         let config = lash_core::PersistedSessionConfig {
             provider_id: state.policy.provider.kind().to_string(),
@@ -84,6 +84,8 @@ fn test_current_epoch_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
 }
+
+lash_core::impl_noop_attachment_manifest!(SnapshotStore);
 
 #[async_trait]
 impl lash_core::RuntimePersistence for SnapshotStore {
@@ -369,6 +371,8 @@ struct BoundSessionStore {
     session_id: String,
 }
 
+lash_core::impl_noop_attachment_manifest!(BoundSessionStore);
+
 #[async_trait]
 impl lash_core::RuntimePersistence for BoundSessionStore {
     async fn load_session(
@@ -484,7 +488,6 @@ impl lash_core::RuntimePersistence for BoundSessionStore {
             created_at: "test".to_string(),
             model: "mock-model".to_string(),
             cwd: None,
-            parent_session_id: None,
             relation: lash_core::SessionRelation::Root,
         }))
     }

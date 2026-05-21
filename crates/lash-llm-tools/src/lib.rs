@@ -373,25 +373,25 @@ mod tests {
     use async_trait::async_trait;
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle};
-    use lash_core::{PersistedSessionState, SessionCreateRequest, ToolCall};
+    use lash_core::{RuntimeSessionState, SessionCreateRequest, ToolCall};
 
     #[derive(Default)]
     struct DirectCompletionManager {
-        snapshot: PersistedSessionState,
+        snapshot: RuntimeSessionState,
         requests: Mutex<Vec<(lash_core::DirectRequest, String)>>,
         response_text: String,
     }
 
     #[async_trait]
     impl RuntimeSessionHost for DirectCompletionManager {
-        async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
+        async fn snapshot_current(&self) -> Result<RuntimeSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<PersistedSessionState, PluginError> {
+        ) -> Result<RuntimeSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
         async fn tool_catalog(
@@ -504,14 +504,14 @@ mod tests {
     #[tokio::test]
     async fn llm_query_uses_current_policy_and_direct_completion() {
         let manager = Arc::new(DirectCompletionManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
                     model: "root-model".to_string(),
                     model_variant: Some("fast".to_string()),
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             requests: Mutex::new(Vec::new()),
             response_text:
@@ -572,14 +572,14 @@ mod tests {
     #[tokio::test]
     async fn llm_query_uses_configured_model_override() {
         let manager = Arc::new(DirectCompletionManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
                     model: "root-model".to_string(),
                     model_variant: Some("medium".to_string()),
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             requests: Mutex::new(Vec::new()),
             response_text: r#"{"kind":"value","value":"done","error":null}"#.to_string(),
@@ -612,12 +612,12 @@ mod tests {
     #[tokio::test]
     async fn llm_query_error_result_fails_tool_call() {
         let manager = Arc::new(DirectCompletionManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             requests: Mutex::new(Vec::new()),
             response_text: r#"{"kind":"error","value":null,"error":"missing required evidence"}"#

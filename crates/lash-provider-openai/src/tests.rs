@@ -102,6 +102,107 @@ fn chat_unknown_finish_reason_maps_to_provider_error() {
 }
 
 #[test]
+fn chat_image_attachment_serializes_as_data_url() {
+    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![
+            LlmContentBlock::Text {
+                text: "look".into(),
+                response_meta: None,
+                cache_breakpoint: false,
+            },
+            LlmContentBlock::Image { attachment_idx: 0 },
+        ],
+    )]);
+    req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
+
+    let body = provider.build_chat_request_body(&req, false).unwrap();
+
+    let messages = body["messages"].as_array().expect("messages");
+    let user_msg = messages.last().expect("user message");
+    let content = user_msg["content"].as_array().expect("content array");
+    let image_part = content
+        .iter()
+        .find(|part| part["type"] == "image_url")
+        .expect("image_url part");
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    assert_eq!(
+        image_part["image_url"]["url"],
+        format!("data:image/png;base64,{expected_b64}")
+    );
+}
+
+#[test]
+fn chat_unsupported_image_mime_is_rejected_at_request_boundary() {
+    let provider = OpenAiCompatibleProvider::new("key", OPENROUTER_BASE_URL);
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Image { attachment_idx: 0 }],
+    )]);
+    req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+
+    let err = provider
+        .build_chat_request_body(&req, false)
+        .expect_err("bmp should be rejected before wire");
+
+    assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+    assert!(err.message.contains("OpenAI"));
+    assert!(err.message.contains("image/bmp"));
+}
+
+#[test]
+fn responses_image_attachment_serializes_as_input_image_data_url() {
+    let provider = OpenAiProvider::new("key");
+    let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![
+            LlmContentBlock::Text {
+                text: "look".into(),
+                response_meta: None,
+                cache_breakpoint: false,
+            },
+            LlmContentBlock::Image { attachment_idx: 0 },
+        ],
+    )]);
+    req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
+
+    let body = provider.build_responses_request_body(&req, false).unwrap();
+
+    let input = body["input"].as_array().expect("input array");
+    let user_msg = input.last().expect("user message");
+    let content = user_msg["content"].as_array().expect("content array");
+    let image_part = content
+        .iter()
+        .find(|part| part["type"] == "input_image")
+        .expect("input_image part");
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    assert_eq!(
+        image_part["image_url"],
+        format!("data:image/png;base64,{expected_b64}")
+    );
+}
+
+#[test]
+fn responses_unsupported_image_mime_is_rejected_at_request_boundary() {
+    let provider = OpenAiProvider::new("key");
+    let mut req = request(vec![LlmMessage::new(
+        LlmRole::User,
+        vec![LlmContentBlock::Image { attachment_idx: 0 }],
+    )]);
+    req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+
+    let err = provider
+        .build_responses_request_body(&req, false)
+        .expect_err("bmp should be rejected before wire");
+
+    assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+    assert!(err.message.contains("OpenAI"));
+}
+
+#[test]
 fn builds_responses_body_with_instructions_and_input() {
     let provider = OpenAiProvider::new("key");
     let req = request(vec![

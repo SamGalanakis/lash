@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lash_sansio::{AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef};
 use sha2::{Digest, Sha256};
+
+use crate::store::{AttachmentIntent, AttachmentManifest};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AttachmentStoreError {
@@ -18,6 +21,8 @@ pub enum AttachmentStoreError {
     },
     #[error("attachment store metadata is unavailable for `{0}`")]
     MissingMeta(AttachmentId),
+    #[error("attachment manifest write failed: {0}")]
+    ManifestRecordFailed(String),
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +197,117 @@ impl AttachmentStore for FileAttachmentStore {
 
 pub fn content_id(bytes: &[u8]) -> AttachmentId {
     AttachmentId::new(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Session-scoped wrapper that records a write-ahead intent in
+/// [`AttachmentManifest`] before delegating each `put` to the backing
+/// [`AttachmentStore`]. The intent row durably captures "this session
+/// is about to write these bytes," so if the process dies between
+/// `put` and the next durable turn commit, a later GC sweep can
+/// reconcile the orphaned bytes by walking
+/// [`AttachmentManifest::list_uncommitted`].
+///
+/// Constructed by the runtime when both a durable [`AttachmentStore`]
+/// and a [`RuntimePersistence`](crate::RuntimePersistence) backend
+/// (which also implements [`AttachmentManifest`]) are wired up. Other
+/// callers — tests, hosts using only ephemeral storage — keep the
+/// plain inner store and skip the manifest entirely.
+pub struct SessionScopedAttachmentStore {
+    inner: Arc<dyn AttachmentStore>,
+    manifest: Arc<dyn AttachmentManifest>,
+    session_id: String,
+}
+
+impl SessionScopedAttachmentStore {
+    pub fn new(
+        inner: Arc<dyn AttachmentStore>,
+        manifest: Arc<dyn AttachmentManifest>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            manifest,
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn inner(&self) -> &Arc<dyn AttachmentStore> {
+        &self.inner
+    }
+
+    pub fn manifest(&self) -> &Arc<dyn AttachmentManifest> {
+        &self.manifest
+    }
+}
+
+impl AttachmentStore for SessionScopedAttachmentStore {
+    fn persistence(&self) -> AttachmentStorePersistence {
+        self.inner.persistence()
+    }
+
+    fn put(
+        &self,
+        bytes: Vec<u8>,
+        meta: AttachmentCreateMeta,
+    ) -> Result<AttachmentRef, AttachmentStoreError> {
+        let attachment_id = content_id(&bytes);
+        let intent = AttachmentIntent {
+            attachment_id: attachment_id.clone(),
+            session_id: self.session_id.clone(),
+            canonical_uri: format!("sha256:{attachment_id}"),
+            intent_at_epoch_ms: now_epoch_ms(),
+        };
+        // Record intent first. If this fails the bytes never land,
+        // matching the write-ahead guarantee.
+        self.manifest.record_intent(intent).map_err(|err| {
+            AttachmentStoreError::ManifestRecordFailed(format!(
+                "failed to record attachment intent for `{attachment_id}`: {err}"
+            ))
+        })?;
+        self.inner.put(bytes, meta)
+    }
+
+    fn get(&self, id: &AttachmentId) -> Result<StoredAttachment, AttachmentStoreError> {
+        self.inner.get(id)
+    }
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Adapter that exposes the [`AttachmentManifest`] supertrait of an
+/// `Arc<dyn RuntimePersistence>` as an `Arc<dyn AttachmentManifest>`.
+/// Rust's trait-object upcasting does not yet allow direct coercion
+/// between the two; this thin forwarder is the bridge.
+pub(crate) struct PersistenceManifestAdapter(pub Arc<dyn crate::RuntimePersistence>);
+
+impl AttachmentManifest for PersistenceManifestAdapter {
+    fn record_intent(&self, intent: AttachmentIntent) -> Result<(), crate::StoreError> {
+        AttachmentManifest::record_intent(&*self.0, intent)
+    }
+
+    fn commit_refs(
+        &self,
+        session_id: &str,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<(), crate::StoreError> {
+        AttachmentManifest::commit_refs(&*self.0, session_id, attachment_ids)
+    }
+
+    fn list_uncommitted(
+        &self,
+        older_than_epoch_ms: u64,
+    ) -> Result<Vec<crate::AttachmentManifestEntry>, crate::StoreError> {
+        AttachmentManifest::list_uncommitted(&*self.0, older_than_epoch_ms)
+    }
+
+    fn forget(&self, attachment_id: &AttachmentId) -> Result<(), crate::StoreError> {
+        AttachmentManifest::forget(&*self.0, attachment_id)
+    }
 }
 
 fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {

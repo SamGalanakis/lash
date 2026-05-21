@@ -2,7 +2,7 @@ use super::*;
 use std::sync::Arc;
 
 impl RuntimeSessionManager {
-    pub(in crate::runtime::session_manager::processes) async fn run_process_tool_call(
+    pub(in crate::runtime::session_manager::process_runners) async fn run_process_tool_call(
         &self,
         registration: crate::ProcessRegistration,
         call: crate::PreparedToolCall,

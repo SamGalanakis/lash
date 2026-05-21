@@ -47,6 +47,8 @@ impl SessionStoreFactory for RuntimePerfStoreFactory {
     }
 }
 
+lash_core::impl_noop_attachment_manifest!(RuntimePerfStore);
+
 #[async_trait::async_trait]
 impl RuntimePersistence for RuntimePerfStore {
     async fn load_session(
@@ -121,6 +123,7 @@ impl RuntimePersistence for RuntimePerfStore {
             checkpoint,
             usage_deltas,
             completed_turn,
+            committed_attachment_ids: _,
         } = commit;
         let mut meta_guard = self
             .session_head_meta

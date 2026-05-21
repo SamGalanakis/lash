@@ -5,28 +5,28 @@ use crate::session_graph::tool_call_record_active_read_key;
 use crate::session_model::SessionEventRecord;
 use crate::{MessageSequence, SessionReadView, ToolCallRecord};
 
-use super::PersistedSessionState;
+use super::RuntimeSessionState;
 use super::turn_graph_editor::TurnGraphEditor;
 
 #[derive(Debug)]
 pub(super) struct TurnCommitDraft {
     graph: TurnGraphEditor,
-    state: PersistedSessionState,
+    state: RuntimeSessionState,
 }
 
 impl TurnCommitDraft {
-    pub(super) fn from_state(mut state: PersistedSessionState) -> Self {
+    pub(super) fn from_state(mut state: RuntimeSessionState) -> Self {
         let base_graph = Arc::new(std::mem::take(&mut state.session_graph));
         let base_read_model = base_graph.read_model();
         let graph = TurnGraphEditor::new(base_graph, base_read_model);
         Self { graph, state }
     }
 
-    pub(super) fn state_mut(&mut self) -> &mut PersistedSessionState {
+    pub(super) fn state_mut(&mut self) -> &mut RuntimeSessionState {
         &mut self.state
     }
 
-    pub(super) fn state(&self) -> &PersistedSessionState {
+    pub(super) fn state(&self) -> &RuntimeSessionState {
         &self.state
     }
 
@@ -104,7 +104,7 @@ impl TurnCommitDraft {
             .replace_active_read_state(projected_messages.as_slice(), &next_tool_calls);
     }
 
-    pub(super) fn into_final_state(mut self) -> PersistedSessionState {
+    pub(super) fn into_final_state(mut self) -> RuntimeSessionState {
         self.state.session_graph = self.graph.into_session_graph();
         self.state
     }

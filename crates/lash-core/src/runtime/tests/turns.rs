@@ -530,8 +530,7 @@ async fn turn_injection_bridge_accepts_active_turn_input_without_persisting_dupl
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
         )
         .await
         .expect("turn");
@@ -814,7 +813,7 @@ async fn session_manager_persists_child_sessions_in_separate_store() {
         .expect("load session meta")
         .expect("session meta");
     assert_eq!(meta.session_id, "child-store");
-    assert_eq!(meta.parent_session_id.as_deref(), Some("root"));
+    assert_eq!(meta.parent_session_id(), Some("root"));
     let read = crate::store::RuntimePersistence::load_session(
         stores[0].as_ref(),
         crate::store::SessionReadScope::FullGraph,

@@ -278,6 +278,11 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
+        validate_image_attachments(
+            req,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"],
+            "OpenAI",
+        )?;
         let mut messages = Self::build_chat_messages(req);
         let mut tools = Self::build_chat_tools(req)?;
         self.apply_anthropic_cache_control(req, &mut messages, &mut tools);

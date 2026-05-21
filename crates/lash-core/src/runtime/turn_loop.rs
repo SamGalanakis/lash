@@ -286,102 +286,45 @@ impl LashRuntime {
     pub async fn stream_turn(
         &mut self,
         input: TurnInput,
-        events: &dyn EventSink,
-        cancel: CancellationToken,
+        opts: TurnOptions<'_>,
     ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn_with_semantic_events(input, events, &NoopTurnActivitySink, cancel)
-            .await
-    }
-
-    pub async fn stream_turn_with_effect_scope(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn_with_semantic_events_with_effect_scope(
-            input,
-            events,
-            &NoopTurnActivitySink,
-            effect_scope,
-            cancel,
-        )
-        .await
-    }
-
-    pub async fn resume_turn(
-        &mut self,
-        turn_id: &str,
-        events: &dyn EventSink,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
-        let effect_scope = RuntimeEffectControllerScope::new(effect_controller.as_ref(), turn_id)?;
-        self.resume_turn_with_effect_scope(turn_id, events, effect_scope, cancel)
-            .await
-    }
-
-    pub async fn resume_turn_with_events(
-        &mut self,
-        turn_id: &str,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
-        let effect_scope = RuntimeEffectControllerScope::new(effect_controller.as_ref(), turn_id)?;
-        self.resume_turn_with_events_and_effect_scope(
-            turn_id,
-            events,
-            turn_events,
-            effect_scope,
-            cancel,
-        )
-        .await
-    }
-
-    pub async fn resume_turn_with_effect_scope(
-        &mut self,
-        turn_id: &str,
-        events: &dyn EventSink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        self.resume_turn_with_events_and_effect_scope(
-            turn_id,
-            events,
-            &NoopTurnActivitySink,
-            effect_scope,
-            cancel,
-        )
-        .await
-    }
-
-    pub(crate) async fn stream_turn_with_semantic_events(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let turn_id = input
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let effect_scope = RuntimeEffectControllerScope::new(effect_controller.as_ref(), &turn_id)?;
-        self.stream_turn_with_semantic_events_with_effect_scope(
+        let cancel = opts.cancel.clone();
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), &turn_id)?;
+        self.stream_turn_with_effect_scope_inner(
             input,
-            events,
-            turn_events,
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
             effect_scope,
             cancel,
         )
         .await
     }
 
-    pub async fn resume_turn_with_events_and_effect_scope(
+    /// Resume an in-flight (durably checkpointed) turn.
+    pub async fn resume_turn(
+        &mut self,
+        turn_id: &str,
+        opts: TurnOptions<'_>,
+    ) -> Result<AssembledTurn, RuntimeError> {
+        let cancel = opts.cancel.clone();
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
+        let effect_scope = opts.resolve_effect_scope(effect_controller.as_ref(), turn_id)?;
+        self.resume_turn_inner(
+            turn_id,
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
+            effect_scope,
+            cancel,
+        )
+        .await
+    }
+
+    async fn resume_turn_inner(
         &mut self,
         turn_id: &str,
         events: &dyn EventSink,
@@ -589,25 +532,7 @@ impl LashRuntime {
         .await
     }
 
-    pub(crate) async fn stream_turn_with_semantic_events_with_effect_scope(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn_with_semantic_events_with_effect_scope_inner(
-            input,
-            events,
-            turn_events,
-            effect_scope,
-            cancel,
-        )
-        .await
-    }
-
-    async fn stream_turn_with_semantic_events_with_effect_scope_inner(
+    async fn stream_turn_with_effect_scope_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
@@ -717,87 +642,27 @@ impl LashRuntime {
     pub async fn stream_turn_following_handoffs(
         &mut self,
         input: TurnInput,
-        events: &dyn EventSink,
-        cancel: CancellationToken,
+        opts: TurnOptions<'_>,
     ) -> Result<FollowedTurn, RuntimeError> {
-        self.stream_turn_following_handoffs_with_semantic_events(
-            input,
-            events,
-            &NoopTurnActivitySink,
-            cancel,
-        )
-        .await
-    }
-
-    pub async fn stream_turn_events_following_handoffs(
-        &mut self,
-        input: TurnInput,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
-        self.stream_turn_following_handoffs_with_semantic_events(
-            input,
-            &NoopEventSink,
-            turn_events,
-            cancel,
-        )
-        .await
-    }
-
-    pub async fn stream_turn_with_events_following_handoffs(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
-        self.stream_turn_following_handoffs_with_semantic_events(input, events, turn_events, cancel)
-            .await
-    }
-
-    pub async fn stream_turn_with_events_following_handoffs_with_effect_scope(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        effect_scope: RuntimeEffectControllerScope<'_>,
-        cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
-        self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
-            input,
-            events,
-            turn_events,
-            effect_scope,
-            cancel,
-        )
-        .await
-    }
-
-    async fn stream_turn_following_handoffs_with_semantic_events(
-        &mut self,
-        input: TurnInput,
-        events: &dyn EventSink,
-        turn_events: &dyn TurnActivitySink,
-        cancel: CancellationToken,
-    ) -> Result<FollowedTurn, RuntimeError> {
-        let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let follow_trace_turn_id = input
             .trace_turn_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let cancel = opts.cancel.clone();
+        let effect_controller = Arc::clone(&self.host.core.effect_controller);
         let effect_scope =
-            RuntimeEffectControllerScope::new(effect_controller.as_ref(), &follow_trace_turn_id)?;
-        self.stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
+            opts.resolve_effect_scope(effect_controller.as_ref(), &follow_trace_turn_id)?;
+        self.stream_turn_following_handoffs_inner(
             input,
-            events,
-            turn_events,
+            opts.events_or_noop(),
+            opts.turn_events_or_noop(),
             effect_scope,
             cancel,
         )
         .await
     }
 
-    async fn stream_turn_following_handoffs_with_semantic_events_with_effect_scope(
+    async fn stream_turn_following_handoffs_inner(
         &mut self,
         mut input: TurnInput,
         events: &dyn EventSink,
@@ -823,7 +688,7 @@ impl LashRuntime {
         let mut turns = Vec::new();
         loop {
             let turn = self
-                .stream_turn_with_semantic_events_with_effect_scope(
+                .stream_turn_with_effect_scope_inner(
                     input,
                     events,
                     turn_events,
@@ -1110,7 +975,7 @@ impl LashRuntime {
         input: TurnInput,
         cancel: CancellationToken,
     ) -> Result<AssembledTurn, RuntimeError> {
-        self.stream_turn(input, &NoopEventSink, cancel).await
+        self.stream_turn(input, TurnOptions::new(cancel)).await
     }
 
     /// Run a turn using host-prepared message history.

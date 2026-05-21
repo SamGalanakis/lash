@@ -306,7 +306,7 @@ async fn uninstalled_mode_fails_at_open_time() -> Result<()> {
 
 #[tokio::test]
 async fn store_factory_reopens_persisted_session_state() -> Result<()> {
-    let mut state = PersistedSessionState {
+    let mut state = RuntimeSessionState {
         session_id: "persisted".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
@@ -338,7 +338,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
 
 #[tokio::test]
 async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
-    let mut state = PersistedSessionState {
+    let mut state = RuntimeSessionState {
         session_id: "active-path".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
@@ -386,7 +386,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
 
 #[tokio::test]
 async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
-    let mut state = PersistedSessionState {
+    let mut state = RuntimeSessionState {
         session_id: "keep-all".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
@@ -419,7 +419,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
 
 #[tokio::test]
 async fn store_session_id_mismatch_is_rejected() -> Result<()> {
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "actual-session".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
@@ -455,7 +455,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
 
 #[tokio::test]
 async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<()> {
-    let mut state = PersistedSessionState {
+    let mut state = RuntimeSessionState {
         session_id: "manual-state".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
@@ -646,7 +646,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
 
 #[tokio::test]
 async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Result<()> {
-    let mut explicit_state = PersistedSessionState {
+    let mut explicit_state = RuntimeSessionState {
         session_id: "store-precedence".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),

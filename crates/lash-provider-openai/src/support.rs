@@ -5,7 +5,9 @@ pub(crate) use serde_json::{Value, json};
 pub(crate) use std::collections::HashMap;
 
 pub(crate) use lash_core::SchemaProjectionOverride;
-pub(crate) use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
+pub(crate) use lash_core::llm::transport::{
+    LlmTransportError, ProviderFailureKind, validate_image_attachments,
+};
 pub(crate) use lash_core::llm::types::{
     LlmAttachment, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec,
     LlmProviderTraceSender, LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason,

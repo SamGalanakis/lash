@@ -779,10 +779,7 @@ mod fork_tests {
         let child_meta = child_store.load_session_meta().expect("child meta");
         assert_eq!(child.session_id, child_meta.session_id);
         assert_eq!(child.session_name, child_meta.session_name);
-        assert_eq!(
-            child_meta.parent_session_id.as_deref(),
-            Some("parent-session")
-        );
+        assert_eq!(child_meta.parent_session_id(), Some("parent-session"));
 
         let child_head = child_store.load_session_head().expect("child head");
         let child_graph = child_head.graph;

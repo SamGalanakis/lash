@@ -54,7 +54,10 @@ impl ManagedSessionCapability {
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
             let turn = runtime
-                .stream_turn(input, &sink, cancel_clone)
+                .stream_turn(
+                    input,
+                    crate::runtime::TurnOptions::new(cancel_clone).with_events(&sink),
+                )
                 .await
                 .map_err(|err| crate::PluginError::Session(err.to_string()))?;
             runtime_clone.publish_from(&runtime);

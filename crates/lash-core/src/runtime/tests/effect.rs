@@ -631,7 +631,10 @@ async fn durable_turn_resume_uses_leased_finisher_and_clears_resume_state() {
     .await;
 
     let resumed = resume_runtime
-        .resume_turn(turn_id, &NoopEventSink, CancellationToken::new())
+        .resume_turn(
+            turn_id,
+            TurnOptions::new(CancellationToken::new()).with_events(&NoopEventSink),
+        )
         .await
         .expect("resume turn");
 
@@ -1027,11 +1030,11 @@ async fn scoped_borrowed_effect_controller_uses_required_stable_turn_id() {
     let effect_scope =
         RuntimeEffectControllerScope::new(&recorder, "stable-scoped-turn").expect("effect scope");
     let turn = runtime
-        .stream_turn_with_effect_scope(
+        .stream_turn(
             TurnInput::text("hello"),
-            &NoopEventSink,
-            effect_scope,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
         )
         .await
         .expect("turn");
@@ -1070,11 +1073,11 @@ async fn durable_controller_rejects_ephemeral_attachment_store_before_turn_runs(
         RuntimeEffectControllerScope::new(&controller, "durable-turn").expect("effect scope");
 
     let err = runtime
-        .stream_turn_with_effect_scope(
+        .stream_turn(
             TurnInput::text("hello"),
-            &NoopEventSink,
-            effect_scope,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
         )
         .await
         .expect_err("ephemeral attachment store should be rejected");
@@ -1176,11 +1179,11 @@ async fn scoped_borrowed_effect_controller_reaches_tool_direct_completions() {
     let effect_scope = RuntimeEffectControllerScope::new(&scoped_recorder, "scoped-tool-direct")
         .expect("effect scope");
     let turn = runtime
-        .stream_turn_with_effect_scope(
+        .stream_turn(
             TurnInput::text("use direct tool"),
-            &NoopEventSink,
-            effect_scope,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
         )
         .await
         .expect("turn");
@@ -1284,11 +1287,11 @@ async fn scoped_retry_sleep_records_turn_and_parent_tool_identity() {
     let effect_scope =
         RuntimeEffectControllerScope::new(&recorder, "scoped-retry-sleep").expect("effect scope");
     let turn = runtime
-        .stream_turn_with_effect_scope(
+        .stream_turn(
             TurnInput::text("use retry tool"),
-            &NoopEventSink,
-            effect_scope,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new())
+                .with_events(&NoopEventSink)
+                .with_effect_scope(effect_scope),
         )
         .await
         .expect("turn");
@@ -1404,7 +1407,7 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
         policy,
         host_with_effect_recorder(recorder.clone()),
         RuntimeServices::new(plugin_session),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -1722,7 +1725,7 @@ fn runtime_effect_controller_cutover_has_no_legacy_host_request_or_fallback_symb
         .chain([
             manifest_dir.join("src/runtime/turn_driver.rs"),
             manifest_dir.join("src/runtime/session_manager/direct.rs"),
-            manifest_dir.join("src/tool_executor.rs"),
+            manifest_dir.join("src/tool_dispatch.rs"),
             manifest_dir.join("src/runtime/assembly.rs"),
         ])
         .collect::<Vec<_>>();

@@ -64,7 +64,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
             ExecutionMode::standard(),
             tools,
         )),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await;
     match result {

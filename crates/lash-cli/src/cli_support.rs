@@ -848,7 +848,6 @@ mod tests {
             created_at: "2026-03-26T10:00:00Z".to_string(),
             model: "gpt-5".to_string(),
             cwd: Some("/tmp/demo".to_string()),
-            parent_session_id: None,
             relation: lash_core::SessionRelation::Root,
         });
 

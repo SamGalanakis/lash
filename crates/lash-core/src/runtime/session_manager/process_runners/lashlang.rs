@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 impl RuntimeSessionManager {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::runtime::session_manager::processes) async fn run_lashlang_process(
+    pub(in crate::runtime::session_manager::process_runners) async fn run_lashlang_process(
         &self,
         registration: crate::ProcessRegistration,
         registry: Arc<dyn crate::ProcessRegistry>,

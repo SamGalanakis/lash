@@ -1,35 +1,24 @@
-mod controller;
-mod direct;
 mod envelope;
-mod identity;
-mod inline;
+mod executor;
 mod journal;
-mod local;
-mod spec;
-mod trace;
 
-pub use controller::{
-    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
-};
 pub use envelope::{
-    EffectInvocationMetadata, EffectOrigin, ProcessCommand, ProcessEffectOutcome,
-    RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectOutcome,
+    DirectRequestSpec, EffectInvocationMetadata, EffectOrigin, LlmAttachmentSpec, LlmRequestSpec,
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectOutcome,
 };
-pub use inline::InlineRuntimeEffectController;
-pub(crate) use local::ProcessRunner;
-pub use local::RuntimeEffectLocalExecutor;
-pub use spec::{DirectRequestSpec, LlmAttachmentSpec, LlmRequestSpec};
+pub use executor::{
+    InlineRuntimeEffectController, RuntimeEffectController, RuntimeEffectControllerError,
+    RuntimeEffectControllerScope, RuntimeEffectLocalExecutor,
+};
 
-pub(crate) use controller::RuntimeEffectControllerHandle;
-pub(crate) use direct::{apply_direct_completion_outcome, apply_direct_llm_completion_outcome};
-pub(crate) use identity::{
-    direct_effect_metadata, direct_request_discriminator, tool_retry_sleep_metadata,
+pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
+pub(crate) use journal::{
+    LlmTraceFailure, apply_direct_completion_outcome, apply_direct_llm_completion_outcome,
+    direct_effect_metadata, direct_request_discriminator, emit_llm_trace_completed,
+    emit_llm_trace_failed, emit_llm_trace_started, execute_effect_with_journal,
+    renew_runtime_turn_lease_for_effect, token_usage_from_llm, tool_retry_sleep_metadata,
     turn_idempotency_key,
-};
-pub(crate) use journal::{execute_effect_with_journal, renew_runtime_turn_lease_for_effect};
-pub(crate) use trace::{
-    LlmTraceFailure, emit_llm_trace_completed, emit_llm_trace_failed, emit_llm_trace_started,
-    token_usage_from_llm,
 };
 
 #[cfg(test)]

@@ -19,9 +19,9 @@ use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent};
 
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
 use crate::executor::{RlmExecutionState, execute_code};
-use crate::projected_bindings::{
+use crate::projection::{
     ProjectionRegistry, ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings,
-    RlmProjectionExtension,
+    RlmProjectionExtension, RlmSeed, decode_rlm_mode_event,
 };
 use crate::rlm_support::BoundVariablesCache;
 #[cfg(test)]
@@ -230,7 +230,7 @@ fn normalize_projected_tool_args(
     ctx: ToolCallHookContext,
 ) -> Result<Vec<PluginDirective>, PluginError> {
     let original = ctx.args;
-    let normalized = crate::projection_transport::normalize_tool_args_for_projection(
+    let normalized = crate::projection::normalize_tool_args_for_projection(
         original.clone(),
         &ctx.argument_projection,
     );
@@ -349,7 +349,7 @@ impl ModeSessionPlugin for RlmModeSession {
     async fn restore_session(
         &self,
         _ctx: ModeSessionContext<'_>,
-        state: &lash_core::runtime::PersistedSessionState,
+        state: &lash_core::runtime::RuntimeSessionState,
     ) -> Result<(), SessionError> {
         let mut execution = self.execution.lock().await;
         let execution = execution
@@ -362,7 +362,7 @@ impl ModeSessionPlugin for RlmModeSession {
         }
         for event in state.read_view().active_events() {
             if let lash_core::SessionEventRecord::Mode(event) = event
-                && let Some(event) = crate::decode_rlm_mode_event(event)
+                && let Some(event) = decode_rlm_mode_event(event)
             {
                 self.apply_seed_or_globals_event(execution, event, &protected_names)
                     .await?;
@@ -384,7 +384,7 @@ impl ModeSessionPlugin for RlmModeSession {
         execution.prune_protected_globals(&protected_names);
         for node in nodes {
             if let lash_core::SessionAppendNode::ModeEvent { event } = node
-                && let Some(event) = crate::decode_rlm_mode_event(event)
+                && let Some(event) = decode_rlm_mode_event(event)
             {
                 self.apply_seed_or_globals_event(execution, event, &protected_names)
                     .await?;
@@ -524,7 +524,7 @@ impl ModeSessionPlugin for RlmModeSession {
 
         let observed_tokens = usage.context_budget_tokens;
         let args = forced_continue_as_args(&ctx, request, threshold, observed_tokens).await?;
-        let seed = crate::RlmSeed::from_tool_args(&args)
+        let seed = RlmSeed::from_tool_args(&args)
             .map_err(|err| PluginError::Session(format!("forced continue_as {err}")))?;
         let referenced_handles =
             crate::control_tools::collect_seed_process_handle_ids(args.get("seed"));
@@ -795,7 +795,7 @@ mod tests {
     impl lash_core::plugin::runtime_host::RuntimeSessionHost for NoopPromptManager {
         async fn snapshot_current(
             &self,
-        ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
+        ) -> Result<lash_core::RuntimeSessionState, lash_core::plugin::PluginError> {
             Err(lash_core::plugin::PluginError::Session(
                 "not used".to_string(),
             ))
@@ -804,7 +804,7 @@ mod tests {
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<lash_core::PersistedSessionState, lash_core::plugin::PluginError> {
+        ) -> Result<lash_core::RuntimeSessionState, lash_core::plugin::PluginError> {
             Err(lash_core::plugin::PluginError::Session(
                 "not used".to_string(),
             ))
@@ -920,7 +920,7 @@ mod tests {
         policy: lash_core::ToolArgumentProjectionPolicy,
         args: serde_json::Value,
     ) -> serde_json::Value {
-        crate::projection_transport::normalize_tool_args_for_projection(args, &policy)
+        crate::projection::normalize_tool_args_for_projection(args, &policy)
     }
 
     fn materializing_args(args: serde_json::Value) -> serde_json::Value {
@@ -937,8 +937,8 @@ mod tests {
         )
     }
 
-    fn classify_received_seed(received: &serde_json::Value) -> crate::RlmSeed {
-        crate::RlmSeed::from_tool_args(received).expect("seed should classify")
+    fn classify_received_seed(received: &serde_json::Value) -> RlmSeed {
+        RlmSeed::from_tool_args(received).expect("seed should classify")
     }
 
     #[test]
@@ -1131,7 +1131,7 @@ mod tests {
             std::fs::read_to_string(manifest_dir.join("src/executor/host_bridge.rs"))
                 .expect("read host bridge source");
         let projected_bindings_src =
-            std::fs::read_to_string(manifest_dir.join("src/projected_bindings.rs"))
+            std::fs::read_to_string(manifest_dir.join("src/projection/bindings.rs"))
                 .expect("read projected bindings source");
 
         let old_hook_call = ["normalize_tool_args_for_projection", "(&ctx.tool_name"].concat();

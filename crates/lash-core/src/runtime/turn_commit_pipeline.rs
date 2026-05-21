@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    PersistedSessionState, RuntimeError, RuntimeErrorCode, TurnCommitDraft, merge_ledger_entry,
+    RuntimeSessionState, RuntimeError, RuntimeErrorCode, TurnCommitDraft, merge_ledger_entry,
 };
 
 pub(super) struct ProgressBoundaryCommit {
@@ -29,7 +29,7 @@ struct ProgressBoundarySnapshot<'a> {
 
 pub(super) struct TurnCommitPipeline {
     draft: Option<TurnCommitDraft>,
-    final_state: Option<PersistedSessionState>,
+    final_state: Option<RuntimeSessionState>,
     final_graph_commit: Option<GraphCommitDelta>,
 }
 
@@ -58,7 +58,7 @@ impl PersistedGraphMark {
 }
 
 impl TurnCommitPipeline {
-    pub(super) fn from_state(state: PersistedSessionState) -> Self {
+    pub(super) fn from_state(state: RuntimeSessionState) -> Self {
         Self {
             draft: Some(TurnCommitDraft::from_state(state)),
             final_state: None,
@@ -66,7 +66,7 @@ impl TurnCommitPipeline {
         }
     }
 
-    pub(super) fn state_mut(&mut self) -> &mut PersistedSessionState {
+    pub(super) fn state_mut(&mut self) -> &mut RuntimeSessionState {
         match self.draft.as_mut() {
             Some(draft) => draft.state_mut(),
             None => self
@@ -284,7 +284,7 @@ impl TurnCommitPipeline {
         Ok(())
     }
 
-    pub(super) fn into_final_state(mut self) -> PersistedSessionState {
+    pub(super) fn into_final_state(mut self) -> RuntimeSessionState {
         if let Some(state) = self.final_state.take() {
             return state;
         }
@@ -306,7 +306,7 @@ impl TurnCommitPipeline {
             .expect("turn commit draft is unavailable after final state materialization")
     }
 
-    fn final_state_mut(&mut self) -> &mut PersistedSessionState {
+    fn final_state_mut(&mut self) -> &mut RuntimeSessionState {
         if self.final_state.is_none() {
             let draft = self
                 .draft
@@ -442,7 +442,7 @@ impl TurnCommitPipeline {
     }
 }
 
-fn materialize_terminal_output(state: &mut PersistedSessionState, outcome: &TurnOutcome) {
+fn materialize_terminal_output(state: &mut RuntimeSessionState, outcome: &TurnOutcome) {
     let TurnOutcome::Finished(TurnFinish::AssistantMessage { text }) = outcome else {
         return;
     };
@@ -534,11 +534,11 @@ mod tests {
         }
     }
 
-    fn state_with_graph(graph: SessionGraph) -> PersistedSessionState {
-        PersistedSessionState {
+    fn state_with_graph(graph: SessionGraph) -> RuntimeSessionState {
+        RuntimeSessionState {
             session_id: "session-1".to_string(),
             session_graph: graph,
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         }
     }
 

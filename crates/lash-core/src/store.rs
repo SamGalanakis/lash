@@ -30,69 +30,33 @@ pub enum StoreError {
     RuntimeEffectJournalHashMismatch { idempotency_key: String },
     #[error("runtime turn checkpoint hash mismatch for `{session_id}`/`{turn_id}`")]
     RuntimeTurnCheckpointHashMismatch { session_id: String, turn_id: String },
+    #[error(
+        "{record_kind} schema_version {actual} is not supported by this binary (expected {expected})"
+    )]
+    UnsupportedRecordSchemaVersion {
+        record_kind: &'static str,
+        actual: u32,
+        expected: u32,
+    },
     #[error("store backend error: {0}")]
     Backend(String),
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionMeta {
     pub session_id: String,
     pub session_name: String,
     pub created_at: String,
     pub model: String,
     pub cwd: Option<String>,
-    pub parent_session_id: Option<String>,
     pub relation: crate::SessionRelation,
 }
 
-impl<'de> serde::Deserialize<'de> for SessionMeta {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct RawSessionMeta {
-            session_id: String,
-            session_name: String,
-            created_at: String,
-            model: String,
-            cwd: Option<String>,
-            #[serde(default)]
-            parent_session_id: Option<String>,
-            #[serde(default)]
-            relation: Option<crate::SessionRelation>,
-        }
-
-        let raw = RawSessionMeta::deserialize(deserializer)?;
-        let relation = raw.relation.unwrap_or_else(|| {
-            raw.parent_session_id
-                .as_ref()
-                .map(|parent_session_id| crate::SessionRelation::Child {
-                    parent_session_id: parent_session_id.clone(),
-                    originating_tool_call_id: None,
-                })
-                .unwrap_or_default()
-        });
-        let parent_session_id = raw
-            .parent_session_id
-            .or_else(|| relation.parent_session_id().map(ToOwned::to_owned));
-        Ok(Self {
-            session_id: raw.session_id,
-            session_name: raw.session_name,
-            created_at: raw.created_at,
-            model: raw.model,
-            cwd: raw.cwd,
-            parent_session_id,
-            relation,
-        })
-    }
-}
-
 impl SessionMeta {
-    pub fn relation_parent_session_id(&self) -> Option<&str> {
-        self.relation
-            .parent_session_id()
-            .or(self.parent_session_id.as_deref())
+    /// Returns the parent session id, if any, derived from the canonical
+    /// [`SessionRelation`] field.
+    pub fn parent_session_id(&self) -> Option<&str> {
+        self.relation.parent_session_id()
     }
 }
 
@@ -101,9 +65,15 @@ impl SessionMeta {
 pub struct SessionPickerInfo {
     pub session_id: String,
     pub cwd: Option<String>,
-    pub parent_session_id: Option<String>,
+    pub relation: crate::SessionRelation,
     pub first_user_message: String,
     pub user_message_count: usize,
+}
+
+impl SessionPickerInfo {
+    pub fn parent_session_id(&self) -> Option<&str> {
+        self.relation.parent_session_id()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -201,7 +171,7 @@ pub struct SessionHeadMeta {
 }
 
 fn persisted_session_config_from_state(
-    state: &crate::PersistedSessionState,
+    state: &crate::RuntimeSessionState,
 ) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
         provider_id: state.policy.provider.kind().to_string(),
@@ -262,6 +232,14 @@ pub struct RuntimeCommit {
     pub checkpoint: HydratedSessionCheckpoint,
     pub usage_deltas: Vec<crate::TokenLedgerEntry>,
     pub completed_turn: Option<RuntimeTurnCompletion>,
+    /// Attachment ids whose bytes are referenced by this commit and
+    /// should be stamped `committed` in the write-ahead manifest as
+    /// part of the same SQL transaction. The backend marks each id
+    /// committed via [`AttachmentManifest::commit_refs`] before the
+    /// commit returns success. Hosts populate this from the
+    /// attachments emitted by tool calls and inline LLM-request
+    /// attachments produced during the turn.
+    pub committed_attachment_ids: Vec<crate::AttachmentId>,
 }
 
 #[derive(Clone, Debug)]
@@ -271,9 +249,160 @@ pub struct RuntimeCommitResult {
     pub manifest: SessionCheckpoint,
 }
 
+/// Wire-format version stamped on every persisted [`RuntimeTurnCheckpoint`].
+///
+/// Bump when the on-wire shape of `RuntimeTurnCheckpoint` changes in a way that
+/// older code cannot safely deserialize (enum-variant renames, field-meaning
+/// changes, removed required fields). Bytes carrying older or newer versions
+/// are rejected at load via [`ensure_supported_schema_version`] so a binary
+/// upgrade against in-flight durable state (Restate / SQLite) fails closed
+/// rather than silently misparsing.
+// =============================================================================
+// Attachment write-ahead manifest
+// =============================================================================
+
+/// A pending attachment write recorded *before* the bytes hit the
+/// [`AttachmentStore`](crate::AttachmentStore) backend.
+///
+/// The runtime calls [`AttachmentManifest::record_intent`] from the
+/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
+/// wrapper before each `put`, so the manifest is a durable record that
+/// "some bytes are about to land at this URI." When the turn that
+/// references the attachment commits successfully via
+/// [`RuntimePersistence::commit_runtime_state`], the same transaction
+/// stamps `committed_at_epoch_ms`. Periodic GC sweeps manifest rows
+/// whose intent has aged past a host-chosen threshold without ever
+/// being committed and deletes the corresponding bytes — that's how we
+/// reconcile orphaned files left behind by crashes between `put` and
+/// the next turn commit.
+#[derive(Clone, Debug)]
+pub struct AttachmentIntent {
+    pub attachment_id: crate::AttachmentId,
+    pub session_id: String,
+    /// Canonical URI for the attachment payload in the backing store.
+    /// For file-backed stores this is the absolute on-disk path; for
+    /// blob-backed stores it can be any stable identifier the host
+    /// uses to clean the payload up.
+    pub canonical_uri: String,
+    pub intent_at_epoch_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachmentManifestEntry {
+    pub attachment_id: crate::AttachmentId,
+    pub session_id: String,
+    pub canonical_uri: String,
+    pub intent_at_epoch_ms: u64,
+    pub committed_at_epoch_ms: Option<u64>,
+}
+
+/// Trait alias for the synchronous attachment-manifest surface on
+/// [`RuntimePersistence`]. Used by
+/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
+/// to record intent rows before `put` and by GC sweeps to reconcile
+/// orphans. See the [`AttachmentIntent`] doc comment for the full
+/// crash-safety story.
+///
+/// Backends with no attachment story (in-memory tests, mock stores)
+/// inherit the default no-op impls on [`RuntimePersistence`] and
+/// participate transparently — `record_intent` is a no-op, the
+/// scoped wrapper still works, and GC sweeps return empty.
+pub trait AttachmentManifest: Send + Sync {
+    fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError>;
+
+    /// Mark a set of attachment ids as committed (i.e. now referenced
+    /// by a durable session-graph commit). Backends that store
+    /// commits and manifest in the same database stamp this inside
+    /// the commit transaction; the trait-level method is the
+    /// out-of-band entry point for hosts that want to commit an id
+    /// outside the normal turn-commit flow.
+    fn commit_refs(
+        &self,
+        session_id: &str,
+        attachment_ids: &[crate::AttachmentId],
+    ) -> Result<(), StoreError>;
+
+    /// Return manifest entries whose intent has aged past
+    /// `older_than_epoch_ms` without ever being committed. Hosts run
+    /// this periodically to find orphans left by crashes between
+    /// `record_intent` and the next turn commit.
+    fn list_uncommitted(
+        &self,
+        older_than_epoch_ms: u64,
+    ) -> Result<Vec<AttachmentManifestEntry>, StoreError>;
+
+    /// Remove a manifest row entirely. Called by the GC coordinator
+    /// after the corresponding bytes have been removed from the
+    /// backing [`AttachmentStore`](crate::AttachmentStore).
+    fn forget(&self, attachment_id: &crate::AttachmentId) -> Result<(), StoreError>;
+}
+
+/// Mixin macro for [`RuntimePersistence`] implementors that have no
+/// attachment-write story (mock backends, in-memory test stores,
+/// runtime-perf harnesses). Pastes no-op impls of every
+/// [`AttachmentManifest`] method.
+#[macro_export]
+macro_rules! impl_noop_attachment_manifest {
+    ($ty:ty) => {
+        impl $crate::AttachmentManifest for $ty {
+            fn record_intent(
+                &self,
+                _intent: $crate::AttachmentIntent,
+            ) -> ::std::result::Result<(), $crate::StoreError> {
+                Ok(())
+            }
+
+            fn commit_refs(
+                &self,
+                _session_id: &str,
+                _attachment_ids: &[$crate::AttachmentId],
+            ) -> ::std::result::Result<(), $crate::StoreError> {
+                Ok(())
+            }
+
+            fn list_uncommitted(
+                &self,
+                _older_than_epoch_ms: u64,
+            ) -> ::std::result::Result<Vec<$crate::AttachmentManifestEntry>, $crate::StoreError> {
+                Ok(Vec::new())
+            }
+
+            fn forget(
+                &self,
+                _attachment_id: &$crate::AttachmentId,
+            ) -> ::std::result::Result<(), $crate::StoreError> {
+                Ok(())
+            }
+        }
+    };
+}
+
 pub const RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+/// Wire-format version for [`RuntimeTurnLease`]. See
+/// [`RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION`] for upgrade semantics.
 pub const RUNTIME_TURN_LEASE_SCHEMA_VERSION: u32 = 1;
+/// Wire-format version for [`RuntimeEffectJournalRecord`]. See
+/// [`RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION`] for upgrade semantics.
 pub const RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION: u32 = 1;
+
+/// Reject a persisted record whose `schema_version` does not match the
+/// version this binary supports. Backends call this immediately after
+/// deserializing a record from durable storage.
+pub fn ensure_supported_schema_version(
+    record_kind: &'static str,
+    actual: u32,
+    expected: u32,
+) -> Result<(), StoreError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(StoreError::UnsupportedRecordSchemaVersion {
+            record_kind,
+            actual,
+            expected,
+        })
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnMachineConfigSnapshot {
@@ -312,6 +441,20 @@ pub struct RuntimeTurnCheckpoint {
     pub updated_at_epoch_ms: u64,
 }
 
+/// Durable lease over a runtime turn.
+///
+/// The lease pair `(owner_id, lease_token)` plus `fencing_token` are how lash
+/// guarantees that one logical turn is driven by exactly one worker at a
+/// time — even after a crash, even across two runtimes that both think
+/// they own the session. The local SQLite backend (`lash-sqlite-store`)
+/// uses these to serialize concurrent claims on the same `(session_id,
+/// turn_id)`; future distributed durable backends (Restate, hosted KV) use
+/// the *same* fields to coordinate workers that don't share a file system.
+///
+/// **This is not single-process theatre.** The owner / fencing-token /
+/// lease-token triple is the public contract that lets any future backend
+/// detect and reject stale writers. Treat it as load-bearing, not
+/// defensive.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeTurnLease {
     pub schema_version: u32,
@@ -360,7 +503,7 @@ pub fn runtime_turn_checkpoint_hash(
         .map_err(|err| StoreError::Backend(format!("failed to serialize turn checkpoint: {err}")))
 }
 
-fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::PersistedTurnState {
+fn build_persisted_turn_state(state: &crate::RuntimeSessionState) -> crate::PersistedTurnState {
     crate::PersistedTurnState {
         turn_index: state.turn_index,
         token_usage: state.token_usage.clone(),
@@ -370,7 +513,7 @@ fn build_persisted_turn_state(state: &crate::PersistedSessionState) -> crate::Pe
 }
 
 fn build_checkpoint_from_persisted_state(
-    state: &crate::PersistedSessionState,
+    state: &crate::RuntimeSessionState,
 ) -> HydratedSessionCheckpoint {
     HydratedSessionCheckpoint {
         turn_state: build_persisted_turn_state(state),
@@ -386,7 +529,7 @@ fn build_checkpoint_from_persisted_state(
 
 impl RuntimeCommit {
     pub fn persisted_state(
-        state: &crate::PersistedSessionState,
+        state: &crate::RuntimeSessionState,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Self {
         Self {
@@ -403,11 +546,12 @@ impl RuntimeCommit {
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
             completed_turn: None,
+            committed_attachment_ids: Vec::new(),
         }
     }
 
     pub(crate) fn persisted_state_with_graph_commit(
-        state: &crate::PersistedSessionState,
+        state: &crate::RuntimeSessionState,
         graph: GraphCommitDelta,
         usage_deltas: &[crate::TokenLedgerEntry],
     ) -> Self {
@@ -419,6 +563,7 @@ impl RuntimeCommit {
             checkpoint: build_checkpoint_from_persisted_state(state),
             usage_deltas: usage_deltas.to_vec(),
             completed_turn: None,
+            committed_attachment_ids: Vec::new(),
         }
     }
 
@@ -426,13 +571,21 @@ impl RuntimeCommit {
         self.completed_turn = Some(completed_turn);
         self
     }
+
+    pub fn with_committed_attachments(
+        mut self,
+        attachment_ids: impl IntoIterator<Item = crate::AttachmentId>,
+    ) -> Self {
+        self.committed_attachment_ids = attachment_ids.into_iter().collect();
+        self
+    }
 }
 
 fn persisted_session_state_from_head(
     head: SessionHead,
     checkpoint: Option<HydratedSessionCheckpoint>,
-) -> crate::PersistedSessionState {
-    let mut state = crate::PersistedSessionState {
+) -> crate::RuntimeSessionState {
+    let mut state = crate::RuntimeSessionState {
         session_id: head.session_id,
         policy: crate::SessionPolicy::default(),
         session_graph: head.graph,
@@ -510,12 +663,19 @@ impl Default for SessionHeadMeta {
 /// Exact persistence protocol required by the runtime.
 ///
 /// This is intentionally the runtime's atomic transaction facade: one backend
-/// owns session graph/head commits, durable turn leases, turn checkpoints, and
-/// effect-journal rows together. Keep this monolithic until a second real
-/// backend proves that splitting store facets removes more complexity than it
-/// adds.
+/// owns session graph/head commits, durable turn leases, turn checkpoints,
+/// effect-journal rows, and the attachment write-ahead manifest together.
+/// Keep this monolithic until a second real backend proves that splitting
+/// store facets removes more complexity than it adds.
+///
+/// The [`AttachmentManifest`] supertrait is required so the runtime can wrap
+/// any persistence backend with a
+/// [`SessionScopedAttachmentStore`](crate::SessionScopedAttachmentStore)
+/// without dual-trait casting. Backends with no attachment-write story can
+/// implement the manifest methods as no-ops via
+/// [`NoopAttachmentManifest`]'s blanket helpers.
 #[async_trait::async_trait]
-pub trait RuntimePersistence: Send + Sync {
+pub trait RuntimePersistence: AttachmentManifest + Send + Sync {
     async fn load_session(
         &self,
         scope: SessionReadScope,
@@ -580,7 +740,7 @@ pub trait RuntimePersistence: Send + Sync {
     async fn gc_unreachable(&self) -> Result<GcReport, StoreError>;
 }
 
-fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::PersistedSessionState {
+fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::RuntimeSessionState {
     persisted_session_state_from_head(
         SessionHead {
             session_id: read.session_id,
@@ -596,7 +756,7 @@ fn persisted_session_state_from_read(read: PersistedSessionRead) -> crate::Persi
 
 pub async fn load_persisted_session_state(
     store: &(dyn RuntimePersistence + '_),
-) -> Result<Option<crate::PersistedSessionState>, StoreError> {
+) -> Result<Option<crate::RuntimeSessionState>, StoreError> {
     Ok(store
         .load_session(SessionReadScope::FullGraph)
         .await?
@@ -606,7 +766,7 @@ pub async fn load_persisted_session_state(
 pub async fn load_persisted_session_state_active_path(
     store: &(dyn RuntimePersistence + '_),
     leaf_node_id: Option<String>,
-) -> Result<Option<crate::PersistedSessionState>, StoreError> {
+) -> Result<Option<crate::RuntimeSessionState>, StoreError> {
     Ok(store
         .load_session(SessionReadScope::ActivePath { leaf_node_id })
         .await?
@@ -615,7 +775,7 @@ pub async fn load_persisted_session_state_active_path(
 
 pub async fn refresh_persisted_session_state(
     store: &(dyn RuntimePersistence + '_),
-    state: &mut crate::PersistedSessionState,
+    state: &mut crate::RuntimeSessionState,
 ) -> Result<(), StoreError> {
     if let Some(mut fresh) = load_persisted_session_state(store).await? {
         // The store owns persisted graph/checkpoint/config state, but not

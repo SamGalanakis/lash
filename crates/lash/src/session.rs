@@ -107,7 +107,7 @@ impl SessionBuilder {
         self.open_resolved(policy, mode, state, store).await
     }
 
-    pub async fn open_with_state(self, mut state: PersistedSessionState) -> Result<LashSession> {
+    pub async fn open_with_state(self, mut state: RuntimeSessionState) -> Result<LashSession> {
         let (policy, mode) = self.session_policy()?;
         let store = self.create_store(&policy)?;
         if state.session_id != self.session_id {
@@ -145,14 +145,14 @@ impl SessionBuilder {
         &self,
         policy: &SessionPolicy,
         store: Option<&dyn RuntimePersistence>,
-    ) -> Result<PersistedSessionState> {
+    ) -> Result<RuntimeSessionState> {
         let state = match store {
             Some(store) => {
                 let loaded = self.load_persisted_state_for_residency(store).await?;
-                let mut state = loaded.unwrap_or_else(|| PersistedSessionState {
+                let mut state = loaded.unwrap_or_else(|| RuntimeSessionState {
                     session_id: self.session_id.clone(),
                     policy: policy.clone(),
-                    ..PersistedSessionState::default()
+                    ..RuntimeSessionState::default()
                 });
                 if state.session_id != self.session_id {
                     return Err(EmbedError::StoreSessionMismatch {
@@ -164,10 +164,10 @@ impl SessionBuilder {
                 Self::normalize_tool_state(&mut state);
                 state
             }
-            None => PersistedSessionState {
+            None => RuntimeSessionState {
                 session_id: self.session_id.clone(),
                 policy: policy.clone(),
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
         };
         Ok(state)
@@ -176,7 +176,7 @@ impl SessionBuilder {
     async fn load_persisted_state_for_residency(
         &self,
         store: &dyn RuntimePersistence,
-    ) -> Result<Option<PersistedSessionState>> {
+    ) -> Result<Option<RuntimeSessionState>> {
         match self.core.env.residency {
             Residency::KeepAll => {
                 let loaded = lash_core::load_persisted_session_state(store)
@@ -213,7 +213,7 @@ impl SessionBuilder {
         }
     }
 
-    fn normalize_tool_state(state: &mut PersistedSessionState) {
+    fn normalize_tool_state(state: &mut RuntimeSessionState) {
         if let Some(snapshot) = state.tool_state_snapshot.as_mut() {
             let normalized = snapshot.clone().with_generation(1);
             state.tool_state_generation = Some(normalized.generation());
@@ -225,7 +225,7 @@ impl SessionBuilder {
         self,
         policy: SessionPolicy,
         mode: ModeId,
-        state: PersistedSessionState,
+        state: RuntimeSessionState,
         store: Option<Arc<dyn RuntimePersistence>>,
     ) -> Result<LashSession> {
         let mut env = self.core.env.clone();
@@ -259,7 +259,6 @@ impl SessionBuilder {
         };
         let request = SessionStoreCreateRequest {
             session_id: self.session_id.clone(),
-            parent_session_id: self.parent_session_id.clone(),
             relation: self
                 .parent_session_id
                 .as_ref()

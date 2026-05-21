@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures_util::FutureExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -10,10 +15,152 @@ use crate::ProcessRegistry;
 use crate::provider::ProviderHandle;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
+use crate::{PluginError, RuntimeError, RuntimeErrorCode};
+use crate::{ProcessAwaitOutput, ProcessRecord};
 
-use super::controller::RuntimeEffectControllerError;
-use super::envelope::{RuntimeEffectCommand, RuntimeEffectEnvelope, RuntimeEffectOutcome};
-use super::trace::llm_call_error_from_transport;
+use super::envelope::{
+    ProcessCommand, ProcessEffectOutcome, RuntimeEffectCommand, RuntimeEffectEnvelope,
+    RuntimeEffectKind, RuntimeEffectOutcome,
+};
+use super::journal::llm_call_error_from_transport;
+
+// =============================================================================
+// Controller trait + scope + error
+// =============================================================================
+
+/// Boundary for nondeterministic runtime work.
+#[async_trait::async_trait]
+pub trait RuntimeEffectController: Send + Sync {
+    fn requires_durable_attachment_store(&self) -> bool {
+        false
+    }
+
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
+}
+
+/// Borrowed durable effect controller for one runtime execution.
+///
+/// Durable integrations create one scope per externally
+/// identified run and pass it to the scoped runtime entrypoints, making the
+/// turn identity part of the idempotency contract rather than a tracing-only
+/// hint.
+#[derive(Clone, Copy)]
+pub struct RuntimeEffectControllerScope<'run> {
+    controller: &'run dyn RuntimeEffectController,
+    turn_id: &'run str,
+}
+
+impl<'run> RuntimeEffectControllerScope<'run> {
+    pub fn new(
+        controller: &'run dyn RuntimeEffectController,
+        turn_id: &'run str,
+    ) -> Result<Self, RuntimeError> {
+        if turn_id.is_empty() {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::MissingEffectScopeTurnId,
+                "scoped durable runs require a non-empty stable turn_id",
+            ));
+        }
+        Ok(Self {
+            controller,
+            turn_id,
+        })
+    }
+
+    pub fn controller(&self) -> &'run dyn RuntimeEffectController {
+        self.controller
+    }
+
+    pub fn turn_id(&self) -> &'run str {
+        self.turn_id
+    }
+}
+
+/// Runtime-internal handle for effect-controller references carried through
+/// per-turn execution contexts.
+#[derive(Clone)]
+pub(crate) enum RuntimeEffectControllerHandle<'run> {
+    Borrowed(&'run dyn RuntimeEffectController),
+    Shared(Arc<dyn RuntimeEffectController>),
+}
+
+impl<'run> RuntimeEffectControllerHandle<'run> {
+    pub(crate) fn borrowed(controller: &'run dyn RuntimeEffectController) -> Self {
+        Self::Borrowed(controller)
+    }
+
+    pub(crate) fn shared(controller: Arc<dyn RuntimeEffectController>) -> Self {
+        Self::Shared(controller)
+    }
+
+    pub(crate) fn as_controller(&self) -> &dyn RuntimeEffectController {
+        match self {
+            Self::Borrowed(controller) => *controller,
+            Self::Shared(controller) => controller.as_ref(),
+        }
+    }
+
+    pub(crate) fn clone_scoped(&self) -> RuntimeEffectControllerHandle<'run> {
+        self.clone()
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error, Serialize, Deserialize)]
+#[error("{code}: {message}")]
+pub struct RuntimeEffectControllerError {
+    pub code: String,
+    pub message: String,
+}
+
+impl RuntimeEffectControllerError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub(super) fn wrong_outcome(expected: RuntimeEffectKind, actual: RuntimeEffectKind) -> Self {
+        Self::new(
+            "runtime_effect_wrong_outcome",
+            format!(
+                "expected {} outcome, got {}",
+                expected.as_str(),
+                actual.as_str()
+            ),
+        )
+    }
+
+    pub(crate) fn into_runtime_error(self) -> RuntimeError {
+        RuntimeError::new(self.code, self.message)
+    }
+}
+
+impl From<RuntimeError> for RuntimeEffectControllerError {
+    fn from(err: RuntimeError) -> Self {
+        Self::new(err.code.as_str(), err.message)
+    }
+}
+
+impl From<PluginError> for RuntimeEffectControllerError {
+    fn from(err: PluginError) -> Self {
+        Self::new("plugin", err.to_string())
+    }
+}
+
+impl From<crate::StoreError> for RuntimeEffectControllerError {
+    fn from(err: crate::StoreError) -> Self {
+        Self::new("runtime_store", err.to_string())
+    }
+}
+
+// =============================================================================
+// Local executor (per-effect borrowed runner state)
+// =============================================================================
 
 #[async_trait::async_trait]
 pub(crate) trait ProcessRunner: Send + Sync {
@@ -63,8 +210,6 @@ enum RuntimeEffectLocalExecutorState<'run> {
 /// Durable controllers may ignore it and replay their own recorded result. The
 /// default inline controller delegates to it, so local provider/tool/checkpoint
 /// work still crosses the same `execute_effect` boundary as durable controllers.
-///
-/// [`RuntimeEffectController`]: super::controller::RuntimeEffectController
 pub struct RuntimeEffectLocalExecutor<'run> {
     state: RuntimeEffectLocalExecutorState<'run>,
 }
@@ -353,5 +498,172 @@ async fn sleep_with_cancellation(
             "runtime effect sleep was cancelled",
         )),
         _ = &mut sleep => Ok(()),
+    }
+}
+
+// =============================================================================
+// Default in-process effect controller
+// =============================================================================
+
+/// Default in-process effect controller.
+#[derive(Clone, Default)]
+pub struct InlineRuntimeEffectController {
+    processes: Arc<Mutex<HashMap<String, LocalProcessExecution>>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectController for InlineRuntimeEffectController {
+    async fn execute_effect(
+        &self,
+        envelope: RuntimeEffectEnvelope,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        match envelope.command {
+            RuntimeEffectCommand::Process { command } => {
+                let result = self
+                    .execute_process_command(command, local_executor)
+                    .await?;
+                Ok(RuntimeEffectOutcome::Process { result })
+            }
+            _ => local_executor.execute(envelope).await,
+        }
+    }
+}
+
+impl InlineRuntimeEffectController {
+    pub(crate) async fn start_process(
+        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        registration: crate::ProcessRegistration,
+        grant: Option<crate::ProcessStartGrant>,
+        execution_context: crate::ProcessExecutionContext,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Result<ProcessRecord, PluginError> {
+        let registration_for_record = registration.clone();
+        let record = registry.register_process(registration_for_record).await?;
+        if let Some(grant) = grant {
+            registry
+                .grant_handle(&grant.session_id, &registration.id, grant.descriptor)
+                .await?;
+        }
+        let process_id = registration.id.clone();
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let registry_for_task = Arc::clone(&registry);
+        let processes = Arc::clone(&self.processes);
+        let process_id_for_task = process_id.clone();
+        let handle = tokio::spawn(Box::pin(async move {
+            let future = runner.run_process(
+                registration,
+                execution_context,
+                Arc::clone(&registry_for_task),
+                task_cancellation,
+            );
+            let output = AssertUnwindSafe(future).catch_unwind().await;
+            let output = match output {
+                Ok(output) => output,
+                Err(_) => ProcessAwaitOutput::from_tool_output(crate::ToolCallOutput::failure(
+                    crate::ToolFailure::runtime(
+                        crate::ToolFailureClass::Internal,
+                        "process_panicked",
+                        "process panicked",
+                    ),
+                )),
+            };
+            let _ = registry_for_task
+                .complete_process(&process_id_for_task, output)
+                .await;
+            processes.lock().await.remove(&process_id_for_task);
+        }));
+        self.processes
+            .lock()
+            .await
+            .insert(process_id, LocalProcessExecution { cancellation });
+        drop(handle);
+        Ok(record)
+    }
+
+    pub(crate) async fn request_process_cancel(
+        &self,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        process_id: &str,
+        reason: Option<String>,
+    ) -> Result<ProcessRecord, PluginError> {
+        let _ = reason;
+        let record = registry
+            .get_process(process_id)
+            .await
+            .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+        let execution = self.processes.lock().await.get(process_id).cloned();
+        if let Some(execution) = execution {
+            execution.cancellation.cancel();
+        }
+        Ok(record)
+    }
+
+    async fn execute_process_command(
+        &self,
+        command: ProcessCommand,
+        local_executor: RuntimeEffectLocalExecutor<'_>,
+    ) -> Result<ProcessEffectOutcome, RuntimeEffectControllerError> {
+        let execution = local_executor.into_process()?;
+        let registry = execution.registry;
+        match command {
+            ProcessCommand::Start {
+                registration,
+                grant,
+                execution_context,
+            } => {
+                let Some(runner) = execution.runner else {
+                    return Err(RuntimeEffectControllerError::new(
+                        "process_runner_required",
+                        format!(
+                            "process `{}` cannot be started without a runtime runner",
+                            registration.id
+                        ),
+                    ));
+                };
+                let record = self
+                    .start_process(registry, registration, grant, execution_context, runner)
+                    .await?;
+                Ok(ProcessEffectOutcome::Start { record })
+            }
+            ProcessCommand::List { session_id } => {
+                let entries = registry.list_handle_grants(&session_id).await?;
+                Ok(ProcessEffectOutcome::List { entries })
+            }
+            ProcessCommand::Transfer {
+                from_session_id,
+                to_session_id,
+                process_ids,
+            } => {
+                registry
+                    .transfer_handle_grants(&from_session_id, &to_session_id, &process_ids)
+                    .await?;
+                Ok(ProcessEffectOutcome::Transfer)
+            }
+            ProcessCommand::Await { process_id } => {
+                let output = registry.await_process(&process_id).await?;
+                Ok(ProcessEffectOutcome::Await { output })
+            }
+            ProcessCommand::Cancel { process_id, reason } => {
+                let record = self
+                    .request_process_cancel(registry, &process_id, reason)
+                    .await?;
+                Ok(ProcessEffectOutcome::Cancel { record })
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LocalProcessExecution {
+    cancellation: CancellationToken,
+}
+
+impl std::fmt::Debug for InlineRuntimeEffectController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlineRuntimeEffectController")
+            .finish_non_exhaustive()
     }
 }

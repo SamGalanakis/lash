@@ -10,7 +10,6 @@ pub(crate) enum RuntimePerfScenario {
     RlmToolCalls,
     RlmProcessHandles,
     RlmLlmQuery,
-    RlmToolRetry,
     RlmGlobals,
     RlmLargeToolSurface,
     ObservationalMemory,
@@ -24,14 +23,13 @@ pub(crate) enum RuntimePerfScenario {
 }
 
 impl RuntimePerfScenario {
-    pub(crate) const DEFAULTS: [Self; 17] = [
+    pub(crate) const DEFAULTS: [Self; 16] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
         Self::RlmToolCalls,
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
-        Self::RlmToolRetry,
         Self::RlmGlobals,
         Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
@@ -43,14 +41,13 @@ impl RuntimePerfScenario {
         Self::StoreReopen,
         Self::TurnCheckpoint,
     ];
-    pub(crate) const KNOWN: [Self; 17] = [
+    pub(crate) const KNOWN: [Self; 16] = [
         Self::Standard,
         Self::Rlm,
         Self::StandardToolCalls,
         Self::RlmToolCalls,
         Self::RlmProcessHandles,
         Self::RlmLlmQuery,
-        Self::RlmToolRetry,
         Self::RlmGlobals,
         Self::RlmLargeToolSurface,
         Self::ObservationalMemory,
@@ -71,7 +68,6 @@ impl RuntimePerfScenario {
             "rlm_tool_calls" => Some(Self::RlmToolCalls),
             "rlm_process_handles" => Some(Self::RlmProcessHandles),
             "rlm_llm_query" => Some(Self::RlmLlmQuery),
-            "rlm_tool_retry" => Some(Self::RlmToolRetry),
             "rlm_globals" => Some(Self::RlmGlobals),
             "rlm_large_tool_surface" => Some(Self::RlmLargeToolSurface),
             "observational_memory" => Some(Self::ObservationalMemory),
@@ -94,7 +90,6 @@ impl RuntimePerfScenario {
             Self::RlmToolCalls => "rlm_tool_calls",
             Self::RlmProcessHandles => "rlm_process_handles",
             Self::RlmLlmQuery => "rlm_llm_query",
-            Self::RlmToolRetry => "rlm_tool_retry",
             Self::RlmGlobals => "rlm_globals",
             Self::RlmLargeToolSurface => "rlm_large_tool_surface",
             Self::ObservationalMemory => "observational_memory",
@@ -123,7 +118,6 @@ impl RuntimePerfScenario {
             | Self::RlmToolCalls
             | Self::RlmProcessHandles
             | Self::RlmLlmQuery
-            | Self::RlmToolRetry
             | Self::RlmGlobals
             | Self::RlmLargeToolSurface
             | Self::EmbedRlm => ExecutionMode::new("rlm"),

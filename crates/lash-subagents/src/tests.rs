@@ -8,7 +8,7 @@ use crate::rlm_support::{
 };
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
 use lash_core::{
-    ExecutionMode, LashRuntime, LocalProcessRegistry, PersistedSessionState, PluginFactory,
+    ExecutionMode, LashRuntime, LocalProcessRegistry, RuntimeSessionState, PluginFactory,
     PluginHost, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices, SessionPolicy,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
@@ -261,9 +261,9 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         ..SessionPolicy::default()
     };
     let registry = Arc::new(default_registry(&BTreeMap::new()));
-    let current_snapshot = PersistedSessionState {
+    let current_snapshot = RuntimeSessionState {
         policy: live_policy.clone(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
 
     let noop = NoopSubagentSessionConfigurator;
@@ -550,10 +550,10 @@ async fn run_seed_probe(
         policy.clone(),
         host,
         RuntimeServices::new(plugins),
-        PersistedSessionState {
+        RuntimeSessionState {
             session_id: "root".to_string(),
             policy,
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         },
     )
     .await

@@ -18,7 +18,7 @@ use crate::provider::{
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
-    PersistedSessionState, ProcessRegistry, ProviderOptions, SessionPolicy, SessionStateEnvelope,
+    RuntimeSessionState, ProcessRegistry, ProviderOptions, SessionPolicy, SessionStateEnvelope,
     TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
@@ -392,7 +392,7 @@ pub struct MockSessionManager {
 impl Default for MockSessionManager {
     fn default() -> Self {
         Self {
-            snapshot: PersistedSessionState::default(),
+            snapshot: RuntimeSessionState::default(),
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,

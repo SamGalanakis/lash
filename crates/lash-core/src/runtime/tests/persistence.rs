@@ -40,8 +40,7 @@ async fn standard_runtime_assembles_stream_only_text_response() {
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
         )
         .await
         .expect("turn");
@@ -102,8 +101,7 @@ async fn standard_runtime_recovers_streamed_text_when_final_response_is_empty() 
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
         )
         .await
         .expect("turn");
@@ -267,7 +265,7 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
     let turn_events = RecordingTurnEvents::default();
 
     let turn = runtime
-        .stream_turn_with_semantic_events(
+        .stream_turn(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: "run terminal tools".to_string(),
@@ -278,9 +276,7 @@ async fn standard_runtime_tool_control_finish_emits_terminal_output() {
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &NoopEventSink,
-            &turn_events,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
@@ -362,7 +358,7 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
     let turn_events = RecordingTurnEvents::default();
 
     let turn = runtime
-        .stream_turn_with_semantic_events(
+        .stream_turn(
             TurnInput {
                 items: vec![InputItem::Text {
                     text: "run failing terminal tool".to_string(),
@@ -373,9 +369,7 @@ async fn standard_runtime_tool_control_fail_stops_without_terminal_output_event(
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &NoopEventSink,
-            &turn_events,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_turn_events(&turn_events),
         )
         .await
         .expect("turn");
@@ -502,8 +496,7 @@ async fn standard_runtime_preserves_part_boundaries_when_response_is_not_streame
                 mode_extension: None,
                 turn_context: crate::TurnContext::default(),
             },
-            &sink,
-            CancellationToken::new(),
+            TurnOptions::new(CancellationToken::new()).with_events(&sink),
         )
         .await
         .expect("turn");

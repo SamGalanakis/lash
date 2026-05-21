@@ -13,7 +13,7 @@ pub struct SessionHandle {
     pub policy: SessionPolicy,
 }
 
-pub type SessionSnapshot = PersistedSessionState;
+pub type SessionSnapshot = RuntimeSessionState;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
