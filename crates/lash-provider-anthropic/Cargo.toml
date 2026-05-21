@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "llm", "anthropic", "claude"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.7" }
-lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.7" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8" }
+lash-llm-transport = { path = "../lash-llm-transport", version = "=0.1.0-alpha.8" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
