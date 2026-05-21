@@ -19,12 +19,12 @@ fff-zlob = ["lash-tool-search/fff-zlob"]
 semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8", default-features = false }
-lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.8" }
-lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history", version = "=0.1.0-alpha.8" }
-lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery", version = "=0.1.0-alpha.8" }
-lash-tool-apply-patch = { path = "../lash-tool-apply-patch", version = "=0.1.0-alpha.8" }
-lash-tool-files = { path = "../lash-tool-files", version = "=0.1.0-alpha.8" }
-lash-tool-search = { path = "../lash-tool-search", version = "=0.1.0-alpha.8" }
-lash-tool-shell = { path = "../lash-tool-shell", version = "=0.1.0-alpha.8" }
-lash-tool-web = { path = "../lash-tool-web", version = "=0.1.0-alpha.8" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
+lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.9" }
+lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history", version = "=0.1.0-alpha.9" }
+lash-plugin-tool-discovery = { path = "../lash-plugin-tool-discovery", version = "=0.1.0-alpha.9" }
+lash-tool-apply-patch = { path = "../lash-tool-apply-patch", version = "=0.1.0-alpha.9" }
+lash-tool-files = { path = "../lash-tool-files", version = "=0.1.0-alpha.9" }
+lash-tool-search = { path = "../lash-tool-search", version = "=0.1.0-alpha.9" }
+lash-tool-shell = { path = "../lash-tool-shell", version = "=0.1.0-alpha.9" }
+lash-tool-web = { path = "../lash-tool-web", version = "=0.1.0-alpha.9" }

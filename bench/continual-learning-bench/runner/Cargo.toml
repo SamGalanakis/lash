@@ -11,15 +11,15 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = "6"
-lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.8" }
-lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.8" }
-lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.8" }
-lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.8" }
-lash-harness-opt = { path = "../../../crates/lash-harness-opt", version = "=0.1.0-alpha.8" }
-lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.8" }
-lash-rlm-types = { path = "../../../crates/lash-rlm-types", version = "=0.1.0-alpha.8" }
-lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.8" }
-lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.8" }
+lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.9" }
+lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.9" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.9" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.9" }
+lash-harness-opt = { path = "../../../crates/lash-harness-opt", version = "=0.1.0-alpha.9" }
+lash-mode-rlm = { path = "../../../crates/lash-mode-rlm", version = "=0.1.0-alpha.9" }
+lash-rlm-types = { path = "../../../crates/lash-rlm-types", version = "=0.1.0-alpha.9" }
+lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.9" }
+lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.9" }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
