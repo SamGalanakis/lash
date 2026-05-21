@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn default_state() -> PersistedSessionState {
-    PersistedSessionState::default()
+pub(crate) fn default_state() -> RuntimeSessionState {
+    RuntimeSessionState::default()
 }
 
 #[test]
@@ -127,7 +127,7 @@ impl ReadModelState for SessionStateEnvelope {
     }
 }
 
-impl ReadModelState for PersistedSessionState {
+impl ReadModelState for RuntimeSessionState {
     fn read_model(&self) -> crate::session_graph::SessionReadModel {
         self.read_model()
     }
@@ -143,7 +143,7 @@ impl ReadModelStateMut for SessionStateEnvelope {
     }
 }
 
-impl ReadModelStateMut for PersistedSessionState {
+impl ReadModelStateMut for RuntimeSessionState {
     fn append_message(&mut self, message: Message) {
         self.session_graph.append_message(message);
     }
@@ -217,6 +217,8 @@ pub(crate) struct RecordingStore {
     runtime_turn_lease_renew_count: Mutex<usize>,
     runtime_turn_lease_abandon_count: Mutex<usize>,
 }
+
+crate::impl_noop_attachment_manifest!(RecordingStore);
 
 #[async_trait::async_trait]
 impl crate::store::RuntimePersistence for RecordingStore {
@@ -711,7 +713,6 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
             created_at: "2026-04-06T00:00:00Z".to_string(),
             model: request.policy.model.clone(),
             cwd: None,
-            parent_session_id: request.parent_session_id.clone(),
             relation: request.relation.clone(),
         });
         self.stores
@@ -769,7 +770,7 @@ pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> 
             ExecutionMode::standard(),
             tools,
         )),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -874,7 +875,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host(
         standard_test_policy(),
         host,
         crate::RuntimeServices::new(plugin_session),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -906,7 +907,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host_and_store(
         standard_test_policy(),
         host,
         services,
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -1162,7 +1163,7 @@ pub(crate) async fn standard_runtime_with_transport_and_host(
             ExecutionMode::standard(),
             tools,
         )),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -1183,7 +1184,7 @@ pub(crate) async fn standard_runtime_with_bridge(
             turn_injection_bridge,
             crate::TurnInputInjectionBridge::new(),
         ),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");
@@ -1204,7 +1205,7 @@ pub(crate) async fn standard_runtime_with_input_bridge(
             crate::TurnInjectionBridge::new(),
             turn_input_injection_bridge,
         ),
-        PersistedSessionState::default(),
+        RuntimeSessionState::default(),
     )
     .await
     .expect("runtime");

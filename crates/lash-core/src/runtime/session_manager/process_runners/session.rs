@@ -1,7 +1,7 @@
 use super::*;
 
 impl RuntimeSessionManager {
-    pub(in crate::runtime::session_manager::processes) async fn run_process_session_turn(
+    pub(in crate::runtime::session_manager::process_runners) async fn run_process_session_turn(
         &self,
         registration: crate::ProcessRegistration,
         create_request: crate::SessionCreateRequest,

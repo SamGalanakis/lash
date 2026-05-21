@@ -5,7 +5,7 @@ pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::{
-    ExecutionMode, LashRuntime, MessageRole, PersistedSessionState, PluginHost, PluginSpec,
+    ExecutionMode, LashRuntime, MessageRole, RuntimeSessionState, PluginHost, PluginSpec,
     PluginStack, RuntimeCoreConfig, RuntimeEnvironment, RuntimeHandle, RuntimeObservation,
     SessionPolicy, SessionSpec,
 };

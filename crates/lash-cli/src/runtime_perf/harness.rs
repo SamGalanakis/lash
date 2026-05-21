@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 use lash::{
     LashCore, ModeId, ModePreset,
@@ -11,9 +11,11 @@ use lash::{
     },
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
+use lash_core::SessionEventRecord;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_observational_memory::ACTIVE_STATE_PLUGIN_TYPE as OM_ACTIVE_STATE_PLUGIN_TYPE;
 use lash_provider_openai::OpenAiCompatibleProvider;
+use lash_rlm_types::{RlmModeEvent, RlmTrajectoryEntry};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 
 use super::openai_compat::OpenAiCompatBenchServer;
@@ -26,6 +28,7 @@ use super::store::{RuntimePerfStore, RuntimePerfStoreFactory};
 const DEFAULT_PROMPT: &str =
     "Inspect the current state and reply with exactly: runtime perf benchmark ok";
 const HISTORY_EXCHANGES: usize = 18;
+const RUNTIME_PERF_MAX_TURNS: usize = 1;
 
 pub(crate) struct BenchmarkRuntime {
     core: LashCore,
@@ -60,7 +63,7 @@ impl BenchmarkRuntime {
     pub(crate) async fn reopen_with_state(
         &mut self,
         scenario: RuntimePerfScenario,
-        state: lash::persistence::PersistedSessionState,
+        state: lash::persistence::RuntimeSessionState,
     ) -> anyhow::Result<()> {
         if let Some(session) = self.session.take() {
             session.close().await?;
@@ -143,16 +146,45 @@ impl BenchmarkRuntime {
 pub(crate) fn validate_runtime_perf_turn(
     scenario: RuntimePerfScenario,
     turn_index: usize,
-    outcome: &TurnOutcome,
-    assistant_output: &lash::turn::AssistantOutput,
+    turn: &lash::TurnResult,
 ) -> anyhow::Result<()> {
     let expected = "runtime perf benchmark ok";
-    match outcome {
+    let diagnostics = runtime_perf_turn_diagnostics(turn);
+    if !rlm_trajectory_errors(turn).is_empty() {
+        anyhow::bail!(
+            "runtime perf scenario {} turn {} surfaced RLM execution error:\n{}",
+            scenario.name(),
+            turn_index + 1,
+            diagnostics
+        );
+    }
+    if !turn.errors.is_empty() {
+        anyhow::bail!(
+            "runtime perf scenario {} turn {} emitted runtime errors:\n{}",
+            scenario.name(),
+            turn_index + 1,
+            diagnostics
+        );
+    }
+    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm")
+        && matches!(
+            turn.outcome,
+            TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { .. })
+        )
+    {
+        anyhow::bail!(
+            "runtime perf scenario {} turn {} finished through assistant prose; RLM perf scenarios must complete through submit so fixture errors cannot be hidden.\n{}",
+            scenario.name(),
+            turn_index + 1,
+            diagnostics
+        );
+    }
+    match &turn.outcome {
         TurnOutcome::Finished(lash::advanced::TurnFinish::AssistantMessage { text }) => {
             let valid = if matches!(scenario, RuntimePerfScenario::OpenAiCompatStream) {
-                text.contains(expected) || assistant_output.safe_text.contains(expected)
+                text.contains(expected) || turn.assistant_output.safe_text.contains(expected)
             } else {
-                text.trim() == expected || assistant_output.safe_text.trim() == expected
+                text.trim() == expected || turn.assistant_output.safe_text.trim() == expected
             };
             if valid {
                 return Ok(());
@@ -198,10 +230,116 @@ pub(crate) fn validate_runtime_perf_turn(
                 scenario.name(),
                 turn_index + 1,
                 stop,
-                assistant_output
+                turn.assistant_output
             );
         }
     }
+}
+
+fn rlm_trajectory_errors(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
+    rlm_trajectory_entries(turn)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty())
+        })
+        .collect()
+}
+
+fn rlm_trajectory_entries(turn: &lash::TurnResult) -> Vec<RlmTrajectoryEntry> {
+    let rlm_mode = lash_core::ExecutionMode::new("rlm");
+    turn.state
+        .read_view()
+        .active_events()
+        .iter()
+        .filter_map(|event| {
+            let SessionEventRecord::Mode(event) = event else {
+                return None;
+            };
+            match event.decode::<RlmModeEvent>(&rlm_mode) {
+                Ok(Some(RlmModeEvent::RlmTrajectoryEntry(entry))) => Some(entry),
+                Ok(Some(
+                    RlmModeEvent::RlmDiagnostic(_)
+                    | RlmModeEvent::RlmGlobalsPatch(_)
+                    | RlmModeEvent::RlmSeed(_),
+                ))
+                | Ok(None)
+                | Err(_) => None,
+            }
+        })
+        .collect()
+}
+
+fn runtime_perf_turn_diagnostics(turn: &lash::TurnResult) -> String {
+    let mut out = String::new();
+    if !turn.errors.is_empty() {
+        let _ = writeln!(out, "turn_errors:");
+        for issue in &turn.errors {
+            let code = issue.code.as_deref().unwrap_or("none");
+            let _ = writeln!(
+                out,
+                "- kind={} code={} message={}",
+                issue.kind,
+                code,
+                preview(&issue.message, 600)
+            );
+        }
+    }
+
+    let entries = rlm_trajectory_entries(turn);
+    let errors = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .error
+                .as_deref()
+                .is_some_and(|error| !error.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        let _ = writeln!(out, "rlm_execution_errors:");
+        for entry in errors {
+            let _ = writeln!(
+                out,
+                "- iteration={} error={}",
+                entry.mode_iteration,
+                preview(entry.error.as_deref().unwrap_or_default(), 900)
+            );
+            if !entry.code.trim().is_empty() {
+                let _ = writeln!(out, "  code={}", preview(&entry.code, 900));
+            }
+        }
+    } else if let Some(entry) = entries.last() {
+        let _ = writeln!(
+            out,
+            "last_rlm_step: iteration={} final_output={}",
+            entry.mode_iteration,
+            entry
+                .final_output
+                .as_ref()
+                .map_or_else(|| "none".to_string(), serde_json::Value::to_string)
+        );
+        if !entry.code.trim().is_empty() {
+            let _ = writeln!(out, "last_rlm_code={}", preview(&entry.code, 900));
+        }
+    }
+
+    if out.trim().is_empty() {
+        "no captured turn errors or RLM trajectory entries".to_string()
+    } else {
+        out
+    }
+}
+
+fn preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview.replace('\n', "\\n")
 }
 
 pub(crate) fn build_embed_core(
@@ -220,6 +358,9 @@ pub(crate) fn build_embed_core(
         .model("mock-model", None)
         .max_context_tokens(200_000)
         .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
+    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
+        builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
+    }
     builder.build().map_err(anyhow::Error::from)
 }
 
@@ -282,7 +423,11 @@ pub(crate) async fn build_runtime_with_store(
         .provider(provider)
         .model("mock-model", None)
         .max_context_tokens(200_000)
+        .process_registry(Arc::new(lash::advanced::LocalProcessRegistry::default()))
         .plugins(plugin_stack);
+    if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
+        builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
+    }
     // RlmGlobals profiles live per-turn projected bindings. Store-backed turns
     // reject live mode extensions because they cannot be checkpointed/resumed.
     if !matches!(scenario, RuntimePerfScenario::RlmGlobals) {
@@ -490,14 +635,6 @@ pub(crate) fn benchmark_prompt(scenario: RuntimePerfScenario, turn_index: usize)
         ),
         RuntimePerfScenario::RlmLlmQuery => format!(
             "Turn {} in RLM mode. Exercise llm_query direct completion, then submit exactly: {}",
-            turn_index + 1,
-            DEFAULT_PROMPT
-                .rsplit_once(": ")
-                .map(|(_, text)| text)
-                .unwrap_or("runtime perf benchmark ok")
-        ),
-        RuntimePerfScenario::RlmToolRetry => format!(
-            "Turn {} in RLM mode. Exercise benchmark_retry and submit exactly: {}",
             turn_index + 1,
             DEFAULT_PROMPT
                 .rsplit_once(": ")

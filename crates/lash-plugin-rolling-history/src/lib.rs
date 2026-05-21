@@ -534,7 +534,7 @@ async fn summarize_compaction_prefix(
         return Ok(None);
     }
 
-    let mut snapshot = lash_core::PersistedSessionState::from_state(state.clone());
+    let mut snapshot = lash_core::RuntimeSessionState::from_state(state.clone());
     snapshot.policy.execution_mode = ExecutionMode::standard();
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;

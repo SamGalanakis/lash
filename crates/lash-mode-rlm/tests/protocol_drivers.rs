@@ -615,6 +615,111 @@ fn typed_rlm_prose_only_response_requests_submit() {
 }
 
 #[test]
+fn submit_required_rlm_prose_at_max_turns_stops_without_retry_prompt() {
+    let mut config = test_config_with_termination(
+        ExecutionMode::new("rlm"),
+        RlmTermination::SubmitRequired { schema: None },
+    );
+    config.max_turns = Some(1);
+    let msgs = vec![user_message("hello")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "plain prose cannot finish submit-required RLM".to_string(),
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_llm_call(&effects).is_none());
+    assert!(find_checkpoint(&effects).is_none());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::TurnOutcome {
+            outcome: lash_core::TurnOutcome::Stopped(lash_core::TurnStop::MaxTurns)
+        })
+    )));
+    assert!(find_done(&effects).is_some());
+    assert!(!machine.messages().iter().any(|message| {
+        message.parts.iter().any(|part| {
+            part.content.contains("Deliver the final answer") && part.content.contains("submit")
+        })
+    }));
+}
+
+#[test]
+fn submit_required_rlm_exec_error_at_max_turns_stops_without_retry() {
+    let mut config = test_config_with_termination(
+        ExecutionMode::new("rlm"),
+        RlmTermination::SubmitRequired { schema: None },
+    );
+    config.max_turns = Some(1);
+    let msgs = vec![user_message("run bad code")];
+    let mut machine = TurnMachine::new(config, msgs, Arc::new(Vec::new()), 0);
+
+    let effects = drain_effects(&mut machine);
+    let llm_id = *find_llm_call(&effects).expect("llm call");
+    machine.handle_response(Response::LlmComplete {
+        id: llm_id,
+        text_streamed: false,
+        result: Ok(LlmResponse {
+            full_text: "```lashlang\nmissing_name\n```".to_string(),
+            parts: vec![LlmOutputPart::Text {
+                text: "```lashlang\nmissing_name\n```".to_string(),
+                response_meta: None,
+            }],
+            ..LlmResponse::default()
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    let exec_id = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ExecCode { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("exec effect");
+    machine.handle_response(Response::ExecResult {
+        id: exec_id,
+        result: Ok(lash_sansio::ExecResponse {
+            output: String::new(),
+            observations: Vec::new(),
+            observation_truncation: Vec::new(),
+            tool_calls: Vec::new(),
+            images: Vec::new(),
+            printed_images: Vec::new(),
+            error: Some("unknown variable `missing_name`".to_string()),
+            duration_ms: 1,
+            terminal_finish: None,
+        }),
+    });
+
+    let effects = drain_effects(&mut machine);
+    assert!(find_llm_call(&effects).is_none());
+    assert!(find_checkpoint(&effects).is_none());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Emit(SessionEvent::TurnOutcome {
+            outcome: lash_core::TurnOutcome::Stopped(lash_core::TurnStop::MaxTurns)
+        })
+    )));
+    assert!(find_done(&effects).is_some());
+    let trajectory = machine_trajectory(&machine);
+    assert!(
+        trajectory
+            .last()
+            .and_then(|entry| entry.error.as_deref())
+            .is_some_and(|error| error.contains("missing_name"))
+    );
+}
+
+#[test]
 fn prose_or_submit_response_finishes_with_assistant_message() {
     let config =
         test_config_with_termination(ExecutionMode::new("rlm"), RlmTermination::ProseOrSubmit);

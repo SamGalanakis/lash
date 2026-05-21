@@ -57,7 +57,7 @@ pub(crate) fn write_hero(out: &mut String, session: &LoadedSession, _stats: &Ses
             meta.session_id.clone(),
             meta.created_at.clone(),
             meta.cwd.clone(),
-            meta.parent_session_id.clone(),
+            meta.parent_session_id().map(ToOwned::to_owned),
         )
     } else {
         (

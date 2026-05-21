@@ -1,7 +1,7 @@
 use lash::LashSession;
 use lash::{TurnActivitySink, TurnInput};
 use lash_core::{
-    AssistantOutput, ExecutionSummary, OutputState, PersistedSessionState, SessionStateEnvelope,
+    AssistantOutput, ExecutionSummary, OutputState, RuntimeSessionState, SessionStateEnvelope,
     TokenUsage, TurnIssue, TurnOutcome, TurnStop,
 };
 #[cfg(test)]
@@ -52,7 +52,7 @@ where
                     .state()
                     .persist_current()
                     .await
-                    .unwrap_or_else(|_| PersistedSessionState::default());
+                    .unwrap_or_else(|_| RuntimeSessionState::default());
                 let state = SessionStateEnvelope {
                     session_id: state.session_id,
                     policy: state.policy,
@@ -179,10 +179,10 @@ mod tests {
             token_ledger: ledger,
         });
 
-        let mut persistence_state = PersistedSessionState {
+        let mut persistence_state = RuntimeSessionState {
             session_graph: SessionGraph::default(),
             token_ledger: Vec::new(),
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         };
         refresh_persisted_session_state(&store, &mut persistence_state)
             .await

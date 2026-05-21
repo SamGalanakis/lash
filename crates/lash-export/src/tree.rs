@@ -196,7 +196,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             if keep[i] {
                 continue;
             }
-            let Some(parent_id) = c.meta.relation_parent_session_id() else {
+            let Some(parent_id) = c.meta.parent_session_id() else {
                 continue;
             };
             let Some(&parent_idx) = by_id.get(parent_id) else {
@@ -353,7 +353,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
             node_kinds.remove(&sid).unwrap_or(NodeRelation::Subagent {
                 parent_session_id: c
                     .meta
-                    .relation_parent_session_id()
+                    .parent_session_id()
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| root_id.clone()),
                 task: None,
@@ -455,7 +455,6 @@ mod tests {
             created_at: "unix:0".to_string(),
             model: "test-model".to_string(),
             cwd: None,
-            parent_session_id: relation.parent_session_id().map(ToOwned::to_owned),
             relation,
         }
     }

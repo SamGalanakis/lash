@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::monitor::{MonitorSnapshot, MonitorSpec};
-use crate::runtime::{AssembledTurn, PersistedSessionState};
+use crate::runtime::{AssembledTurn, RuntimeSessionState};
 use crate::{
     ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
     ToolManifest, ToolProvider, ToolResult, TurnInput,

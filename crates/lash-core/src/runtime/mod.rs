@@ -97,7 +97,7 @@ pub use process::{
     lashlang_process_event_types,
 };
 pub use session_manager::DirectCompletionClient;
-pub use state::{PersistedSessionState, SessionStateEnvelope};
+pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
 use state::{
     append_session_nodes_to_state, apply_residency_on_load, apply_session_checkpoint,
     apply_session_head, normalize_session_graph,
@@ -509,6 +509,9 @@ pub trait EventSink: Send + Sync {
 /// No-op sink useful for callers that only care about final state.
 pub struct NoopEventSink;
 
+/// Static no-op event sink for callers that need a `&dyn EventSink` default.
+pub static NOOP_EVENT_SINK: NoopEventSink = NoopEventSink;
+
 #[async_trait::async_trait]
 impl EventSink for NoopEventSink {
     fn is_noop(&self) -> bool {
@@ -657,6 +660,9 @@ pub trait TurnActivitySink: Send + Sync {
 
 pub struct NoopTurnActivitySink;
 
+/// Static no-op turn-activity sink for callers that need a `&dyn TurnActivitySink` default.
+pub static NOOP_TURN_ACTIVITY_SINK: NoopTurnActivitySink = NoopTurnActivitySink;
+
 #[async_trait::async_trait]
 impl TurnActivitySink for NoopTurnActivitySink {
     fn is_noop(&self) -> bool {
@@ -664,6 +670,67 @@ impl TurnActivitySink for NoopTurnActivitySink {
     }
 
     async fn emit(&self, _activity: TurnActivity) {}
+}
+
+/// Optional sinks and durable-effect scope passed to one of [`LashRuntime`]'s
+/// turn-driving entry points (`stream_turn`, `resume_turn`,
+/// `stream_turn_following_handoffs`).
+///
+/// Construct via [`TurnOptions::new`] and chain `with_*` builders; defaults to
+/// no-op sinks and an inline effect scope derived from the runtime's own
+/// effect controller.
+pub struct TurnOptions<'a> {
+    events: Option<&'a dyn EventSink>,
+    turn_events: Option<&'a dyn TurnActivitySink>,
+    effect_scope: Option<RuntimeEffectControllerScope<'a>>,
+    cancel: CancellationToken,
+}
+
+impl<'a> TurnOptions<'a> {
+    pub fn new(cancel: CancellationToken) -> Self {
+        Self {
+            events: None,
+            turn_events: None,
+            effect_scope: None,
+            cancel,
+        }
+    }
+
+    pub fn with_events(mut self, events: &'a dyn EventSink) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    pub fn with_turn_events(mut self, turn_events: &'a dyn TurnActivitySink) -> Self {
+        self.turn_events = Some(turn_events);
+        self
+    }
+
+    pub fn with_effect_scope(mut self, effect_scope: RuntimeEffectControllerScope<'a>) -> Self {
+        self.effect_scope = Some(effect_scope);
+        self
+    }
+
+    pub(crate) fn events_or_noop(&self) -> &'a dyn EventSink {
+        self.events.unwrap_or(&NOOP_EVENT_SINK)
+    }
+
+    pub(crate) fn turn_events_or_noop(&self) -> &'a dyn TurnActivitySink {
+        self.turn_events.unwrap_or(&NOOP_TURN_ACTIVITY_SINK)
+    }
+
+    /// Return the caller-supplied effect scope, or build a fresh inline scope
+    /// from `fallback_controller` targeting `turn_id`.
+    pub(crate) fn resolve_effect_scope(
+        &self,
+        fallback_controller: &'a dyn RuntimeEffectController,
+        turn_id: &'a str,
+    ) -> Result<RuntimeEffectControllerScope<'a>, RuntimeError> {
+        if let Some(scope) = self.effect_scope {
+            return Ok(scope);
+        }
+        RuntimeEffectControllerScope::new(fallback_controller, turn_id)
+    }
 }
 
 enum RuntimeStreamEvent {
@@ -674,9 +741,14 @@ enum RuntimeStreamEvent {
 #[derive(Clone)]
 pub struct SessionStoreCreateRequest {
     pub session_id: String,
-    pub parent_session_id: Option<String>,
     pub relation: SessionRelation,
     pub policy: SessionPolicy,
+}
+
+impl SessionStoreCreateRequest {
+    pub fn parent_session_id(&self) -> Option<&str> {
+        self.relation.parent_session_id()
+    }
 }
 
 pub trait SessionStoreFactory: Send + Sync {
@@ -701,7 +773,7 @@ pub struct LashRuntime {
     pub(in crate::runtime) policy: SessionPolicy,
     pub(in crate::runtime) host: RuntimeHost,
     pub(in crate::runtime) services: RuntimeServices,
-    pub(in crate::runtime) state: PersistedSessionState,
+    pub(in crate::runtime) state: RuntimeSessionState,
     pub(in crate::runtime) runtime_scope_id: Arc<str>,
     pub(in crate::runtime) managed_sessions: Arc<Mutex<HashMap<String, RuntimeHandle>>>,
     pub(in crate::runtime) active_handoff_continuations: Arc<Mutex<HashMap<String, String>>>,
@@ -722,4 +794,9 @@ pub struct LashRuntime {
     pub(in crate::runtime) pending_first_turn_inputs:
         Arc<std::sync::Mutex<HashMap<String, crate::PluginMessage>>>,
     pub(in crate::runtime) turn_phase_probe: Option<Arc<dyn RuntimeTurnPhaseProbe>>,
+    /// Resident-graph policy chosen by the host. Controls whether
+    /// [`LashRuntime::refresh_session_graph_from_store`] reloads the full
+    /// graph or just the active path, matching the trimming behavior set at
+    /// load time via [`apply_residency_on_load`](crate::runtime::apply_residency_on_load).
+    pub(in crate::runtime) residency: Residency,
 }

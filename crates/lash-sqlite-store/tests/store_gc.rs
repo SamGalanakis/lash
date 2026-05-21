@@ -1,12 +1,12 @@
 use lash_core::{
-    ExecutionMode, HostModeProtocol, HydratedSessionCheckpoint, ModeConfig, ModePreamble,
-    ModeTurnOptions, PersistedSessionConfig, PersistedSessionState, PersistedTurnState,
-    PluginSessionSnapshot, PreparedPrompt, PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-    RuntimeCommit, RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome,
-    RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
-    RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead, SessionPolicy, SessionReadScope,
-    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, StoreError,
-    TokenLedgerEntry, TokenUsage, ToolState,
+    AttachmentId, AttachmentIntent, AttachmentManifest, ExecutionMode, HostModeProtocol,
+    HydratedSessionCheckpoint, ModeConfig, ModePreamble, ModeTurnOptions, PersistedSessionConfig,
+    RuntimeSessionState, PersistedTurnState, PluginSessionSnapshot, PreparedPrompt,
+    PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
+    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeTurnCheckpoint,
+    RuntimeTurnCompletion, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
+    SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    StandardContextApproach, StoreError, TokenLedgerEntry, TokenUsage, ToolState,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
@@ -69,18 +69,18 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
 #[tokio::test]
 async fn runtime_commit_rejects_different_session_id_on_single_session_store() {
     let store = Store::memory().expect("store");
-    let alpha = PersistedSessionState {
+    let alpha = RuntimeSessionState {
         session_id: "alpha".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let first = store
         .commit_runtime_state(RuntimeCommit::persisted_state(&alpha, &[]))
         .await;
     assert!(first.is_ok());
 
-    let beta = PersistedSessionState {
+    let beta = RuntimeSessionState {
         session_id: "beta".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let err = store
         .commit_runtime_state(RuntimeCommit::persisted_state(&beta, &[]))
@@ -92,14 +92,14 @@ async fn runtime_commit_rejects_different_session_id_on_single_session_store() {
 #[tokio::test]
 async fn load_session_hydrates_checkpoint_and_usage_without_reentrant_locking() {
     let store = Store::memory().expect("store");
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "hydrated".to_string(),
         tool_state_snapshot: Some(ToolState::default().with_generation(9)),
         plugin_snapshot_revision: Some(12),
         plugin_snapshot: Some(PluginSessionSnapshot {
             plugins: Default::default(),
         }),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let usage = TokenLedgerEntry {
         source: "turn".to_string(),
@@ -147,9 +147,9 @@ async fn auto_gc_runs_after_commit_without_reentrant_locking() {
     .expect("store");
     let orphan =
         store.put_artifact_blob(BlobArtifactDescriptor::plugin_session_snapshot(), b"orphan");
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "auto-gc".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
 
     store
@@ -186,7 +186,6 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
     let factory = SqliteSessionStoreFactory::new(&root);
     let request = SessionStoreCreateRequest {
         session_id: "chat/alpha".to_string(),
-        parent_session_id: Some("parent".to_string()),
         relation: lash_core::SessionRelation::Child {
             parent_session_id: "parent".to_string(),
             originating_tool_call_id: None,
@@ -213,7 +212,6 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
             created_at: "original".to_string(),
             model: "preserved-model".to_string(),
             cwd: Some("/tmp/original".to_string()),
-            parent_session_id: Some("parent".to_string()),
             relation: lash_core::SessionRelation::Child {
                 parent_session_id: "parent".to_string(),
                 originating_tool_call_id: None,
@@ -248,7 +246,6 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
         std::sync::Arc::new(SqliteSessionStoreFactory::new(&root));
     let request = SessionStoreCreateRequest {
         session_id: "explicit".to_string(),
-        parent_session_id: None,
         relation: lash_core::SessionRelation::Root,
         policy: SessionPolicy {
             model: "model".to_string(),
@@ -296,9 +293,9 @@ async fn runtime_effect_journal_replays_by_idempotency_key_and_clears_on_final_c
         .expect("journal record");
     assert_eq!(loaded.envelope_hash, "hash-a");
 
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "root".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let commit = RuntimeCommit::persisted_state(&state, &[])
         .clearing_completed_turn(RuntimeTurnCompletion::from_lease(&lease));
@@ -343,9 +340,9 @@ async fn stale_completed_turn_commit_rejects_and_preserves_resume_state() {
         .await
         .expect("new lease");
 
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "root".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let err = store
         .commit_runtime_state(
@@ -419,9 +416,9 @@ async fn expired_completed_turn_commit_rejects_and_preserves_resume_state() {
         .expect("save journal");
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-    let state = PersistedSessionState {
+    let state = RuntimeSessionState {
         session_id: "root".to_string(),
-        ..PersistedSessionState::default()
+        ..RuntimeSessionState::default()
     };
     let err = store
         .commit_runtime_state(
@@ -708,6 +705,75 @@ fn runtime_effect_record(
         outcome: RuntimeEffectOutcome::Sleep,
         created_at_epoch_ms: 1,
     }
+}
+
+#[tokio::test]
+async fn attachment_manifest_records_intent_and_commit_stamps_atomically() {
+    let store = Store::memory().expect("store");
+    let attachment_a = AttachmentId::new("aaaa".to_string());
+    let attachment_b = AttachmentId::new("bbbb".to_string());
+
+    AttachmentManifest::record_intent(
+        &store,
+        AttachmentIntent {
+            attachment_id: attachment_a.clone(),
+            session_id: "root".to_string(),
+            canonical_uri: "sha256:aaaa".to_string(),
+            intent_at_epoch_ms: 100,
+        },
+    )
+    .expect("intent a");
+    AttachmentManifest::record_intent(
+        &store,
+        AttachmentIntent {
+            attachment_id: attachment_b.clone(),
+            session_id: "root".to_string(),
+            canonical_uri: "sha256:bbbb".to_string(),
+            intent_at_epoch_ms: 100,
+        },
+    )
+    .expect("intent b");
+
+    // Both are uncommitted; both surface when sweeping for intents
+    // older than 200.
+    let uncommitted = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
+    assert_eq!(uncommitted.len(), 2);
+
+    // Commit one of them via a RuntimeCommit that names it. The other
+    // remains uncommitted so a later GC sweep can reconcile it.
+    let commit = RuntimeCommit {
+        session_id: "root".to_string(),
+        expected_head_revision: Some(0),
+        config: PersistedSessionConfig::default(),
+        graph: lash_core::GraphCommitDelta::ReplaceFull(SessionGraph::default()),
+        checkpoint: HydratedSessionCheckpoint {
+            turn_state: PersistedTurnState::default(),
+            tool_state_ref: None,
+            tool_state: None,
+            plugin_snapshot_ref: None,
+            plugin_snapshot_revision: None,
+            plugin_snapshot: None,
+            execution_state_ref: None,
+            execution_state: None,
+        },
+        usage_deltas: Vec::new(),
+        completed_turn: None,
+        committed_attachment_ids: vec![attachment_a.clone()],
+    };
+    store
+        .commit_runtime_state(commit)
+        .await
+        .expect("commit succeeds");
+
+    let still_uncommitted = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
+    assert_eq!(still_uncommitted.len(), 1);
+    assert_eq!(still_uncommitted[0].attachment_id, attachment_b);
+    assert!(still_uncommitted[0].committed_at_epoch_ms.is_none());
+
+    // Forget the orphan after the GC removes its bytes.
+    AttachmentManifest::forget(&store, &attachment_b).expect("forget");
+    let after_forget = AttachmentManifest::list_uncommitted(&store, 200).expect("list");
+    assert!(after_forget.is_empty());
 }
 
 fn unique_temp_dir(name: &str) -> std::path::PathBuf {

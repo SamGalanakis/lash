@@ -22,6 +22,7 @@ mod paths;
 mod perf_support;
 mod persistence;
 mod plugin_surface;
+mod prompt_context_plugin;
 mod prompt_model;
 mod prompt_tool;
 mod provider_metadata;

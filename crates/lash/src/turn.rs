@@ -364,10 +364,8 @@ pub(crate) async fn resume_prepared_assembled(
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
-    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
     let turn = writer
-        .resume_turn_with_events(turn_id, session_events, turn_events, cancel)
+        .resume_turn(turn_id, turn_options(session_events, turn_events, None, cancel))
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
@@ -383,19 +381,33 @@ pub(crate) async fn resume_prepared_assembled_with_effect_scope(
 ) -> Result<AssembledTurn> {
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
-    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
-    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
     let turn = writer
-        .resume_turn_with_events_and_effect_scope(
+        .resume_turn(
             turn_id,
-            session_events,
-            turn_events,
-            effect_scope,
-            cancel,
+            turn_options(session_events, turn_events, Some(effect_scope), cancel),
         )
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)
+}
+
+fn turn_options<'a>(
+    session_events: Option<&'a dyn EventSink>,
+    turn_events: Option<&'a dyn TurnActivitySink>,
+    effect_scope: Option<RuntimeEffectControllerScope<'a>>,
+    cancel: CancellationToken,
+) -> lash_core::TurnOptions<'a> {
+    let mut opts = lash_core::TurnOptions::new(cancel);
+    if let Some(events) = session_events {
+        opts = opts.with_events(events);
+    }
+    if let Some(turn_events) = turn_events {
+        opts = opts.with_turn_events(turn_events);
+    }
+    if let Some(effect_scope) = effect_scope {
+        opts = opts.with_effect_scope(effect_scope);
+    }
+    opts
 }
 
 struct ChannelTurnActivitySink {
@@ -523,32 +535,11 @@ pub(crate) async fn stream_prepared_followed(
             .await
             .map_err(EmbedError::Session)?;
     }
-    let turn = match (session_events, turn_events) {
-        (Some(session_events), Some(turn_events)) => {
-            Box::pin(writer.stream_turn_with_events_following_handoffs(
-                input,
-                session_events,
-                turn_events,
-                cancel,
-            ))
-            .await?
-        }
-        (Some(session_events), None) => {
-            Box::pin(writer.stream_turn_following_handoffs(input, session_events, cancel)).await?
-        }
-        (None, Some(turn_events)) => {
-            Box::pin(writer.stream_turn_events_following_handoffs(input, turn_events, cancel))
-                .await?
-        }
-        (None, None) => {
-            Box::pin(writer.stream_turn_events_following_handoffs(
-                input,
-                &lash_core::NoopTurnActivitySink,
-                cancel,
-            ))
-            .await?
-        }
-    };
+    let turn = Box::pin(writer.stream_turn_following_handoffs(
+        input,
+        turn_options(session_events, turn_events, None, cancel),
+    ))
+    .await?;
     runtime.publish_from(&writer);
     Ok(turn)
 }
@@ -569,17 +560,10 @@ pub(crate) async fn stream_prepared_followed_with_effect_scope(
             .await
             .map_err(EmbedError::Session)?;
     }
-    let session_events = session_events.unwrap_or(&lash_core::NoopEventSink);
-    let turn_events = turn_events.unwrap_or(&lash_core::NoopTurnActivitySink);
-    let turn = Box::pin(
-        writer.stream_turn_with_events_following_handoffs_with_effect_scope(
-            input,
-            session_events,
-            turn_events,
-            effect_scope,
-            cancel,
-        ),
-    )
+    let turn = Box::pin(writer.stream_turn_following_handoffs(
+        input,
+        turn_options(session_events, turn_events, Some(effect_scope), cancel),
+    ))
     .await?;
     runtime.publish_from(&writer);
     Ok(turn)

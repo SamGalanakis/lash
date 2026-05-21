@@ -9,7 +9,7 @@ use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{EventSink, LocalProcessRegistry, TurnFinish, TurnOutcome, TurnStop},
     persistence::{
-        ModeEvent, PersistedSessionState, RuntimePersistence, load_persisted_session_state,
+        ModeEvent, RuntimeSessionState, RuntimePersistence, load_persisted_session_state,
     },
     plugins::{PluginSpec, StaticPluginFactory},
     provider::ProviderHandle,
@@ -119,9 +119,9 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
     let mut state = load_persisted_session_state(store.as_ref())
         .await
         .context("load session state")?
-        .unwrap_or_else(|| PersistedSessionState {
+        .unwrap_or_else(|| RuntimeSessionState {
             session_id: request.session_id.clone(),
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         });
     if let Some(seed) = build_seed_event(&request) {
         state.session_graph.append_mode_event(seed);

@@ -7,9 +7,7 @@ mod control_tools;
 mod driver;
 mod executor;
 mod plugin;
-mod projected_bindings;
 mod projection;
-mod projection_transport;
 mod protocol;
 mod rlm_support;
 mod stream_mask;
@@ -17,16 +15,15 @@ mod stream_mask;
 pub use control_tools::continue_as_tool_definition;
 pub use driver::{RlmProjectorConfig, build_rlm_preamble};
 pub use plugin::{BuiltinRlmModePluginFactory, RlmModePluginConfig};
-pub use projected_bindings::{
+pub use projection::{
     ProjectionRef, ProjectionRegistry, ProjectionResolveError, ProjectionResolver,
     RlmProjectedBindings, RlmProjectedSeedError, RlmToolResultProjector, RlmTurnInputExt,
     rlm_session_projection_extension,
 };
 pub use projection::{
-    RlmHistoryProjection, decode_rlm_mode_event, project_rlm_globals_from_events,
-    rlm_history_projection, rlm_mode_event,
+    RlmHistoryProjection, RlmSeed, decode_rlm_mode_event, project_rlm_globals_from_events,
+    rlm_history_projection, rlm_mode_event, rlm_seed_initial_nodes,
 };
-pub use projection_transport::{RlmSeed, rlm_seed_initial_nodes};
 pub use protocol::{
     RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
     rlm_execution_section_with_features,

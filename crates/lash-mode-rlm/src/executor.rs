@@ -1,5 +1,4 @@
 mod host_bridge;
-mod projections;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -12,15 +11,10 @@ use lashlang::{CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State a
 use serde_json::json;
 
 use self::host_bridge::HostBridge;
-use self::projections::{
-    projected_bindings, prune_projected_binding_names, prune_protected_bindings,
-    prune_reserved_projected_bindings,
-};
-use crate::projected_bindings::{
+use crate::projection::{
     ProjectionResolver, RLM_TURN_INPUT_PLUGIN_ID, RlmProjectedBindings, RlmProjectionExtension,
-};
-use crate::projection_transport::{
-    flow_to_json_value, json_to_flow_value, rehydrate_projected_globals,
+    flow_to_json_value, json_to_flow_value, projected_bindings, prune_projected_binding_names,
+    prune_protected_bindings, prune_reserved_projected_bindings, rehydrate_projected_globals,
 };
 
 const RLM_SNAPSHOT_VERSION: u32 = 3;
@@ -378,11 +372,10 @@ fn clear_dir(root: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::projections::projected_index;
     use super::*;
-    use crate::projected_bindings::ProjectionRef;
-    use crate::projection_transport::{
-        flow_record_to_json_value, flow_record_to_tool_args, flow_to_json_value,
+    use crate::projection::{
+        ProjectionRef, flow_record_to_json_value, flow_record_to_tool_args, flow_to_json_value,
+        projected_index,
     };
     use lash_rlm_types::PROJECTED_JSON_TAG;
     use lashlang::{

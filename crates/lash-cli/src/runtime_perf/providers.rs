@@ -1,9 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 use lash_core::llm::types::{
@@ -12,7 +9,7 @@ use lash_core::llm::types::{
 use lash_core::testing::TestProvider;
 use lash_core::{
     ToolAvailabilityConfig, ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
-    ToolFailureClass, ToolManifest, ToolOutputContract, ToolProvider, ToolResult, ToolRetryPolicy,
+    ToolManifest, ToolOutputContract, ToolProvider, ToolResult,
 };
 
 use super::scenarios::RuntimePerfScenario;
@@ -73,9 +70,8 @@ pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider 
         .build()
 }
 
-pub(crate) struct BenchmarkEchoTool {
-    retry_attempts: AtomicUsize,
-}
+#[derive(Default)]
+pub(crate) struct BenchmarkEchoTool;
 
 #[derive(Clone)]
 pub(crate) struct BenchmarkLargeToolSurface {
@@ -85,14 +81,6 @@ pub(crate) struct BenchmarkLargeToolSurface {
 struct BenchmarkLargeToolSurfaceCache {
     manifests: Vec<ToolManifest>,
     contracts: HashMap<String, Arc<ToolContract>>,
-}
-
-impl Default for BenchmarkEchoTool {
-    fn default() -> Self {
-        Self {
-            retry_attempts: AtomicUsize::new(0),
-        }
-    }
 }
 
 impl Default for BenchmarkLargeToolSurface {
@@ -133,7 +121,6 @@ impl ToolProvider for BenchmarkEchoTool {
         vec![
             benchmark_echo_tool_definition().manifest(),
             benchmark_slow_tool_definition().manifest(),
-            benchmark_retry_tool_definition().manifest(),
         ]
     }
 
@@ -145,9 +132,6 @@ impl ToolProvider for BenchmarkEchoTool {
             "benchmark_slow" => Some(std::sync::Arc::new(
                 benchmark_slow_tool_definition().contract(),
             )),
-            "benchmark_retry" => Some(std::sync::Arc::new(
-                benchmark_retry_tool_definition().contract(),
-            )),
             _ => None,
         }
     }
@@ -156,7 +140,6 @@ impl ToolProvider for BenchmarkEchoTool {
         match call.name {
             "benchmark_echo" => execute_benchmark_echo(call).await,
             "benchmark_slow" => execute_benchmark_slow(call).await,
-            "benchmark_retry" => self.execute_benchmark_retry(call).await,
             _ => ToolResult::err_fmt(format_args!("Unknown benchmark tool: {}", call.name)),
         }
     }
@@ -188,25 +171,6 @@ async fn execute_benchmark_slow(call: lash_core::ToolCall<'_>) -> ToolResult {
         "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
         "delay_ms": delay_ms,
     }))
-}
-
-impl BenchmarkEchoTool {
-    async fn execute_benchmark_retry(&self, call: lash_core::ToolCall<'_>) -> ToolResult {
-        tokio::task::yield_now().await;
-        let attempt = self.retry_attempts.fetch_add(1, Ordering::SeqCst);
-        if attempt % 2 == 0 {
-            return ToolResult::retryable_failure(
-                ToolFailureClass::External,
-                "benchmark_retry_transient",
-                "synthetic retryable benchmark failure",
-                Some(1),
-            );
-        }
-        ToolResult::ok(serde_json::json!({
-            "value": call.args.get("value").cloned().unwrap_or(serde_json::Value::Null),
-            "attempt": call.context.attempt_number(),
-        }))
-    }
 }
 
 fn benchmark_echo_tool_definition() -> ToolDefinition {
@@ -245,24 +209,6 @@ fn benchmark_slow_tool_definition() -> ToolDefinition {
     .with_execution_mode(ToolExecutionMode::Parallel)
 }
 
-fn benchmark_retry_tool_definition() -> ToolDefinition {
-    ToolDefinition::raw(
-        "tool:benchmark_retry",
-        "benchmark_retry",
-        "Fail once with a safe retry disposition, then return the input payload.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "value": { "type": ["string", "number", "boolean", "object", "array", "null"] }
-            },
-            "additionalProperties": false
-        }),
-        serde_json::json!({ "type": "object", "additionalProperties": true }),
-    )
-    .with_retry_policy(ToolRetryPolicy::safe(2, 1, 1))
-    .with_execution_mode(ToolExecutionMode::Parallel)
-}
-
 #[async_trait::async_trait]
 impl ToolProvider for BenchmarkLargeToolSurface {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
@@ -298,6 +244,7 @@ impl BenchmarkLargeToolSurface {
 
 fn gmail_like_tool_definition(index: usize, name: &str) -> ToolDefinition {
     let mut definition = ToolDefinition::raw(
+        format!("tool:{name}"),
         name,
         gmail_like_tool_description(index, name),
         gmail_like_input_schema(name),
@@ -775,11 +722,15 @@ fn benchmark_stream_profile_for_request(
         }
         RuntimePerfScenario::RlmToolCalls => {
             let text = r#"```lashlang
-fanout = parallel {
-  a: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
-  b: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
-  c: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 3 }
-  d: call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 4 }
+first = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
+second = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
+third = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 3 }
+fourth = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 4 }
+fanout = await {
+  a: first,
+  b: second,
+  c: third,
+  d: fourth
 }
 first = fanout.a?
 submit first.value
@@ -808,14 +759,6 @@ result = (call llm_query {
   inputs: { marker: "runtime perf benchmark ok" }
 })?
 submit result
-```"#
-                .to_string();
-            text_profile(text)
-        }
-        RuntimePerfScenario::RlmToolRetry => {
-            let text = r#"```lashlang
-result = (call benchmark_retry { value: "runtime perf benchmark ok" })?
-submit result.value
 ```"#
                 .to_string();
             text_profile(text)

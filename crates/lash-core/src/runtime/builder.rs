@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, PersistedSessionState, PersistentRuntimeServices,
+    EmbeddedRuntimeHost, LashRuntime, RuntimeSessionState, PersistentRuntimeServices,
     PluginStack, ProcessRegistry, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController,
     RuntimePersistence, RuntimeServices, SessionError, SessionPolicy, SessionStoreFactory,
     TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
@@ -17,7 +17,7 @@ enum PluginSource {
 pub struct EmbeddedRuntimeBuilder {
     session_id: Option<String>,
     policy: Option<SessionPolicy>,
-    initial_state: Option<PersistedSessionState>,
+    initial_state: Option<RuntimeSessionState>,
     plugin_source: PluginSource,
     turn_injection_bridge: TurnInjectionBridge,
     turn_input_injection_bridge: TurnInputInjectionBridge,
@@ -67,7 +67,7 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_initial_state(mut self, state: PersistedSessionState) -> Self {
+    pub fn with_initial_state(mut self, state: RuntimeSessionState) -> Self {
         self.initial_state = Some(state);
         self
     }
@@ -198,7 +198,7 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    fn resolve_state_from_defaults(&self) -> PersistedSessionState {
+    fn resolve_state_from_defaults(&self) -> RuntimeSessionState {
         let mut state = self.initial_state.clone().unwrap_or_default();
         if let Some(session_id) = &self.session_id {
             state.session_id = session_id.clone();
@@ -209,7 +209,7 @@ impl EmbeddedRuntimeBuilder {
         state
     }
 
-    async fn resolve_state(&self) -> Result<PersistedSessionState, SessionError> {
+    async fn resolve_state(&self) -> Result<RuntimeSessionState, SessionError> {
         if let Some(state) = &self.initial_state {
             return Ok({
                 let mut state = state.clone();
@@ -251,7 +251,7 @@ impl EmbeddedRuntimeBuilder {
 
     fn resolve_plugins(
         &self,
-        state: &PersistedSessionState,
+        state: &RuntimeSessionState,
     ) -> Result<Arc<PluginSession>, SessionError> {
         match &self.plugin_source {
             PluginSource::Session(session) => Ok(Arc::clone(session)),

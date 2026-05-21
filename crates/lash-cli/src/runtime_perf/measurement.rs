@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use lash::usage::SessionUsageReport;
@@ -31,6 +32,9 @@ use super::harness::{
 };
 use super::scenarios::RuntimePerfScenario;
 use super::store::RuntimePerfStore;
+
+const RUNTIME_PERF_TURN_TIMEOUT_ENV: &str = "LASH_RUNTIME_PERF_TURN_TIMEOUT_MS";
+const DEFAULT_RUNTIME_PERF_TURN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RuntimePerfRunResult {
@@ -81,6 +85,42 @@ pub(crate) struct RuntimePerfTurnAllocationRunResult {
     pub(crate) run_turn: RuntimePerfAllocationDelta,
     pub(crate) await_background_work: RuntimePerfAllocationDelta,
     pub(crate) total: RuntimePerfAllocationDelta,
+}
+
+async fn runtime_perf_timed<T, F>(
+    scenario: RuntimePerfScenario,
+    turn_index: usize,
+    phase: &str,
+    cancel: Option<CancellationToken>,
+    future: F,
+) -> anyhow::Result<T>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    let timeout = runtime_perf_turn_timeout();
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => {
+            if let Some(cancel) = cancel {
+                cancel.cancel();
+            }
+            anyhow::bail!(
+                "runtime perf scenario {} turn {} {phase} timed out after {} ms; profiling aborts instead of looping. Override with {RUNTIME_PERF_TURN_TIMEOUT_ENV}.",
+                scenario.name(),
+                turn_index + 1,
+                timeout.as_millis()
+            );
+        }
+    }
+}
+
+fn runtime_perf_turn_timeout() -> Duration {
+    std::env::var(RUNTIME_PERF_TURN_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_RUNTIME_PERF_TURN_TIMEOUT)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -368,11 +408,23 @@ pub(crate) async fn run_once(
             let effect_scope =
                 lash::advanced::RuntimeEffectControllerScope::new(&effect_controller, &turn_id)
                     .map_err(anyhow::Error::from)?;
-            runtime
-                .run_turn_with_effect_scope(turn_input, cancel, effect_scope)
-                .await
+            runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_turn_with_effect_scope(turn_input, cancel, effect_scope),
+            )
+            .await
         } else {
-            runtime.run_turn(turn_input, cancel).await
+            runtime_perf_timed(
+                scenario,
+                turn_index,
+                "run_turn",
+                Some(cancel.clone()),
+                runtime.run_turn(turn_input, cancel),
+            )
+            .await
         }
         .with_context(|| {
             format!(
@@ -381,14 +433,22 @@ pub(crate) async fn run_once(
                 turn_index + 1
             )
         })?;
-        validate_runtime_perf_turn(scenario, turn_index, &turn.outcome, &turn.assistant_output)?;
+        validate_runtime_perf_turn(scenario, turn_index, &turn)?;
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
         let after_turn_memory = process_memory_sample();
 
         let await_before_alloc = allocator_stats();
         let background_started = Instant::now();
-        runtime.await_background_work().await.with_context(|| {
+        runtime_perf_timed(
+            scenario,
+            turn_index,
+            "await_background_work",
+            None,
+            runtime.await_background_work(),
+        )
+        .await
+        .with_context(|| {
             format!(
                 "await background work for {} turn {}",
                 scenario.name(),
@@ -986,10 +1046,13 @@ fn completed_checkpoint_tool(index: usize, call: PendingToolCall) -> CompletedTo
 fn checkpoint_exec_code(mode_iteration: usize) -> String {
     format!(
         r#"print("checkpoint turn {mode_iteration}")
-fanout = parallel {{
-  a: call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 1 }}
-  b: call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 2 }}
-  c: call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 3 }}
+first = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 1 }}
+second = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 2 }}
+third = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 3 }}
+fanout = await {{
+  a: first,
+  b: second,
+  c: third
 }}
 submit fanout.a?.value"#
     )
@@ -1084,24 +1147,32 @@ pub(crate) async fn run_once_embed(
         let turn_before_alloc = allocator_stats();
         let turn_before_memory = process_memory_sample();
         let turn_started = Instant::now();
-        let turn = session
-            .run(lash_core::TurnInput::text(benchmark_prompt(
-                scenario, turn_index,
-            )))
-            .await
-            .with_context(|| {
-                format!(
-                    "run embed runtime perf scenario {} turn {}",
-                    scenario.name(),
-                    turn_index + 1
-                )
-            })?;
-        validate_runtime_perf_turn(
+        let cancel = CancellationToken::new();
+        let turn = runtime_perf_timed(
             scenario,
             turn_index,
-            &turn.result.outcome,
-            &turn.result.assistant_output,
-        )?;
+            "run_turn",
+            Some(cancel.clone()),
+            async {
+                session
+                    .turn(lash_core::TurnInput::text(benchmark_prompt(
+                        scenario, turn_index,
+                    )))
+                    .cancel(cancel)
+                    .collect_session_events_with(&lash::advanced::NoopEventSink)
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "run embed runtime perf scenario {} turn {}",
+                scenario.name(),
+                turn_index + 1
+            )
+        })?;
+        validate_runtime_perf_turn(scenario, turn_index, &turn)?;
         let run_turn_ms = elapsed_ms(turn_started);
         let run_turn_alloc = alloc_delta(turn_before_alloc, allocator_stats());
         let after_turn_memory = process_memory_sample();
@@ -1134,7 +1205,7 @@ pub(crate) async fn run_once_embed(
                 total: turn_total_alloc,
             },
             phase_profile: BTreeMap::new(),
-            turn_usage: turn.result.usage,
+            turn_usage: turn.usage,
             usage_delta: before_turn_usage,
             cumulative_usage: SessionUsageReport::default(),
         });

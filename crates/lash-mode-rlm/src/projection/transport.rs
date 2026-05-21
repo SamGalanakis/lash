@@ -8,7 +8,7 @@ use lashlang::{
 };
 use serde_json::Value;
 
-use crate::projected_bindings::{ProjectionRef, ProjectionResolver, RlmProjectedSeedError};
+use super::bindings::{ProjectionRef, ProjectionResolver, RlmProjectedSeedError};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RlmSeed {
@@ -50,9 +50,11 @@ pub fn rlm_seed_initial_nodes(seed: RlmSeed) -> Vec<SessionAppendNode> {
     if seed.is_empty() {
         return Vec::new();
     }
-    vec![SessionAppendNode::mode_event(crate::rlm_mode_event(
-        lash_rlm_types::RlmModeEvent::RlmSeed(seed.into_event_body()),
-    ))]
+    vec![SessionAppendNode::mode_event(
+        super::context::rlm_mode_event(lash_rlm_types::RlmModeEvent::RlmSeed(
+            seed.into_event_body(),
+        )),
+    )]
 }
 
 pub(crate) fn normalize_tool_args_for_projection(

@@ -20,7 +20,6 @@ pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tool_dispatch;
-mod tool_executor;
 mod tool_provider;
 pub mod tool_registry;
 mod tool_result;
@@ -35,7 +34,7 @@ pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 // Re-exports
 pub use attachments::{
     AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, FileAttachmentStore,
-    InMemoryAttachmentStore, StoredAttachment,
+    InMemoryAttachmentStore, SessionScopedAttachmentStore, StoredAttachment,
 };
 pub use chronological::{
     BorrowedChronologicalEntry, BorrowedChronologicalMessage, BorrowedChronologicalPayload,
@@ -192,7 +191,8 @@ pub use runtime::{
     ExecutionSummary, FollowedTurn, InlineRuntimeEffectController, InputItem, LashRuntime,
     LashlangProcessToolBinding, LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry,
     ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle,
-    NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionState,
+    NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionSnapshot,
+    RuntimeSessionState,
     ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest, ProcessCleanupRequest,
     ProcessCommand, ProcessCommandLineEventSpec, ProcessEffectOutcome, ProcessEvent,
     ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
@@ -207,7 +207,8 @@ pub use runtime::{
     RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
     RuntimeObservation, SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory,
     SessionUsageReport, TerminationPolicy, TokenLedgerEntry, TurnActivity, TurnActivityId,
-    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, UsageReportRow, UsageTotals,
+    TurnActivitySink, TurnContext, TurnEvent, TurnInput, TurnIssue, TurnOptions, UsageReportRow,
+    UsageTotals,
     diff_token_ledger, diff_usage_reports, lashlang_process_event_types,
 };
 pub use runtime_controls::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory};
@@ -224,14 +225,16 @@ pub use session_model::context::PreparedContext;
 pub use session_model::{ConversationRecord, ModeEvent, SessionEventRecord, ToolEvent};
 pub use session_model::{SessionPolicy, SessionSpec};
 pub use store::{
-    BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
+    AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
+    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
     RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
     RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
     RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
     RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot, SessionCheckpoint, SessionHead,
     SessionHeadMeta, SessionMeta, SessionPickerInfo, SessionReadScope, StoreError, VacuumReport,
-    load_persisted_session_state, load_persisted_session_state_active_path,
-    refresh_persisted_session_state, runtime_turn_checkpoint_hash,
+    ensure_supported_schema_version, load_persisted_session_state,
+    load_persisted_session_state_active_path, refresh_persisted_session_state,
+    runtime_turn_checkpoint_hash,
 };
 pub use tool_provider::{
     PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolPrepareCall,

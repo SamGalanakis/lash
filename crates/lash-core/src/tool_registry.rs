@@ -44,15 +44,18 @@ impl ToolStateEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct ToolState {
     generation: u64,
-    tools: BTreeMap<String, ToolStateEntry>,
+    tools: Arc<BTreeMap<String, ToolStateEntry>>,
 }
 
 impl ToolState {
     pub(crate) fn new(generation: u64, tools: BTreeMap<String, ToolStateEntry>) -> Self {
-        Self { generation, tools }
+        Self {
+            generation,
+            tools: Arc::new(tools),
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -76,7 +79,9 @@ impl ToolState {
     }
 
     pub fn manifest_mut(&mut self, name: &str) -> Option<&mut ToolManifest> {
-        self.tools.get_mut(name).map(|entry| &mut entry.manifest)
+        Arc::make_mut(&mut self.tools)
+            .get_mut(name)
+            .map(|entry| &mut entry.manifest)
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -102,7 +107,7 @@ impl ToolState {
         name: &str,
         availability: Option<crate::ToolAvailability>,
     ) -> Result<(), ReconfigureError> {
-        let Some(entry) = self.tools.get_mut(name) else {
+        let Some(entry) = Arc::make_mut(&mut self.tools).get_mut(name) else {
             return Err(ReconfigureError::Validation(format!(
                 "unknown tool `{name}`"
             )));
@@ -112,19 +117,60 @@ impl ToolState {
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&str, &ToolStateEntry) -> bool) {
-        self.tools.retain(|name, entry| keep(name, entry));
+        Arc::make_mut(&mut self.tools).retain(|name, entry| keep(name, entry));
     }
 
     pub fn remove(&mut self, name: &str) -> Option<ToolStateEntry> {
-        self.tools.remove(name)
+        Arc::make_mut(&mut self.tools).remove(name)
     }
 
     pub(crate) fn entries(&self) -> &BTreeMap<String, ToolStateEntry> {
-        &self.tools
+        self.tools.as_ref()
     }
 
     pub(crate) fn into_entries(self) -> BTreeMap<String, ToolStateEntry> {
-        self.tools
+        match Arc::try_unwrap(self.tools) {
+            Ok(tools) => tools,
+            Err(tools) => tools.as_ref().clone(),
+        }
+    }
+}
+
+impl Serialize for ToolState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct ToolStateRef<'a> {
+            generation: u64,
+            tools: &'a BTreeMap<String, ToolStateEntry>,
+        }
+
+        ToolStateRef {
+            generation: self.generation,
+            tools: self.tools.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ToolStateOwned {
+            generation: u64,
+            tools: BTreeMap<String, ToolStateEntry>,
+        }
+
+        let owned = ToolStateOwned::deserialize(deserializer)?;
+        Ok(Self {
+            generation: owned.generation,
+            tools: Arc::new(owned.tools),
+        })
     }
 }
 
@@ -882,8 +928,10 @@ mod tests {
     #[test]
     fn apply_state_rejects_tools_not_advertised_by_source() {
         let registry = ToolRegistry::from_tool_provider(Arc::new(MockTool)).expect("registry");
-        let mut snapshot = registry.export_state();
-        snapshot.tools.insert(
+        let snapshot = registry.export_state();
+        let generation = snapshot.generation();
+        let mut tools = snapshot.into_entries();
+        tools.insert(
             "missing".to_string(),
             ToolStateEntry {
                 manifest: test_tool(
@@ -895,6 +943,7 @@ mod tests {
                 source_id: PLUGIN_SOURCE_ID.to_string(),
             },
         );
+        let snapshot = ToolState::new(generation, tools);
         assert!(matches!(
             registry.apply_state(snapshot),
             Err(ReconfigureError::Validation(_))

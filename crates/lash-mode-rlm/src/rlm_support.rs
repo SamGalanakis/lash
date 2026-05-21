@@ -5,6 +5,8 @@ use lash_core::PromptContribution;
 use lash_core::PromptUsage;
 use lash_core::plugin::PromptHookContext;
 
+use crate::projection::{project_rlm_globals_from_events, rlm_history_projection};
+
 /// Render the "Context Budget" line for the volatile turn-tail message.
 /// Returns the formatted text (status line + optional escalation tail)
 /// or `None` when there's nothing to say. The string is intentionally
@@ -59,11 +61,8 @@ impl BoundVariablesCache {
     }
 
     pub fn contributions(&self, ctx: &PromptHookContext) -> Vec<PromptContribution> {
-        let globals = Arc::new(crate::project_rlm_globals_from_events(
-            ctx.state.active_events(),
-        ));
-        let history_len =
-            crate::rlm_history_projection(&ctx.state.chronological_projection()).len();
+        let globals = Arc::new(project_rlm_globals_from_events(ctx.state.active_events()));
+        let history_len = rlm_history_projection(&ctx.state.chronological_projection()).len();
         if let Ok(guard) = self.inner.lock()
             && let Some(cached) = guard.as_ref()
             && cached.globals.as_ref() == globals.as_ref()

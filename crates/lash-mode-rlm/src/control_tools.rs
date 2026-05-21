@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::RlmSeed;
+use crate::projection::RlmSeed;
 
 pub(crate) struct RlmControlToolsProvider;
 
@@ -268,17 +268,18 @@ fn finalise_tool_result(result: Result<ContinueAsResult, String>) -> ToolResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::{decode_rlm_mode_event, rlm_mode_event};
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
     use lash_core::plugin::runtime_host::RuntimeSessionHost;
     use lash_core::plugin::{PluginError, SessionHandle};
-    use lash_core::{PersistedSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint};
+    use lash_core::{RuntimeSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
     #[derive(Default)]
     struct BatonManager {
-        snapshot: PersistedSessionState,
+        snapshot: RuntimeSessionState,
         created: Mutex<Vec<SessionCreateRequest>>,
         closed: Mutex<Vec<String>>,
         visible_handles: Mutex<BTreeSet<String>>,
@@ -296,14 +297,14 @@ mod tests {
 
     #[async_trait]
     impl RuntimeSessionHost for BatonManager {
-        async fn snapshot_current(&self) -> Result<PersistedSessionState, PluginError> {
+        async fn snapshot_current(&self) -> Result<RuntimeSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
 
         async fn snapshot_session(
             &self,
             _session_id: &str,
-        ) -> Result<PersistedSessionState, PluginError> {
+        ) -> Result<RuntimeSessionState, PluginError> {
             Ok(self.snapshot.clone())
         }
         async fn tool_catalog(
@@ -382,13 +383,13 @@ mod tests {
     #[tokio::test]
     async fn continue_as_creates_empty_rlm_successor_with_seed_and_task() {
         let mut session_graph = lash_core::SessionGraph::default();
-        session_graph.append_mode_event(crate::rlm_mode_event(RlmModeEvent::RlmGlobalsPatch(
+        session_graph.append_mode_event(rlm_mode_event(RlmModeEvent::RlmGlobalsPatch(
             lash_rlm_types::RlmGlobalsPatchPluginBody {
                 set_default: serde_json::Map::from_iter([("diary".to_string(), json!([]))]),
             },
         )));
         let manager = Arc::new(BatonManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
@@ -408,7 +409,7 @@ mod tests {
                 )
                 .expect("valid rlm turn options"),
                 session_graph,
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             created: Mutex::new(Vec::new()),
             ..BatonManager::default()
@@ -461,7 +462,7 @@ mod tests {
         let SessionAppendNode::ModeEvent { event: mode_event } = &request.initial_nodes[0] else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmSeed(seed)) = crate::decode_rlm_mode_event(mode_event) else {
+        let Some(RlmModeEvent::RlmSeed(seed)) = decode_rlm_mode_event(mode_event) else {
             panic!("expected RlmSeed");
         };
         assert_eq!(seed.globals["x"], json!(1));
@@ -484,14 +485,14 @@ mod tests {
         // the canonical `__projected__` JSON wrapper), `glob` was a regular
         // global. The successor receives both through one durable RLM seed event.
         let manager = Arc::new(BatonManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
                     ..SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             created: Mutex::new(Vec::new()),
             ..BatonManager::default()
@@ -523,7 +524,7 @@ mod tests {
         let SessionAppendNode::ModeEvent { event: mode_event } = &request.initial_nodes[0] else {
             panic!("expected seed globals event");
         };
-        let Some(RlmModeEvent::RlmSeed(seed)) = crate::decode_rlm_mode_event(mode_event) else {
+        let Some(RlmModeEvent::RlmSeed(seed)) = decode_rlm_mode_event(mode_event) else {
             panic!("expected RlmSeed");
         };
         assert_eq!(seed.globals.len(), 1, "only `glob` should land as a global");
@@ -543,14 +544,14 @@ mod tests {
     #[tokio::test]
     async fn continue_as_transfers_handles_found_recursively_in_seed() {
         let manager = Arc::new(BatonManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
                     ..SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             created: Mutex::new(Vec::new()),
             visible_handles: Mutex::new(BTreeSet::from_iter(["h1".to_string(), "h2".to_string()])),
@@ -598,14 +599,14 @@ mod tests {
     #[tokio::test]
     async fn continue_as_rejects_unknown_seed_handle_before_creating_successor() {
         let manager = Arc::new(BatonManager {
-            snapshot: PersistedSessionState {
+            snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     model: "model".to_string(),
                     max_context_tokens: Some(200_000),
                     ..SessionPolicy::default()
                 },
-                ..PersistedSessionState::default()
+                ..RuntimeSessionState::default()
             },
             created: Mutex::new(Vec::new()),
             ..BatonManager::default()

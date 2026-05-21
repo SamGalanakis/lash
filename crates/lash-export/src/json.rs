@@ -12,7 +12,7 @@ pub fn render(session: &LoadedSession) -> String {
             "created_at": meta.created_at,
             "model": meta.model,
             "cwd": meta.cwd,
-            "parent_session_id": meta.parent_session_id,
+            "parent_session_id": meta.parent_session_id(),
             "relation": meta.relation,
         })
     });

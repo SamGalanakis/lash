@@ -12,7 +12,7 @@ use lash_core::plugin::{
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
-    AssembledTurn, ExecutionMode, MessageRole, PersistedSessionState, PluginHost,
+    AssembledTurn, ExecutionMode, MessageRole, RuntimeSessionState, PluginHost,
     SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
     SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
     ToolResult, TurnHookContext, TurnResultHookContext,
@@ -108,7 +108,7 @@ macro_rules! impl_plan_test_host {
 }
 
 fn mock_snapshot(run_session_id: &str) -> SessionSnapshot {
-    PersistedSessionState::from_state(SessionStateEnvelope {
+    RuntimeSessionState::from_state(SessionStateEnvelope {
         session_id: "root".to_string(),
         policy: SessionPolicy {
             execution_mode: ExecutionMode::standard(),

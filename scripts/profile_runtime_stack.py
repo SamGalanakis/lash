@@ -18,6 +18,13 @@ from pathlib import Path
 
 
 DEFAULT_STACKS = [
+    64 * 1024,
+    80 * 1024,
+    96 * 1024,
+    128 * 1024,
+    192 * 1024,
+    256 * 1024,
+    384 * 1024,
     512 * 1024,
     768 * 1024,
     1024 * 1024,
@@ -27,6 +34,16 @@ DEFAULT_STACKS = [
     4 * 1024 * 1024,
     6 * 1024 * 1024,
     8 * 1024 * 1024,
+]
+
+DEFAULT_SCENARIOS = [
+    "standard",
+    "rlm",
+    "rlm_tool_calls",
+    "rlm_process_handles",
+    "rlm_large_tool_surface",
+    "scoped_effect_controller",
+    "turn_checkpoint",
 ]
 
 
@@ -81,8 +98,8 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Runtime perf scenario to run. Defaults to rlm_large_tool_surface. "
-            "May be repeated."
+            "Runtime perf scenario to run. Defaults to the stack-sensitive runtime "
+            "coverage set. May be repeated."
         ),
     )
     parser.add_argument(
@@ -105,6 +122,14 @@ def parse_args() -> argparse.Namespace:
         "--out",
         type=Path,
         help="Write matrix JSON here. Defaults under .benchmarks/runtime-stack/.",
+    )
+    parser.add_argument(
+        "--strict-failures",
+        action="store_true",
+        help=(
+            "Exit non-zero when any stack-size sample fails. By default the matrix "
+            "exits successfully if every scenario has at least one passing stack size."
+        ),
     )
     parser.add_argument(
         "--cargo-feature",
@@ -229,7 +254,7 @@ def main() -> int:
     out = args.out or default_out(root)
     out.parent.mkdir(parents=True, exist_ok=True)
     binary = resolve_binary(args, root)
-    scenarios = args.scenario or ["rlm_large_tool_surface"]
+    scenarios = args.scenario or DEFAULT_SCENARIOS
     stacks = sorted(set(args.stack_bytes or DEFAULT_STACKS))
 
     maybe_build(args, root)
@@ -271,7 +296,9 @@ def main() -> int:
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"Runtime stack matrix: {out}", file=sys.stderr)
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if all(sample["status"] == "ok" for sample in samples) else 1
+    if args.strict_failures:
+        return 0 if all(sample["status"] == "ok" for sample in samples) else 1
+    return 0 if all(first_success(samples, scenario) is not None for scenario in scenarios) else 1
 
 
 if __name__ == "__main__":

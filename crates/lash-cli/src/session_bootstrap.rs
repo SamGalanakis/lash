@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
 use lash_core::{
-    AttachmentStore, PersistedSessionConfig, PersistedSessionState, ProcessRegistry,
+    AttachmentStore, PersistedSessionConfig, RuntimeSessionState, ProcessRegistry,
     RuntimePersistence, SessionGraph, SessionHead, SessionPolicy,
 };
 use lash_sqlite_store::Store;
@@ -220,11 +220,11 @@ impl CliSessionOpener {
             bootstrap.persisted_config().as_ref(),
         );
         let logger = bootstrap.logger(&policy.model, Some(session_id.clone()))?;
-        let state = PersistedSessionState {
+        let state = RuntimeSessionState {
             session_id: session_id.clone(),
             policy: policy.clone(),
             session_graph: bootstrap.initial_graph(),
-            ..PersistedSessionState::default()
+            ..RuntimeSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
         let mut core_builder = LashCore::builder()

@@ -1,7 +1,7 @@
 //! Session state envelopes and persistence helpers.
 //!
 //! Extracted from `runtime/mod.rs`. `SessionStateEnvelope` and
-//! `PersistedSessionState` keep their original public paths via `pub use`
+//! `RuntimeSessionState` keep their original public paths via `pub use`
 //! in `mod.rs`; the helper functions are `pub(super)` so sibling runtime
 //! modules (`mod.rs`, `session_manager.rs`) can reach them via
 //! `super::*`.
@@ -77,9 +77,52 @@ impl Default for SessionStateEnvelope {
     }
 }
 
-/// Serializable persistence snapshot used by stores, resume, and child session snapshots.
+/// Plain-data view of the **persistable** subset of a
+/// [`RuntimeSessionState`]. Hosts and store backends that want to
+/// inspect "what would be persisted right now" use this — it never
+/// carries runtime-only scratch fields (`head_revision`,
+/// `graph_replace_required`, the dirty `*_snapshot` write buffers).
+///
+/// Build one via [`RuntimeSessionState::persisted_snapshot`]. The
+/// shape mirrors the persisted fields of `RuntimeSessionState` 1:1;
+/// adding a field here is also a contract change for every backend's
+/// on-disk layout, so do it deliberately.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PersistedSessionState {
+pub struct PersistedSessionSnapshot {
+    pub session_id: String,
+    pub policy: SessionPolicy,
+    pub session_graph: crate::SessionGraph,
+    pub turn_index: usize,
+    pub token_usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_usage: Option<PromptUsage>,
+    pub mode_turn_options: crate::ModeTurnOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_state_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_snapshot_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_ref: Option<crate::store::BlobRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ledger: Vec<TokenLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_ref: Option<crate::store::BlobRef>,
+}
+
+/// The runtime's view of a session: the persistable snapshot fields
+/// **plus** scratch fields the runtime tracks but never persists
+/// (head-revision CAS guard, pending dirty-write buffers, replace-graph
+/// flag). The non-persisted fields are marked `#[serde(skip)]` so the
+/// type still round-trips correctly when used directly as a wire
+/// format, but `persisted_snapshot()` is the preferred way to extract
+/// "what gets saved" — it returns a separate value type and rules out
+/// runtime-only fields by construction.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeSessionState {
     pub session_id: String,
     #[serde(default)]
     pub policy: SessionPolicy,
@@ -129,7 +172,7 @@ pub struct PersistedSessionState {
     pub graph_replace_required: bool,
 }
 
-impl PersistedSessionState {
+impl RuntimeSessionState {
     pub fn from_state(state: SessionStateEnvelope) -> Self {
         Self {
             session_id: state.session_id,
@@ -151,6 +194,30 @@ impl PersistedSessionState {
             checkpoint_ref: None,
             head_revision: None,
             graph_replace_required: false,
+        }
+    }
+
+    /// Return the persistable subset of this runtime state as a
+    /// plain-data [`PersistedSessionSnapshot`]. Runtime-only scratch
+    /// fields (`head_revision`, `graph_replace_required`, the dirty
+    /// `*_snapshot` write buffers) are dropped on purpose — they
+    /// don't belong on the wire.
+    pub fn persisted_snapshot(&self) -> PersistedSessionSnapshot {
+        PersistedSessionSnapshot {
+            session_id: self.session_id.clone(),
+            policy: self.policy.clone(),
+            session_graph: self.session_graph.clone(),
+            turn_index: self.turn_index,
+            token_usage: self.token_usage.clone(),
+            last_prompt_usage: self.last_prompt_usage.clone(),
+            mode_turn_options: self.mode_turn_options.clone(),
+            tool_state_ref: self.tool_state_ref.clone(),
+            tool_state_generation: self.tool_state_generation,
+            plugin_snapshot_ref: self.plugin_snapshot_ref.clone(),
+            plugin_snapshot_revision: self.plugin_snapshot_revision,
+            execution_state_ref: self.execution_state_ref.clone(),
+            token_ledger: self.token_ledger.clone(),
+            checkpoint_ref: self.checkpoint_ref.clone(),
         }
     }
 
@@ -300,7 +367,7 @@ impl PersistedSessionState {
     }
 }
 
-impl Default for PersistedSessionState {
+impl Default for RuntimeSessionState {
     fn default() -> Self {
         Self {
             session_id: "root".to_string(),
@@ -342,7 +409,7 @@ pub(super) fn apply_persisted_session_config(
 }
 
 pub(super) fn apply_session_checkpoint(
-    state: &mut PersistedSessionState,
+    state: &mut RuntimeSessionState,
     checkpoint: Option<crate::store::HydratedSessionCheckpoint>,
 ) {
     let Some(checkpoint) = checkpoint else {
@@ -374,7 +441,7 @@ pub(super) fn apply_session_checkpoint(
 }
 
 pub(super) fn apply_session_head(
-    state: &mut PersistedSessionState,
+    state: &mut RuntimeSessionState,
     head: &crate::store::SessionHead,
 ) {
     state.session_graph = head.graph.clone();
@@ -394,7 +461,7 @@ pub(super) fn apply_session_head(
 }
 
 pub(super) fn append_session_nodes_to_state(
-    state: &mut PersistedSessionState,
+    state: &mut RuntimeSessionState,
     nodes: &[crate::SessionAppendNode],
 ) -> Vec<String> {
     let mut node_ids = Vec::with_capacity(nodes.len());
@@ -428,7 +495,7 @@ pub(super) fn append_session_nodes_to_state(
 /// path; if the leaf doesn't resolve against that reduced set, the
 /// caller falls back to a full `load_session_graph()` + `normalize` +
 /// trim.
-pub(super) fn normalize_session_graph(state: &mut PersistedSessionState) {
+pub(super) fn normalize_session_graph(state: &mut RuntimeSessionState) {
     if state.session_graph.heal_orphaned_leaf() {
         state.graph_replace_required = true;
     }
@@ -442,7 +509,7 @@ pub(super) fn normalize_session_graph(state: &mut PersistedSessionState) {
 /// `LashRuntime::orphaned_node_ids` + the store primitives.
 ///
 pub(super) fn apply_residency_on_load(
-    state: &mut PersistedSessionState,
+    state: &mut RuntimeSessionState,
     residency: crate::Residency,
 ) {
     match residency {

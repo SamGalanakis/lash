@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use lash_plugin_prompt_context::InstructionSource;
+use crate::prompt_context_plugin::InstructionSource;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstructionLoaderConfig {

@@ -67,21 +67,21 @@ impl LashRuntime {
     }
 
     /// Export the narrow persistence snapshot used by stores and resume logic.
-    pub fn export_persistence_state(&self) -> PersistedSessionState {
+    pub fn export_persistence_state(&self) -> RuntimeSessionState {
         self.state.clone()
     }
 
-    pub fn apply_persistence_state(&mut self, state: PersistedSessionState) {
+    pub fn apply_persistence_state(&mut self, state: RuntimeSessionState) {
         self.set_persisted_state(state);
     }
 
-    pub(crate) fn export_graph_first_state(&self) -> PersistedSessionState {
+    pub(crate) fn export_graph_first_state(&self) -> RuntimeSessionState {
         self.state.clone()
     }
 
     /// Export a persistence-ready state envelope with dynamic/plugin snapshots
     /// refreshed from the live session.
-    pub fn export_persisted_state(&self) -> PersistedSessionState {
+    pub fn export_persisted_state(&self) -> RuntimeSessionState {
         let mut state = self.state.clone();
         state.mode_turn_options = self.mode_turn_options.clone();
         if let Some(session) = self.session.as_ref() {
@@ -109,7 +109,6 @@ impl LashRuntime {
         if self.process_sync_needed.swap(false, Ordering::AcqRel) {
             self.refresh_session_graph_from_store().await;
         }
-        self.refresh_session_tool_surface().await?;
         Ok(())
     }
 
@@ -121,10 +120,13 @@ impl LashRuntime {
         else {
             return;
         };
-        let read = match store
-            .load_session(crate::store::SessionReadScope::FullGraph)
-            .await
-        {
+        let scope = match self.residency {
+            crate::Residency::KeepAll => crate::store::SessionReadScope::FullGraph,
+            crate::Residency::ActivePathOnly => crate::store::SessionReadScope::ActivePath {
+                leaf_node_id: self.state.session_graph.leaf_node_id.clone(),
+            },
+        };
+        let read = match store.load_session(scope).await {
             Ok(Some(read)) => read,
             Ok(None) => return,
             Err(err) => {

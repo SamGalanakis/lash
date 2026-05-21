@@ -12,9 +12,7 @@ use lashlang::{
 };
 use serde_json::Value;
 
-use crate::projection_transport::{
-    flow_record_to_tool_args, flow_to_json_value, format_output_value,
-};
+use crate::projection::{flow_record_to_tool_args, flow_to_json_value, format_output_value};
 
 pub(super) struct HostBridge<'run> {
     ctx: ModeExecutionContext<'run>,

@@ -480,7 +480,7 @@ pub(crate) async fn run_app(
                             let _ = rt.control().state().reset().await;
                             rt.control()
                                 .state()
-                                .set_persisted(lash_core::PersistedSessionState::from_state(
+                                .set_persisted(lash_core::RuntimeSessionState::from_state(
                                     cleared_session_state(preserved_policy),
                                 ))
                                 .await;

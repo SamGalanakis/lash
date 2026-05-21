@@ -5,7 +5,7 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use lash_core::llm::transport::LlmTransportError;
+use lash_core::llm::transport::{LlmTransportError, validate_image_attachments};
 use lash_core::llm::types::{
     LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmProviderTraceEvent,
     LlmRequest, LlmResponse, LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmUsage,
@@ -385,6 +385,11 @@ impl AnthropicProvider {
     }
 
     fn build_request_body(&self, req: &LlmRequest) -> Result<Value, LlmTransportError> {
+        validate_image_attachments(
+            req,
+            &["image/jpeg", "image/png", "image/gif", "image/webp"],
+            "Anthropic",
+        )?;
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
@@ -1194,7 +1199,9 @@ impl ProviderFactory for AnthropicProviderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::llm::types::{LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec};
+    use lash_core::llm::types::{
+        LlmAttachment, LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec,
+    };
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1210,6 +1217,56 @@ mod tests {
             stream_events: None,
             provider_trace: None,
         }
+    }
+
+    #[test]
+    fn image_attachment_serializes_as_base64_image_block() {
+        let provider = AnthropicProvider::new("key");
+        let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
+        let mut req = request(vec![LlmMessage::new(
+            LlmRole::User,
+            vec![
+                LlmContentBlock::Text {
+                    text: "look at this".into(),
+                    response_meta: None,
+                    cache_breakpoint: false,
+                },
+                LlmContentBlock::Image { attachment_idx: 0 },
+            ],
+        )]);
+        req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
+
+        let body = provider.build_request_body(&req).expect("body");
+
+        let messages = body["messages"].as_array().expect("messages array");
+        let user_msg = messages.last().expect("user message");
+        let content = user_msg["content"].as_array().expect("content array");
+        let image_block = content
+            .iter()
+            .find(|b| b["type"] == "image")
+            .expect("image block");
+        assert_eq!(image_block["source"]["type"], "base64");
+        assert_eq!(image_block["source"]["media_type"], "image/png");
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        assert_eq!(image_block["source"]["data"], expected_b64);
+    }
+
+    #[test]
+    fn unsupported_image_mime_is_rejected_at_request_boundary() {
+        let provider = AnthropicProvider::new("key");
+        let mut req = request(vec![LlmMessage::new(
+            LlmRole::User,
+            vec![LlmContentBlock::Image { attachment_idx: 0 }],
+        )]);
+        req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+
+        let err = provider
+            .build_request_body(&req)
+            .expect_err("bmp should be rejected before wire");
+
+        assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+        assert!(err.message.contains("Anthropic"));
+        assert!(err.message.contains("image/bmp"));
     }
 
     #[test]

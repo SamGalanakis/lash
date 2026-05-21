@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::SessionPolicy;
 use crate::SessionStateEnvelope;
-use crate::runtime::PersistedSessionState;
+use crate::runtime::RuntimeSessionState;
 
 use super::PluginError;
 
@@ -86,7 +86,7 @@ impl SessionReadMeta {
         }
     }
 
-    fn from_persisted_ref(state: &PersistedSessionState) -> Self {
+    fn from_persisted_ref(state: &RuntimeSessionState) -> Self {
         Self {
             session_id: state.session_id.clone(),
             policy: state.policy.clone(),
@@ -169,7 +169,7 @@ impl SessionReadView {
         }))
     }
 
-    pub fn from_persisted_state(state: &PersistedSessionState) -> Self {
+    pub fn from_persisted_state(state: &RuntimeSessionState) -> Self {
         let graph = state.session_graph.clone();
         let read_model = graph.read_model();
         Self(Arc::new(SessionReadState {
@@ -181,7 +181,7 @@ impl SessionReadView {
     }
 
     pub(crate) fn from_runtime_state(
-        state: &PersistedSessionState,
+        state: &RuntimeSessionState,
         policy: SessionPolicy,
         mode_turn_options: crate::ModeTurnOptions,
     ) -> Self {
@@ -198,7 +198,7 @@ impl SessionReadView {
     }
 
     pub(crate) fn derived_from_persisted_state(
-        state: &PersistedSessionState,
+        state: &RuntimeSessionState,
         policy: SessionPolicy,
         turn_index: usize,
         mode_turn_options: crate::ModeTurnOptions,

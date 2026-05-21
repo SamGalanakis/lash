@@ -73,7 +73,7 @@ pub mod persistence {
     pub use lash_core::{
         AttachmentStore, BlobRef, FileAttachmentStore, GcReport, GraphCommitDelta,
         HydratedSessionCheckpoint, ModeEvent, PersistedSessionConfig, PersistedSessionRead,
-        PersistedSessionState, PersistedTurnState, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+        RuntimeSessionState, PersistedTurnState, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
         RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
         RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
         RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,

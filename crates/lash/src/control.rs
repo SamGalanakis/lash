@@ -125,7 +125,7 @@ impl SessionControl {
         result.map(|_| ())
     }
 
-    async fn set_persisted_state(&self, state: PersistedSessionState) {
+    async fn set_persisted_state(&self, state: RuntimeSessionState) {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         runtime.set_persisted_state(state);
@@ -281,7 +281,7 @@ impl SessionControl {
         result
     }
 
-    async fn persist_current_state(&self) -> Result<PersistedSessionState> {
+    async fn persist_current_state(&self) -> Result<RuntimeSessionState> {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
         runtime.await_background_work().await?;
@@ -684,7 +684,7 @@ impl StateControl {
         self.control.append_plugin_body(plugin_type, body).await
     }
 
-    pub async fn set_persisted(&self, state: PersistedSessionState) {
+    pub async fn set_persisted(&self, state: RuntimeSessionState) {
         self.control.set_persisted_state(state).await
     }
 
@@ -703,7 +703,7 @@ impl StateControl {
         self.control.await_background_work().await
     }
 
-    pub async fn persist_current(&self) -> Result<PersistedSessionState> {
+    pub async fn persist_current(&self) -> Result<RuntimeSessionState> {
         self.control.persist_current_state().await
     }
 
