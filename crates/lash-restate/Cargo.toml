@@ -12,7 +12,7 @@ description = "Restate durable execution adapter for Lash runtime effects"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.7" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8" }
 restate-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
