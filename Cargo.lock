@@ -3004,7 +3004,6 @@ dependencies = [
  "criterion",
  "futures",
  "futures-executor",
- "futures-util",
  "insta",
  "proptest",
  "rustc-hash 2.1.2",

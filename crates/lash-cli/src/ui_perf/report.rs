@@ -213,35 +213,14 @@ fn resolve_dhat_output_path(
 }
 
 fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<UiPerfScenario>> {
-    if filters.is_empty() {
-        return Ok(UiPerfScenario::DEFAULTS.to_vec());
-    }
-
-    let mut scenarios = Vec::with_capacity(filters.len());
-    for filter in filters {
-        if filter == "all" {
-            for scenario in UiPerfScenario::KNOWN {
-                if !scenarios.contains(&scenario) {
-                    scenarios.push(scenario);
-                }
-            }
-            continue;
-        }
-        let scenario = UiPerfScenario::parse(filter).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown UI perf scenario `{filter}`; expected one of: {}, all",
-                UiPerfScenario::KNOWN
-                    .iter()
-                    .map(|scenario| scenario.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-        if !scenarios.contains(&scenario) {
-            scenarios.push(scenario);
-        }
-    }
-    Ok(scenarios)
+    report_support::resolve_named_scenarios(
+        filters,
+        &UiPerfScenario::DEFAULTS,
+        &UiPerfScenario::KNOWN,
+        UiPerfScenario::parse,
+        UiPerfScenario::name,
+        "UI perf",
+    )
 }
 fn summarize_samples(results: &[UiPerfRunResult]) -> BTreeMap<String, UiPerfMetricSummary> {
     let mut grouped: BTreeMap<String, Vec<f64>> = BTreeMap::new();
