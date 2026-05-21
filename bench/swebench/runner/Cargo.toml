@@ -11,13 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 dirs = "6"
-lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.8" }
-lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.8" }
-lash-standard-plugins = { path = "../../../crates/lash-standard-plugins", version = "=0.1.0-alpha.8" }
-lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.8" }
-lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.8" }
-lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.8" }
-lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.8" }
+lash-runtime = { path = "../../../crates/lash", version = "=0.1.0-alpha.9" }
+lash-cli = { path = "../../../crates/lash-cli", version = "=0.1.0-alpha.9" }
+lash-standard-plugins = { path = "../../../crates/lash-standard-plugins", version = "=0.1.0-alpha.9" }
+lash-sqlite-store = { path = "../../../crates/lash-sqlite-store", version = "=0.1.0-alpha.9" }
+lash-llm-tools = { path = "../../../crates/lash-llm-tools", version = "=0.1.0-alpha.9" }
+lash-providers-builtin = { path = "../../../crates/lash-providers-builtin", version = "=0.1.0-alpha.9" }
+lash-subagents = { path = "../../../crates/lash-subagents", version = "=0.1.0-alpha.9" }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive", "env"] }

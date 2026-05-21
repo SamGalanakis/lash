@@ -21,11 +21,11 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8" }
-lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.8" }
-lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.8" }
-lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.8" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.8" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9" }
+lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.9" }
+lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.9" }
+lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.9" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -33,6 +33,6 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8", features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 trybuild = "1"
