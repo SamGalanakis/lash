@@ -113,35 +113,14 @@ fn resolve_dhat_output_path(
 }
 
 fn resolve_scenarios(filters: &[String]) -> anyhow::Result<Vec<RuntimePerfScenario>> {
-    if filters.is_empty() {
-        return Ok(RuntimePerfScenario::DEFAULTS.to_vec());
-    }
-
-    let mut scenarios = Vec::with_capacity(filters.len());
-    for filter in filters {
-        if filter == "all" {
-            for scenario in RuntimePerfScenario::KNOWN {
-                if !scenarios.contains(&scenario) {
-                    scenarios.push(scenario);
-                }
-            }
-            continue;
-        }
-        let scenario = RuntimePerfScenario::parse(filter).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown runtime perf scenario `{filter}`; expected one of: {}, all",
-                RuntimePerfScenario::KNOWN
-                    .iter()
-                    .map(|scenario| scenario.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-        if !scenarios.contains(&scenario) {
-            scenarios.push(scenario);
-        }
-    }
-    Ok(scenarios)
+    report_support::resolve_named_scenarios(
+        filters,
+        &RuntimePerfScenario::DEFAULTS,
+        &RuntimePerfScenario::KNOWN,
+        RuntimePerfScenario::parse,
+        RuntimePerfScenario::name,
+        "runtime perf",
+    )
 }
 fn summarize(
     results: &[RuntimePerfRunResult],

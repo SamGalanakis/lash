@@ -15,7 +15,6 @@ categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 compact_str = { version = "0.9.0", features = ["serde"] }
-futures-util = "0.3"
 futures-executor = "0.3"
 rustc-hash = "2"
 serde = { version = "1", features = ["derive", "rc"] }
