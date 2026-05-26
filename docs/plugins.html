@@ -76,8 +76,7 @@ use lash::{plugins::PluginFactory, LashCore};
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model("gpt-5.4", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
     .configure_plugins(|plugins| {
         plugins.push(Arc::new(AppPluginFactory) as Arc&lt;dyn PluginFactory&gt;);
     })
@@ -99,8 +98,7 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model("gpt-5.4", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
     .plugins(plugins)
     .build()?;</code></pre>
             </article>

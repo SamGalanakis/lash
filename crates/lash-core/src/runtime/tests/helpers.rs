@@ -645,7 +645,6 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
     let calls = Arc::new(Mutex::new(calls));
     TestProvider::builder()
         .kind("mock")
-        .default_model("mock-model")
         .requires_streaming(true)
         .complete(move |req| {
             let calls = Arc::clone(&calls);
@@ -666,8 +665,8 @@ pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         execution_mode: ExecutionMode::standard(),
         provider: mock_provider(Vec::new()).into_handle(),
-        model: "mock-model".to_string(),
-        max_context_tokens: Some(200_000),
+        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            .expect("valid model spec"),
         ..SessionPolicy::default()
     }
 }
@@ -711,7 +710,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
             session_id: request.session_id.clone(),
             session_name: request.session_id.clone(),
             created_at: "2026-04-06T00:00:00Z".to_string(),
-            model: request.policy.model.clone(),
+            model: request.policy.model.id.clone(),
             cwd: None,
             relation: request.relation.clone(),
         });

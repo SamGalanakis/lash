@@ -398,11 +398,18 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
         let model = self
             .model
             .clone()
-            .unwrap_or_else(|| self.provider.default_model().to_string());
+            .unwrap_or_else(|| default_model_for_provider(self.provider.kind()).to_string());
+        let model_spec = lash::ModelSpec::from_token_limits(
+            model,
+            self.variant.clone(),
+            self.max_context_tokens,
+            None,
+            None,
+        )
+        .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
         let core_builder = LashCore::rlm()
             .provider(self.provider.clone())
-            .model(model, self.variant.clone())
-            .max_context_tokens(self.max_context_tokens);
+            .model(model_spec);
         let core = core_builder
             .build()
             .map_err(|error| lash_harness_opt::HarnessOptError::Strategy(error.to_string()))?;
@@ -471,6 +478,17 @@ impl ReflectiveProposer for LashRlmReflectiveProposer {
                 turn.result.errors, assistant_prose
             ))),
         }
+    }
+}
+
+fn default_model_for_provider(kind: &str) -> &'static str {
+    match kind {
+        "anthropic" => "claude-opus-4-7",
+        "openai" => "gpt-5.4",
+        "openai-compatible" => "anthropic/claude-sonnet-4.6",
+        "codex" => "gpt-5.5",
+        "google_oauth" => "gemini-3.1-pro-preview",
+        _ => "mock-model",
     }
 }
 

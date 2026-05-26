@@ -25,7 +25,6 @@ pub use projection::{
     rlm_history_projection, rlm_mode_event, rlm_seed_initial_nodes,
 };
 pub use protocol::{
-    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section,
-    rlm_execution_section_with_features,
+    RlmDriver, RlmPromptFeatures, contains_closed_lashlang_fence, rlm_execution_section_for_surface,
 };
 pub use rlm_support::{BoundVariablesCache, format_budget_suffix};

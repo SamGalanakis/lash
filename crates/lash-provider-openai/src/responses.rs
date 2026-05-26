@@ -350,10 +350,9 @@ impl OpenAiCompatibleProvider {
         !Self::local_style_base_url(base_url)
     }
 
-    pub(crate) fn output_token_cap(&self) -> u64 {
-        self.options
-            .max_output_tokens
-            .filter(|v| *v > 0)
+    pub(crate) fn output_token_cap(&self, req: &LlmRequest) -> u64 {
+        req.generation
+            .output_token_cap_u64()
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
     }
 
@@ -375,7 +374,7 @@ impl OpenAiCompatibleProvider {
             "input": input,
             "tools": tools,
             "stream": stream,
-            "max_output_tokens": self.output_token_cap(),
+            "max_output_tokens": self.output_token_cap(req),
         });
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));

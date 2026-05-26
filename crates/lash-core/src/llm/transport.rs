@@ -127,6 +127,10 @@ pub type LlmTransportError = ProviderFailure;
 /// Provider adapters call this at the top of their request-building pipeline
 /// to fail fast with a clear runtime-side error rather than relying on the
 /// upstream API to reject the request with a less actionable message.
+#[expect(
+    clippy::result_large_err,
+    reason = "provider transport errors are a public typed API and carry request/response diagnostics"
+)]
 pub fn validate_image_attachments(
     req: &lash_sansio::llm::types::LlmRequest,
     accepted_mimes: &[&str],
@@ -139,7 +143,7 @@ pub fn validate_image_attachments(
         } else {
             mime.as_str()
         };
-        if !accepted_mimes.iter().any(|accepted| *accepted == normalized) {
+        if !accepted_mimes.contains(&normalized) {
             return Err(ProviderFailure::new(format!(
                 "{provider_name} does not accept image attachments of type `{}` (attachment index {idx}); accepted: {}",
                 att.mime,

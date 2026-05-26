@@ -1,6 +1,7 @@
 use crate::ast::{
-    AssignPathStep, AssignTarget, AstString, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
-    ToolCallMode, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, AstString, BinaryOp, Declaration, Expr, ProcessDecl,
+    ProcessParam, ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl,
+    TriggerDecl, TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
 use crate::lexer::{LexError, Span, Token, TokenKind, lex};
 use thiserror::Error;
@@ -21,9 +22,9 @@ pub enum ParseError {
     LoopControlOutsideLoop { keyword: &'static str, span: Span },
     #[error("unsupported `{keyword}` loop; use bounded `for` loops over ranges or lists")]
     UnsupportedLoop { keyword: &'static str, span: Span },
-    #[error("`{keyword}` can only be used inside a `start` process block")]
+    #[error("`{keyword}` can only be used inside a `process` body")]
     ProcessControlOutsideBlock { keyword: &'static str, span: Span },
-    #[error("`{keyword}` can't be used inside a `start` process block")]
+    #[error("`{keyword}` can't be used inside a `process` body")]
     ForegroundControlInsideProcess { keyword: &'static str, span: Span },
 }
 
@@ -62,9 +63,35 @@ struct Parser {
 impl Parser {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let capacity = (self.tokens.len() / 20).max(1);
+        let mut declarations = Vec::new();
+        let mut declaration_spans = Vec::new();
         let mut expressions = Vec::with_capacity(capacity);
         let mut expression_spans = Vec::with_capacity(capacity);
         while !self.at_eof() {
+            if self.peek_contextual("type") && !self.peek_assignment_target() {
+                let start = self.peek().span.start;
+                declarations.push(Declaration::Type(self.parse_type_decl()?));
+                declaration_spans.push(self.span_from(start));
+                continue;
+            }
+            if self.peek_contextual("process") && !self.peek_assignment_target() {
+                let start = self.peek().span.start;
+                declarations.push(Declaration::Process(self.parse_process_decl()?));
+                declaration_spans.push(self.span_from(start));
+                continue;
+            }
+            if self.peek_contextual("trigger") && !self.peek_assignment_target() {
+                let start = self.peek().span.start;
+                declarations.push(Declaration::Trigger(self.parse_trigger_decl()?));
+                declaration_spans.push(self.span_from(start));
+                continue;
+            }
+            if self.peek_contextual("schedule") && !self.peek_assignment_target() {
+                let start = self.peek().span.start;
+                declarations.push(Declaration::Schedule(self.parse_schedule_decl()?));
+                declaration_spans.push(self.span_from(start));
+                continue;
+            }
             let start = self.peek().span.start;
             expressions.push(self.parse_statement_expr()?);
             let end = self
@@ -74,7 +101,161 @@ impl Parser {
                 .unwrap_or(start);
             expression_spans.push(Span { start, end });
         }
-        Ok(Program::block_with_spans(expressions, expression_spans))
+        Ok(Program::module_with_spans(
+            declarations,
+            declaration_spans,
+            expressions,
+            expression_spans,
+        ))
+    }
+
+    fn span_from(&self, start: usize) -> Span {
+        let end = self
+            .tokens
+            .get(self.index.saturating_sub(1))
+            .map(|token| token.span.end)
+            .unwrap_or(start);
+        Span { start, end }
+    }
+
+    fn parse_type_decl(&mut self) -> Result<TypeDecl, ParseError> {
+        self.expect_contextual("type")?;
+        let name = self.expect_ident()?;
+        self.expect_exact(TokenKind::Equal, "`=`")?;
+        let ty = if matches!(self.peek_kind(), TokenKind::LBrace) {
+            self.parse_type_object_body()?
+        } else {
+            self.parse_type_expr()?
+        };
+        Ok(TypeDecl { name, ty })
+    }
+
+    fn parse_process_decl(&mut self) -> Result<ProcessDecl, ParseError> {
+        self.expect_contextual("process")?;
+        let name = self.expect_ident()?;
+        self.expect_exact(TokenKind::LParen, "`(`")?;
+        let mut params = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let param_name = self.expect_ident()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type_expr()?;
+            params.push(ProcessParam {
+                name: param_name,
+                ty,
+            });
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect_exact(TokenKind::RParen, "`)`")?;
+        let return_ty = if matches!(self.peek_kind(), TokenKind::Minus)
+            && self
+                .tokens
+                .get(self.index + 1)
+                .is_some_and(|token| matches!(token.kind, TokenKind::Greater))
+        {
+            self.bump();
+            self.bump();
+            Some(self.parse_type_expr()?)
+        } else {
+            None
+        };
+        self.process_depth += 1;
+        let body = self.parse_block()?;
+        self.process_depth -= 1;
+        Ok(ProcessDecl {
+            name,
+            params,
+            return_ty,
+            body,
+        })
+    }
+
+    fn parse_trigger_decl(&mut self) -> Result<TriggerDecl, ParseError> {
+        self.expect_contextual("trigger")?;
+        let name = self.expect_ident()?;
+        self.expect_contextual("on")?;
+        let source = if self.peek_contextual("each") {
+            self.bump();
+            let resource_type = self.expect_ident()?;
+            self.expect_exact(TokenKind::Dot, "`.`")?;
+            let event = self.expect_ident()?;
+            self.expect_contextual("as")?;
+            let resource_binding = self.expect_ident()?;
+            self.expect_exact(TokenKind::Comma, "`,`")?;
+            let event_binding = self.expect_ident()?;
+            return Ok(TriggerDecl {
+                name,
+                source: TriggerSource::Each {
+                    resource_type,
+                    event,
+                    resource_binding,
+                },
+                event_binding,
+                body: self.parse_block()?,
+            });
+        } else {
+            let resource = self.parse_resource_ref()?;
+            self.expect_exact(TokenKind::Dot, "`.`")?;
+            let event = self.expect_ident()?;
+            self.expect_contextual("as")?;
+            TriggerSource::Binding { resource, event }
+        };
+        let event_binding = self.expect_ident()?;
+        let body = self.parse_block()?;
+        Ok(TriggerDecl {
+            name,
+            source,
+            event_binding,
+            body,
+        })
+    }
+
+    fn parse_schedule_decl(&mut self) -> Result<ScheduleDecl, ParseError> {
+        self.expect_contextual("schedule")?;
+        let name = self.expect_ident()?;
+        self.expect_contextual("every")?;
+        let cadence = self.parse_schedule_cadence()?;
+        self.expect_contextual("as")?;
+        let tick_binding = self.expect_ident()?;
+        let body = self.parse_block()?;
+        Ok(ScheduleDecl {
+            name,
+            cadence,
+            tick_binding,
+            body,
+        })
+    }
+
+    fn parse_schedule_cadence(&mut self) -> Result<ScheduleCadence, ParseError> {
+        let function = self.expect_ident()?;
+        if function.as_str() != "cron" {
+            return Err(ParseError::Expected {
+                expected: "`cron(...)` schedule cadence",
+                found: format!("identifier `{function}`"),
+                span: self.tokens[self.index.saturating_sub(1)].span,
+            });
+        }
+        self.expect_exact(TokenKind::LParen, "`(`")?;
+        let expression = self.parse_expr()?;
+        let mut options = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::Comma) {
+            self.bump();
+            if matches!(self.peek_kind(), TokenKind::RParen) {
+                break;
+            }
+            let key = self.expect_ident()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let value = self.parse_expr()?;
+            options.push((key, value));
+        }
+        self.expect_exact(TokenKind::RParen, "`)`")?;
+        Ok(ScheduleCadence::Cron {
+            expression,
+            options,
+        })
     }
 
     fn parse_statement_expr(&mut self) -> Result<Expr, ParseError> {
@@ -84,10 +265,13 @@ impl Parser {
             TokenKind::Submit => self.parse_submit(),
             TokenKind::Cancel => self.parse_cancel(),
             TokenKind::Print => self.parse_print(),
-            TokenKind::Call => Ok(Expr::ToolCall {
-                mode: ToolCallMode::Call,
-                call: self.parse_call_expr()?,
+            TokenKind::Call => Err(ParseError::Unexpected {
+                found: "`call`".to_string(),
+                span: self.peek().span,
             }),
+            TokenKind::Ident(name) if name == "let" && !self.peek_assignment_target() => {
+                self.parse_let_assign()
+            }
             TokenKind::Ident(name)
                 if matches!(name.as_str(), "yield" | "wake" | "finish" | "fail")
                     && !self.peek_assignment_target() =>
@@ -109,6 +293,11 @@ impl Parser {
             TokenKind::Ident(_) if self.peek_assignment_target() => self.parse_assign(),
             _ => self.parse_expr(),
         }
+    }
+
+    fn parse_let_assign(&mut self) -> Result<Expr, ParseError> {
+        self.bump();
+        self.parse_assign()
     }
 
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
@@ -415,10 +604,33 @@ impl Parser {
                 TokenKind::Dot => {
                     self.bump();
                     let field = self.expect_key_name()?;
-                    expr = Expr::Field {
-                        target: Box::new(expr),
-                        field,
-                    };
+                    if matches!(self.peek_kind(), TokenKind::LParen) {
+                        let args = self.parse_call_arguments()?;
+                        expr = Expr::ReceiverCall {
+                            receiver: Box::new(expr),
+                            operation: field,
+                            args,
+                        };
+                    } else if let Expr::Variable(resource_type) = &expr
+                        && is_resource_namespace(resource_type)
+                    {
+                        if self.process_depth > 0 {
+                            return Err(ParseError::Expected {
+                                expected: "resource handle parameter",
+                                found: format!("catalog handle `{resource_type}.{field}`"),
+                                span: self.tokens[self.index.saturating_sub(1)].span,
+                            });
+                        }
+                        expr = Expr::ResourceRef(ResourceRefExpr {
+                            resource_type: resource_type.clone(),
+                            alias: field,
+                        });
+                    } else {
+                        expr = Expr::Field {
+                            target: Box::new(expr),
+                            field,
+                        };
+                    }
                 }
                 TokenKind::LBracket => {
                     self.bump();
@@ -477,14 +689,32 @@ impl Parser {
                 }
                 let name = name.clone();
                 self.bump();
+                if name == "sleep" {
+                    return self.parse_sleep_expr();
+                }
+                if name == "wait" && self.peek_contextual("signal") {
+                    self.bump();
+                    return Ok(Expr::WaitSignal);
+                }
+                if name == "signal" && self.peek_contextual("run") {
+                    self.bump();
+                    let run = self.parse_expr()?;
+                    self.expect_contextual("with")?;
+                    let payload = self.parse_expr()?;
+                    return Ok(Expr::SignalRun {
+                        run: Box::new(run),
+                        payload: Box::new(payload),
+                    });
+                }
                 if name == "start" && matches!(self.peek_kind(), TokenKind::Call) {
-                    return Ok(Expr::ToolCall {
-                        mode: ToolCallMode::Start,
-                        call: self.parse_call_expr()?,
+                    return Err(ParseError::Unexpected {
+                        found: "`start call`".to_string(),
+                        span: self.tokens[self.index.saturating_sub(1)].span,
                     });
                 }
                 if name == "start"
-                    && (matches!(self.peek_kind(), TokenKind::LBrace)
+                    && (matches!(self.peek_kind(), TokenKind::Ident(_))
+                        || matches!(self.peek_kind(), TokenKind::LBrace)
                         || self.paren_group_followed_by_lbrace())
                 {
                     return self.parse_process_start_expr();
@@ -494,19 +724,7 @@ impl Parser {
                     return Ok(Expr::TypeLiteral(Box::new(ty)));
                 }
                 if matches!(self.peek_kind(), TokenKind::LParen) {
-                    self.bump();
-                    let mut args = Vec::new();
-                    if !matches!(self.peek_kind(), TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if matches!(self.peek_kind(), TokenKind::Comma) {
-                                self.bump();
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    self.expect_exact(TokenKind::RParen, "`)`")?;
+                    let args = self.parse_call_arguments()?;
                     Ok(Expr::BuiltinCall { name, args })
                 } else {
                     Ok(Expr::Variable(name))
@@ -520,9 +738,9 @@ impl Parser {
             }
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_record(),
-            TokenKind::Call => Ok(Expr::ToolCall {
-                mode: ToolCallMode::Call,
-                call: self.parse_call_expr()?,
+            TokenKind::Call => Err(ParseError::Unexpected {
+                found: "`call`".to_string(),
+                span: self.peek().span,
             }),
             _ => Err(self.unexpected()),
         }
@@ -566,88 +784,83 @@ impl Parser {
         Ok(entries)
     }
 
-    fn parse_call_expr(&mut self) -> Result<CallExpr, ParseError> {
-        self.expect_exact(TokenKind::Call, "`call`")?;
-        let name = self.expect_ident()?;
-        self.expect_exact(TokenKind::LBrace, "`{`")?;
-        let args = self.parse_record_entries()?;
-        self.expect_exact(TokenKind::RBrace, "`}`")?;
-        Ok(CallExpr { name, args })
-    }
-
-    fn parse_process_start_expr(&mut self) -> Result<Expr, ParseError> {
-        let mut name = None;
-        let mut timeout_ms = None;
-        let mut input = None;
-        if matches!(self.peek_kind(), TokenKind::LParen) {
-            self.bump();
-            while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
-                let key_span = self.peek().span;
-                let key = self.expect_ident()?;
-                self.expect_exact(TokenKind::Colon, "`:`")?;
-                let expr = Box::new(self.parse_expr()?);
-                match key.as_str() {
-                    "name" => {
-                        if name.replace(expr).is_some() {
-                            return Err(ParseError::Expected {
-                                expected: "unique process option",
-                                found: "duplicate `name`".to_string(),
-                                span: key_span,
-                            });
-                        }
-                    }
-                    "timeout_ms" => {
-                        if timeout_ms.replace(expr).is_some() {
-                            return Err(ParseError::Expected {
-                                expected: "unique process option",
-                                found: "duplicate `timeout_ms`".to_string(),
-                                span: key_span,
-                            });
-                        }
-                    }
-                    "input" => {
-                        if input.replace(expr).is_some() {
-                            return Err(ParseError::Expected {
-                                expected: "unique process option",
-                                found: "duplicate `input`".to_string(),
-                                span: key_span,
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(ParseError::Expected {
-                            expected: "`name`, `timeout_ms`, or `input`",
-                            found: format!("process option `{key}`"),
-                            span: key_span,
-                        });
-                    }
-                }
+    fn parse_call_arguments(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect_exact(TokenKind::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !matches!(self.peek_kind(), TokenKind::RParen) {
+            loop {
+                args.push(self.parse_expr()?);
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.bump();
+                    if matches!(self.peek_kind(), TokenKind::RParen) {
+                        break;
+                    }
                     continue;
                 }
                 break;
             }
-            self.expect_exact(TokenKind::RParen, "`)`")?;
         }
-        self.expect_exact(TokenKind::LBrace, "`{`")?;
-        self.process_depth += 1;
-        let mut body = Vec::new();
-        while !matches!(self.peek_kind(), TokenKind::RBrace | TokenKind::Eof) {
-            body.push(self.parse_statement_expr()?);
+        self.expect_exact(TokenKind::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    fn parse_named_arguments(&mut self) -> Result<Vec<(AstString, Expr)>, ParseError> {
+        let mut entries = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RParen | TokenKind::Eof) {
+            let key = self.expect_key_name()?;
+            self.expect_exact(TokenKind::Colon, "`:`")?;
+            let value = self.parse_expr()?;
+            entries.push((key, value));
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
         }
-        self.process_depth -= 1;
-        self.expect_exact(TokenKind::RBrace, "`}`")?;
-        Ok(Expr::StartProcess(ProcessStartExpr {
-            name,
-            timeout_ms,
-            input,
-            body: Box::new(Expr::Block(body)),
-        }))
+        Ok(entries)
+    }
+
+    fn parse_process_start_expr(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek_kind(), TokenKind::LBrace) || self.paren_group_followed_by_lbrace() {
+            return Err(ParseError::Unexpected {
+                found: "inline `start` process body".to_string(),
+                span: self.peek().span,
+            });
+        }
+        let process = self.expect_ident()?;
+        self.expect_exact(TokenKind::LParen, "`(`")?;
+        let args = self.parse_named_arguments()?;
+        self.expect_exact(TokenKind::RParen, "`)`")?;
+        Ok(Expr::StartProcess(ProcessStartExpr { process, args }))
+    }
+
+    fn parse_sleep_expr(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek_kind(), TokenKind::For) {
+            self.bump();
+            return Ok(Expr::SleepFor(Box::new(self.parse_expr()?)));
+        }
+        if self.peek_contextual("until") {
+            self.bump();
+            return Ok(Expr::SleepUntil(Box::new(self.parse_expr()?)));
+        }
+        Err(ParseError::Expected {
+            expected: "`for` or `until`",
+            found: render_kind(self.peek_kind()),
+            span: self.peek().span,
+        })
     }
 
     fn parse_type_object(&mut self) -> Result<TypeExpr, ParseError> {
         self.expect_exact(TokenKind::LBrace, "`{`")?;
+        self.parse_type_object_body_after_lbrace()
+    }
+
+    fn parse_type_object_body(&mut self) -> Result<TypeExpr, ParseError> {
+        self.expect_exact(TokenKind::LBrace, "`{`")?;
+        self.parse_type_object_body_after_lbrace()
+    }
+
+    fn parse_type_object_body_after_lbrace(&mut self) -> Result<TypeExpr, ParseError> {
         let mut fields = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while !matches!(self.peek_kind(), TokenKind::RBrace) {
@@ -702,15 +915,15 @@ impl Parser {
                 self.bump();
                 Ok(TypeExpr::Null)
             }
+            TokenKind::String(value) => {
+                self.bump();
+                Ok(TypeExpr::Enum(vec![value]))
+            }
             // A bare `{` in type position is the classic "forgot the
             // `Type` keyword" mistake (`foo: { ok: bool }` instead of
             // `foo: Type { ok: bool }`). Surface a targeted diagnostic
             // rather than the generic "expected type expression" shrug.
-            TokenKind::LBrace => Err(ParseError::Expected {
-                expected: "type expression (type literals must start with `Type`, e.g. `Type { ok: bool }`)",
-                found: render_kind(&token.kind),
-                span: token.span,
-            }),
+            TokenKind::LBrace => self.parse_type_object_body(),
             TokenKind::Ident(name) => {
                 self.bump();
                 match name.as_str() {
@@ -956,6 +1169,32 @@ impl Parser {
         false
     }
 
+    fn parse_resource_ref(&mut self) -> Result<ResourceRefExpr, ParseError> {
+        let resource_type = self.expect_ident()?;
+        self.expect_exact(TokenKind::Dot, "`.`")?;
+        let alias = self.expect_ident()?;
+        Ok(ResourceRefExpr {
+            resource_type,
+            alias,
+        })
+    }
+
+    fn peek_contextual(&self, keyword: &str) -> bool {
+        matches!(self.peek_kind(), TokenKind::Ident(name) if name.as_str() == keyword)
+    }
+
+    fn expect_contextual(&mut self, keyword: &'static str) -> Result<(), ParseError> {
+        let token = self.bump();
+        match &token.kind {
+            TokenKind::Ident(name) if name.as_str() == keyword => Ok(()),
+            other => Err(ParseError::Expected {
+                expected: keyword,
+                found: render_kind(other),
+                span: token.span,
+            }),
+        }
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek_kind(), TokenKind::Eof)
     }
@@ -977,6 +1216,13 @@ impl Parser {
 
 fn token_can_be_key(kind: &TokenKind) -> bool {
     matches!(kind, TokenKind::Ident(_) | TokenKind::String(_)) || keyword_key_name(kind).is_some()
+}
+
+fn is_resource_namespace(name: &str) -> bool {
+    name.chars().any(|ch| ch.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn keyword_key_name(kind: &TokenKind) -> Option<&'static str> {
@@ -1021,7 +1267,6 @@ fn token_can_start_expr(kind: &TokenKind) -> bool {
             | TokenKind::LParen
             | TokenKind::LBracket
             | TokenKind::LBrace
-            | TokenKind::Call
             | TokenKind::Await
             | TokenKind::Minus
             | TokenKind::Bang
@@ -1082,10 +1327,10 @@ fn render_kind(kind: &TokenKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr, ToolCallMode};
+    use crate::ast::{Declaration, Expr, TriggerSource};
 
     fn block(program: &Program) -> &[Expr] {
-        let Expr::Block(expressions) = &program.expr else {
+        let Expr::Block(expressions) = &program.main else {
             panic!("program root should be a block");
         };
         expressions
@@ -1110,8 +1355,10 @@ mod tests {
     }
 
     #[test]
-    fn await_record_of_starts_parses_directly() {
-        let program = parse("result = await { a: start call one {}, b: start call two {} }")
+    fn await_record_of_process_starts_parses_directly() {
+        let program = parse(
+            "process one() { finish null }\nprocess two() { finish null }\nresult = await { a: start one(), b: start two() }",
+        )
             .expect("program should parse");
         let Expr::Assign { expr, .. } = &block(&program)[0] else {
             panic!("expected assignment");
@@ -1123,18 +1370,18 @@ mod tests {
             panic!("await should target a record");
         };
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().all(|(_, expr)| matches!(
-            expr,
-            Expr::ToolCall {
-                mode: ToolCallMode::Start,
-                ..
-            }
-        )));
+        assert!(
+            entries
+                .iter()
+                .all(|(_, expr)| matches!(expr, Expr::StartProcess(_)))
+        );
     }
 
     #[test]
-    fn await_list_of_starts_parses_directly() {
-        let program = parse("submit await [start call one {}, start call two {}]")
+    fn await_list_of_process_starts_parses_directly() {
+        let program = parse(
+            "process one() { finish null }\nprocess two() { finish null }\nsubmit await [start one(), start two()]",
+        )
             .expect("program should parse");
         let Expr::Submit(Some(expr)) = &block(&program)[0] else {
             panic!("expected submit");
@@ -1146,13 +1393,103 @@ mod tests {
             panic!("await should target a list");
         };
         assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|expr| matches!(
-            expr,
-            Expr::ToolCall {
-                mode: ToolCallMode::Start,
-                ..
+        assert!(
+            items
+                .iter()
+                .all(|expr| matches!(expr, Expr::StartProcess(_)))
+        );
+    }
+
+    #[test]
+    fn module_declarations_parse_process_triggers_schedules_and_receiver_calls() {
+        let program = parse(
+            r#"
+            type EmailInput = { source: "gmail" | "manual", message_id: string? }
+            process triage(gmail: GMAIL, input: EmailInput) -> null {
+              msg = await gmail.get_message(input.message_id)?
+              finish msg
             }
-        )));
+            trigger personal_mail on GMAIL.personal.new_message as event {
+              start triage(gmail: GMAIL.personal, input: { source: "gmail", message_id: event.message_id })
+            }
+            schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
+              start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
+            }
+            "#,
+        )
+        .expect("module should parse");
+        assert_eq!(program.declarations.len(), 4);
+        assert!(matches!(program.declarations[0], Declaration::Type(_)));
+        assert!(matches!(program.declarations[1], Declaration::Process(_)));
+        let Declaration::Trigger(trigger) = &program.declarations[2] else {
+            panic!("expected trigger");
+        };
+        assert!(matches!(trigger.source, TriggerSource::Binding { .. }));
+        assert!(matches!(program.declarations[3], Declaration::Schedule(_)));
+    }
+
+    #[test]
+    fn static_graph_includes_process_activation_resources_and_branches() {
+        let program = parse(
+            r#"
+            type EmailInput = { source: "gmail" | "manual", message_id: string? }
+            process triage(gmail: GMAIL, input: EmailInput) -> null {
+              if input.source == "gmail" {
+                msg = await gmail.get_message(input.message_id)?
+              } else {
+                msg = null
+              }
+              finish msg
+            }
+            trigger personal_mail on GMAIL.personal.new_message as event {
+              start triage(gmail: GMAIL.personal, input: { source: "gmail", message_id: event.message_id })
+            }
+            schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
+              start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
+            }
+            "#,
+        )
+        .expect("module should parse");
+
+        let graph = crate::static_graph_json(&program, "v1");
+        let nodes = graph["nodes"].as_array().expect("graph nodes");
+        let edges = graph["edges"].as_array().expect("graph edges");
+        assert!(nodes.iter().any(|node| node["kind"] == "process"));
+        assert!(nodes.iter().any(|node| node["kind"] == "trigger"));
+        assert!(nodes.iter().any(|node| node["kind"] == "schedule"));
+        assert!(nodes.iter().any(|node| node["kind"] == "resource"));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node["kind"] == "resource_operation")
+        );
+        assert!(nodes.iter().any(|node| node["kind"] == "branch"));
+        assert!(nodes.iter().any(|node| node["kind"] == "terminal"));
+        assert!(edges.iter().any(|edge| edge["label"] == "starts"));
+        assert!(edges.iter().any(|edge| edge["label"] == "calls"));
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node["span"]["end"].as_u64() > node["span"]["start"].as_u64())
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|edge| edge["span"]["end"].as_u64() > edge["span"]["start"].as_u64())
+        );
+    }
+
+    #[test]
+    fn process_body_rejects_catalog_handles() {
+        let err = parse(
+            r#"
+            process bad() {
+              await GMAIL.personal.get_message("id")?
+            }
+            "#,
+        )
+        .expect_err("catalog handle should be rejected inside process bodies");
+        assert!(matches!(err, ParseError::Expected { .. }));
     }
 
     #[test]

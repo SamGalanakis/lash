@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use lash::{LashCore, LashSession, ModeId, ModePreset, PluginStack};
 use lash_core::{
-    AttachmentStore, PersistedSessionConfig, RuntimeSessionState, ProcessRegistry,
-    RuntimePersistence, SessionGraph, SessionHead, SessionPolicy,
+    AttachmentStore, PersistedSessionConfig, ProcessRegistry, RuntimePersistence,
+    RuntimeSessionState, SessionGraph, SessionHead, SessionPolicy,
 };
 use lash_sqlite_store::Store;
 
@@ -49,15 +49,9 @@ fn policy_with_persisted_config(
     config: Option<&PersistedSessionConfig>,
 ) -> SessionPolicy {
     if let Some(config) = config {
-        if !config.configured_model.is_empty() {
-            policy.model = config.configured_model.clone();
-        }
-        if config.context_window > 0 {
-            policy.max_context_tokens = Some(config.context_window as usize);
-        }
+        policy.model = config.model.clone();
         policy.execution_mode = config.execution_mode.clone();
         policy.standard_context_approach = config.standard_context_approach.clone();
-        policy.model_variant = config.model_variant.clone();
     }
     policy.session_id = Some(session_id);
     policy
@@ -219,7 +213,7 @@ impl CliSessionOpener {
             session_id.clone(),
             bootstrap.persisted_config().as_ref(),
         );
-        let logger = bootstrap.logger(&policy.model, Some(session_id.clone()))?;
+        let logger = bootstrap.logger(&policy.model.id, Some(session_id.clone()))?;
         let state = RuntimeSessionState {
             session_id: session_id.clone(),
             policy: policy.clone(),
@@ -227,12 +221,12 @@ impl CliSessionOpener {
             ..RuntimeSessionState::default()
         };
         let store: Arc<dyn RuntimePersistence> = bootstrap.store();
-        let mut core_builder = LashCore::builder()
+        let core_builder = LashCore::builder()
             .install_mode(ModePreset::standard())
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::new(policy.execution_mode.plugin_id().to_string()))
             .provider(policy.provider.clone())
-            .model(policy.model.clone(), policy.model_variant.clone())
+            .model(policy.model.clone())
             .child_store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 bootstrap.sessions_dir().to_path_buf(),
             )))
@@ -242,9 +236,6 @@ impl CliSessionOpener {
             .trace_jsonl_path(self.trace_jsonl_path.clone())
             .trace_level(self.trace_level)
             .process_registry(Arc::clone(&self.process_registry));
-        if let Some(max_context_tokens) = policy.max_context_tokens {
-            core_builder = core_builder.max_context_tokens(max_context_tokens);
-        }
         let core = core_builder.build()?;
         let session = core
             .session(session_id)

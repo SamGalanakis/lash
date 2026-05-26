@@ -25,13 +25,13 @@
 <div class="section" id="context-window">
           <div class="section-header">
             <h2>Context Window And History</h2>
-            <p><code>max_context_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or hand off.</p>
+            <p><code>ModelSpec.limits.context_window_tokens</code> caps every provider request. Overflow finishes as <code>TurnStop::ProviderError</code>; the runtime does <strong>not</strong> auto-truncate. Compact, switch model, or hand off.</p>
           </div>
           <p>Two history strategies, picked via the mode's context-approach setting:</p>
           <div class="two-col">
             <article class="panel">
               <h3><code>RollingHistory</code> (default)</h3>
-              <p>Full ordered history each turn, trimmed only to fit <code>max_context_tokens</code>.</p>
+              <p>Full ordered history each turn, trimmed only to fit the active model's context window.</p>
             </article>
             <article class="panel">
               <h3><code>ObservationalMemory</code></h3>
@@ -154,8 +154,7 @@ let template = PromptTemplate::new(vec![
 
 let core = lash::LashCore::standard()
     .provider(provider)
-    .model("gpt-5.4", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"))
     .prompt_template(template)
     .prompt_contribution(PromptContribution::guidance(
         "App",
@@ -276,8 +275,7 @@ impl ToneTurnExt for lash::TurnBuilder {
           <p>Install on the session; use the extension method before each run:</p>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .build()?;
 
 let session = core

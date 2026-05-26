@@ -59,8 +59,7 @@ pub fn load_session_from_paths(store_path: &Path, trace_path: &Path) -> Result<L
     let head = store.load_session_head();
     let context_window_tokens = head
         .as_ref()
-        .map(|head| head.config.context_window)
-        .filter(|tokens| *tokens > 0);
+        .map(|head| head.config.model.context_window_tokens() as u64);
     let graph = head
         .map(|head| head.graph)
         .unwrap_or_else(|| load_graph(&store));

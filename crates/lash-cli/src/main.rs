@@ -17,6 +17,7 @@ mod input_items;
 mod instructions;
 mod interactive;
 mod markdown;
+mod model_catalog;
 mod overlay;
 mod paths;
 mod perf_support;

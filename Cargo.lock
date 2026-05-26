@@ -2494,7 +2494,6 @@ dependencies = [
  "lash-sansio",
  "lash-trace",
  "lashlang",
- "libc",
  "regex",
  "reqwest 0.13.3",
  "schemars",
@@ -2608,6 +2607,7 @@ dependencies = [
  "async-trait",
  "lash-core",
  "lash-sqlite-store",
+ "lash-tool-shell",
  "serde_json",
  "tokio",
 ]
@@ -2783,6 +2783,7 @@ dependencies = [
  "http",
  "http-body-util",
  "lash-core",
+ "lashlang",
  "restate-sdk",
  "serde",
  "serde_json",
@@ -2920,6 +2921,7 @@ name = "lash-tool-shell"
 version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
+ "chrono",
  "lash-core",
  "lash-tool-support",
  "libc",
@@ -3009,6 +3011,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.18",
  "tokio",

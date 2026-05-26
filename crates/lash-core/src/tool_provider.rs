@@ -31,6 +31,7 @@ pub struct ToolContext<'run> {
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
+    pub(crate) process_events: Option<ToolProcessEventContext>,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
@@ -44,6 +45,13 @@ pub struct ToolContext<'run> {
     pub(crate) max_attempts: u32,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ToolProcessEventContext {
+    process_id: String,
+    registry: Arc<dyn crate::ProcessRegistry>,
+    wake_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +222,7 @@ impl<'run> ToolContext<'run> {
             host,
             cancellation_token: None,
             async_process_id: None,
+            process_events: None,
             attachment_store,
             direct_completions,
             effect_controller,
@@ -233,8 +242,8 @@ impl<'run> ToolContext<'run> {
     pub async fn session_model(&self) -> Result<ToolSessionModel, PluginError> {
         let snapshot = self.session_snapshot().await?;
         Ok(ToolSessionModel {
-            model: snapshot.policy.model,
-            model_variant: snapshot.policy.model_variant,
+            model: snapshot.policy.model.id,
+            model_variant: snapshot.policy.model.variant,
         })
     }
 
@@ -306,6 +315,50 @@ impl<'run> ToolContext<'run> {
         self.async_process_id.as_deref()
     }
 
+    pub async fn emit_process_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        let Some(process) = self.process_events.as_ref() else {
+            return Err(PluginError::Session(
+                "process event emission is unavailable outside a durable process".to_string(),
+            ));
+        };
+        let event = process
+            .registry
+            .append_event(&process.process_id, event_type.into(), payload)
+            .await?;
+        if let Some(wake) = event.semantics.wake.as_ref()
+            && self
+                .host
+                .inject_turn_input(
+                    process
+                        .wake_session_id
+                        .as_deref()
+                        .unwrap_or(&self.session_id),
+                    crate::InjectedTurnInput {
+                        id: Some(format!(
+                            "process:{}:wake:{}",
+                            process.process_id, event.sequence
+                        )),
+                        message: crate::PluginMessage::text(
+                            crate::MessageRole::System,
+                            wake.input.clone(),
+                        ),
+                    },
+                )
+                .await
+                .is_ok()
+        {
+            process
+                .registry
+                .ack_wake(&process.process_id, event.sequence)
+                .await?;
+        }
+        Ok(event)
+    }
+
     pub fn tool_call_id(&self) -> Option<&str> {
         self.tool_call_id.as_deref()
     }
@@ -348,6 +401,20 @@ impl<'run> ToolContext<'run> {
     ) -> Self {
         self.async_process_id = Some(process_id.into());
         self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    pub(crate) fn with_process_events(
+        mut self,
+        process_id: impl Into<String>,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        wake_session_id: Option<String>,
+    ) -> Self {
+        self.process_events = Some(ToolProcessEventContext {
+            process_id: process_id.into(),
+            registry,
+            wake_session_id,
+        });
         self
     }
 

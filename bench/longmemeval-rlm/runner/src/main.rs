@@ -590,6 +590,14 @@ async fn run_question(
     let store = Arc::new(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
+    let model_spec = lash::ModelSpec::from_token_limits(
+        args.model.clone(),
+        args.variant.clone(),
+        args.max_context_tokens,
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let core = LashCore::builder()
         .install_mode(mode_preset(
             &execution_mode,
@@ -597,8 +605,7 @@ async fn run_question(
         )?)
         .default_mode(execution_mode.clone())
         .provider(provider.clone())
-        .model(args.model.clone(), args.variant.clone())
-        .max_context_tokens(args.max_context_tokens)
+        .model(model_spec.clone())
         .trace_jsonl_path(Some(trace_path.clone()))
         .prompt_template(prompt_template(args.prompt_profile, args.session_tools))
         .process_registry(Arc::new(LocalProcessRegistry::default()))
@@ -606,7 +613,7 @@ async fn run_question(
             standard_context_approach.cloned(),
             args.session_tools,
             benchmark_context,
-            &args.model,
+            &model_spec,
         ))
         .build()?;
     let session = core
@@ -728,7 +735,7 @@ fn build_plugin_stack(
     standard_context_approach: Option<StandardContextApproach>,
     session_tools: bool,
     benchmark_context: BenchmarkQuestionContext,
-    model: &str,
+    model: &lash::ModelSpec,
 ) -> PluginStack {
     let mut stack = PluginStack::runtime();
     if let Some(standard_context_approach) = &standard_context_approach {
@@ -742,8 +749,8 @@ fn build_plugin_stack(
         }
     }
     let mut subagent_models = std::collections::BTreeMap::new();
-    subagent_models.insert("explore".to_string(), model.to_string());
-    subagent_models.insert("peer".to_string(), model.to_string());
+    subagent_models.insert("explore".to_string(), model.clone());
+    subagent_models.insert("peer".to_string(), model.clone());
     let registry = std::sync::Arc::new(lash_subagents::default_registry(&subagent_models));
     stack.push(Arc::new(LlmToolsPluginFactory::default()));
     stack.push(Arc::new(

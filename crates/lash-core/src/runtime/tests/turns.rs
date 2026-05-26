@@ -31,15 +31,14 @@ async fn session_config_change_hook_receives_context_window_updates() {
 
     let alt_provider = TestProvider::builder()
         .kind("alt")
-        .default_model("alt-model")
         .complete_error("alt provider not wired")
         .build();
+    let alt_model = crate::ModelSpec::from_token_limits("alt-model", None, 123_456, None, None)
+        .expect("valid model spec");
     runtime
         .update_session_config(
             Some(alt_provider.into_handle()),
-            Some("alt-model".to_string()),
-            Some(None),
-            Some(123_456),
+            Some(alt_model.clone()),
             None,
         )
         .await;
@@ -49,8 +48,11 @@ async fn session_config_change_hook_receives_context_window_updates() {
     let (previous, current) = &changes[0];
     assert_eq!(previous.provider.kind(), "mock");
     assert_eq!(current.provider.kind(), "alt");
-    assert_eq!(current.model, "alt-model");
-    assert_ne!(previous.max_context_tokens, current.max_context_tokens);
+    assert_eq!(current.model.id, "alt-model");
+    assert_ne!(
+        previous.context_window_tokens(),
+        current.context_window_tokens()
+    );
 }
 
 #[tokio::test]
@@ -745,7 +747,7 @@ async fn session_manager_can_run_child_session_turn() {
         .await
         .expect("child turn");
     assert_eq!(handle.session_id, "child");
-    assert_eq!(handle.policy.model, "mock-model");
+    assert_eq!(handle.policy.model.id, "mock-model");
     assert_eq!(assembled.state.session_id, "child");
 }
 

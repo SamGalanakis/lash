@@ -124,7 +124,13 @@ impl RuntimeEnvironmentBuilder {
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.env.process_registry = Some(process_registry);
         if let Some(host) = self.env.plugin_host.take() {
-            self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_processes()));
+            let abilities = super::builder::lashlang_abilities_for_process_registry(
+                host.lashlang_abilities(),
+                true,
+            );
+            self.env.plugin_host = Some(Arc::new(
+                host.as_ref().clone().with_lashlang_abilities(abilities),
+            ));
         }
         self
     }

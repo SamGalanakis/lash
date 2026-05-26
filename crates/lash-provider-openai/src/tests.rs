@@ -2,6 +2,7 @@ use crate::support::*;
 use crate::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
 use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
 use lash_core::provider::CacheRetention;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -15,6 +16,7 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         session_id: Some("session-1".to_string()),
         output_spec: None,
         stream_events: None,
+        generation: lash_core::GenerationOptions::default(),
         provider_trace: None,
     }
 }
@@ -553,12 +555,13 @@ fn responses_none_cache_retention_omits_prompt_cache_fields() {
 }
 
 #[test]
-fn max_output_tokens_uses_shared_options() {
+fn output_token_cap_maps_to_wire_fields() {
     let options = ProviderOptions {
-        max_output_tokens: Some(2048),
+        max_output_tokens: Some(9999),
         ..ProviderOptions::default()
     };
-    let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+    req.generation.output_token_cap = NonZeroUsize::new(2048);
 
     let responses_body = OpenAiProvider::new("key")
         .with_options(options.clone())

@@ -329,7 +329,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 let (result, text_streamed) = runner
                     .driver
                     .run_standard_llm_call(
-                        Arc::new(request.into_request(None, None)),
+                        Arc::new((*request).into_request(None, None)),
                         mode_iteration,
                         &runner.event_tx,
                         &runner.cancellation,
@@ -418,13 +418,13 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
                 normalized_request, ..
             } => Ok(RuntimeEffectOutcome::DirectCompletion {
                 result: self
-                    .run_direct_llm_request(normalized_request.into_request(None, None))
+                    .run_direct_llm_request((*normalized_request).into_request(None, None))
                     .await,
             }),
             RuntimeEffectCommand::DirectLlmCompletion { request, .. } => {
                 Ok(RuntimeEffectOutcome::DirectLlmCompletion {
                     result: self
-                        .run_direct_llm_request(request.into_request(None, None))
+                        .run_direct_llm_request((*request).into_request(None, None))
                         .await,
                 })
             }
@@ -624,7 +624,7 @@ impl InlineRuntimeEffectController {
                     ));
                 };
                 let record = self
-                    .start_process(registry, registration, grant, execution_context, runner)
+                    .start_process(registry, registration, grant, *execution_context, runner)
                     .await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }

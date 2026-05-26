@@ -20,7 +20,7 @@ use lash::{
         TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
-    plugins::{BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory},
+    plugins::BuiltinProcessControlsPluginFactory,
     provider::ProviderHandle,
     usage::{SessionUsageReport, diff_usage_reports},
 };
@@ -613,6 +613,14 @@ async fn run_instance(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
 
+    let model_spec = lash::ModelSpec::from_token_limits(
+        model.to_string(),
+        Some(args.variant.clone()),
+        args.max_context_tokens,
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let core = LashCore::builder()
         .install_mode(mode_preset(
             &execution_mode,
@@ -620,8 +628,7 @@ async fn run_instance(
         )?)
         .default_mode(execution_mode.clone())
         .provider(provider.clone())
-        .model(model.to_string(), Some(args.variant.clone()))
-        .max_context_tokens(args.max_context_tokens)
+        .model(model_spec)
         .max_turns(args.max_turns)
         .trace_jsonl_path(Some(trace_path.clone()))
         .process_registry(Arc::new(LocalProcessRegistry::default()))
@@ -929,7 +936,6 @@ fn build_plugin_stack(standard_context_approach: Option<StandardContextApproach>
         tavily_api_key: None,
     });
     stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
-    stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
 
     let registry = Arc::new(CapabilityRegistry::new().with(Arc::new(TierCapability::new(
         "default",
@@ -965,8 +971,19 @@ fn resolve_provider(args: &Args) -> Result<(ProviderHandle, String, String)> {
     let model = args
         .model
         .clone()
-        .unwrap_or_else(|| provider.default_model().to_string());
+        .unwrap_or_else(|| default_model_for_provider(provider.kind()).to_string());
     Ok((provider, kind, model))
+}
+
+fn default_model_for_provider(kind: &str) -> &'static str {
+    match kind {
+        "anthropic" => "claude-opus-4-7",
+        "openai" => "gpt-5.4",
+        "openai-compatible" => "anthropic/claude-sonnet-4.6",
+        "codex" => "gpt-5.5",
+        "google_oauth" => "gemini-3.1-pro-preview",
+        _ => "mock-model",
+    }
 }
 
 fn parse_execution_mode(raw: &str) -> Result<ModeId> {

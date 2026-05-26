@@ -6,9 +6,6 @@ use lash::direct::{
     DirectLlmClient, DirectLlmError, DirectRequest, LlmAttachment, LlmEventSender, LlmOutputPart,
     LlmResponse, LlmUsage, TokenUsage,
 };
-use lash::model_info::{
-    ModelCatalog, ModelInfo, ResolvedModelSpec, bundled_models_dev_snapshot,
-};
 use lash::messages::MessageRole;
 use lash::persistence::{
     GcReport, GraphCommitDelta, PersistedSessionRead, RuntimeSessionState, RuntimeCommit,
@@ -30,6 +27,7 @@ use lash::tools::{
     ToolActivation, ToolCallRecord, ToolDiscoveryMetadata, ToolOutputContract,
 };
 use lash::turn::{AssistantOutput, TurnIssue};
+use lash::{ModelLimits, ModelSpec};
 
 struct FacadeStore;
 
@@ -262,12 +260,8 @@ fn provider_reliability_types_are_nameable(
     let _ = (reliability, builder, retry, timeouts, rate_limits);
 }
 
-fn model_info_types_are_nameable(
-    catalog: ModelCatalog,
-    info: ModelInfo,
-    spec: ResolvedModelSpec,
-) {
-    let _ = (catalog, info, spec, bundled_models_dev_snapshot());
+fn model_spec_types_are_nameable(spec: ModelSpec, limits: ModelLimits) {
+    let _ = (spec, limits);
 }
 
 async fn persistence_load_helpers_are_nameable(
@@ -294,6 +288,6 @@ fn main() {
     let _ = message_role_type_is_nameable;
     let _ = turn_result_detail_types_are_nameable;
     let _ = provider_reliability_types_are_nameable;
-    let _ = model_info_types_are_nameable;
+    let _ = model_spec_types_are_nameable;
     let _ = persistence_load_helpers_are_nameable;
 }

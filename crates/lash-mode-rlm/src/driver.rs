@@ -72,8 +72,9 @@ pub fn build_rlm_preamble(input: ModeBuildInput, config: RlmProjectorConfig) -> 
         tool_names,
         tool_names_fingerprint,
         omitted_tool_count,
-        execution_prompt: Arc::from(crate::protocol::rlm_execution_section_with_features(
+        execution_prompt: Arc::from(crate::protocol::rlm_execution_section_for_surface(
             config.prompt_features,
+            &input.lashlang_surface,
         )),
         prompt_contributions,
     }
@@ -121,6 +122,10 @@ mod catalogue_tests {
             lash_core::ModeBuildInput {
                 mode: ExecutionMode::new("test"),
                 tool_surface: Arc::new(surface),
+                lashlang_surface: lashlang::LashlangSurface::new(
+                    lashlang::ResourceCatalog::tool_default(["search_tools", "grep"]),
+                    lashlang::LashlangAbilities::all(),
+                ),
                 extra_prompt_contributions: Vec::new(),
             },
             RlmProjectorConfig::default(),
@@ -136,6 +141,40 @@ mod catalogue_tests {
             .join("\n");
         assert!(prompt.contains("search_tools"));
         assert!(prompt.contains("grep"));
+    }
+
+    #[test]
+    fn rlm_preamble_uses_lashlang_surface_abilities() {
+        let definitions = vec![tool("grep")];
+        let contracts = definitions
+            .iter()
+            .map(|tool| (tool.name.clone(), Arc::new(tool.contract())))
+            .collect();
+        let surface = lash_core::ToolSurface::from_tools(
+            definitions
+                .into_iter()
+                .map(|tool| tool.manifest())
+                .collect(),
+            ExecutionMode::new("test"),
+            contracts,
+        );
+
+        let preamble = build_rlm_preamble(
+            lash_core::ModeBuildInput {
+                mode: ExecutionMode::new("test"),
+                tool_surface: Arc::new(surface),
+                lashlang_surface: lashlang::LashlangSurface::new(
+                    lashlang::ResourceCatalog::tool_default(["grep"]),
+                    lashlang::LashlangAbilities::default(),
+                ),
+                extra_prompt_contributions: Vec::new(),
+            },
+            RlmProjectorConfig::default(),
+        );
+
+        assert!(!preamble.execution_prompt.contains("process name"));
+        assert!(!preamble.execution_prompt.contains("sleep for"));
+        assert!(preamble.execution_prompt.contains("Resource operations"));
     }
 
     #[test]
@@ -213,6 +252,7 @@ impl ContextProjector<lash_core::HostModeProtocol> for RlmContextProjector {
             session_id: ctx.config.run_session_id.clone(),
             output_spec: None,
             stream_events: None,
+            generation: ctx.config.generation.clone(),
             provider_trace: None,
         })
     }
@@ -940,8 +980,8 @@ fn append_repl_step(out: &mut String, step: ReplStepRender<'_>) {
     // One block per `print` (or raw stdout emission). Tool calls used to
     // get their own section here for retrieval-without-print, but that
     // duplicated content the model could fetch via `print result` and
-    // bloated history; the `code` field above shows every `(call …)`
-    // the model wrote.
+    // bloated history; the `code` field above shows every receiver
+    // operation the model wrote.
     for (output_index, item) in output.iter().enumerate() {
         let (preview, raw_len) = head_tail_truncate(item, max_output_chars);
         let full_ref = truncated_ref(

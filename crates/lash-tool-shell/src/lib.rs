@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -21,8 +21,11 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash_core::{
-    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
-    ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    MAX_MONITOR_TIMEOUT_MS, MonitorWakePolicy, PreparedToolCall, ProcessEventSemanticsSpec,
+    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
+    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeSpec, ProgressSender,
+    PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract, ToolDefinition,
+    ToolExecutionMode, ToolFailure, ToolFailureClass, ToolManifest, ToolProvider, ToolResult,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -146,6 +149,19 @@ struct StartCommandParams {
     allow_nonzero_exit: bool,
     poll_ms: u64,
     max_output_tokens: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct MonitorCommandParams {
+    id: String,
+    command: String,
+    description: String,
+    workdir: PathBuf,
+    cwd: Option<String>,
+    env: BTreeMap<String, String>,
+    persistent: bool,
+    timeout_ms: u64,
+    wake_policy: MonitorWakePolicy,
 }
 
 #[derive(Clone)]
@@ -1004,6 +1020,79 @@ impl StandardShell {
         })
     }
 
+    fn parse_monitor_command_params(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<MonitorCommandParams, ToolResult> {
+        let id = args
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.runtime.allocate_handle_id());
+        let command = args
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ToolResult::err_fmt("monitor requires `command`"))?
+            .to_string();
+        let description = args
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&command)
+            .to_string();
+        let cwd = args
+            .get("cwd")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let workdir = self.runtime.resolve_workdir(cwd.as_deref());
+        let env = match args.get("env") {
+            Some(value) => serde_json::from_value::<BTreeMap<String, String>>(value.clone())
+                .map_err(|err| ToolResult::err_fmt(format_args!("invalid monitor env: {err}")))?,
+            None => BTreeMap::new(),
+        };
+        let persistent = args
+            .get("persistent")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(300_000);
+        if timeout_ms > MAX_MONITOR_TIMEOUT_MS {
+            return Err(ToolResult::err_fmt(format_args!(
+                "monitor timeout_ms must be <= {MAX_MONITOR_TIMEOUT_MS}"
+            )));
+        }
+        let wake_policy = match args.get("wake_policy").and_then(|value| value.as_str()) {
+            Some("notify") => MonitorWakePolicy::Notify,
+            Some("queue_turn") | None => MonitorWakePolicy::QueueTurn,
+            Some(other) => {
+                return Err(ToolResult::err_fmt(format_args!(
+                    "invalid monitor wake_policy `{other}`"
+                )));
+            }
+        };
+
+        Ok(MonitorCommandParams {
+            id,
+            command,
+            description,
+            workdir,
+            cwd,
+            env,
+            persistent,
+            timeout_ms,
+            wake_policy,
+        })
+    }
+
     async fn exec_command(
         &self,
         params: &ExecCommandParams,
@@ -1133,6 +1222,212 @@ impl StandardShell {
         }
     }
 
+    async fn start_monitor_process(
+        &self,
+        params: &MonitorCommandParams,
+        context: &lash_core::ToolContext<'_>,
+    ) -> ToolResult {
+        let process_id = format!("monitor:{}", params.id);
+        let mut args = json!({
+            "id": params.id,
+            "command": params.command,
+            "description": params.description,
+            "persistent": params.persistent,
+            "timeout_ms": params.timeout_ms,
+            "wake_policy": params.wake_policy,
+        });
+        if let Some(cwd) = params.cwd.as_ref() {
+            args["cwd"] = json!(cwd);
+        }
+        if !params.env.is_empty() {
+            args["env"] = json!(params.env);
+        }
+
+        let registration = ProcessRegistration::new(
+            process_id.clone(),
+            ProcessInput::ToolCall {
+                call: PreparedToolCall::from_parts(
+                    process_id.clone(),
+                    "monitor",
+                    args,
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        )
+        .with_extra_event_types([monitor_line_event_type()]);
+        let descriptor =
+            ProcessHandleDescriptor::new(Some("monitor"), Some(params.description.clone()));
+        match context
+            .processes()
+            .start_process(registration, Some(descriptor))
+            .await
+        {
+            Ok(record) => ToolResult::ok(json!({
+                "process_id": record.id,
+                "monitor_id": params.id,
+                "description": params.description,
+                "command": params.command,
+                "persistent": params.persistent,
+                "timeout_ms": params.timeout_ms,
+                "state": monitor_state_label(record.terminal.as_ref()),
+            })),
+            Err(err) => ToolResult::err_fmt(err.to_string()),
+        }
+    }
+
+    async fn run_monitor_process(
+        &self,
+        params: &MonitorCommandParams,
+        context: &lash_core::ToolContext<'_>,
+        cancel: Option<CancellationToken>,
+    ) -> ToolResult {
+        let mut cmd = TokioCommand::new(&self.runtime.shell_path);
+        let args =
+            match self
+                .runtime
+                .shell_args(&params.command, false, &self.runtime.shell_path, false)
+            {
+                Ok(args) => args,
+                Err(err) => return ToolResult::err_fmt(err),
+            };
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(&params.workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if !params.env.is_empty() {
+            cmd.envs(params.env.iter());
+        }
+
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return monitor_failure(
+                    "monitor_start_failed",
+                    format!(
+                        "failed to spawn monitor with shell `{}` in `{}`: {err}",
+                        self.runtime.shell_path,
+                        params.workdir.display()
+                    ),
+                );
+            }
+        };
+        let child_pid = child.id();
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => return monitor_failure("monitor_stdout_unavailable", "stdout unavailable"),
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => return monitor_failure("monitor_stderr_unavailable", "stderr unavailable"),
+        };
+        let mut stdout_lines = tokio::io::BufReader::new(stdout).lines();
+        let mut stderr_lines = tokio::io::BufReader::new(stderr).lines();
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let deadline = (!params.persistent)
+            .then(|| tokio::time::Instant::now() + Duration::from_millis(params.timeout_ms));
+        let mut timeout = deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
+        let mut timed_out = false;
+        let mut cancelled = false;
+
+        while !stdout_done || !stderr_done {
+            let cancel_future = async {
+                match cancel.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = timeout.as_mut().unwrap(), if timeout.is_some() => {
+                    timed_out = true;
+                    break;
+                }
+                _ = cancel_future => {
+                    cancelled = true;
+                    break;
+                }
+                line = stdout_lines.next_line(), if !stdout_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Err(err) = emit_monitor_line_event(context, params, line, true).await {
+                                return monitor_failure("monitor_event_failed", err.to_string());
+                            }
+                        }
+                        Ok(None) => stdout_done = true,
+                        Err(err) => return monitor_failure("monitor_stdout_read_failed", err.to_string()),
+                    }
+                }
+                line = stderr_lines.next_line(), if !stderr_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Err(err) = emit_monitor_line_event(context, params, line, false).await {
+                                return monitor_failure("monitor_event_failed", err.to_string());
+                            }
+                        }
+                        Ok(None) => stderr_done = true,
+                        Err(err) => return monitor_failure("monitor_stderr_read_failed", err.to_string()),
+                    }
+                }
+            }
+        }
+
+        if timed_out || cancelled {
+            terminate_pipe_process(child_pid);
+        }
+
+        let exit = if let Some(deadline) = deadline.filter(|_| !timed_out && !cancelled) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, child.wait()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    timed_out = true;
+                    terminate_pipe_process(child_pid);
+                    child.wait().await
+                }
+            }
+        } else {
+            child.wait().await
+        };
+
+        if cancelled {
+            return ToolResult::cancelled("monitor command was cancelled");
+        }
+        if timed_out {
+            return monitor_failure(
+                "monitor_timeout",
+                format!("monitor timed out after {}ms", params.timeout_ms),
+            );
+        }
+        match exit {
+            Ok(status) if status.success() => ToolResult::ok(json!({
+                "exit_status": status.code(),
+            })),
+            Ok(status) => monitor_failure(
+                "monitor_command_failed",
+                format!(
+                    "monitor command exited with status {}",
+                    status.code().unwrap_or_default()
+                ),
+            ),
+            Err(err) => monitor_failure("monitor_wait_failed", err.to_string()),
+        }
+    }
+
     async fn write_stdin_call(
         &self,
         args: &serde_json::Value,
@@ -1251,8 +1546,14 @@ impl ToolProvider for StandardShell {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
-        self.dispatch(call.name, call.args, call.progress, cancellation_token)
-            .await
+        self.dispatch(
+            call.name,
+            call.args,
+            call.context,
+            call.progress,
+            cancellation_token,
+        )
+        .await
     }
 }
 
@@ -1293,6 +1594,7 @@ impl StandardShell {
         };
         let output_schema = json!({ "type": "object", "additionalProperties": true });
         vec![
+            monitor_tool_definition(),
             ToolDefinition::raw(
                 "tool:exec_command",
                 "exec_command",
@@ -1396,10 +1698,22 @@ impl StandardShell {
         &self,
         name: &str,
         args: &serde_json::Value,
+        context: &lash_core::ToolContext<'_>,
         progress: Option<&ProgressSender>,
         cancel: Option<CancellationToken>,
     ) -> ToolResult {
         match name {
+            "monitor" => {
+                let params = match self.parse_monitor_command_params(args) {
+                    Ok(params) => params,
+                    Err(err) => return err,
+                };
+                if context.async_process_id().is_some() {
+                    self.run_monitor_process(&params, context, cancel).await
+                } else {
+                    self.start_monitor_process(&params, context).await
+                }
+            }
             "exec_command" => {
                 let params = match self.parse_exec_command_params(args) {
                     Ok(params) => params,
@@ -1418,6 +1732,133 @@ impl StandardShell {
             _ => ToolResult::err_fmt(format_args!("Unknown tool: {name}")),
         }
     }
+}
+
+/// Build the shell-backed `monitor` tool definition.
+pub fn monitor_tool_definition() -> ToolDefinition {
+    ToolDefinition::raw(
+        "tool:monitor",
+        "monitor",
+        "Run a background script that turns each stdout line into a process event and optional turn wake-up. Use for streaming watches (`tell me every time X happens`); for one-shot `wait until X`, run the command synchronously instead. This returns a process handle; use `list_process_handles` to rediscover live monitors and `cancel handle` to stop one.\n\nEvents arrive automatically as user-like input - do not call another tool to collect them. Return your turn after starting the monitor; the runtime wakes a new turn on the first matching line.\n\n**Pipe guards**\n- Always use `grep --line-buffered` in pipes (otherwise pipe buffering delays events by minutes).\n- Merge stderr into stdout (`cmd 2>&1 | grep ...`) - stderr alone is not observed.\n- In poll loops wrap transient failures (`curl ... || true`) and pick intervals >=30s for remote APIs, 0.5-1s for local checks.\n\n**Coverage - silence is not success.** Your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hang, or an unexpected exit - and silence looks identical to `still running`. If you can't enumerate the failure signatures, broaden the alternation rather than narrow it.\n\nSet `persistent: true` for session-length watches. Timeout -> killed; exit ends the watch (exit code is reported).",
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command or script. Each stdout line is an event; exit ends the watch. Filter with `grep --line-buffered` (or equivalent) so only the lines you'd act on become events - including failure signatures, not just success."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short human-readable description of what you are monitoring (shown in every notification). Be specific - \"errors in deploy.log\" beats \"watching logs\"."
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Optional stable monitor id. Defaults to an opaque id."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory to run the monitor command in; defaults to the turn cwd."
+                },
+                "env": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Optional environment variables for the monitor command."
+                },
+                "persistent": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Run for the lifetime of the session (no timeout). Use for session-length watches like PR monitoring or log tails."
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": MAX_MONITOR_TIMEOUT_MS,
+                    "default": 300000,
+                    "description": "Kill the monitor after this deadline. Default 300000ms, max 3600000ms. Ignored when persistent is true."
+                }
+            },
+            "required": ["command", "description"],
+            "additionalProperties": false
+        }),
+        json!({ "type": "object", "additionalProperties": true }),
+    )
+    .with_examples(vec![
+        r#"monitor(command="tail -f /var/log/app.log | grep -E --line-buffered 'ERROR|Traceback|FAILED'", description="errors in app.log")"#.into(),
+        r#"monitor(command="while true; do curl -sf http://localhost:3000/health && echo ready && break; sleep 2; done", description="local server ready", timeout_ms=300000)"#.into(),
+    ])
+    .with_execution_mode(ToolExecutionMode::Parallel)
+}
+
+fn monitor_line_event_type() -> ProcessEventType {
+    let mut properties = serde_json::Map::new();
+    properties.insert("line".to_string(), json!({ "type": "string" }));
+    properties.insert("stream".to_string(), json!({ "type": "string" }));
+    properties.insert("timestamp".to_string(), json!({ "type": "string" }));
+    properties.insert("wake_input".to_string(), json!({ "type": "string" }));
+    ProcessEventType {
+        name: "monitor.line".to_string(),
+        payload_schema: lash_core::LashSchema::object(
+            properties,
+            vec![
+                "line".to_string(),
+                "stream".to_string(),
+                "timestamp".to_string(),
+            ],
+        ),
+        semantics: ProcessEventSemanticsSpec {
+            wake: Some(ProcessWakeSpec {
+                when: Some(ProcessValueSelector::Present("/wake_input".to_string())),
+                input: ProcessValueSelector::Pointer("/wake_input".to_string()),
+                dedupe_key: ProcessWakeDedupeKey::EventIdentity,
+            }),
+            ..ProcessEventSemanticsSpec::default()
+        },
+    }
+}
+
+fn monitor_state_label(terminal: Option<&lash_core::ProcessTerminalSemantics>) -> &'static str {
+    match terminal.map(|terminal| terminal.state) {
+        None => "running",
+        Some(lash_core::ProcessTerminalState::Completed) => "exited",
+        Some(lash_core::ProcessTerminalState::Failed) => "failed",
+        Some(lash_core::ProcessTerminalState::Cancelled) => "stopped",
+    }
+}
+
+async fn emit_monitor_line_event(
+    context: &lash_core::ToolContext<'_>,
+    params: &MonitorCommandParams,
+    line: String,
+    from_stdout: bool,
+) -> Result<(), PluginError> {
+    let message = line.trim().to_string();
+    if message.is_empty() {
+        return Ok(());
+    }
+    let mut payload = json!({
+        "line": message,
+        "stream": if from_stdout { "stdout" } else { "stderr" },
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    if from_stdout && params.wake_policy != MonitorWakePolicy::Notify {
+        payload["wake_input"] = json!(format!(
+            "Monitor event \"{}\": {}",
+            params.id,
+            payload["line"].as_str().unwrap_or_default()
+        ));
+    }
+    context
+        .emit_process_event("monitor.line", payload)
+        .await
+        .map(|_| ())
+}
+
+fn monitor_failure(code: impl Into<String>, message: impl Into<String>) -> ToolResult {
+    ToolResult::failure(ToolFailure::tool(
+        ToolFailureClass::Execution,
+        code,
+        message,
+    ))
 }
 
 fn spawn_reader_thread(
@@ -1824,6 +2265,52 @@ mod tests {
 
     async fn run(shell: &StandardShell, name: &str, args: &serde_json::Value) -> ToolResult {
         lash_core::testing::run_tool(shell, name, args).await
+    }
+
+    #[tokio::test]
+    async fn monitor_starts_as_durable_tool_call_process() {
+        use lash_core::ProcessRegistry;
+
+        let shell = test_shell();
+        let host = Arc::new(lash_core::testing::MockSessionManager::default());
+        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
+        let args = json!({
+            "command": "printf 'ready\\n'",
+            "description": "readiness probe",
+            "persistent": false,
+            "timeout_ms": 1000,
+        });
+
+        let result = shell
+            .execute(ToolCall {
+                name: "monitor",
+                args: &args,
+                context: &context,
+                progress: None,
+            })
+            .await;
+
+        assert!(result.is_success(), "{}", result.value_for_projection());
+        let process_id = result.value_for_projection()["process_id"]
+            .as_str()
+            .expect("process id")
+            .to_string();
+        let record = host
+            .process_registry
+            .get_process(&process_id)
+            .await
+            .expect("process record");
+        let ProcessInput::ToolCall { call } = record.input.as_ref() else {
+            panic!("monitor should start as a tool-call process");
+        };
+        assert_eq!(call.tool_name, "monitor");
+        assert_eq!(call.args["command"], args["command"]);
+        assert!(
+            record
+                .event_types
+                .iter()
+                .any(|event_type| event_type.name == "monitor.line")
+        );
     }
 
     #[tokio::test]
@@ -2282,7 +2769,8 @@ mod tests {
     fn shell_definitions_are_compact_and_non_empty() {
         let shell = StandardShell::default();
         let defs = shell.tool_definitions();
-        assert_eq!(defs.len(), 3);
+        assert_eq!(defs.len(), 4);
+        assert!(defs.iter().any(|def| def.name == "monitor"));
         assert!(defs.iter().all(|def| !def.description.is_empty()));
     }
 

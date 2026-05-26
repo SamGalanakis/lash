@@ -3,21 +3,21 @@
 //! the mode crates; this module only
 //! exposes the shared surface:
 //!
-//! - [`ModeConfig`], [`ModePreamble`], [`ModeBuildInput`] — the
-//!   per-turn configuration driver-plugins populate.
+//! - [`ModeConfig`], [`ModePreamble`] — the per-turn configuration
+//!   driver-plugins populate.
 //! - A small helper layer (`normalized_response_parts`, `reasoning_part`,
 //!   `append_assistant_text_part`) that mode drivers reuse for building
 //!   assistant messages.
 
 use std::sync::Arc;
 
+use crate::PromptContribution;
 use crate::PromptFingerprint;
 use crate::llm::types::{LlmOutputPart, LlmResponse, LlmToolSpec, ProviderReasoningReplay};
 use crate::sansio::{
     ChatContextProjector, ContextProjector, ModeProtocol, ProtocolDriverHandle, UnitModeProtocol,
 };
 use crate::session_model::{Part, PartKind, PruneState};
-use crate::{ExecutionMode, PromptContribution, ToolSurface};
 
 pub type TurnLimitFinalMessage =
     Arc<dyn Fn(String, usize) -> crate::Message + Send + Sync + 'static>;
@@ -54,13 +54,6 @@ pub struct ModePreamble<M: ModeProtocol = UnitModeProtocol> {
     pub omitted_tool_count: usize,
     pub execution_prompt: Arc<str>,
     pub prompt_contributions: Vec<PromptContribution>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ModeBuildInput {
-    pub mode: ExecutionMode,
-    pub tool_surface: std::sync::Arc<ToolSurface>,
-    pub extra_prompt_contributions: Vec<PromptContribution>,
 }
 
 /// Convert a raw `LlmResponse` into a stream of `LlmOutputPart`s that

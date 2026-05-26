@@ -2,7 +2,7 @@
 //!
 //! - The [`RlmDriver`] itself — extracts the first fenced `lashlang`
 //!   block from the assistant text and dispatches `StartExec`.
-//! - The [`rlm_execution_section`] prompt copy.
+//! - The [`rlm_execution_section_for_surface`] prompt copy.
 //! - Fence-extraction utilities (`extract_first_lashlang_fence`,
 //!   [`contains_closed_lashlang_fence`]).
 //! - Typed-RLM schema validation and the auxiliary messages used when
@@ -25,71 +25,6 @@ use lash_rlm_types::{RlmDiagnosticEvent, RlmModeEvent, RlmTermination, RlmTrajec
 use serde_json::Value;
 
 use crate::projection::rlm_mode_event;
-
-pub const RLM_EXECUTION_SECTION: &str = r#"**All actions go through `lashlang`.** Invoke documented tools as `call tool_name { ... }` from inside a fenced `lashlang` block. Start from tools listed under **Showcased Tools**; if a discovery tool is available, use it to find and load additional tools before calling them. Emit a block whenever you need to call an available tool or compute a value. Plain prose is for direct conversational replies that need no action.
-
-### `print` vs `submit`
-
-- `print <expr>` — inspect a value and keep going. Output appears on the next step and is capped: keep full tool results in variables and print only lengths, selected fields, samples, or slices. Don't print large objects just to hand-copy IDs back into code.
-- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
-
-Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
-
-### Turn shape
-
-**Exactly one ` ```lashlang ` fenced block per response.** Anything after the first block closes is dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose.
-
-- Write small blocks. Each should do one focused step: call a tool or two, `print` what you need to see, then stop.
-- Keep prose around the block to one or two sentences of reasoning. Don't describe an action in prose instead of executing it.
-- After each result, decide: another block (more work), or finish.
-
-Example — inspect with an available tool, then submit:
-
-````
-Checking the available data.
-
-```lashlang
-result = (call tool_name { key: "value" })?
-print { summary: slice(to_string(result), 0, 200) }
-```
-````
-
-…then on the next turn, once you've seen what you need:
-
-````
-```lashlang
-submit "The bound version is 0.2.61."
-```
-````
-
-"#;
-
-pub const LASHLANG_LANGUAGE_VALUES_SECTION: &str = r#"### Language
-
-- Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
-- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ "type": "image", "id": ..., "label": ..., "size": ..., "width": ..., "height": ... }`. `len(image)` is invalid; use `.size`.
-- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
-- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
-- Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background processes: `handle = start(name: "label", timeout_ms: 600000, input: { key: value }) { ... }` starts a lashlang block and returns a **handle** (not wrapped). There is no implicit parent capture; pass every child variable through `input`, whose record fields become variables inside the block. Inside a process block use `yield value` for a durable progress event, `wake value` to also wake the parent turn, `finish value` for success, or `fail value` for failure; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside process blocks. `start call tool { arg: expr }` is the single-tool shorthand backed by the same handle machinery. Resolve a handle with `await handle` or `(await handle)?`; `await [h1, h2]` returns wrappers in order and `await { a: h1, b: h2 }` returns wrappers keyed by name. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
-- Independent tool fanout: start each call first (`a = start call tool_a { ... }`, `b = start call tool_b { ... }`), then join with `results = await { a: a, b: b }` or `await [a, b]`. Unwrap each wrapper with `?` after the join, e.g. `a_result = results.a?`. Do not use fanout when one branch needs another branch's output.
-- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
-- Bare expressions are valid statements in normal blocks.
-- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
-"#;
-
-pub const LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION: &str = r#"### Language
-
-- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.
-- Strings: `"..."` supports `\n`, `\r`, `\t`, `\"`, and `\\`; `"""..."""` is multiline with the same escapes; `r"""..."""` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.
-- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.
-- Call a tool: `call tool { arg: expr }`. Every tool call returns a wrapper record: `{ ok: true, value: <tool output> }` on success, `{ ok: false, error: "..." }` on failure. For the common happy path, append `?` to unwrap it: `(call tool { arg: expr })?` returns `.value` or aborts this block with the tool error. Keep the raw wrapper only when you intentionally need `.ok`, `.value`, or `.error` for branching/retry/reporting.
-- Background processes: `handle = start(name: "label", timeout_ms: 600000, input: { key: value }) { ... }` starts a lashlang block and returns a **handle** (not wrapped). There is no implicit parent capture; pass every child variable through `input`, whose record fields become variables inside the block. Inside a process block use `yield value` for a durable progress event, `wake value` to also wake the parent turn, `finish value` for success, or `fail value` for failure; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside process blocks. `start call tool { arg: expr }` is the single-tool shorthand backed by the same handle machinery. Resolve a handle with `await handle` or `(await handle)?`; `await [h1, h2]` returns wrappers in order and `await { a: h1, b: h2 }` returns wrappers keyed by name. Cancel with `cancel handle` (best-effort). If a handle-listing tool is available, use its documented contract to rediscover live handles.
-- Independent tool fanout: start each call first (`a = start call tool_a { ... }`, `b = start call tool_b { ... }`), then join with `results = await { a: a, b: b }` or `await [a, b]`. Unwrap each wrapper with `?` after the join, e.g. `a_result = results.a?`. Do not use fanout when one branch needs another branch's output.
-- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.
-- Bare expressions are valid statements in normal blocks.
-- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.
-"#;
 
 pub const LASHLANG_BUILTINS_SECTION: &str = r#"### Builtins
 
@@ -137,10 +72,10 @@ Call as functions (e.g. `len(x)`, `slice(s, 0, 200)`). For `slice`, `null` bound
 
 pub const LASHLANG_COMMON_PATTERNS_SECTION: &str = r#"### Common patterns
 
-Tool-level errors are different from successful tool results that contain domain errors. `?` unwraps the lash tool wrapper and aborts the block only when the tool call itself failed:
+Operation-level errors are different from successful results that contain domain errors. `?` aborts the block only when the resource operation itself failed:
 
 ```lashlang
-probe = (call tool_name { key: "value" })?
+probe = await TOOL.default.tool_name({ key: "value" })?
 submit probe
 ```
 
@@ -149,7 +84,7 @@ Build collections with explicit loops, not comprehensions:
 ```lashlang
 items = []
 for key in ["a", "b"] {
-  value = (call tool_name { key: key })?
+  value = await TOOL.default.tool_name({ key: key })?
   items = push(items, { key: key, value: value })
 }
 submit items
@@ -158,7 +93,7 @@ submit items
 Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
 
 ```lashlang
-result = (call tool_name { key: "value" })?
+result = await TOOL.default.tool_name({ key: "value" })?
 text = to_string(result)
 print { chars: len(text), head: slice(text, 0, 1200) }
 ```
@@ -166,8 +101,8 @@ print { chars: len(text), head: slice(text, 0, 1200) }
 For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
 
 ```lashlang
-first = (call tool_a { key: "value" })?
-second = (call tool_b { input: first })?
+first = await TOOL.default.tool_a({ key: "value" })?
+second = await TOOL.default.tool_b({ input: first })?
 if contains(to_string(second), "needs_more_work") {
   print { first: first, second: second }
 } else {
@@ -192,28 +127,6 @@ profile = validate(record, Type { name: str, email: str?, tags: list[str] })
 ```
 "#;
 
-const RLM_DECOMPOSITION_SECTION: &str = r#"### Working with context
-
-Your turn's REPL trace is your working memory. Keep it small, decision-sized, and current. Big artifacts (files, search results, long pages, raw tool dumps) live outside — pull them in only when you need to compute over them yourself. Keep full results in variables; `print` only lengths, keys, selected fields, or slices, never large objects you intend to hand-copy IDs from.
-
-Choose the lightest mechanism that preserves progress:
-
-- Current variables already hold what you need → reason inline in lashlang.
-- Several independent tool calls can run at once → `start call ...` each one, then `await { ... }` or `await [ ... ]`; use a `start { ... }` block for multi-step background work.
-- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.
-- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.
-
-Example fanout to two available tools (use `?` for fail-fast unwrapping):
-
-```lashlang
-a = start call tool_a { key: "one" }
-b = start call tool_b { key: "two" }
-results = await { one: a, two: b }
-one = results.one?
-two = results.two?
-submit [one, two]
-```"#;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RlmPromptFeatures {
@@ -234,33 +147,239 @@ impl Default for RlmPromptFeatures {
     }
 }
 
-pub fn rlm_execution_section() -> String {
-    rlm_execution_section_with_features(RlmPromptFeatures::default())
-}
-
-pub fn rlm_execution_section_with_features(features: RlmPromptFeatures) -> String {
+pub fn rlm_execution_section_for_surface(
+    features: RlmPromptFeatures,
+    surface: &lashlang::LashlangSurface,
+) -> String {
+    let has_operations = surface.resources.has_operations();
     let mut sections = Vec::new();
-    sections.push(RLM_EXECUTION_SECTION);
+    sections.push(render_execution_intro(has_operations));
+    sections.push(render_language_section(
+        features.images,
+        has_operations,
+        &surface.abilities,
+    ));
     sections.push(if features.images {
-        LASHLANG_LANGUAGE_VALUES_SECTION
+        LASHLANG_BUILTINS_SECTION.to_string()
     } else {
-        LASHLANG_LANGUAGE_VALUES_NO_IMAGES_SECTION
-    });
-    sections.push(if features.images {
-        LASHLANG_BUILTINS_SECTION
-    } else {
-        LASHLANG_BUILTINS_NO_IMAGES_SECTION
+        LASHLANG_BUILTINS_NO_IMAGES_SECTION.to_string()
     });
     if features.common_patterns {
-        sections.push(LASHLANG_COMMON_PATTERNS_SECTION);
+        sections.push(render_common_patterns(has_operations));
     }
     if features.type_literals {
-        sections.push(LASHLANG_TYPE_LITERALS_SECTION);
+        sections.push(LASHLANG_TYPE_LITERALS_SECTION.to_string());
     }
     if features.decomposition {
-        sections.push(RLM_DECOMPOSITION_SECTION);
+        sections.push(render_decomposition_section(
+            has_operations,
+            surface.abilities.processes,
+        ));
     }
     sections.join("\n\n")
+}
+
+fn render_execution_intro(has_operations: bool) -> String {
+    let mut section = String::from("**All actions go through `lashlang`.** ");
+    if has_operations {
+        section.push_str("Invoke documented operations with receiver syntax like `await TOOL.default.tool_name({ ... })?` from inside a fenced `lashlang` block. Start from resources listed under **Showcased Tools**; if a discovery tool is available, use it to find and load additional operations before calling them. Emit a block whenever you need to call an available operation or compute a value. Plain prose is for direct conversational replies that need no action.");
+    } else {
+        section.push_str("Use fenced `lashlang` blocks to compute values, inspect current variables, and submit structured answers. No receiver operations are available in this turn, so do not invent tool calls. Plain prose is for direct conversational replies that need no computation.");
+    }
+    section.push_str(
+        r#"
+
+### `print` vs `submit`
+
+- `print <expr>` — inspect a value and keep going. Output appears on the next step and is capped: keep full tool results in variables and print only lengths, selected fields, samples, or slices. Don't print large objects just to hand-copy IDs back into code.
+- `submit <expr>` — final answer; ends the turn. Strings pass through as the reply; other values render as pretty JSON. If a **Required output** schema is present, the value must match it.
+
+Never `submit` a raw tool-result dump. If you need to look at something, `print` it, then `submit` a summary on a later step.
+
+### Turn shape
+
+**Exactly one ` ```lashlang ` fenced block per response.** Anything after the first block closes is dropped. Only ` ```lashlang ` is recognised — `rlm` and other labels are treated as plain prose.
+
+- Write small blocks. Each should do one focused step.
+- Keep prose around the block to one or two sentences of reasoning. Don't describe an action in prose instead of executing it.
+- After each result, decide: another block (more work), or finish.
+"#,
+    );
+    if has_operations {
+        section.push_str(
+            r#"
+Example — inspect with an available operation, then submit:
+
+````
+Checking the available data.
+
+```lashlang
+result = await TOOL.default.tool_name({ key: "value" })?
+print { summary: slice(to_string(result), 0, 200) }
+```
+````
+
+…then on the next turn, once you've seen what you need:
+
+````
+```lashlang
+submit "The bound version is 0.2.61."
+```
+````
+"#,
+        );
+    } else {
+        section.push_str(
+            r#"
+Example — compute and submit:
+
+````
+```lashlang
+items = ["alpha", "beta"]
+submit { count: len(items), first: items[0] }
+```
+````
+"#,
+        );
+    }
+    section
+}
+
+fn render_language_section(
+    images: bool,
+    has_operations: bool,
+    abilities: &lashlang::LashlangAbilities,
+) -> String {
+    let mut bullets = Vec::new();
+    if images {
+        bullets.push("- Values: null, booleans, numbers, strings, lists, records, and immutable `Image` handles. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
+        bullets.push("- Images: image-producing tools may return an `Image` value. Read metadata with `.id`, `.label`, `.size`, `.width`, `.height`; fields are read-only. `print(image)` or `print` on a list/record containing images sends both descriptor text and the actual image attachment to the next model call. `submit(image)`, `to_string(image)`, and JSON-like serialization emit only `{ \"type\": \"image\", \"id\": ..., \"label\": ..., \"size\": ..., \"width\": ..., \"height\": ... }`. `len(image)` is invalid; use `.size`.".to_string());
+    } else {
+        bullets.push("- Values: null, booleans, numbers, strings, lists, and records. Literals: `[a, b]`, `{ a: 1, b: 2 }`.".to_string());
+    }
+    bullets.push("- Strings: `\"...\"` supports `\\n`, `\\r`, `\\t`, `\\\"`, and `\\\\`; `\"\"\"...\"\"\"` is multiline with the same escapes; `r\"\"\"...\"\"\"` and `r'''...'''` are raw multiline strings and preserve content exactly. Use raw multiline strings for JSON, Markdown, and other payloads with braces, backslashes, quotes, heredocs, or `@@` hunk markers.".to_string());
+    bullets.push("- Assign with `name = expr`. Variables persist across fenced blocks within the turn. You can also update mutable collection paths rooted at a variable: `record.field = value`, `record[key] = value`, `list[i] = value`, and nested forms like `state.groups[g].count = count + 1`. Record field/index assignment inserts or replaces fields; list assignment replaces an existing integer index only. Record indexing reads dynamic string-coerced keys and returns `null` when missing, so histogram code can use `counts[g] = counts[g] + 1`.".to_string());
+    if has_operations {
+        bullets.push("- Resource operations: call host capabilities through an explicit receiver, e.g. `await TOOL.default.tool_name({ key: value })?` or `await RESOURCE.alias.operation({ query: q })?`. `?` aborts the block with sanitized operation metadata if the operation fails.".to_string());
+    }
+    if abilities.processes {
+        let mut forms = vec![
+            "`yield value`",
+            "`wake value`",
+            "`finish value`",
+            "`fail value`",
+        ];
+        if abilities.process_sleep {
+            forms.push("`sleep for \"5s\"`");
+            forms.push("`sleep until deadline`");
+        }
+        if abilities.process_signals {
+            forms.push("`payload = wait signal`");
+            forms.push("`signal run handle with payload`");
+        }
+        let mut catalog_scopes = vec!["top level"];
+        if abilities.triggers {
+            catalog_scopes.push("triggers");
+        }
+        if abilities.schedules.cron {
+            catalog_scopes.push("schedules");
+        }
+        bullets.push(format!(
+            "- Background processes: declare reusable work with `process name(param: TYPE) {{ ... }}` and start it with `handle = start name(param: value)`. Process bodies use only passed resource handles, input values, locals, and builtins; catalog handles such as `TOOL.default` belong at {}. Inside a process use {}; falling off the end is `finish null`. `submit` and `print` are foreground-only and invalid inside processes. Resolve a handle with `await handle` or `(await handle)?`; cancel with `cancel handle` (best-effort).",
+            join_words(&catalog_scopes),
+            join_words(&forms)
+        ));
+    }
+    if abilities.triggers {
+        bullets.push("- Triggers: declare resource-event activation with `trigger name on RESOURCE.alias.event as event { ... }` or `trigger name on each RESOURCE.event as resource, event { ... }`.".to_string());
+    }
+    if abilities.schedules.cron {
+        bullets.push("- Schedules: declare cron activation with `schedule name every cron(\"0 * * * *\") as tick { ... }`.".to_string());
+    }
+    if has_operations {
+        let tail = if abilities.processes {
+            " Use a named process for multi-step background work."
+        } else {
+            ""
+        };
+        bullets.push(format!(
+            "- Independent operation fanout: call independent operations directly and store their values, e.g. `a = await TOOL.default.tool_a({{ key: \"one\" }})?` and `b = await TOOL.default.tool_b({{ key: \"two\" }})?`.{tail}"
+        ));
+    }
+    bullets.push("- Control flow: statement `if`/`for`; `break` exits the nearest `for`; `continue` skips to the nearest `for`'s next iteration; expression ternary `cond ? yes : no` (there is no expression-form `if`); boolean negation via `!cond` or `not cond`. There is no `while` loop; use bounded `for` loops over ranges/lists for fill or retry logic. `submit` is different from `break`: it ends the whole program/turn.".to_string());
+    bullets.push("- Bare expressions are valid statements in normal blocks.".to_string());
+    bullets.push("- When a **Bound Variables** section appears in the prompt, those names are already in scope inside lashlang blocks — read them directly instead of restating their values.".to_string());
+    format!("### Language\n\n{}", bullets.join("\n"))
+}
+
+fn render_common_patterns(has_operations: bool) -> String {
+    if has_operations {
+        return LASHLANG_COMMON_PATTERNS_SECTION.to_string();
+    }
+    r#"### Common patterns
+
+Build collections with explicit loops, not comprehensions:
+
+```lashlang
+items = []
+for key in ["a", "b"] {
+  items = push(items, { key: key, size: len(key) })
+}
+submit items
+```
+
+Print narrow observations. Keep large values in variables and print only keys, lengths, selected fields, or slices:
+
+```lashlang
+text = to_string(input)
+print { chars: len(text), head: slice(text, 0, 1200) }
+```
+
+For multi-step work, inspect intermediate results before submitting success. Reaching `submit` ends the turn even mid-block:
+
+```lashlang
+first = trim(input.question)
+if empty(first) {
+  print { problem: "missing question" }
+} else {
+  submit first
+}
+```"#
+        .to_string()
+}
+
+fn render_decomposition_section(has_operations: bool, processes: bool) -> String {
+    let mut section = String::from(
+        "### Working with context\n\nYour turn's REPL trace is your working memory. Keep it small, decision-sized, and current. Big artifacts (files, search results, long pages, raw tool dumps) live outside — pull them in only when you need to compute over them yourself. Keep full results in variables; `print` only lengths, keys, selected fields, or slices, never large objects you intend to hand-copy IDs from.\n\nChoose the lightest mechanism that preserves progress:\n\n- Current variables already hold what you need → reason inline in lashlang.",
+    );
+    if has_operations {
+        if processes {
+            section.push_str("\n- Several independent operations are needed → call each receiver operation and keep the values in variables; use a named `process` for multi-step background work.");
+        } else {
+            section.push_str("\n- Several independent operations are needed → call each receiver operation and keep the values in variables.");
+        }
+    }
+    section.push_str("\n- The trace is bloated, stale, or failed attempts dominate → use an available continuation tool to hand off concrete state to a fresh successor.");
+    if has_operations {
+        section.push_str("\n- Anything tool-specific (parameters, return shapes, lifecycle) lives under **Showcased Tools** — don't infer a tool exists from these generic examples.\n\nExample fanout to two available operations (use `?` for fail-fast unwrapping):\n\n```lashlang\na = await TOOL.default.tool_a({ key: \"one\" })?\nb = await TOOL.default.tool_b({ key: \"two\" })?\none = a\ntwo = b\nsubmit [one, two]\n```");
+    } else {
+        section.push_str("\n- No receiver operations are available in this turn — don't infer one exists from generic lashlang syntax.");
+    }
+    section
+}
+
+fn join_words(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [one, two] => format!("{one} or {two}"),
+        _ => {
+            let mut out = words[..words.len() - 1].join(", ");
+            out.push_str(", or ");
+            out.push_str(words[words.len() - 1]);
+            out
+        }
+    }
 }
 
 pub struct RlmDriver;
@@ -614,7 +733,7 @@ pub(crate) fn turn_limit_final_message(message_id: String, max_turns: usize) -> 
                 1. Summary of what you accomplished\n\
                 2. List of remaining tasks not yet completed\n\
                 3. Recommended next steps\n\
-                Do NOT emit a lashlang code fence, call tools, or call submit/continue_as."
+                Do NOT emit a lashlang code fence, invoke resource operations, or call submit/continue_as."
             ),
             attachment: None,
             tool_call_id: None,
@@ -914,23 +1033,101 @@ mod tests {
 
     #[test]
     fn rlm_execution_section_default_prompt_is_golden() {
-        insta::assert_snapshot!("rlm_execution_section_default", rlm_execution_section());
+        insta::assert_snapshot!(
+            "rlm_execution_section_default",
+            rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface())
+        );
     }
 
     #[test]
     fn rlm_execution_section_no_images_prompt_is_golden() {
         insta::assert_snapshot!(
             "rlm_execution_section_no_images",
-            rlm_execution_section_with_features(RlmPromptFeatures {
-                images: false,
-                ..RlmPromptFeatures::default()
-            })
+            rlm_execution_section_for_surface(
+                RlmPromptFeatures {
+                    images: false,
+                    ..RlmPromptFeatures::default()
+                },
+                &full_prompt_surface()
+            )
         );
+    }
+
+    fn prompt_surface(
+        resources: lashlang::ResourceCatalog,
+        abilities: lashlang::LashlangAbilities,
+    ) -> lashlang::LashlangSurface {
+        lashlang::LashlangSurface::new(resources, abilities)
+    }
+
+    fn tool_resources() -> lashlang::ResourceCatalog {
+        lashlang::ResourceCatalog::tool_default(["tool_name", "tool_a", "tool_b"])
+    }
+
+    fn full_prompt_surface() -> lashlang::LashlangSurface {
+        prompt_surface(tool_resources(), lashlang::LashlangAbilities::all())
+    }
+
+    #[test]
+    fn execution_section_hides_processes_when_disabled() {
+        let surface = prompt_surface(tool_resources(), lashlang::LashlangAbilities::default());
+        let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+        assert!(!section.contains("process name"));
+        assert!(!section.contains("start name"));
+        assert!(!section.contains("sleep for"));
+        assert!(!section.contains("wait signal"));
+        assert!(!section.contains("signal run"));
+    }
+
+    #[test]
+    fn execution_section_hides_process_sleep_and_signals_independently() {
+        let surface = prompt_surface(
+            tool_resources(),
+            lashlang::LashlangAbilities::default().with_processes(),
+        );
+        let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+        assert!(section.contains("process name"));
+        assert!(!section.contains("sleep for"));
+        assert!(!section.contains("wait signal"));
+        assert!(!section.contains("signal run"));
+    }
+
+    #[test]
+    fn execution_section_hides_trigger_and_schedule_language_when_disabled() {
+        let surface = prompt_surface(
+            tool_resources(),
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_process_lifecycle(),
+        );
+        let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+        assert!(!section.contains("trigger name"));
+        assert!(!section.contains("schedule name"));
+        assert!(!section.contains("cron("));
+        assert!(!section.contains("triggers, or schedules"));
+    }
+
+    #[test]
+    fn execution_section_hides_receiver_examples_without_resource_operations() {
+        let surface = prompt_surface(
+            lashlang::ResourceCatalog::new(),
+            lashlang::LashlangAbilities::default(),
+        );
+        let section = rlm_execution_section_for_surface(RlmPromptFeatures::default(), &surface);
+
+        assert!(!section.contains("TOOL.default"));
+        assert!(!section.contains("Showcased Tools"));
+        assert!(!section.contains("Resource operations"));
+        assert!(section.contains("No receiver operations are available"));
     }
 
     #[test]
     fn execution_section_does_not_advertise_unregistered_peer_capability() {
-        let section = rlm_execution_section();
+        let section =
+            rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
 
         assert!(!section.contains("capability: \"peer\""));
         assert!(!section.contains("`peer`"));
@@ -938,7 +1135,8 @@ mod tests {
 
     #[test]
     fn execution_section_keeps_tool_specific_examples_out_of_core_prompt() {
-        let section = rlm_execution_section();
+        let section =
+            rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
 
         for tool_name in [
             "read_file",
@@ -958,10 +1156,13 @@ mod tests {
 
     #[test]
     fn execution_section_can_disable_image_guidance() {
-        let section = rlm_execution_section_with_features(RlmPromptFeatures {
-            images: false,
-            ..RlmPromptFeatures::default()
-        });
+        let section = rlm_execution_section_for_surface(
+            RlmPromptFeatures {
+                images: false,
+                ..RlmPromptFeatures::default()
+            },
+            &full_prompt_surface(),
+        );
 
         assert!(!section.contains("Image"));
         assert!(!section.contains("image.size"));
@@ -973,7 +1174,8 @@ mod tests {
 
     #[test]
     fn execution_section_states_no_while_loop() {
-        let section = rlm_execution_section();
+        let section =
+            rlm_execution_section_for_surface(RlmPromptFeatures::default(), &full_prompt_surface());
 
         assert!(section.contains("There is no `while` loop"));
         assert!(section.contains("use bounded `for` loops over ranges/lists"));

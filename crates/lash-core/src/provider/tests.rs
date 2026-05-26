@@ -1,6 +1,7 @@
 use super::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::GenerationOptions;
 use crate::llm::types::{LlmToolChoice, LlmUsage};
 
 #[derive(Clone, Debug, Default)]
@@ -19,7 +20,7 @@ struct FailingProvider {
 
 impl FailingProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new("model-a")))
+        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new()))
     }
 }
 
@@ -163,6 +164,7 @@ fn empty_request() -> LlmRequest {
         session_id: None,
         output_spec: None,
         stream_events: None,
+        generation: GenerationOptions::default(),
         provider_trace: None,
     }
 }
@@ -237,15 +239,14 @@ fn provider_options_default_omits_and_restores_shared_output_fields() {
 }
 
 #[test]
-fn provider_handle_delegates_model_policy_resolution() {
+fn provider_handle_delegates_variant_policy() {
     static VARIANTS: &[&str] = &["low", "high"];
-    let handle = ProviderHandle::new(MutatingProvider::default().into_components(Arc::new(
-        StaticModelPolicy::with_variants("model-a", VARIANTS, Some("high")),
-    )));
+    let handle = ProviderHandle::new(
+        MutatingProvider::default()
+            .into_components(Arc::new(StaticModelPolicy::with_variants(VARIANTS))),
+    );
 
-    assert_eq!(handle.default_model(), "model-a");
     assert_eq!(handle.supported_variants("model-a"), VARIANTS);
-    assert_eq!(handle.default_model_variant("model-a"), Some("high"));
     assert!(handle.validate_variant("model-a", "low").is_ok());
     assert!(handle.validate_variant("model-a", "medium").is_err());
 }
@@ -253,7 +254,7 @@ fn provider_handle_delegates_model_policy_resolution() {
 #[tokio::test]
 async fn transport_mutations_are_visible_after_completion_returns() {
     let mut handle = ProviderHandle::new(
-        MutatingProvider::default().into_components(Arc::new(StaticModelPolicy::new("model-a"))),
+        MutatingProvider::default().into_components(Arc::new(StaticModelPolicy::new())),
     );
 
     handle.complete(empty_request()).await.expect("complete");
@@ -268,7 +269,7 @@ async fn transport_mutations_are_visible_after_completion_returns() {
 async fn map_transport_installs_transport_only_decorator() {
     let hits = Arc::new(AtomicUsize::new(0));
     let components = MutatingProvider::default()
-        .into_components(Arc::new(StaticModelPolicy::new("model-a")))
+        .into_components(Arc::new(StaticModelPolicy::new()))
         .map_transport({
             let hits = Arc::clone(&hits);
             move |inner| Box::new(MetricsTransport { inner, hits })

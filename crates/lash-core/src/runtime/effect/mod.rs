@@ -44,6 +44,7 @@ mod tests {
             session_id: Some("session".to_string()),
             output_spec: None,
             stream_events: Some(LlmEventSender::new(|_| {})),
+            generation: crate::GenerationOptions::default(),
             provider_trace: Some(LlmProviderTraceSender::new(|_| {})),
         };
         let spec = LlmRequestSpec::from_request(&llm_request, &attachment_store).expect("llm spec");
@@ -73,9 +74,11 @@ mod tests {
         let envelope = RuntimeEffectEnvelope::new(
             metadata,
             RuntimeEffectCommand::DirectCompletion {
-                request: direct_spec,
-                normalized_request: LlmRequestSpec::from_request(&llm_request, &attachment_store)
-                    .expect("normalized spec"),
+                request: Box::new(direct_spec),
+                normalized_request: Box::new(
+                    LlmRequestSpec::from_request(&llm_request, &attachment_store)
+                        .expect("normalized spec"),
+                ),
                 model: "model".to_string(),
                 usage_source: "test".to_string(),
             },
@@ -123,7 +126,7 @@ mod tests {
                 command: ProcessCommand::Start {
                     registration,
                     grant: None,
-                    execution_context: crate::ProcessExecutionContext::default(),
+                    execution_context: Box::new(crate::ProcessExecutionContext::default()),
                 },
             },
         );

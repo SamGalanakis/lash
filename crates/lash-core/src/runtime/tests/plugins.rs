@@ -48,14 +48,13 @@ fn plugin_host_rejects_standard_context_for_rlm_sessions() {
 }
 
 #[tokio::test]
-async fn runtime_requires_explicit_max_context_tokens() {
+async fn runtime_requires_explicit_model_spec() {
     let tools: Arc<dyn crate::ToolProvider> = Arc::new(EmptyTools);
     let result = LashRuntime::from_embedded_state(
         SessionPolicy {
             execution_mode: ExecutionMode::standard(),
             provider: mock_provider(Vec::new()).into_handle(),
-            model: "mock-model".to_string(),
-            max_context_tokens: None,
+            model: crate::ModelSpec::default(),
             ..SessionPolicy::default()
         },
         test_host_config(),
@@ -69,7 +68,7 @@ async fn runtime_requires_explicit_max_context_tokens() {
     .await;
     match result {
         Err(SessionError::Protocol(message)) => {
-            assert!(message.contains("max_context_tokens"));
+            assert!(message.contains("missing model spec"));
         }
         Err(other) => panic!("unexpected session error: {other}"),
         Ok(_) => panic!("runtime should reject implicit model metadata"),

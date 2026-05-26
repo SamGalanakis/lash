@@ -45,6 +45,7 @@ sequenceDiagram
   Host->>Runtime: session.turn(TurnInput).stream(&sink)
   Runtime->>Runtime: normalize InputItem text/file/dir/image refs
   Runtime->>Plugins: prepare_turn + context transforms
+  Runtime->>Plugins: build ModePreamble from ModeBuildInput(ToolSurface + LashlangSurface)
   Runtime->>Machine: build_turn(ModePreamble, ToolSurface, PromptTemplate)
   loop poll effect
     Machine-->>Runtime: Effect

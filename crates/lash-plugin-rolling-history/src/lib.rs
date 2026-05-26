@@ -850,7 +850,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
             RewriteTrigger::WindowShrink { .. } => {
                 if !compaction_needed(
                     ctx.state.last_prompt_usage(),
-                    ctx.state.policy().max_context_tokens,
+                    Some(ctx.state.policy().context_window_tokens()),
                 ) {
                     return Ok(input);
                 }

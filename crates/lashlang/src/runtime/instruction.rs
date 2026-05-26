@@ -9,6 +9,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use crate::LinkedModule;
 use crate::ast::{BinaryOp, Program, UnaryOp};
 use crate::lexer::Span;
 
@@ -18,6 +19,8 @@ use super::{CompileStats, LoweredLoop, ProfileReport, ProfileStat, Value};
 
 #[derive(Clone)]
 pub(crate) struct Chunk {
+    pub(crate) module: Program,
+    pub(crate) linked_module: Option<LinkedModule>,
     pub(crate) code: Vec<Instruction>,
     pub(crate) spans: Vec<Option<Span>>,
     pub(crate) constants: Vec<Value>,
@@ -28,19 +31,12 @@ pub(crate) struct Chunk {
     pub(crate) compiled_schemas: Vec<ValidationPlan>,
     pub(crate) assign_paths: Vec<CompiledAssignPath>,
     pub(crate) lowered_loops: Vec<LoweredLoop>,
-    pub(crate) process_blocks: Vec<CompiledProcessBlock>,
 }
 
 #[derive(Clone)]
 pub(crate) struct Name {
     pub(crate) symbol: Symbol,
     pub(crate) text: Arc<str>,
-}
-
-#[derive(Clone)]
-pub(crate) struct CompiledProcessBlock {
-    pub(crate) program: Program,
-    pub(crate) tool_names: Box<[Name]>,
 }
 
 #[derive(Clone)]
@@ -165,25 +161,23 @@ pub(crate) enum Instruction {
         target: usize,
     },
     JumpIfTrue(usize),
-    CallTool {
-        name: usize,
-        keys: usize,
+    ResourceCall {
+        operation: usize,
+        argc: usize,
     },
-    CallToolUnwrap {
-        name: usize,
-        keys: usize,
-    },
-    StartCallTool {
-        name: usize,
-        keys: usize,
+    ResourceCallUnwrap {
+        operation: usize,
+        argc: usize,
     },
     StartProcess {
-        block: usize,
-        has_name: bool,
-        has_timeout_ms: bool,
-        has_input: bool,
+        process: usize,
+        keys: usize,
     },
     AwaitHandle,
+    ProcessSleepFor,
+    ProcessSleepUntil,
+    ProcessWaitSignal,
+    ProcessSignalRun,
     AwaitHandleUnwrap,
     CancelHandle,
     Intrinsic(IntrinsicOp),
@@ -311,14 +305,17 @@ impl Instruction {
                 InstructionProfileTag::JumpIfFalse
             }
             Instruction::JumpIfTrue(_) => InstructionProfileTag::JumpIfTrue,
-            Instruction::CallTool { .. } | Instruction::CallToolUnwrap { .. } => {
-                InstructionProfileTag::CallTool
+            Instruction::ResourceCall { .. } | Instruction::ResourceCallUnwrap { .. } => {
+                InstructionProfileTag::ResourceCall
             }
-            Instruction::StartCallTool { .. } => InstructionProfileTag::StartCallTool,
             Instruction::StartProcess { .. } => InstructionProfileTag::StartProcess,
-            Instruction::AwaitHandle | Instruction::AwaitHandleUnwrap => {
-                InstructionProfileTag::AwaitHandle
+            Instruction::AwaitHandle
+            | Instruction::AwaitHandleUnwrap
+            | Instruction::ProcessWaitSignal => InstructionProfileTag::AwaitHandle,
+            Instruction::ProcessSleepFor | Instruction::ProcessSleepUntil => {
+                InstructionProfileTag::ProcessControl
             }
+            Instruction::ProcessSignalRun => InstructionProfileTag::ProcessControl,
             Instruction::CancelHandle => InstructionProfileTag::CancelHandle,
             Instruction::Intrinsic(_) => InstructionProfileTag::Intrinsic,
             Instruction::AddAssign(_)
@@ -434,8 +431,7 @@ pub(crate) enum InstructionProfileTag {
     Jump,
     JumpIfFalse,
     JumpIfTrue,
-    CallTool,
-    StartCallTool,
+    ResourceCall,
     StartProcess,
     AwaitHandle,
     CancelHandle,
@@ -538,8 +534,7 @@ const INSTRUCTION_PROFILE_NAMES: [&str; INSTRUCTION_PROFILE_COUNT] = [
     "jump",
     "jump_if_false",
     "jump_if_true",
-    "call_tool",
-    "start_call_tool",
+    "resource_call",
     "start_process",
     "await_handle",
     "cancel_handle",

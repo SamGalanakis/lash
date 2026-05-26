@@ -4,53 +4,81 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use lash_core::ModelSpec;
 use reqwest as model_catalog_http;
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-pub const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ModelInfo {
-    pub context_window: u64,
+pub(crate) struct ModelInfo {
+    pub(crate) context_window: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_input_tokens: Option<u64>,
+    pub(crate) max_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u64>,
+    pub(crate) max_output_tokens: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResolvedModelSpec {
-    pub configured_model: String,
-    pub resolved_model: String,
-    pub catalog_model_id: String,
-    pub info: ModelInfo,
+impl ModelInfo {
+    pub(crate) fn to_model_spec(
+        &self,
+        id: impl Into<String>,
+        variant: Option<String>,
+    ) -> Result<ModelSpec, String> {
+        ModelSpec::from_token_limits(
+            id,
+            variant,
+            usize::try_from(self.context_window)
+                .map_err(|_| "context window does not fit in usize".to_string())?,
+            self.max_input_tokens
+                .map(|value| {
+                    usize::try_from(value)
+                        .map_err(|_| "input token capacity does not fit in usize".to_string())
+                })
+                .transpose()?,
+            self.max_output_tokens
+                .map(|value| {
+                    usize::try_from(value)
+                        .map_err(|_| "output token capacity does not fit in usize".to_string())
+                })
+                .transpose()?,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedModelSpec {
+    pub(crate) configured_model: String,
+    pub(crate) provider_model: String,
+    pub(crate) catalog_model_id: String,
+    pub(crate) info: ModelInfo,
 }
 
 impl ResolvedModelSpec {
-    pub fn context_window(&self) -> u64 {
+    pub(crate) fn context_window(&self) -> u64 {
         self.info.context_window
+    }
+
+    pub(crate) fn into_model_spec(self, variant: Option<String>) -> Result<ModelSpec, String> {
+        self.info.to_model_spec(self.provider_model, variant)
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ModelCatalog {
+pub(crate) struct ModelCatalog {
     entries: HashMap<String, ModelInfo>,
 }
 
 impl ModelCatalog {
-    pub fn get(&self, model_id: &str) -> Option<&ModelInfo> {
+    pub(crate) fn get(&self, model_id: &str) -> Option<&ModelInfo> {
         self.entries.get(model_id)
     }
 
-    pub fn into_entries(self) -> HashMap<String, ModelInfo> {
-        self.entries
-    }
-
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn from_models_dev_json(raw: &str) -> Result<Self, String> {
+    pub(crate) fn from_models_dev_json(raw: &str) -> Result<Self, String> {
         let providers = serde_json::from_str::<serde_json::Value>(raw)
             .map_err(|err| format!("failed to parse models catalog JSON: {err}"))?;
         let mut entries = HashMap::new();
@@ -91,14 +119,22 @@ impl ModelCatalog {
     }
 }
 
+pub(crate) trait ModelCatalogStore: Send + Sync {
+    fn load(&self) -> Result<Option<String>, String>;
+    fn save(&self, raw: &str) -> Result<(), String>;
+    fn modified_at(&self) -> Result<Option<SystemTime>, String>;
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
-pub struct MemoryModelCatalogStore {
+pub(crate) struct MemoryModelCatalogStore {
     raw: Arc<RwLock<Option<String>>>,
     modified_at: Arc<RwLock<Option<SystemTime>>>,
 }
 
+#[cfg(test)]
 impl MemoryModelCatalogStore {
-    pub fn new(raw: Option<String>) -> Self {
+    pub(crate) fn new(raw: Option<String>) -> Self {
         Self {
             raw: Arc::new(RwLock::new(raw)),
             modified_at: Arc::new(RwLock::new(None)),
@@ -106,6 +142,7 @@ impl MemoryModelCatalogStore {
     }
 }
 
+#[cfg(test)]
 impl ModelCatalogStore for MemoryModelCatalogStore {
     fn load(&self) -> Result<Option<String>, String> {
         self.raw
@@ -134,28 +171,18 @@ impl ModelCatalogStore for MemoryModelCatalogStore {
 }
 
 #[async_trait]
-pub trait ModelCatalogSource: Send + Sync {
+pub(crate) trait ModelCatalogSource: Send + Sync {
     async fn fetch(&self) -> Result<String, String>;
 }
 
-pub trait ModelCatalogStore: Send + Sync {
-    fn load(&self) -> Result<Option<String>, String>;
-    fn save(&self, raw: &str) -> Result<(), String>;
-    fn modified_at(&self) -> Result<Option<SystemTime>, String>;
-}
-
 #[derive(Clone, Debug)]
-pub struct FileModelCatalogStore {
+pub(crate) struct FileModelCatalogStore {
     path: PathBuf,
 }
 
 impl FileModelCatalogStore {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    pub fn path(&self) -> &PathBuf {
-        &self.path
     }
 }
 
@@ -191,27 +218,19 @@ impl ModelCatalogStore for FileModelCatalogStore {
 }
 
 #[derive(Clone, Debug)]
-pub struct ModelsDevHttpSource {
+pub(crate) struct ModelsDevHttpSource {
     url: String,
     user_agent: String,
     timeout: Duration,
 }
 
 impl ModelsDevHttpSource {
-    pub fn new(url: impl Into<String>, user_agent: impl Into<String>, timeout: Duration) -> Self {
+    pub(crate) fn default_models_dev() -> Self {
         Self {
-            url: url.into(),
-            user_agent: user_agent.into(),
-            timeout,
+            url: MODELS_DEV_URL.to_string(),
+            user_agent: format!("lash/{}", crate::APP_VERSION),
+            timeout: Duration::from_secs(10),
         }
-    }
-
-    pub fn default_models_dev() -> Self {
-        Self::new(
-            MODELS_DEV_URL,
-            format!("lash/{}", crate::VERSION),
-            Duration::from_secs(10),
-        )
     }
 }
 
@@ -239,21 +258,21 @@ impl ModelCatalogSource for ModelsDevHttpSource {
 }
 
 #[derive(Clone)]
-pub struct CachedModelCatalog {
+pub(crate) struct CachedModelCatalog {
     catalog: Arc<RwLock<ModelCatalog>>,
     store: Arc<dyn ModelCatalogStore>,
     source: Option<Arc<dyn ModelCatalogSource>>,
 }
 
 impl CachedModelCatalog {
-    pub fn new(
+    pub(crate) fn new(
         store: Arc<dyn ModelCatalogStore>,
         source: Option<Arc<dyn ModelCatalogSource>>,
         bundled_snapshot: &'static str,
     ) -> Result<Self, String> {
         let catalog = if let Some(raw) = store.load()?
             && let Ok(parsed) = ModelCatalog::from_models_dev_json(&raw)
-            && !parsed.entries.is_empty()
+            && !parsed.is_empty()
         {
             parsed
         } else {
@@ -266,28 +285,21 @@ impl CachedModelCatalog {
         })
     }
 
-    pub fn models_dev(
+    pub(crate) fn models_dev(
         store: Arc<dyn ModelCatalogStore>,
         source: Option<Arc<dyn ModelCatalogSource>>,
     ) -> Result<Self, String> {
         Self::new(store, source, bundled_models_dev_snapshot())
     }
 
-    pub fn snapshot(&self) -> ModelCatalog {
-        self.catalog
-            .read()
-            .map(|catalog| catalog.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn get(&self, model_id: &str) -> Option<ModelInfo> {
+    pub(crate) fn get(&self, model_id: &str) -> Option<ModelInfo> {
         self.catalog
             .read()
             .ok()
             .and_then(|catalog| catalog.get(model_id).cloned())
     }
 
-    pub async fn refresh_if_stale(&self, max_age: Duration) -> Result<bool, String> {
+    pub(crate) async fn refresh_if_stale(&self, max_age: Duration) -> Result<bool, String> {
         if self.cache_is_fresh(max_age)? {
             return Ok(false);
         }
@@ -307,28 +319,22 @@ impl CachedModelCatalog {
 
     fn cache_is_fresh(&self, max_age: Duration) -> Result<bool, String> {
         let Some(modified) = self.store.modified_at()? else {
-            return false_result();
+            return Ok(false);
         };
         let Ok(age) = SystemTime::now().duration_since(modified) else {
-            return false_result();
+            return Ok(false);
         };
         Ok(age <= max_age)
     }
 }
 
-fn false_result() -> Result<bool, String> {
-    Ok(false)
-}
-
-pub fn bundled_models_dev_snapshot() -> &'static str {
+pub(crate) fn bundled_models_dev_snapshot() -> &'static str {
     include_str!(concat!(env!("OUT_DIR"), "/models_snapshot.json"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedModelCatalog, ModelCatalog, ModelCatalogStore};
-    use std::sync::{Arc, Mutex};
-    use std::time::SystemTime;
+    use super::ModelCatalog;
 
     #[test]
     fn parse_context_map_reads_provider_prefixed_limits() {
@@ -354,50 +360,6 @@ mod tests {
             map.get("openai/gpt-4.1")
                 .and_then(|info| info.max_input_tokens),
             Some(900000)
-        );
-    }
-
-    struct MemoryStore {
-        raw: Mutex<Option<String>>,
-        modified: Mutex<Option<SystemTime>>,
-    }
-
-    impl MemoryStore {
-        fn new(raw: Option<String>) -> Self {
-            Self {
-                raw: Mutex::new(raw),
-                modified: Mutex::new(None),
-            }
-        }
-    }
-
-    impl ModelCatalogStore for MemoryStore {
-        fn load(&self) -> Result<Option<String>, String> {
-            Ok(self.raw.lock().unwrap().clone())
-        }
-
-        fn save(&self, raw: &str) -> Result<(), String> {
-            *self.raw.lock().unwrap() = Some(raw.to_string());
-            *self.modified.lock().unwrap() = Some(SystemTime::now());
-            Ok(())
-        }
-
-        fn modified_at(&self) -> Result<Option<SystemTime>, String> {
-            Ok(*self.modified.lock().unwrap())
-        }
-    }
-
-    #[test]
-    fn cached_catalog_uses_store_before_snapshot() {
-        let store = Arc::new(MemoryStore::new(Some(
-            r#"{"anthropic":{"models":{"claude-opus-4-6":{"limit":{"context":42}}}}}"#.to_string(),
-        )));
-        let cache = CachedModelCatalog::new(store, None, "{}").expect("cached catalog");
-        assert_eq!(
-            cache
-                .get("anthropic/claude-opus-4-6")
-                .map(|info| info.context_window),
-            Some(42)
         );
     }
 }

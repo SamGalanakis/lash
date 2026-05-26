@@ -21,8 +21,8 @@ pub(crate) use context::{
     prune_reserved_projected_bindings,
 };
 #[cfg(test)]
-pub(crate) use transport::flow_record_to_json_value;
+pub(crate) use transport::{flow_record_to_json_value, flow_record_to_tool_args};
 pub(crate) use transport::{
-    flow_record_to_tool_args, flow_to_json_value, format_output_value, json_to_flow_value,
+    flow_to_json_value, format_output_value, json_to_flow_value,
     normalize_tool_args_for_projection, rehydrate_projected_globals,
 };

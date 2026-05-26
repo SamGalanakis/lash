@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use super::super::host::{
-    AbilityOp, AbilityResult, ProcessBlockEvent, ProcessBlockEventKind, ProcessBlockStart,
+    AbilityOp, AbilityResult, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep,
+    ProcessSleepKind, ProcessStart, ResourceOperation,
 };
 use super::super::{
     ExecutionHost, RuntimeError, Value, error_value, is_process_handle_record,
@@ -12,29 +13,17 @@ use super::control::VmOutcome;
 
 #[derive(Clone, Copy)]
 pub(super) enum VmEffect {
-    CallTool {
-        name: usize,
-        keys: usize,
-    },
-    CallToolUnwrap {
-        name: usize,
-        keys: usize,
-    },
-    StartCallTool {
-        name: usize,
-        keys: usize,
-    },
-    StartProcess {
-        block: usize,
-        has_name: bool,
-        has_timeout_ms: bool,
-        has_input: bool,
-    },
+    ResourceCall { operation: usize, argc: usize },
+    ResourceCallUnwrap { operation: usize, argc: usize },
+    StartProcess { process: usize, keys: usize },
     AwaitHandle,
+    ProcessSleep(ProcessSleepKind),
+    WaitSignal,
+    SignalRun,
     AwaitHandleUnwrap,
     CancelHandle,
     Print,
-    ProcessEvent(ProcessBlockEventKind),
+    ProcessEvent(ProcessEventKind),
     Submit,
     Finish,
     Fail,
@@ -46,76 +35,50 @@ impl<H: ExecutionHost> Vm<'_, H> {
         effect: VmEffect,
     ) -> Result<Option<VmOutcome>, RuntimeError> {
         match effect {
-            VmEffect::CallTool { name, keys } => {
-                let args = self.drain_record_from_stack(keys)?;
+            VmEffect::ResourceCall { operation, argc } => {
+                let (receiver, args) = self.drain_receiver_call(argc)?;
                 let result = match self
                     .host
-                    .perform(AbilityOp::CallTool {
-                        name: self.chunk.names[name].text.to_string(),
+                    .perform(AbilityOp::ResourceOperation(ResourceOperation {
+                        receiver,
+                        operation: self.chunk.names[operation].text.to_string(),
                         args,
-                    })
+                    }))
                     .await
                 {
                     Ok(AbilityResult::Value(value)) => success(value),
                     Ok(AbilityResult::Unit) => {
-                        error_value("tool call returned no value".to_string())
+                        error_value("resource operation returned no value".to_string())
                     }
                     Err(error) => error_value(error.to_string()),
                 };
                 self.stack.push(result);
             }
-            VmEffect::CallToolUnwrap { name, keys } => {
-                let args = self.drain_record_from_stack(keys)?;
+            VmEffect::ResourceCallUnwrap { operation, argc } => {
+                let (receiver, args) = self.drain_receiver_call(argc)?;
                 let value = self
                     .host
-                    .perform(AbilityOp::CallTool {
-                        name: self.chunk.names[name].text.to_string(),
+                    .perform(AbilityOp::ResourceOperation(ResourceOperation {
+                        receiver,
+                        operation: self.chunk.names[operation].text.to_string(),
                         args,
-                    })
+                    }))
                     .await
-                    .and_then(|result| result.into_value("tool call"))
+                    .and_then(|result| result.into_value("resource operation"))
                     .map_err(|error| RuntimeError::ValueError {
-                        message: format!("`?` unwrapped failed tool result: {error}"),
+                        message: format!("`?` unwrapped failed resource operation: {error}"),
                     })?;
                 self.stack.push(value);
             }
-            VmEffect::StartCallTool { name, keys } => {
+            VmEffect::StartProcess { process, keys } => {
                 let args = self.drain_record_from_stack(keys)?;
                 let value = self
                     .host
-                    .perform(AbilityOp::StartToolCall {
-                        name: self.chunk.names[name].text.to_string(),
+                    .perform(AbilityOp::StartProcess(ProcessStart {
+                        module: self.chunk.module.clone(),
+                        linked_module: self.chunk.linked_module.clone(),
+                        process: self.chunk.names[process].text.to_string(),
                         args,
-                    })
-                    .await
-                    .and_then(|result| result.into_value("async start"))
-                    .map_err(|err| RuntimeError::ValueError {
-                        message: format!("async start failed: {err}"),
-                    })?;
-                self.stack.push(value);
-            }
-            VmEffect::StartProcess {
-                block,
-                has_name,
-                has_timeout_ms,
-                has_input,
-            } => {
-                let input = has_input.then(|| self.pop_stack()).transpose()?;
-                let timeout_ms = has_timeout_ms.then(|| self.pop_stack()).transpose()?;
-                let name = has_name.then(|| self.pop_stack()).transpose()?;
-                let block = &self.chunk.process_blocks[block];
-                let value = self
-                    .host
-                    .perform(AbilityOp::StartProcess(ProcessBlockStart {
-                        program: block.program.clone(),
-                        tool_names: block
-                            .tool_names
-                            .iter()
-                            .map(|name| name.text.to_string())
-                            .collect(),
-                        name,
-                        timeout_ms,
-                        input,
                     }))
                     .await
                     .and_then(|result| result.into_value("process start"))
@@ -128,6 +91,42 @@ impl<H: ExecutionHost> Vm<'_, H> {
                 let handle = self.pop_stack()?;
                 let result = self.await_value(handle).await;
                 self.stack.push(result);
+            }
+            VmEffect::ProcessSleep(kind) => {
+                let value = self.pop_stack()?;
+                self.host
+                    .perform(AbilityOp::ProcessSleep(ProcessSleep { kind, value }))
+                    .await
+                    .and_then(|result| result.into_value("process sleep"))
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("process sleep failed: {err}"),
+                    })?;
+                self.last_value = Some(Value::Null);
+                self.stack.push(Value::Null);
+            }
+            VmEffect::WaitSignal => {
+                let value = self
+                    .host
+                    .perform(AbilityOp::WaitSignal)
+                    .await
+                    .and_then(|result| result.into_value("wait signal"))
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("wait signal failed: {err}"),
+                    })?;
+                self.stack.push(value);
+            }
+            VmEffect::SignalRun => {
+                let payload = self.pop_stack()?;
+                let run = self.pop_stack()?;
+                self.host
+                    .perform(AbilityOp::SignalRun(ProcessSignal { run, payload }))
+                    .await
+                    .and_then(|result| result.into_value("signal run"))
+                    .map_err(|err| RuntimeError::ValueError {
+                        message: format!("signal run failed: {err}"),
+                    })?;
+                self.last_value = Some(Value::Null);
+                self.stack.push(Value::Null);
             }
             VmEffect::AwaitHandleUnwrap => {
                 let handle = self.pop_stack()?;
@@ -150,7 +149,7 @@ impl<H: ExecutionHost> Vm<'_, H> {
             VmEffect::ProcessEvent(kind) => {
                 let value = self.pop_stack()?;
                 self.host
-                    .perform(AbilityOp::ProcessEvent(ProcessBlockEvent {
+                    .perform(AbilityOp::ProcessEvent(ProcessEvent {
                         kind,
                         value: value.clone(),
                     }))

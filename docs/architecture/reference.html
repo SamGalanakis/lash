@@ -34,11 +34,11 @@
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lash-core" target="_blank" rel="noopener">lash-core <span aria-hidden="true">↗</span></a></h3>
-          <p>The runtime kernel — <code>RuntimeEffectController</code>, plugin host, session graph, tool execution, process registry plumbing, environment wiring. Drop down here when you're writing a custom <code>PluginHost</code>, explicitly installing a <code>ProcessRegistry</code> such as <code>LocalProcessRegistry</code>, or doing something the facade doesn't expose.</p>
+          <p>The runtime kernel — <code>RuntimeEffectController</code>, plugin host, session graph, mode build input, tool execution, process registry plumbing, Lashlang surface construction, environment wiring. Drop down here when you're writing a custom <code>PluginHost</code>, explicitly installing a <code>ProcessRegistry</code> such as <code>LocalProcessRegistry</code>, or doing something the facade doesn't expose.</p>
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lash-sansio" target="_blank" rel="noopener">lash-sansio <span aria-hidden="true">↗</span></a></h3>
-          <p>Pure protocol types — <code>LlmRequest</code>, <code>LlmResponse</code>, <code>ToolDefinition</code>, the sans-IO state machine. No async, no IO. Reach for it when writing a provider or anything that touches the wire shape directly.</p>
+          <p>Pure protocol types — <code>LlmRequest</code>, <code>LlmResponse</code>, <code>ToolDefinition</code>, <code>ModePreamble</code>, the sans-IO state machine. No async, no IO, no Lashlang dependency. Reach for it when writing a provider or anything that touches the wire shape directly.</p>
         </article>
         <article class="panel">
           <h3><a href="https://docs.rs/lashlang" target="_blank" rel="noopener">lashlang <span aria-hidden="true">↗</span></a></h3>

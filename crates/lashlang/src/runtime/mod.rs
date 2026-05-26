@@ -30,10 +30,14 @@ mod vm;
 pub use cache::{CompiledProgramCache, CompiledProgramCacheStats};
 #[allow(unused_imports)]
 pub(crate) use compiler::*;
-pub use entry_points::{ExecutableProgram, compile, execute, prewarm};
+pub use entry_points::{
+    ExecutableProgram, compile, compile_linked, compile_linked_process, compile_process, execute,
+    prewarm,
+};
 pub use host::{
     AbilityOp, AbilityResult, ExecutionEnvironment, ExecutionHost, ExecutionHostError,
-    ExecutionMode, ProcessBlockEvent, ProcessBlockEventKind, ProcessBlockStart,
+    ExecutionMode, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep, ProcessSleepKind,
+    ProcessStart, ResourceOperation,
 };
 #[allow(unused_imports)]
 pub(crate) use instruction::*;
@@ -63,7 +67,7 @@ pub use state::{Snapshot, State};
 pub use value::{
     ImageValue, LASH_TYPE_KEY, ListValue, ProjectedBindingError, ProjectedBindings,
     ProjectedFuture, ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse,
-    ProjectedValue, Value,
+    ProjectedValue, ResourceHandle, Value,
 };
 use vm::IterState;
 
@@ -73,9 +77,9 @@ pub enum RuntimeError {
     UndefinedVariable { name: String },
     #[error("`for` expects a list")]
     NonListIteration,
-    #[error("`{keyword}` can only be used inside a process block")]
+    #[error("`{keyword}` can only be used inside a process body")]
     ProcessControlOutsideProcess { keyword: &'static str },
-    #[error("`{keyword}` can't be used inside a process block")]
+    #[error("`{keyword}` can't be used inside a process body")]
     ForegroundControlInsideProcess { keyword: &'static str },
     #[error("unknown builtin `{name}`")]
     UnknownBuiltin { name: String },
@@ -125,6 +129,14 @@ impl std::fmt::Debug for CompiledProgram {
 impl CompiledProgram {
     pub fn compile_stats(&self) -> &CompileStats {
         &self.compile_stats
+    }
+
+    pub fn static_graph_json(&self, module_version: impl Into<String>) -> serde_json::Value {
+        if let Some(linked) = &self.chunk.linked_module {
+            crate::linked_static_graph_json(linked)
+        } else {
+            crate::static_graph_json(&self.chunk.module, module_version)
+        }
     }
 }
 

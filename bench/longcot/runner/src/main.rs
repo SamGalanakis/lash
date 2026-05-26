@@ -595,12 +595,19 @@ async fn run_question(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
 
+    let model_spec = lash::ModelSpec::from_token_limits(
+        args.model.clone(),
+        Some(args.variant.clone()),
+        args.max_context_tokens,
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm_with_config(longcot_rlm_config()))
         .default_mode(ModeId::rlm())
         .provider(provider.clone())
-        .model(args.model.clone(), Some(args.variant.clone()))
-        .max_context_tokens(args.max_context_tokens)
+        .model(model_spec)
         .max_turns(args.max_turns)
         .prompt_template(longcot_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))

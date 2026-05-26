@@ -53,6 +53,8 @@ pub struct DirectRequest {
     pub attachments: Vec<LlmAttachment>,
     #[serde(default)]
     pub output: DirectOutputSpec,
+    #[serde(default)]
+    pub generation: crate::GenerationOptions,
     #[serde(default, skip)]
     pub stream_events: Option<LlmEventSender>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +85,7 @@ impl DirectRequest {
             }],
             attachments: Vec::new(),
             output: DirectOutputSpec::Text,
+            generation: crate::GenerationOptions::default(),
             stream_events: None,
             session_id: None,
             originating_tool_call_id: None,
@@ -159,14 +162,14 @@ impl DirectLlmClient {
         &mut self,
         request: DirectRequest,
     ) -> Result<LlmResponse, DirectLlmError> {
-        let normalized_model = self.provider.resolve_model(&request.model);
         if let Some(variant) = request.model_variant.as_deref() {
             self.provider
-                .validate_variant(&normalized_model, variant)
+                .validate_variant(&request.model, variant)
                 .map_err(DirectLlmError::InvalidRequest)?;
         }
 
-        let llm_request = build_llm_request(&self.provider, request, normalized_model);
+        let model = request.model.clone();
+        let llm_request = build_llm_request(&self.provider, request, model);
         let llm_call_id = if self.trace_sink.is_some() {
             let id = uuid::Uuid::new_v4().to_string();
             crate::trace::emit_trace(
@@ -239,6 +242,7 @@ pub(crate) fn build_llm_request(
         messages,
         attachments,
         output,
+        generation,
         stream_events: _,
         session_id,
         originating_tool_call_id: _,
@@ -293,6 +297,7 @@ pub(crate) fn build_llm_request(
         tools: Vec::new().into(),
         tool_choice: LlmToolChoice::None,
         model_variant,
+        generation,
         session_id,
         output_spec,
         stream_events,

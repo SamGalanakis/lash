@@ -52,7 +52,7 @@
 
   // ── lashlang grammar — Prism doesn't ship with this one ──
   // Mirrors the surface tokens used in our docs: control flow, the
-  // call / start call / await / submit verbs, raw triple-quoted
+  // receiver operations / named process starts / await / submit verbs, raw triple-quoted
   // strings, and ordinary Rust-style punctuation.
   function defineLashlang(Prism) {
     if (!Prism || !Prism.languages || Prism.languages.lashlang) return;
@@ -70,12 +70,12 @@
         pattern: /\/\/.*|\/\*[\s\S]*?\*\//,
         greedy: true,
       },
-      "keyword": /\b(?:and|await|break|call|cancel|continue|else|false|for|if|in|let|not|null|or|print|return|start|submit|true|while)\b/,
+      "keyword": /\b(?:and|as|await|break|cancel|continue|each|else|every|fail|false|finish|for|if|in|let|not|null|on|or|print|process|schedule|signal|sleep|start|submit|trigger|true|type|while)\b/,
       "builtin": /\b(?:contains|len|push|glob|read_file|continue_as)\b/,
       "function": /\b[a-z_][a-z0-9_]*(?=\s*\()/i,
       "number": /\b\d+(?:\.\d+)?\b/,
       "operator": /=>|->|::|[+\-*/%=<>!?:]+/,
-      "punctuation": /[{}[\];(),]/,
+      "punctuation": /[{}[\];(),.]/,
     };
     // shorthand alias used in fenced blocks
     Prism.languages.lash = Prism.languages.lashlang;
@@ -100,7 +100,7 @@
     const t = text || "";
     // Most-distinctive cues first.
     if (/^\s*\$\s/m.test(t) || /^\s*#\s*!.+/.test(t)) return "bash";
-    if (/\(call\s+\w|\bstart\s+call\b|\bsubmit\s+\{|```lashlang/.test(t)) return "lashlang";
+    if (/\bprocess\s+\w|\btrigger\s+\w|\bschedule\s+\w|\bawait\s+[A-Z][A-Z0-9_]*\.\w+\.|\bstart\s+\w+\s*\(|```lashlang/.test(t)) return "lashlang";
     if (/^\s*[#/]{0,2}\[(?:dev-)?dependencies\]/m.test(t)) return "toml";
     if (/(?:^|\n)\s*\[[\w.\-]+\]\s*(?:\n|$)/.test(t) && /=\s*["'\d{[]/.test(t)) return "toml";
     if (/\bfn\s+\w|\bpub\s+(?:fn|struct|enum|use|mod|trait|type|const|static)\b|\buse\s+[a-z_][\w:]*::|#\[\w|\bimpl\s+\w/.test(t)) return "rust";

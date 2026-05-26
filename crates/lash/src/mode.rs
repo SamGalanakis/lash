@@ -101,18 +101,3 @@ impl ModePreset {
         &self.mode_id
     }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModelSelection {
-    pub model: String,
-    pub variant: Option<String>,
-}
-
-impl ModelSelection {
-    pub fn new(model: impl Into<String>, variant: Option<String>) -> Self {
-        Self {
-            model: model.into(),
-            variant,
-        }
-    }
-}

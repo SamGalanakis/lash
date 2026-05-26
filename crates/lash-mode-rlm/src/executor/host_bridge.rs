@@ -7,12 +7,12 @@ use lash_core::{
     ToolOutputBudgetConfig,
 };
 use lashlang::{
-    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessBlockStart,
-    ProjectedFuture, Record as FlowRecord, Value as FlowValue,
+    AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessStart, ProjectedFuture,
+    Record as FlowRecord, Value as FlowValue,
 };
 use serde_json::Value;
 
-use crate::projection::{flow_record_to_tool_args, flow_to_json_value, format_output_value};
+use crate::projection::{flow_to_json_value, format_output_value};
 
 pub(super) struct HostBridge<'run> {
     ctx: ModeExecutionContext<'run>,
@@ -53,16 +53,6 @@ impl<'run> HostBridge<'run> {
         let next = *guard;
         *guard += 1;
         next
-    }
-
-    async fn tool_payload(&self, tool_name: &str, args: &FlowRecord) -> Value {
-        let policy = self.ctx.tool_argument_projection_policy(tool_name);
-        let mut payload = flow_record_to_tool_args(args, &policy).await;
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__session_id__".to_string())
-                .or_insert_with(|| Value::String(self.ctx.session_id().to_string()));
-        }
-        payload
     }
 
     fn consume_reply(
@@ -107,40 +97,50 @@ impl<'run> HostBridge<'run> {
 }
 
 impl HostBridge<'_> {
-    async fn call(&self, name: String, args: FlowRecord) -> Result<FlowValue, ExecutionHostError> {
+    async fn resource_operation(
+        &self,
+        operation: String,
+        receiver: FlowValue,
+        args: Vec<FlowValue>,
+    ) -> Result<FlowValue, ExecutionHostError> {
+        let resource = match &receiver {
+            FlowValue::Resource(resource) => resource,
+            _ => {
+                return Err(ExecutionHostError::new(format!(
+                    "resource operation `{operation}` requires a resource receiver"
+                )));
+            }
+        };
+        if resource.resource_type != "TOOL" || resource.alias != "default" {
+            return Err(ExecutionHostError::new(format!(
+                "resource `{}`.`{}` is not executable in this host",
+                resource.resource_type, resource.alias
+            )));
+        }
         let index = self.next_index();
+        let mut payload = if let [FlowValue::Record(record)] = args.as_slice() {
+            flow_record_json(record).await
+        } else {
+            serde_json::json!({
+                "args": flow_values_to_json(&args).await,
+            })
+        };
+        payload.as_object_mut().ok_or_else(|| {
+            ExecutionHostError::new("resource operation payload must be an object")
+        })?;
         let reply = self
             .ctx
             .call_tool(
                 uuid::Uuid::new_v4().to_string(),
-                name.clone(),
-                self.tool_payload(&name, &args).await,
+                operation.clone(),
+                payload,
                 index,
             )
             .await;
-        self.consume_reply(&name, reply)
+        self.consume_reply(&operation, reply)
     }
 
-    async fn start_call(
-        &self,
-        name: String,
-        args: FlowRecord,
-    ) -> Result<FlowValue, ExecutionHostError> {
-        let reply = self
-            .ctx
-            .start_tool_call(
-                uuid::Uuid::new_v4().to_string(),
-                name.clone(),
-                self.tool_payload(&name, &args).await,
-            )
-            .await;
-        self.consume_reply(&name, reply)
-    }
-
-    async fn start_process(
-        &self,
-        start: ProcessBlockStart,
-    ) -> Result<FlowValue, ExecutionHostError> {
+    async fn start_process(&self, start: ProcessStart) -> Result<FlowValue, ExecutionHostError> {
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)
@@ -198,12 +198,10 @@ impl HostBridge<'_> {
 impl ExecutionHost for HostBridge<'_> {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::CallTool { name, args } => {
-                self.call(name, args).await.map(AbilityResult::Value)
-            }
-            AbilityOp::StartToolCall { name, args } => {
-                self.start_call(name, args).await.map(AbilityResult::Value)
-            }
+            AbilityOp::ResourceOperation(operation) => self
+                .resource_operation(operation.operation, operation.receiver, operation.args)
+                .await
+                .map(AbilityResult::Value),
             AbilityOp::StartProcess(start) => {
                 self.start_process(start).await.map(AbilityResult::Value)
             }
@@ -214,8 +212,13 @@ impl ExecutionHost for HostBridge<'_> {
                 Ok(AbilityResult::Unit)
             }
             AbilityOp::ProcessEvent(_) => Err(ExecutionHostError::new(
-                "process events are only available inside lashlang process blocks",
+                "process events are only available inside lashlang process bodies",
             )),
+            AbilityOp::ProcessSleep(_) | AbilityOp::WaitSignal | AbilityOp::SignalRun(_) => {
+                Err(ExecutionHostError::new(
+                    "process lifecycle primitives are only available inside lashlang process bodies",
+                ))
+            }
             AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 Ok(AbilityResult::Value(value))
             }
@@ -232,6 +235,26 @@ async fn handle_to_json(value: &FlowValue) -> Result<Value, ExecutionHostError> 
         FlowValue::Projected(_) => Ok(flow_to_json_value(value).await),
         _ => lash_core::lashlang_bridge::lashlang_value_to_json(value),
     }
+}
+
+fn flow_values_to_json<'a>(values: &'a [FlowValue]) -> ProjectedFuture<'a, Vec<Value>> {
+    Box::pin(async move {
+        let mut out = Vec::with_capacity(values.len());
+        for value in values {
+            out.push(flow_to_json_value(value).await);
+        }
+        out
+    })
+}
+
+fn flow_record_json<'a>(record: &'a FlowRecord) -> ProjectedFuture<'a, Value> {
+    Box::pin(async move {
+        let mut object = serde_json::Map::with_capacity(record.len());
+        for (key, value) in record.iter() {
+            object.insert(key.to_string(), flow_to_json_value(value).await);
+        }
+        Value::Object(object)
+    })
 }
 
 pub(super) struct CollectedExecutionOutput {
@@ -295,7 +318,11 @@ fn collect_printed_images_inner<'a>(
                 )
                 .await?;
             }
-            FlowValue::Null | FlowValue::Bool(_) | FlowValue::Number(_) | FlowValue::String(_) => {}
+            FlowValue::Null
+            | FlowValue::Bool(_)
+            | FlowValue::Number(_)
+            | FlowValue::String(_)
+            | FlowValue::Resource(_) => {}
         }
         Ok(())
     })

@@ -105,6 +105,7 @@ impl LlmToolsProvider {
                     attachments: Vec::new(),
                     output,
                     stream_events: None,
+                    generation: lash_core::GenerationOptions::default(),
                     session_id: Some(format!("{}-llm-query", context.session_id())),
                     originating_tool_call_id: None,
                     idempotency_key: None,
@@ -143,8 +144,8 @@ pub fn llm_query_tool_definition() -> ToolDefinition {
         "Run a one-shot LLM prompt over supplied data and return its result. The `task` plus everything in `inputs` is rendered into that single prompt; the call cannot use tools, inspect files, or gather more context beyond what you pass it. Use this for extracting information, classification, summarization, judging, or transformation over data already in your variables. `inputs` can be any structured value. `output` is optional and defaults to a string; when present, it requests structured output using record descriptors or `Type { ... }` literals.",
         llm_query_input_schema(),
         vec![
-            r#"call llm_query { task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } }"#.into(),
-            r#"call llm_query { task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } }"#.into(),
+            r#"summary = await TOOL.default.llm_query({ task: "Summarize the supplied notes in three bullets", inputs: { notes: notes } })?"#.into(),
+            r#"claims = await TOOL.default.llm_query({ task: "Extract the key claim from each supplied chunk", inputs: { chunks: chunks }, output: { claims: "list[str]" } })?"#.into(),
         ],
         ToolExecutionMode::Parallel,
     )
@@ -375,6 +376,17 @@ mod tests {
     use lash_core::plugin::{PluginError, SessionHandle};
     use lash_core::{RuntimeSessionState, SessionCreateRequest, ToolCall};
 
+    fn model_spec(model: &str, variant: Option<&str>) -> lash_core::ModelSpec {
+        lash_core::ModelSpec::from_token_limits(
+            model,
+            variant.map(str::to_string),
+            200_000,
+            None,
+            None,
+        )
+        .expect("valid test model spec")
+    }
+
     #[derive(Default)]
     struct DirectCompletionManager {
         snapshot: RuntimeSessionState,
@@ -506,8 +518,7 @@ mod tests {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
-                    model: "root-model".to_string(),
-                    model_variant: Some("fast".to_string()),
+                    model: model_spec("root-model", Some("fast")),
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },
@@ -574,8 +585,7 @@ mod tests {
         let manager = Arc::new(DirectCompletionManager {
             snapshot: RuntimeSessionState {
                 policy: lash_core::SessionPolicy {
-                    model: "root-model".to_string(),
-                    model_variant: Some("medium".to_string()),
+                    model: model_spec("root-model", Some("medium")),
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
                     ..lash_core::SessionPolicy::default()
                 },

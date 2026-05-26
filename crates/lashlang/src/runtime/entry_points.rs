@@ -1,5 +1,6 @@
 //! Public compile/execute entry points for lashlang programs.
 
+use crate::LinkedModule;
 use crate::ast::Program;
 
 use super::record::intern_symbol;
@@ -35,6 +36,55 @@ pub(crate) fn compile_program_internal(program: &Program) -> CompiledProgram {
         chunk,
         compile_stats,
     }
+}
+
+pub fn compile_linked(linked: &LinkedModule) -> CompiledProgram {
+    let (chunk, compile_stats) = Compiler::compile_linked_program(&linked.program, linked);
+    CompiledProgram {
+        chunk,
+        compile_stats,
+    }
+}
+
+pub fn compile_process(
+    program: &Program,
+    process_name: &str,
+) -> Result<CompiledProgram, RuntimeError> {
+    let process = program
+        .process(process_name)
+        .ok_or_else(|| RuntimeError::ValueError {
+            message: format!("unknown process `{process_name}`"),
+        })?;
+    let process_program = Program {
+        declarations: program.declarations.clone(),
+        main: process.body.clone(),
+        declaration_spans: program.declaration_spans.clone(),
+        expression_spans: Vec::new(),
+    };
+    Ok(compile_program_internal(&process_program))
+}
+
+pub fn compile_linked_process(
+    linked: &LinkedModule,
+    process_name: &str,
+) -> Result<CompiledProgram, RuntimeError> {
+    let process = linked
+        .program
+        .process(process_name)
+        .ok_or_else(|| RuntimeError::ValueError {
+            message: format!("unknown process `{process_name}`"),
+        })?;
+    let process_program = Program {
+        declarations: linked.program.declarations.clone(),
+        main: process.body.clone(),
+        declaration_spans: linked.program.declaration_spans.clone(),
+        expression_spans: Vec::new(),
+    };
+    let (chunk, compile_stats) = Compiler::compile_linked_program(&process_program, linked);
+    Ok(CompiledProgram {
+        chunk,
+        compile_stats,
+    })
 }
 
 pub fn prewarm() {

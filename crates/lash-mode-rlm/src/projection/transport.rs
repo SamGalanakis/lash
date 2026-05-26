@@ -71,6 +71,14 @@ pub(crate) fn normalize_tool_args_for_projection(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn flow_record_to_tool_args(
+    record: &FlowRecord,
+    policy: &ToolArgumentProjectionPolicy,
+) -> Value {
+    normalize_tool_args_for_projection(flow_record_to_json_value(record).await, policy)
+}
+
 fn normalize_seed_preserving_tool_args(args: Value, field: &str) -> Value {
     let Value::Object(args) = args else {
         return materialize_projected_json(args);
@@ -124,49 +132,6 @@ fn materialize_projected_json(value: Value) -> Value {
     }
 }
 
-pub(crate) async fn flow_record_to_tool_args(
-    record: &FlowRecord,
-    policy: &ToolArgumentProjectionPolicy,
-) -> Value {
-    match policy {
-        ToolArgumentProjectionPolicy::MaterializeProjectedValues => {
-            flow_record_to_materialized_json(record).await
-        }
-        ToolArgumentProjectionPolicy::PreserveProjectedRefsInField { field } => {
-            flow_record_to_seed_preserving_tool_args(record, field).await
-        }
-    }
-}
-
-async fn flow_record_to_seed_preserving_tool_args(record: &FlowRecord, field: &str) -> Value {
-    let mut object = serde_json::Map::with_capacity(record.len());
-    for (key, value) in record.iter() {
-        let value = if key == field {
-            flow_seed_to_json(value).await
-        } else {
-            flow_value_to_materialized_json(value).await
-        };
-        object.insert(key.to_string(), value);
-    }
-    Value::Object(object)
-}
-
-async fn flow_seed_to_json(value: &FlowValue) -> Value {
-    let FlowValue::Record(record) = value else {
-        return flow_value_to_materialized_json(value).await;
-    };
-    let mut object = serde_json::Map::with_capacity(record.len());
-    for (key, value) in record.iter() {
-        let value = if matches!(value, FlowValue::Projected(_)) {
-            flow_to_json_value(value).await
-        } else {
-            flow_value_to_materialized_json(value).await
-        };
-        object.insert(key.to_string(), value);
-    }
-    Value::Object(object)
-}
-
 pub(crate) fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
     Box::pin(async move {
         match value {
@@ -175,6 +140,8 @@ pub(crate) fn flow_to_json_value<'a>(value: &'a FlowValue) -> ProjectedFuture<'a
             FlowValue::Number(value) => json_number(*value),
             FlowValue::String(value) => Value::String(value.to_string()),
             FlowValue::Image(image) => serde_json::to_value(image)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            FlowValue::Resource(resource) => serde_json::to_value(resource)
                 .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             FlowValue::List(values) => {
                 let mut out = Vec::with_capacity(values.len());
@@ -205,41 +172,6 @@ pub(crate) async fn flow_record_to_json_value(record: &FlowRecord) -> Value {
     let mut object = serde_json::Map::with_capacity(record.len());
     for (key, value) in record.iter() {
         object.insert(key.to_string(), flow_to_json_value(value).await);
-    }
-    Value::Object(object)
-}
-
-fn flow_value_to_materialized_json<'a>(value: &'a FlowValue) -> ProjectedFuture<'a, Value> {
-    Box::pin(async move {
-        match value {
-            FlowValue::Null => Value::Null,
-            FlowValue::Bool(value) => Value::Bool(*value),
-            FlowValue::Number(value) => json_number(*value),
-            FlowValue::String(value) => Value::String(value.to_string()),
-            FlowValue::Image(image) => serde_json::to_value(image)
-                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            FlowValue::List(values) => {
-                let mut out = Vec::with_capacity(values.len());
-                for value in values.iter() {
-                    out.push(flow_value_to_materialized_json(value).await);
-                }
-                Value::Array(out)
-            }
-            FlowValue::Record(record) => flow_record_to_materialized_json(record).await,
-            FlowValue::Projected(value) => {
-                flow_value_to_materialized_json(&value.materialize_async().await).await
-            }
-        }
-    })
-}
-
-async fn flow_record_to_materialized_json(record: &FlowRecord) -> Value {
-    let mut object = serde_json::Map::with_capacity(record.len());
-    for (key, value) in record.iter() {
-        object.insert(
-            key.to_string(),
-            flow_value_to_materialized_json(value).await,
-        );
     }
     Value::Object(object)
 }
@@ -354,6 +286,7 @@ fn rehydrate_projected_value<'a>(
             | FlowValue::Bool(_)
             | FlowValue::Number(_)
             | FlowValue::String(_)
+            | FlowValue::Resource(_)
             | FlowValue::Image(_) => Ok(false),
         }
     })
@@ -390,6 +323,7 @@ pub(crate) async fn format_output_value(value: &FlowValue) -> String {
         FlowValue::Bool(value) => value.to_string(),
         FlowValue::Number(value) => value.to_string(),
         FlowValue::Image(_)
+        | FlowValue::Resource(_)
         | FlowValue::List(_)
         | FlowValue::Record(_)
         | FlowValue::Projected(_) => serde_json::to_string(&flow_to_json_value(value).await)

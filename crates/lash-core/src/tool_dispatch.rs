@@ -40,7 +40,11 @@ pub(crate) struct ToolDispatchOutcome {
 
 pub(crate) enum ToolPreparationOutcome {
     Prepared(PreparedToolCall),
-    Completed(ToolDispatchOutcome),
+    Completed(Box<ToolDispatchOutcome>),
+}
+
+fn completed_preparation(outcome: ToolDispatchOutcome) -> ToolPreparationOutcome {
+    ToolPreparationOutcome::Completed(Box::new(outcome))
 }
 
 #[derive(Clone)]
@@ -107,7 +111,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
             )
             .await
         }
-        ToolPreparationOutcome::Completed(outcome) => outcome,
+        ToolPreparationOutcome::Completed(outcome) => *outcome,
     }
 }
 
@@ -118,7 +122,7 @@ pub(crate) async fn prepare_tool_call_with_context(
 ) -> ToolPreparationOutcome {
     let tool_name = pending.tool_name.clone();
     let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             pending.args,
             runtime_failure(
@@ -146,7 +150,7 @@ pub(crate) async fn prepare_tool_call_with_context(
     {
         Ok(directives) => directives,
         Err(err) => {
-            return ToolPreparationOutcome::Completed(outcome(
+            return completed_preparation(outcome(
                 tool_name,
                 args,
                 runtime_failure(
@@ -216,7 +220,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         }
     }
     if let Some(result) = short_circuit {
-        return ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0));
+        return completed_preparation(outcome(tool_name, args, result, 0));
     }
 
     let contract = context
@@ -226,7 +230,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         .find_map(|provider| provider.resolve_contract(&tool_name))
         .or_else(|| context.tools.resolve_contract(&tool_name));
     let Some(contract) = contract else {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             args,
             runtime_failure(
@@ -238,7 +242,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         ));
     };
     if let Err(err) = validate_tool_input(&contract, &args) {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             args,
             runtime_failure(ToolFailureClass::InvalidRequest, "invalid_tool_args", err),
@@ -270,7 +274,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         .await
     {
         Ok(prepared) => ToolPreparationOutcome::Prepared(prepared),
-        Err(result) => ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0)),
+        Err(result) => completed_preparation(outcome(tool_name, args, result, 0)),
     }
 }
 

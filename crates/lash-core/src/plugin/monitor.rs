@@ -184,33 +184,19 @@ impl MonitorPlugin {
             .map(|entry| {
                 let mut status = entry.status.clone();
                 if let Some(record) = by_id.get(format!("monitor:{}", status.spec.id).as_str()) {
-                    status.state = match record.terminal.as_ref().map(|terminal| terminal.state) {
-                        None => MonitorRunState::Running,
-                        Some(crate::ProcessTerminalState::Completed) => MonitorRunState::Exited,
-                        Some(crate::ProcessTerminalState::Failed) => MonitorRunState::Failed,
-                        Some(crate::ProcessTerminalState::Cancelled) => MonitorRunState::Stopped,
-                    };
-                    if let Some(terminal) = record.terminal.as_ref() {
-                        match &terminal.await_output {
-                            crate::ProcessAwaitOutput::Failure { message, .. } => {
-                                status.last_error = Some(message.clone());
-                            }
-                            crate::ProcessAwaitOutput::Cancelled { message, .. } => {
-                                status.last_error = Some(message.clone());
-                            }
-                            crate::ProcessAwaitOutput::Success { value, .. } => {
-                                status.last_error = None;
-                                status.last_exit_status = value
-                                    .get("exit_status")
-                                    .and_then(serde_json::Value::as_i64)
-                                    .and_then(|code| i32::try_from(code).ok());
-                            }
-                        }
-                    }
+                    Self::apply_process_terminal(&mut status, record);
                 }
                 status
             })
             .collect::<Vec<_>>();
+        let known_ids = monitors
+            .iter()
+            .map(|status| status.spec.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        monitors.extend(by_id.values().filter_map(|record| {
+            let status = Self::status_from_monitor_process(record)?;
+            (!known_ids.contains(&status.spec.id)).then_some(status)
+        }));
         monitors.sort_by(|left, right| left.spec.id.cmp(&right.spec.id));
         MonitorSnapshot {
             revision: state.snapshot.revision,
@@ -220,6 +206,102 @@ impl MonitorPlugin {
                 .count(),
             monitors,
         }
+    }
+
+    fn apply_process_terminal(status: &mut MonitorStatus, record: &crate::ProcessRecord) {
+        status.state = match record.terminal.as_ref().map(|terminal| terminal.state) {
+            None => MonitorRunState::Running,
+            Some(crate::ProcessTerminalState::Completed) => MonitorRunState::Exited,
+            Some(crate::ProcessTerminalState::Failed) => MonitorRunState::Failed,
+            Some(crate::ProcessTerminalState::Cancelled) => MonitorRunState::Stopped,
+        };
+        if let Some(terminal) = record.terminal.as_ref() {
+            match &terminal.await_output {
+                crate::ProcessAwaitOutput::Failure { message, .. } => {
+                    status.last_error = Some(message.clone());
+                }
+                crate::ProcessAwaitOutput::Cancelled { message, .. } => {
+                    status.last_error = Some(message.clone());
+                }
+                crate::ProcessAwaitOutput::Success { value, .. } => {
+                    status.last_error = None;
+                    status.last_exit_status = value
+                        .get("exit_status")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|code| i32::try_from(code).ok());
+                }
+            }
+        }
+    }
+
+    fn status_from_monitor_process(record: &crate::ProcessRecord) -> Option<MonitorStatus> {
+        let crate::ProcessInput::ToolCall { call } = record.input.as_ref() else {
+            return None;
+        };
+        if call.tool_name != "monitor" {
+            return None;
+        }
+        let id = call
+            .args
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| record.id.strip_prefix("monitor:").map(str::to_string))?;
+        let command = call
+            .args
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let cwd = call
+            .args
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let env = call
+            .args
+            .get("env")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        let persistent = call
+            .args
+            .get("persistent")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let timeout_ms = call
+            .args
+            .get("timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(300_000);
+        let wake_policy = match call
+            .args
+            .get("wake_policy")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("notify") => crate::MonitorWakePolicy::Notify,
+            _ => crate::MonitorWakePolicy::QueueTurn,
+        };
+        let mut status = MonitorStatus {
+            spec: MonitorSpec {
+                id,
+                command,
+                cwd,
+                env,
+                persistent,
+                timeout_ms,
+                wake_policy,
+                ..MonitorSpec::default()
+            },
+            armed: !record.is_terminal(),
+            state: MonitorRunState::Idle,
+            last_event: None,
+            last_error: None,
+            last_exit_status: None,
+            event_count: 0,
+        };
+        Self::apply_process_terminal(&mut status, record);
+        Some(status)
     }
 
     fn record_monitor_notice(state: &mut MonitorPluginState, monitor_id: &str, message: String) {
@@ -345,22 +427,31 @@ impl MonitorPlugin {
                 ..crate::ProcessEventSemanticsSpec::default()
             },
         };
+        let spec_id = spec.id.clone();
+        let mut args = serde_json::json!({
+            "id": spec_id,
+            "command": spec.command.clone(),
+            "description": spec.command.clone(),
+            "persistent": spec.persistent,
+            "timeout_ms": spec.timeout_ms,
+            "wake_policy": spec.wake_policy,
+        });
+        if let Some(cwd) = spec.cwd.clone() {
+            args["cwd"] = serde_json::json!(cwd);
+        }
+        if !spec.env.is_empty() {
+            args["env"] = serde_json::json!(spec.env.clone());
+        }
         let managed_spec = crate::ProcessRegistration::new(
             process_id.clone(),
-            crate::ProcessInput::Command {
-                command: spec.command.clone(),
-                cwd: spec.cwd.clone(),
-                env: spec.env.clone(),
-                timeout_ms: spec.timeout_ms,
-                persistent: spec.persistent,
-                line_event: Some(crate::ProcessCommandLineEventSpec {
-                    event_type: "monitor.line".to_string(),
-                    wake_input_template: if spec.wake_policy == crate::MonitorWakePolicy::Notify {
-                        None
-                    } else {
-                        Some(format!("Monitor event \"{}\": {{line}}", spec.id))
-                    },
-                }),
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    process_id.clone(),
+                    "monitor",
+                    args,
+                    None,
+                    serde_json::Value::Null,
+                ),
             },
         )
         .with_extra_event_types([line_event]);

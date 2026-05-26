@@ -547,9 +547,14 @@ where
             grant,
             execution_context,
         } => {
-            let record =
-                schedule_restate_process(registry, registration, grant, execution_context, context)
-                    .await?;
+            let record = schedule_restate_process(
+                registry,
+                registration,
+                grant,
+                *execution_context,
+                context,
+            )
+            .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
         ProcessCommand::List { session_id } => {
@@ -744,6 +749,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: Default::default(),
             model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
             session_id: Some("session".to_string()),
             output_spec: None,
         }
@@ -753,6 +759,7 @@ mod tests {
         lash_core::DirectRequestSpec {
             model: "model".to_string(),
             model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
             messages: Vec::new(),
             attachments: Vec::new(),
             output: Default::default(),
@@ -882,14 +889,14 @@ mod tests {
             ),
             (
                 RuntimeEffectCommand::LlmCall {
-                    request: llm_spec(),
+                    request: Box::new(llm_spec()),
                 },
                 RestateEffectExecution::JournaledRun,
             ),
             (
                 RuntimeEffectCommand::DirectCompletion {
-                    request: direct_spec(),
-                    normalized_request: llm_spec(),
+                    request: Box::new(direct_spec()),
+                    normalized_request: Box::new(llm_spec()),
                     model: "model".to_string(),
                     usage_source: "test".to_string(),
                 },
@@ -897,7 +904,7 @@ mod tests {
             ),
             (
                 RuntimeEffectCommand::DirectLlmCompletion {
-                    request: llm_spec(),
+                    request: Box::new(llm_spec()),
                     usage_source: "test".to_string(),
                 },
                 RestateEffectExecution::JournaledRun,
@@ -1122,7 +1129,7 @@ mod tests {
                                     Some("task"),
                                 ),
                             }),
-                            execution_context: ProcessExecutionContext::default(),
+                            execution_context: Box::new(ProcessExecutionContext::default()),
                         },
                     },
                 ),
@@ -1186,24 +1193,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restate_controller_schedules_lashlang_block_with_serializable_input() {
+    async fn restate_controller_schedules_lashlang_process_with_serializable_input() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
         let registry = Arc::new(lash_core::LocalProcessRegistry::default());
-        let program = serde_json::json!({ "statements": [] });
-        let mut input = serde_json::Map::new();
-        input.insert("root".to_string(), serde_json::json!("."));
+        let module = lashlang::parse("process scan(root: str) { finish root }")
+            .expect("lashlang process module");
+        let catalog = lashlang::ResourceCatalog::new();
+        let linked_module = lashlang::LinkedModule::link(
+            module.clone(),
+            lashlang::LashlangSurface::new(catalog, lashlang::LashlangAbilities::all()),
+        )
+        .expect("link lashlang module");
+        let module_version = linked_module.module_version.clone();
+        let mut args = serde_json::Map::new();
+        args.insert("root".to_string(), serde_json::json!("."));
         let registration = ProcessRegistration::new(
-            "block-1",
-            ProcessInput::LashlangBlock {
-                program: program.clone(),
-                input: input.clone(),
-                tool_bindings: vec![lash_core::LashlangProcessToolBinding {
-                    name: "echo".to_string(),
-                    tool_id: lash_core::ToolId::new("tool:echo"),
-                }],
-                timeout_ms: Some(5000),
-                display_name: Some("scan".to_string()),
+            "process-1",
+            ProcessInput::LashlangProcess {
+                module_version,
+                linked_module: linked_module.clone(),
+                process_name: "scan".to_string(),
+                args: args.clone(),
             },
         )
         .with_extra_event_types(lash_core::lashlang_process_event_types());
@@ -1211,13 +1222,14 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "lashlang-block-start"),
+                    effect_metadata(RuntimeEffectKind::Process, "lashlang-process-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
                             grant: None,
-                            execution_context: ProcessExecutionContext::default()
-                                .with_wake_session_id("session"),
+                            execution_context: Box::new(
+                                ProcessExecutionContext::default().with_wake_session_id("session"),
+                            ),
                         },
                     },
                 ),
@@ -1241,7 +1253,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .get_process("block-1")
+                .get_process("process-1")
                 .await
                 .expect("registered process")
                 .external_ref
@@ -1251,24 +1263,18 @@ mod tests {
         );
         let started = context.started.lock().expect("started lock");
         assert_eq!(started.len(), 1);
-        let ProcessInput::LashlangBlock {
-            program: sent_program,
-            input: sent_input,
-            tool_bindings,
-            timeout_ms,
-            display_name,
+        let ProcessInput::LashlangProcess {
+            linked_module: sent_module,
+            process_name,
+            args: sent_args,
+            ..
         } = started[0].input.as_ref()
         else {
-            panic!("expected lashlang block input");
+            panic!("expected lashlang process input");
         };
-        assert_eq!(sent_program, &program);
-        assert_eq!(sent_input, &input);
-        assert_eq!(
-            tool_bindings[0].tool_id,
-            lash_core::ToolId::new("tool:echo")
-        );
-        assert_eq!(*timeout_ms, Some(5000));
-        assert_eq!(display_name.as_deref(), Some("scan"));
+        assert_eq!(sent_module, &linked_module);
+        assert_eq!(process_name, "scan");
+        assert_eq!(sent_args, &args);
         assert_eq!(
             context
                 .started_execution_contexts
@@ -1480,7 +1486,7 @@ mod tests {
                                     Some("task-smoke"),
                                 ),
                             }),
-                            execution_context,
+                            execution_context: Box::new(execution_context),
                         },
                     },
                 ),

@@ -1,6 +1,6 @@
 use super::*;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 impl RuntimeSessionManager {
     #[allow(clippy::too_many_arguments)]
@@ -8,25 +8,24 @@ impl RuntimeSessionManager {
         &self,
         registration: crate::ProcessRegistration,
         registry: Arc<dyn crate::ProcessRegistry>,
-        program: serde_json::Value,
-        input: serde_json::Map<String, serde_json::Value>,
-        tool_bindings: Vec<crate::LashlangProcessToolBinding>,
-        timeout_ms: Option<u64>,
+        linked_module: ::lashlang::LinkedModule,
+        process_name: String,
+        args: serde_json::Map<String, serde_json::Value>,
         execution_context: crate::ProcessExecutionContext,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
-        let program = match serde_json::from_value::<::lashlang::Program>(program) {
-            Ok(program) => program,
+        let compiled = match ::lashlang::compile_linked_process(&linked_module, &process_name) {
+            Ok(compiled) => compiled,
             Err(err) => {
                 return process_lashlang_failure(
-                    "process_block_decode_failed",
-                    format!("failed to decode lashlang process block: {err}"),
+                    "process_compile_failed",
+                    format!("failed to compile process `{process_name}`: {err}"),
                     None,
                 );
             }
         };
-        let mut globals = ::lashlang::Record::with_capacity(input.len());
-        for (name, value) in input {
+        let mut globals = ::lashlang::Record::with_capacity(args.len());
+        for (name, value) in args {
             globals.insert(name, ::lashlang::from_json(value));
         }
         let mut state = ::lashlang::State::from_snapshot(::lashlang::Snapshot { globals });
@@ -69,7 +68,7 @@ impl RuntimeSessionManager {
                 drop(runtime_host);
                 let _ = event_drain.await;
                 return process_lashlang_failure(
-                    "process_block_tool_surface_failed",
+                    "process_tool_surface_failed",
                     err.to_string(),
                     None,
                 );
@@ -79,6 +78,7 @@ impl RuntimeSessionManager {
             self.current.session_id.clone(),
             self.current.policy.execution_mode.clone(),
             Arc::new(dispatch),
+            self.current.plugins.lashlang_abilities(),
             Arc::clone(&self.current.host.core.attachment_store),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -89,38 +89,22 @@ impl RuntimeSessionManager {
             ctx = ctx.with_effect_metadata(metadata);
         }
 
-        let host = LashlangBlockProcessHost {
+        let host = LashlangProcessHost {
             manager: self.clone(),
             ctx,
             registry: Arc::clone(&registry),
             process_id: registration.id.clone(),
-            tool_bindings: tool_bindings
-                .into_iter()
-                .map(|binding| (binding.name, binding.tool_id))
-                .collect(),
             wake_session_id: execution_context.wake_session_id,
+            cancellation: cancellation.clone(),
+            sleep_sequence: AtomicU64::new(0),
+            signal_sequence: tokio::sync::Mutex::new(0),
         };
         let env = ::lashlang::ExecutionEnvironment::new(&host).process();
 
-        let output = if let Some(timeout_ms) = timeout_ms {
-            let timeout = tokio::time::Duration::from_millis(timeout_ms);
+        let output = {
             tokio::select! {
-                _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process block was cancelled"),
-                result = tokio::time::timeout(timeout, ::lashlang::execute(&program, &mut state, &env)) => {
-                    match result {
-                        Ok(result) => process_lashlang_execution_result(result),
-                        Err(_) => process_lashlang_failure(
-                            "process_block_timeout",
-                            format!("lashlang process block timed out after {timeout_ms}ms"),
-                            None,
-                        ),
-                    }
-                }
-            }
-        } else {
-            tokio::select! {
-                _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process block was cancelled"),
-                result = ::lashlang::execute(&program, &mut state, &env) => {
+                _ = cancellation.cancelled() => process_lashlang_cancelled("lashlang process was cancelled"),
+                result = ::lashlang::execute(&compiled, &mut state, &env) => {
                     process_lashlang_execution_result(result)
                 }
             }
@@ -132,81 +116,75 @@ impl RuntimeSessionManager {
     }
 }
 
-struct LashlangBlockProcessHost<'run> {
+struct LashlangProcessHost<'run> {
     manager: RuntimeSessionManager,
     ctx: crate::ModeExecutionContext<'run>,
     registry: Arc<dyn crate::ProcessRegistry>,
     process_id: String,
-    tool_bindings: HashMap<String, crate::ToolId>,
     wake_session_id: Option<String>,
+    cancellation: tokio_util::sync::CancellationToken,
+    sleep_sequence: AtomicU64,
+    signal_sequence: tokio::sync::Mutex<u64>,
 }
 
-impl LashlangBlockProcessHost<'_> {
-    fn captured_manifest(
+impl LashlangProcessHost<'_> {
+    fn resource_payload(
         &self,
-        name: &str,
-    ) -> Result<crate::ToolManifest, ::lashlang::ExecutionHostError> {
-        let tool_id = self.tool_bindings.get(name).ok_or_else(|| {
-            ::lashlang::ExecutionHostError::new(format!(
-                "tool `{name}` was not captured for this lashlang process"
-            ))
-        })?;
-        self.ctx
-            .callable_tool_manifest_by_id(tool_id)
-            .ok_or_else(|| {
-                ::lashlang::ExecutionHostError::new(format!(
-                    "captured tool `{name}` with id `{}` is unavailable in this session",
-                    tool_id.as_str()
-                ))
-            })
-    }
-
-    fn tool_payload(
-        &self,
-        args: &::lashlang::Record,
+        _receiver: &::lashlang::Value,
+        args: &[::lashlang::Value],
     ) -> Result<serde_json::Value, ::lashlang::ExecutionHostError> {
-        let mut payload = crate::lashlang_bridge::lashlang_value_to_json(
-            &::lashlang::Value::Record(std::sync::Arc::new(args.clone())),
-        )?;
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("__session_id__".to_string())
-                .or_insert_with(|| serde_json::Value::String(self.ctx.session_id().to_string()));
-        }
+        let mut payload = if let [::lashlang::Value::Record(record)] = args {
+            crate::lashlang_bridge::lashlang_value_to_json(&::lashlang::Value::Record(Arc::clone(
+                record,
+            )))?
+        } else {
+            serde_json::json!({
+                "args": args
+                    .iter()
+                    .map(crate::lashlang_bridge::lashlang_value_to_json)
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        };
+        payload.as_object_mut().ok_or_else(|| {
+            ::lashlang::ExecutionHostError::new("resource operation payload must be an object")
+        })?;
         Ok(payload)
     }
 }
 
-impl LashlangBlockProcessHost<'_> {
-    async fn call(
+impl LashlangProcessHost<'_> {
+    async fn resource_operation(
         &self,
-        name: String,
-        args: ::lashlang::Record,
+        operation: String,
+        receiver: ::lashlang::Value,
+        args: Vec<::lashlang::Value>,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        let manifest = self.captured_manifest(&name)?;
+        let resource = match &receiver {
+            ::lashlang::Value::Resource(resource) => resource,
+            _ => {
+                return Err(::lashlang::ExecutionHostError::new(format!(
+                    "resource operation `{operation}` requires a resource receiver"
+                )));
+            }
+        };
+        if resource.resource_type != "TOOL" || resource.alias != "default" {
+            return Err(::lashlang::ExecutionHostError::new(format!(
+                "resource `{}`.`{}` is not executable in this host",
+                resource.resource_type, resource.alias
+            )));
+        }
+        let manifest = self.ctx.callable_tool_manifest(&operation).ok_or_else(|| {
+            ::lashlang::ExecutionHostError::new(format!(
+                "resource operation `{operation}` is unavailable in this session"
+            ))
+        })?;
         let reply = self
             .ctx
             .call_tool(
                 uuid::Uuid::new_v4().to_string(),
                 manifest.name.clone(),
-                self.tool_payload(&args)?,
+                self.resource_payload(&receiver, &args)?,
                 0,
-            )
-            .await;
-        mode_reply_to_lashlang_value(reply)
-    }
-
-    async fn start_call(
-        &self,
-        name: String,
-        args: ::lashlang::Record,
-    ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
-        let manifest = self.captured_manifest(&name)?;
-        let reply = self
-            .ctx
-            .start_tool_call(
-                uuid::Uuid::new_v4().to_string(),
-                manifest.name.clone(),
-                self.tool_payload(&args)?,
             )
             .await;
         mode_reply_to_lashlang_value(reply)
@@ -242,7 +220,7 @@ impl LashlangBlockProcessHost<'_> {
 
     async fn start_process(
         &self,
-        start: ::lashlang::ProcessBlockStart,
+        start: ::lashlang::ProcessStart,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
         let (registration, label) = self
             .ctx
@@ -254,11 +232,11 @@ impl LashlangBlockProcessHost<'_> {
 
     async fn process_event(
         &self,
-        event: ::lashlang::ProcessBlockEvent,
+        event: ::lashlang::ProcessEvent,
     ) -> Result<(), ::lashlang::ExecutionHostError> {
         let event_type = match event.kind {
-            ::lashlang::ProcessBlockEventKind::Yield => "process.yield",
-            ::lashlang::ProcessBlockEventKind::Wake => "process.wake",
+            ::lashlang::ProcessEventKind::Yield => "process.yield",
+            ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
         let event = self
             .registry
@@ -298,20 +276,70 @@ impl LashlangBlockProcessHost<'_> {
         }
         Ok(())
     }
+
+    async fn process_sleep(
+        &self,
+        sleep: ::lashlang::ProcessSleep,
+    ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
+        let duration_ms = sleep_duration_ms(sleep.kind, &sleep.value)?;
+        let sequence = self.sleep_sequence.fetch_add(1, Ordering::Relaxed);
+        self.ctx
+            .sleep_lashlang_process(&self.process_id, sequence, duration_ms)
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        Ok(::lashlang::Value::Null)
+    }
+
+    async fn wait_signal(&self) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
+        let after_sequence = *self.signal_sequence.lock().await;
+        let wait =
+            self.registry
+                .wait_event_after(&self.process_id, "process.signal", after_sequence);
+        let event = tokio::select! {
+            _ = self.cancellation.cancelled() => {
+                return Err(::lashlang::ExecutionHostError::new("wait signal was cancelled"));
+            }
+            event = wait => event.map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?,
+        };
+        *self.signal_sequence.lock().await = event.sequence;
+        Ok(::lashlang::from_json(
+            event
+                .payload
+                .get("payload")
+                .cloned()
+                .unwrap_or(event.payload),
+        ))
+    }
+
+    async fn signal_run(
+        &self,
+        signal: ::lashlang::ProcessSignal,
+    ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
+        let target = process_id_from_lashlang_handle(&signal.run)?;
+        let payload = crate::lashlang_bridge::lashlang_value_to_json(&signal.payload)?;
+        self.registry
+            .append_event(
+                &target,
+                "process.signal".to_string(),
+                serde_json::json!({
+                    "payload": payload,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+            .await
+            .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
+        Ok(::lashlang::Value::Null)
+    }
 }
 
-impl ::lashlang::ExecutionHost for LashlangBlockProcessHost<'_> {
+impl ::lashlang::ExecutionHost for LashlangProcessHost<'_> {
     async fn perform(
         &self,
         op: ::lashlang::AbilityOp,
     ) -> Result<::lashlang::AbilityResult, ::lashlang::ExecutionHostError> {
         match op {
-            ::lashlang::AbilityOp::CallTool { name, args } => self
-                .call(name, args)
-                .await
-                .map(::lashlang::AbilityResult::Value),
-            ::lashlang::AbilityOp::StartToolCall { name, args } => self
-                .start_call(name, args)
+            ::lashlang::AbilityOp::ResourceOperation(operation) => self
+                .resource_operation(operation.operation, operation.receiver, operation.args)
                 .await
                 .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::Await(handle) => self
@@ -330,8 +358,20 @@ impl ::lashlang::ExecutionHost for LashlangBlockProcessHost<'_> {
                 self.process_event(event).await?;
                 Ok(::lashlang::AbilityResult::Unit)
             }
+            ::lashlang::AbilityOp::ProcessSleep(sleep) => self
+                .process_sleep(sleep)
+                .await
+                .map(::lashlang::AbilityResult::Value),
+            ::lashlang::AbilityOp::WaitSignal => self
+                .wait_signal()
+                .await
+                .map(::lashlang::AbilityResult::Value),
+            ::lashlang::AbilityOp::SignalRun(signal) => self
+                .signal_run(signal)
+                .await
+                .map(::lashlang::AbilityResult::Value),
             ::lashlang::AbilityOp::Print(_) => Err(::lashlang::ExecutionHostError::new(
-                "`print` is not available inside lashlang process blocks",
+                "`print` is not available inside lashlang process bodies",
             )),
             ::lashlang::AbilityOp::Submit(value)
             | ::lashlang::AbilityOp::Finish(value)
@@ -350,6 +390,99 @@ fn mode_reply_to_lashlang_value(
     crate::lashlang_bridge::mode_tool_reply_to_lashlang_value(reply)
 }
 
+fn sleep_duration_ms(
+    kind: ::lashlang::ProcessSleepKind,
+    value: &::lashlang::Value,
+) -> Result<u64, ::lashlang::ExecutionHostError> {
+    match kind {
+        ::lashlang::ProcessSleepKind::For => duration_value_ms(value),
+        ::lashlang::ProcessSleepKind::Until => {
+            let target = deadline_value_ms(value)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            Ok(target.saturating_sub(now.max(0) as u64))
+        }
+    }
+}
+
+fn duration_value_ms(value: &::lashlang::Value) -> Result<u64, ::lashlang::ExecutionHostError> {
+    match value {
+        ::lashlang::Value::Number(value) if value.is_finite() && *value >= 0.0 => {
+            Ok(value.round() as u64)
+        }
+        ::lashlang::Value::String(value) => parse_duration_ms(value),
+        other => Err(::lashlang::ExecutionHostError::new(format!(
+            "`sleep for` expects a non-negative millisecond number or duration string, got {other}"
+        ))),
+    }
+}
+
+fn deadline_value_ms(value: &::lashlang::Value) -> Result<u64, ::lashlang::ExecutionHostError> {
+    match value {
+        ::lashlang::Value::Number(value) if value.is_finite() && *value >= 0.0 => {
+            Ok(value.round() as u64)
+        }
+        ::lashlang::Value::String(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|deadline| deadline.timestamp_millis().max(0) as u64)
+            .map_err(|err| {
+                ::lashlang::ExecutionHostError::new(format!(
+                    "`sleep until` expects RFC3339 text or Unix epoch milliseconds: {err}"
+                ))
+            }),
+        other => Err(::lashlang::ExecutionHostError::new(format!(
+            "`sleep until` expects RFC3339 text or Unix epoch milliseconds, got {other}"
+        ))),
+    }
+}
+
+fn parse_duration_ms(value: &str) -> Result<u64, ::lashlang::ExecutionHostError> {
+    let value = value.trim();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000.0)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000.0)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600_000.0)
+    } else {
+        (value, 1.0)
+    };
+    let parsed = number.trim().parse::<f64>().map_err(|err| {
+        ::lashlang::ExecutionHostError::new(format!("invalid duration `{value}`: {err}"))
+    })?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err(::lashlang::ExecutionHostError::new(format!(
+            "invalid non-negative duration `{value}`"
+        )));
+    }
+    Ok((parsed * multiplier).round() as u64)
+}
+
+fn process_id_from_lashlang_handle(
+    handle: &::lashlang::Value,
+) -> Result<String, ::lashlang::ExecutionHostError> {
+    let value = crate::lashlang_bridge::lashlang_value_to_json(handle)?;
+    let kind = value
+        .get("__handle__")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            ::lashlang::ExecutionHostError::new("signal run expects a process handle")
+        })?;
+    if kind != "process" {
+        return Err(::lashlang::ExecutionHostError::new(format!(
+            "signal run expects a process handle, got `{kind}`"
+        )));
+    }
+    value
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ::lashlang::ExecutionHostError::new("signal run process handle is missing `id`")
+        })
+}
+
 fn process_lashlang_execution_result(
     result: Result<::lashlang::ExecutionOutcome, ::lashlang::RuntimeError>,
 ) -> crate::ProcessAwaitOutput {
@@ -360,7 +493,7 @@ fn process_lashlang_execution_result(
             control: None,
         },
         Ok(::lashlang::ExecutionOutcome::Failed(value)) => process_lashlang_failure(
-            "process_block_failed",
+            "process_failed",
             value.to_string(),
             Some(
                 crate::lashlang_bridge::lashlang_value_to_json(&value)
@@ -371,7 +504,7 @@ fn process_lashlang_execution_result(
             value: serde_json::Value::Null,
             control: None,
         },
-        Err(err) => process_lashlang_failure("process_block_runtime_error", err.to_string(), None),
+        Err(err) => process_lashlang_failure("process_runtime_error", err.to_string(), None),
     }
 }
 

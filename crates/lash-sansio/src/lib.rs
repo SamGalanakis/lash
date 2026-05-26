@@ -20,7 +20,7 @@ pub use attachment::{
 pub use execution_mode::{ExecutionMode, default_execution_mode, execution_mode_supported};
 pub use llm::types::LlmTerminalReason;
 pub use mode::{
-    ModeBuildInput, ModeConfig, ModePreamble, TurnLimitFinalMessage, append_assistant_text_part,
+    ModeConfig, ModePreamble, TurnLimitFinalMessage, append_assistant_text_part,
     normalized_response_parts, reasoning_part,
 };
 pub use plugin::{

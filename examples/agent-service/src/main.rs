@@ -103,12 +103,19 @@ async fn main() -> anyhow_like::Result<()> {
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
+    let model_spec = lash::ModelSpec::from_token_limits(
+        model.clone(),
+        Some(model_variant.clone()),
+        200_000,
+        None,
+        None,
+    )
+    .map_err(|err| format!("invalid OPENROUTER_MODEL metadata: {err}"))?;
     let core_builder = LashCore::builder()
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::rlm())
         .provider(provider)
-        .model(model.clone(), Some(model_variant.clone()))
-        .max_context_tokens(200_000)
+        .model(model_spec)
         .store_factory(store_factory)
         .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
             data_dir.join("attachments"),

@@ -89,6 +89,14 @@ struct RuntimeDirectCompletionInvoker<'run> {
     turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
+pub(in crate::runtime::session_manager) struct DirectInvocationContext<'a> {
+    current: &'a CurrentSessionCapability,
+    usage_capability: &'a UsageCapability,
+    effect_controller: &'a dyn crate::RuntimeEffectController,
+    turn_id: Option<&'a str>,
+    turn_lease: Option<&'a crate::RuntimeTurnLease>,
+}
+
 impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
     fn direct_completion<'a>(
         &'a self,
@@ -99,13 +107,15 @@ impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
             self.manager
                 .direct
                 .invoke_direct_completion(
-                    &self.manager.current,
-                    &self.manager.usage,
+                    DirectInvocationContext {
+                        current: &self.manager.current,
+                        usage_capability: &self.manager.usage,
+                        effect_controller: self.effect_controller.as_controller(),
+                        turn_id: self.turn_id.as_deref(),
+                        turn_lease: self.turn_lease.as_ref(),
+                    },
                     request,
                     usage_source,
-                    self.effect_controller.as_controller(),
-                    self.turn_id.as_deref(),
-                    self.turn_lease.as_ref(),
                 )
                 .await
         })
@@ -120,13 +130,15 @@ impl DirectCompletionInvoker for RuntimeDirectCompletionInvoker<'_> {
             self.manager
                 .direct
                 .invoke_direct_llm_completion(
-                    &self.manager.current,
-                    &self.manager.usage,
+                    DirectInvocationContext {
+                        current: &self.manager.current,
+                        usage_capability: &self.manager.usage,
+                        effect_controller: self.effect_controller.as_controller(),
+                        turn_id: self.turn_id.as_deref(),
+                        turn_lease: self.turn_lease.as_ref(),
+                    },
                     request,
                     usage_source,
-                    self.effect_controller.as_controller(),
-                    self.turn_id.as_deref(),
-                    self.turn_lease.as_ref(),
                 )
                 .await
         })
@@ -194,23 +206,13 @@ impl DirectCompletionInvoker for TestDirectCompletionInvoker {
 impl DirectCompletionCapability {
     pub(in crate::runtime::session_manager) async fn invoke_direct_completion(
         &self,
-        current: &CurrentSessionCapability,
-        usage_capability: &UsageCapability,
-        mut request: crate::DirectRequest,
+        context: DirectInvocationContext<'_>,
+        request: crate::DirectRequest,
         usage_source: &str,
-        effect_controller: &dyn crate::RuntimeEffectController,
-        turn_id: Option<&str>,
-        turn_lease: Option<&crate::RuntimeTurnLease>,
     ) -> Result<crate::DirectCompletion, crate::PluginError> {
+        let current = context.current;
         let provider = current.policy.provider.clone();
-        let model = if let Some(selection) = provider.default_agent_model(&request.model) {
-            if request.model_variant.is_none() {
-                request.model_variant = selection.variant;
-            }
-            provider.resolve_model(&selection.model)
-        } else {
-            provider.resolve_model(&request.model)
-        };
+        let model = request.model.clone();
         if let Some(variant) = request.model_variant.as_deref() {
             provider
                 .validate_variant(&model, variant)
@@ -236,22 +238,22 @@ impl DirectCompletionCapability {
             usage_source,
             crate::RuntimeEffectKind::DirectCompletion,
             discriminator,
-            turn_id,
+            context.turn_id,
         );
         let usage_source = usage_source.to_string();
         let envelope = crate::RuntimeEffectEnvelope::new(
             metadata,
             crate::RuntimeEffectCommand::DirectCompletion {
-                request: request_spec,
-                normalized_request: normalized_spec,
+                request: Box::new(request_spec),
+                normalized_request: Box::new(normalized_spec),
                 model: model.clone(),
                 usage_source: usage_source.clone(),
             },
         );
         let outcome = crate::runtime::effect::execute_effect_with_journal(
             current.store.as_ref().map(|store| store.as_ref()),
-            turn_lease,
-            effect_controller,
+            context.turn_lease,
+            context.effect_controller,
             envelope,
             crate::RuntimeEffectLocalExecutor::direct(
                 provider,
@@ -261,7 +263,7 @@ impl DirectCompletionCapability {
         .await?;
         crate::runtime::effect::apply_direct_completion_outcome(
             current,
-            usage_capability,
+            context.usage_capability,
             &request,
             &llm_request,
             &model,
@@ -273,14 +275,11 @@ impl DirectCompletionCapability {
 
     pub(in crate::runtime::session_manager) async fn invoke_direct_llm_completion(
         &self,
-        current: &CurrentSessionCapability,
-        usage_capability: &UsageCapability,
+        context: DirectInvocationContext<'_>,
         request: crate::LlmRequest,
         usage_source: &str,
-        effect_controller: &dyn crate::RuntimeEffectController,
-        turn_id: Option<&str>,
-        turn_lease: Option<&crate::RuntimeTurnLease>,
     ) -> Result<crate::DirectLlmCompletion, crate::PluginError> {
+        let current = context.current;
         let provider = current.policy.provider.clone();
         let request_spec = crate::LlmRequestSpec::from_request(
             &request,
@@ -293,20 +292,20 @@ impl DirectCompletionCapability {
             usage_source,
             crate::RuntimeEffectKind::DirectLlmCompletion,
             discriminator,
-            turn_id,
+            context.turn_id,
         );
         let usage_source = usage_source.to_string();
         let envelope = crate::RuntimeEffectEnvelope::new(
             metadata,
             crate::RuntimeEffectCommand::DirectLlmCompletion {
-                request: request_spec,
+                request: Box::new(request_spec),
                 usage_source: usage_source.clone(),
             },
         );
         let outcome = crate::runtime::effect::execute_effect_with_journal(
             current.store.as_ref().map(|store| store.as_ref()),
-            turn_lease,
-            effect_controller,
+            context.turn_lease,
+            context.effect_controller,
             envelope,
             crate::RuntimeEffectLocalExecutor::direct(
                 provider,
@@ -316,7 +315,7 @@ impl DirectCompletionCapability {
         .await?;
         crate::runtime::effect::apply_direct_llm_completion_outcome(
             current,
-            usage_capability,
+            context.usage_capability,
             &request,
             &usage_source,
             outcome,

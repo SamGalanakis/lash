@@ -12,8 +12,8 @@ use lash_core::llm::types::{
     ProviderReasoningReplay,
 };
 use lash_core::provider::{
-    AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
+    CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, VariantRequestConfig,
 };
 use lash_llm_transport::streaming::drive_sse_response;
 use lash_llm_transport::timeouts::{
@@ -393,10 +393,9 @@ impl AnthropicProvider {
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
-        let max_output_tokens = self
-            .options
-            .max_output_tokens
-            .filter(|v| *v > 0)
+        let max_output_tokens = req
+            .generation
+            .output_token_cap_u64()
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
 
         let mut system_value: Option<Value> = system_text.map(|text| {
@@ -966,10 +965,6 @@ impl ProviderState for AnthropicProvider {
 }
 
 impl ProviderModelPolicy for AnthropicModelPolicy {
-    fn default_model(&self) -> &str {
-        "claude-opus-4-7"
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if anthropic_supports_adaptive_thinking(model) {
@@ -987,20 +982,6 @@ impl ProviderModelPolicy for AnthropicModelPolicy {
             CLAUDE_BUDGET_VARIANTS
         } else {
             &[]
-        }
-    }
-
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
-            return None;
-        }
-        if variants.contains(&"xhigh") {
-            Some("xhigh")
-        } else if variants.contains(&"max") {
-            Some("max")
-        } else {
-            Some("high")
         }
     }
 
@@ -1024,32 +1005,6 @@ impl ProviderModelPolicy for AnthropicModelPolicy {
                 _ => return None,
             };
             Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens })
-        }
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "low" => Some(AgentModelSelection {
-                model: "claude-haiku-4-6".to_string(),
-                variant: None,
-            }),
-            "medium" => Some(AgentModelSelection {
-                model: "claude-sonnet-4-6".to_string(),
-                variant: Some("medium".to_string()),
-            }),
-            "high" => Some(AgentModelSelection {
-                model: "claude-opus-4-7".to_string(),
-                variant: Some("high".to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.starts_with("anthropic/") {
-            model.to_string()
-        } else {
-            format!("anthropic/{model}")
         }
     }
 }
@@ -1202,6 +1157,7 @@ mod tests {
     use lash_core::llm::types::{
         LlmAttachment, LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec,
     };
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1215,6 +1171,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
             output_spec: None,
             stream_events: None,
+            generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
     }
@@ -1458,12 +1415,13 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_uses_shared_options() {
+    fn output_token_cap_maps_to_max_tokens() {
         let provider = AnthropicProvider::new("key").with_options(ProviderOptions {
-            max_output_tokens: Some(2048),
+            max_output_tokens: Some(9999),
             ..ProviderOptions::default()
         });
-        let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.generation.output_token_cap = NonZeroUsize::new(2048);
 
         let body = provider.build_request_body(&req).expect("body");
 

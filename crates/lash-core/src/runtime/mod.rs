@@ -86,15 +86,14 @@ pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
 pub use process::{
-    LashlangProcessToolBinding, LocalProcessRegistry, ProcessAwaitOutput, ProcessAwaitRequest,
-    ProcessCancelRequest, ProcessCleanupRequest, ProcessCommandLineEventSpec, ProcessEvent,
-    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
-    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
-    ProcessId, ProcessInput, ProcessListRequest, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessRequestScope, ProcessStartGrant, ProcessStartRequest,
-    ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState, ProcessTransferRequest,
-    ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey, ProcessWakeSpec,
-    lashlang_process_event_types,
+    LocalProcessRegistry, ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest,
+    ProcessCleanupRequest, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
+    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessListRequest,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRequestScope, ProcessStartGrant,
+    ProcessStartRequest, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
+    ProcessTransferRequest, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
+    ProcessWakeSpec, lashlang_process_event_types,
 };
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
@@ -222,8 +221,7 @@ impl TurnInput {
 pub struct TurnContext {
     plugin_inputs: HashMap<&'static str, Arc<dyn Any + Send + Sync>>,
     provider: Option<crate::ProviderHandle>,
-    model: Option<String>,
-    model_variant: Option<Option<String>>,
+    model: Option<crate::ModelSpec>,
     prompt: crate::PromptLayer,
 }
 
@@ -247,20 +245,12 @@ impl TurnContext {
         self.provider.as_ref()
     }
 
-    pub fn set_model(&mut self, model: impl Into<String>, variant: Option<String>) {
-        self.model = Some(model.into());
-        self.model_variant = Some(variant);
+    pub fn set_model(&mut self, model: crate::ModelSpec) {
+        self.model = Some(model);
     }
 
-    pub fn model_selection(&self) -> Option<(&str, Option<&str>)> {
-        self.model.as_deref().map(|model| {
-            (
-                model,
-                self.model_variant
-                    .as_ref()
-                    .and_then(|variant| variant.as_deref()),
-            )
-        })
+    pub fn model_spec(&self) -> Option<&crate::ModelSpec> {
+        self.model.as_ref()
     }
 
     pub fn plugin_input<T>(&self, plugin_id: &'static str) -> Option<&T>

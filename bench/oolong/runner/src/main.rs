@@ -688,12 +688,19 @@ async fn run_question(
         Store::open(&store_path).with_context(|| format!("open {}", store_path.display()))?,
     );
     let execution_mode = ExecutionMode::new(EXECUTION_MODE_LABEL);
+    let model_spec = lash::ModelSpec::from_token_limits(
+        args.model.clone(),
+        Some(args.variant.clone()),
+        args.max_context_tokens,
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm_with_config(rlm_config(args)))
         .default_mode(ModeId::rlm())
         .provider(provider.clone())
-        .model(args.model.clone(), Some(args.variant.clone()))
-        .max_context_tokens(args.max_context_tokens)
+        .model(model_spec)
         .max_turns(args.max_turns)
         .prompt_template(oolong_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))
@@ -1076,10 +1083,18 @@ fn child_session_spec(args: &Args, execution_mode: ExecutionMode) -> SessionSpec
     let mut spec = SessionSpec::inherit()
         .mode(execution_mode)
         .prompt_layer(oolong_child_prompt_layer());
-    if let Some(child_model) = args.child_model.as_ref() {
-        spec = spec.model(child_model, args.child_variant.clone());
-    } else if let Some(child_variant) = args.child_variant.as_ref() {
-        spec = spec.model_variant(child_variant);
+    if args.child_model.is_some() || args.child_variant.is_some() {
+        let child_model = args.child_model.as_deref().unwrap_or(&args.model);
+        let child_variant = args.child_variant.clone();
+        let child_spec = lash::ModelSpec::from_token_limits(
+            child_model,
+            child_variant,
+            args.max_context_tokens,
+            None,
+            None,
+        )
+        .expect("benchmark child context window is non-zero");
+        spec = spec.model(child_spec);
     }
     if let Some(max_turns) = args.child_max_turns {
         spec = spec.max_turns(max_turns);

@@ -75,8 +75,8 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         policy: &mut SessionPolicy,
     ) -> Result<String, SessionEvent> {
-        let model = policy.provider.resolve_model(&policy.model);
-        if let Some(variant) = policy.model_variant.as_deref()
+        let model = policy.model.id.clone();
+        if let Some(variant) = policy.model.variant.as_deref()
             && let Err(message) = policy.provider.validate_variant(&model, variant)
         {
             return Err(make_error_event(

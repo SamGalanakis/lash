@@ -6,7 +6,7 @@ use crossterm::event::{
 };
 use lash::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, InjectedTurnInput, ToolState};
+use lash_core::{InjectedTurnInput, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -16,6 +16,7 @@ use crate::app::{App, PreparedTurn, UiTimelineItem};
 use crate::editor::SuggestionKind;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
+use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};

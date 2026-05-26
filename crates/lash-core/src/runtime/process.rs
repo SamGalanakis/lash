@@ -16,32 +16,17 @@ pub enum ProcessInput {
     ToolCall {
         call: crate::PreparedToolCall,
     },
-    LashlangBlock {
-        program: serde_json::Value,
+    LashlangProcess {
+        module_version: String,
+        linked_module: lashlang::LinkedModule,
+        process_name: String,
         #[serde(default)]
-        input: serde_json::Map<String, serde_json::Value>,
-        #[serde(default)]
-        tool_bindings: Vec<LashlangProcessToolBinding>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<String>,
+        args: serde_json::Map<String, serde_json::Value>,
     },
     SessionTurn {
         create_request: Box<crate::SessionCreateRequest>,
         turn_input: Box<crate::TurnInput>,
         output_contract: crate::ToolOutputContract,
-    },
-    Command {
-        command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-        timeout_ms: u64,
-        persistent: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        line_event: Option<ProcessCommandLineEventSpec>,
     },
     External {
         #[serde(default)]
@@ -53,18 +38,16 @@ impl Clone for ProcessInput {
     fn clone(&self) -> Self {
         match self {
             Self::ToolCall { call } => Self::ToolCall { call: call.clone() },
-            Self::LashlangBlock {
-                program,
-                input,
-                tool_bindings,
-                timeout_ms,
-                display_name,
-            } => Self::LashlangBlock {
-                program: program.clone(),
-                input: input.clone(),
-                tool_bindings: tool_bindings.clone(),
-                timeout_ms: *timeout_ms,
-                display_name: display_name.clone(),
+            Self::LashlangProcess {
+                module_version,
+                linked_module,
+                process_name,
+                args,
+            } => Self::LashlangProcess {
+                module_version: module_version.clone(),
+                linked_module: linked_module.clone(),
+                process_name: process_name.clone(),
+                args: args.clone(),
             },
             Self::SessionTurn {
                 create_request,
@@ -75,40 +58,11 @@ impl Clone for ProcessInput {
                 turn_input: turn_input.clone(),
                 output_contract: output_contract.clone(),
             },
-            Self::Command {
-                command,
-                cwd,
-                env,
-                timeout_ms,
-                persistent,
-                line_event,
-            } => Self::Command {
-                command: command.clone(),
-                cwd: cwd.clone(),
-                env: env.clone(),
-                timeout_ms: *timeout_ms,
-                persistent: *persistent,
-                line_event: line_event.clone(),
-            },
             Self::External { metadata } => Self::External {
                 metadata: metadata.clone(),
             },
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LashlangProcessToolBinding {
-    pub name: String,
-    pub tool_id: crate::ToolId,
-}
-
-/// Optional line-event projection for command-backed processes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessCommandLineEventSpec {
-    pub event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_input_template: Option<String>,
 }
 
 /// Execution-local context for a process start effect. This is not part of the
@@ -140,7 +94,7 @@ impl ProcessExecutionContext {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProcessRequestScope<'scope> {
     pub effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
@@ -165,15 +119,6 @@ impl<'scope> ProcessRequestScope<'scope> {
     ) -> Self {
         self.effect_controller = Some(effect_controller);
         self
-    }
-}
-
-impl Default for ProcessRequestScope<'_> {
-    fn default() -> Self {
-        Self {
-            effect_metadata: None,
-            effect_controller: None,
-        }
     }
 }
 
@@ -561,6 +506,11 @@ pub fn lashlang_process_event_types() -> Vec<ProcessEventType> {
                 ..ProcessEventSemanticsSpec::default()
             },
         },
+        ProcessEventType {
+            name: "process.signal".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec::default(),
+        },
     ]
 }
 
@@ -703,6 +653,13 @@ pub trait ProcessRegistry: Send + Sync {
         process_id: &str,
         after_sequence: u64,
     ) -> Result<Vec<ProcessEvent>, PluginError>;
+
+    async fn wait_event_after(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, PluginError>;
 
     async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError>;
 
@@ -933,14 +890,11 @@ impl ProcessRegistry for LocalProcessRegistry {
             semantics,
             occurred_at: SystemTime::now(),
         };
-        let terminal = event.semantics.terminal.is_some();
         if let Some(terminal) = event.semantics.terminal.clone() {
             record.record.terminal = Some(terminal);
         }
         record.events.push(event.clone());
-        if terminal {
-            record.notify.notify_waiters();
-        }
+        record.notify.notify_waiters();
         Ok(event)
     }
 
@@ -982,6 +936,34 @@ impl ProcessRegistry for LocalProcessRegistry {
             .filter(|event| !record.acked_wakes.contains(&event.sequence))
             .cloned()
             .collect())
+    }
+
+    async fn wait_event_after(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, PluginError> {
+        loop {
+            let notify = {
+                let managed = self.managed.lock().await;
+                let Some(record) = managed.get(process_id) else {
+                    return Err(PluginError::Session(format!(
+                        "unknown process `{process_id}`"
+                    )));
+                };
+                if let Some(event) = record
+                    .events
+                    .iter()
+                    .find(|event| event.sequence > after_sequence && event.event_type == event_type)
+                    .cloned()
+                {
+                    return Ok(event);
+                }
+                Arc::clone(&record.notify)
+            };
+            notify.notified().await;
+        }
     }
 
     async fn await_process(&self, process_id: &str) -> Result<ProcessAwaitOutput, PluginError> {

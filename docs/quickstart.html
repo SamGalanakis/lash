@@ -100,8 +100,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     // one LashCore per app, cloned freely.
     let core = LashCore::standard()
         .provider(provider)
-        .model("anthropic/claude-sonnet-4.6", None)
-        .max_context_tokens(200_000)
+        .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
         .build()?;
 
     // one session per chat / task.

@@ -16,8 +16,8 @@ use lash_core::llm::types::{
     ProviderReasoningReplay, ProviderReplayMeta,
 };
 use lash_core::provider::{
-    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
-    ProviderState, ProviderTransport, VariantRequestConfig,
+    ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState,
+    ProviderTransport, VariantRequestConfig,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
@@ -859,11 +859,7 @@ impl GoogleOAuthProvider {
         contents: Vec<Value>,
         project_id: Option<&str>,
     ) -> Value {
-        let max_output_tokens = provider
-            .options
-            .max_output_tokens
-            .filter(|v| *v > 0)
-            .unwrap_or(32_768);
+        let max_output_tokens = req.generation.output_token_cap_u64().unwrap_or(32_768);
         let mut request = json!({
             "model": req.model,
             "user_prompt_id": uuid::Uuid::new_v4().to_string(),
@@ -1211,10 +1207,6 @@ impl ProviderState for GoogleOAuthProvider {
 }
 
 impl ProviderModelPolicy for GoogleModelPolicy {
-    fn default_model(&self) -> &str {
-        "gemini-3.1-pro-preview"
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if lower.contains("gemini-2.5") {
@@ -1226,13 +1218,6 @@ impl ProviderModelPolicy for GoogleModelPolicy {
         } else {
             &[]
         }
-    }
-
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        if self.supported_variants(model).is_empty() {
-            return None;
-        }
-        Some("high")
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
@@ -1251,32 +1236,6 @@ impl ProviderModelPolicy for GoogleModelPolicy {
             Some(VariantRequestConfig::GoogleThinkingLevel {
                 level: variant.to_string(),
             })
-        }
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "low" => Some(AgentModelSelection {
-                model: "gemini-3-flash-preview".to_string(),
-                variant: Some("low".to_string()),
-            }),
-            "medium" | "high" => Some(AgentModelSelection {
-                model: "gemini-3.1-pro-preview".to_string(),
-                variant: Some(if tier == "medium" { "medium" } else { "high" }.to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn resolve_model(&self, model: &str) -> String {
-        model.strip_prefix("google/").unwrap_or(model).to_string()
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.contains('/') {
-            model.to_string()
-        } else {
-            format!("google/{model}")
         }
     }
 }
@@ -1392,6 +1351,7 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use super::*;
@@ -1408,6 +1368,7 @@ mod tests {
             session_id: None,
             output_spec: None,
             stream_events: None::<LlmEventSender>,
+            generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
     }
@@ -1530,14 +1491,16 @@ mod tests {
     }
 
     #[test]
-    fn max_output_tokens_uses_shared_options() {
+    fn output_token_cap_maps_to_max_output_tokens() {
         let provider =
             GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
-                max_output_tokens: Some(4096),
+                max_output_tokens: Some(9999),
                 ..ProviderOptions::default()
             });
 
-        let body = GoogleOAuthProvider::build_request(&provider, &request(None), Vec::new(), None);
+        let mut req = request(None);
+        req.generation.output_token_cap = NonZeroUsize::new(4096);
+        let body = GoogleOAuthProvider::build_request(&provider, &req, Vec::new(), None);
 
         assert_eq!(body["request"]["generationConfig"]["maxOutputTokens"], 4096);
     }

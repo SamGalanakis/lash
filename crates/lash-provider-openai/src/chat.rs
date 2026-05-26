@@ -290,7 +290,7 @@ impl OpenAiCompatibleProvider {
             "model": req.model,
             "messages": messages,
             "stream": stream,
-            "max_tokens": self.output_token_cap(),
+            "max_tokens": self.output_token_cap(req),
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);

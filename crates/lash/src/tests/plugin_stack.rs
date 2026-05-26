@@ -4,9 +4,8 @@ use super::*;
 async fn plugin_surface_streams_as_semantic_turn_event() -> Result<()> {
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .plugin(Arc::new(SurfacePluginFactory))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("plugin-surface").open().await?;
     let events = RecordingEvents::default();
@@ -49,8 +48,7 @@ async fn embedded_sessions_always_expose_tool_state() -> Result<()> {
 async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
     let session = core.session("static-tools").open().await?;
@@ -65,8 +63,7 @@ async fn registered_static_tools_appear_in_tool_state() -> Result<()> {
 async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
     let session = core.session("tool-state").open().await?;
@@ -141,8 +138,7 @@ async fn apply_tool_state_and_availability_update_live_catalog() -> Result<()> {
 async fn persisted_session_restores_tool_state() -> Result<()> {
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
     let session = core.session("persisted-tools").open().await?;
@@ -156,8 +152,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
         session_id: "persisted-tools".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -167,8 +162,7 @@ async fn persisted_session_restores_tool_state() -> Result<()> {
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
     let reopened_core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .store_factory(Arc::new(ReusableStoreFactory { store }))
         .build()?;
@@ -226,7 +220,6 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                     ])));
                     let standard_provider = lash_core::testing::TestProvider::builder()
                         .kind("embed-test")
-                        .default_model("mock-model")
                         .complete(move |request| {
                             let observed_tool_results = Arc::clone(&observed_tool_results_provider);
                             let responses = Arc::clone(&responses);
@@ -248,13 +241,12 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         .into_handle();
                     let standard_core = LashCore::standard()
                         .provider(standard_provider)
-                        .model("mock-model", None)
+                        .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
                         .process_registry(Arc::new(LocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection.clone());
                         })
-                        .max_context_tokens(200_000)
                         .build()?;
                     let standard_session =
                         standard_core.session("standard-projection").open().await?;
@@ -287,15 +279,14 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
 
                     let rlm_core = LashCore::rlm()
                         .provider(queued_text_provider(vec![
-                            "```lashlang\nvalue = (call app_lookup {})?\nsubmit \"done\"\n```",
+                            "```lashlang\nvalue = await TOOL.default.app_lookup({})?\nsubmit \"done\"\n```",
                         ]))
-                        .model("mock-model", None)
+                        .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
                         .process_registry(Arc::new(LocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection);
                         })
-                        .max_context_tokens(200_000)
                         .build()?;
                     let rlm_session = rlm_core.session("rlm-projection").open().await?;
                     let rlm_events = RecordingEvents::default();

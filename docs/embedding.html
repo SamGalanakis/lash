@@ -35,7 +35,7 @@
             <dt>Typed plugin capabilities</dt>
             <dd>Tools see a named <code>ToolContext</code> surface — <code>processes()</code>, <code>sessions()</code>, <code>direct_completion</code>, <code>tool_catalog</code>, snapshot reads — not a general host handle. The surface exposes no <code>ToolContext::host()</code> escape hatch.</dd>
             <dt>Sandboxed code load, ready</dt>
-            <dd>RLM mode runs model-emitted Lashlang programs in a VM with no filesystem, process, or network surface. Every effect crosses Lashlang's <code>ExecutionHost</code>. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
+            <dd>RLM mode runs model-emitted Lashlang programs in a VM with no direct filesystem, OS-process, or network surface. Every effect crosses Lashlang's <code>ExecutionHost</code>, and the linked host surface decides which resource and background-process abilities exist. Use it when the model should compose multiple tool calls per turn instead of one.</dd>
             <dt>Subagent capability boundaries</dt>
             <dd><code>Capability::resolve(parent_policy)</code> returns a constrained <code>SessionSpec</code> for the child. Interactive-only tools are stripped from every subagent surface regardless of capability.</dd>
             <dt>Semantic event stream</dt>
@@ -66,8 +66,7 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model("anthropic/claude-sonnet-4.6", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .plugins(PluginStack::runtime())
     .tools(Arc::new(AppTools) as Arc&lt;dyn ToolProvider&gt;)
     .store_factory(store_factory)
@@ -109,8 +108,7 @@ println!("{assistant_text}");</code></pre>
 
 let root_spec = SessionSpec::new()
     .provider(provider)
-    .model("gpt-5.4", None)
-    .max_context_tokens(200_000);
+    .model(lash::ModelSpec::from_token_limits("gpt-5.4", None, 200_000, None, None).expect("valid model metadata"));
 
 let core = LashCore::rlm()
     .session_spec(root_spec)

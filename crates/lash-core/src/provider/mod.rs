@@ -25,10 +25,10 @@ mod traits;
 pub use handle::{ProviderComponents, ProviderHandle, UnconfiguredProvider};
 pub use model_policy::StaticModelPolicy;
 pub use options::{
-    AgentModelSelection, CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS,
-    LlmTimeouts, ProviderOptions, ProviderRateLimitPolicy, ProviderReliability,
-    ProviderReliabilityBuilder, ProviderRetryPolicy, ProviderThinkingPolicy, ProviderTimeoutPolicy,
-    RequestTimeout, VariantRequestConfig,
+    CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts,
+    ProviderOptions, ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder,
+    ProviderRetryPolicy, ProviderThinkingPolicy, ProviderTimeoutPolicy, RequestTimeout,
+    VariantRequestConfig,
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
 pub use registry::{

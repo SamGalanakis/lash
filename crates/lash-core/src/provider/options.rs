@@ -30,13 +30,6 @@ pub enum VariantRequestConfig {
     AnthropicThinkingBudget { budget_tokens: i32 },
 }
 
-/// Model + optional variant returned by provider model policies for agent tiers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentModelSelection {
-    pub model: String,
-    pub variant: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestTimeout {
     Disabled,

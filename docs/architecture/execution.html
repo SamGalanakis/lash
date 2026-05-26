@@ -55,9 +55,9 @@ flowchart TD
           </div>
           <div class="two-col">
             <article class="panel"><small>standard</small><h3>Native provider tool calls</h3><p>Standard mode interprets provider output through <code>StandardDriver</code> and emits <code>DriverAction::StartTools</code>. The runtime dispatches mode-native tools first, then tools contributed by registered <code>ToolProvider</code>s.</p></article>
-            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>RLM mode extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. <code>continue_as</code> is a mode-provided control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::Handoff { session_id }</code> and the successor session is created with <code>SessionRelation::Handoff</code> so the runtime can carry parent ids, turn index, trace continuity, and projected seed refs. App hosts call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows handoffs and returns the final <code>TurnResult</code>.</p></article>
+            <article class="panel"><small>rlm</small><h3>Persistent Lashlang execution</h3><p>RLM mode extracts closed <code>lashlang</code> fences from the model output and runs them through a persistent VM. Read-only host bindings (e.g., <code>history</code>) are projected into Lashlang scope through <code>RlmProjectedBindings</code>; lazy bindings carry <code>ProjectionRef</code>s that resolve immediately before execution. They read like ordinary names but cannot be reassigned. The prompt renderer uses the effective <code>LashlangSurface</code>, so disabled process/trigger/schedule abilities are not advertised and fail during linking if emitted anyway. <code>continue_as</code> is a mode-provided control tool, <code>llm_query</code> is supplied by <code>lash-llm-tools</code>, and the <code>stream_mask</code> plugin hides the still-streaming fence from live UI until execution completes. An RLM block ending with <code>continue_as { task, seed }</code> finishes the low-level turn as <code>TurnOutcome::Handoff { session_id }</code> and the successor session is created with <code>SessionRelation::Handoff</code> so the runtime can carry parent ids, turn index, trace continuity, and projected seed refs. App hosts call <code>session.turn(input).stream(&amp;sink)</code> or <code>.run()</code>; the facade follows handoffs and returns the final <code>TurnResult</code>.</p></article>
           </div>
-          <p>Background work — subagents, monitor tasks, and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either mode can spawn handles; RLM additionally discovers live handles via <code>list_process_handles</code> and resolves them with <code>await</code>.</p>
+          <p>Background work — subagents, monitor tasks, and async tool calls — is described in <a href="#background-work">Background Work</a> below. Either mode can spawn handles when a process registry is installed; RLM additionally discovers live handles via <code>list_process_handles</code> and resolves them with <code>await</code>.</p>
         </div>
 
         <div class="section">
@@ -96,8 +96,7 @@ flowchart LR
           </dl>
           <pre><code>let core = LashCore::standard()
     .provider(provider)
-    .model("anthropic/claude-sonnet-4.6", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .build()?;
 
@@ -121,8 +120,8 @@ let result = session
             <div class="diagram-title">Subagent and monitor path</div>
             <div class="mermaid">
 flowchart LR
-  Rlm["RLM lashlang<br/>start call spawn_agent / call monitor"] --> Provider["spawn_agent_tool_definition<br/>+ lash_core::runtime_controls factories"]
-  Provider --> Host["ToolContext sessions/processes<br/>+ MonitorHost"]
+  Rlm["RLM lashlang<br/>await TOOL.default.spawn_agent / monitor ops"] --> Provider["spawn_agent_tool_definition<br/>+ shell monitor tool<br/>+ lash_core process controls"]
+  Provider --> Host["ToolContext sessions/processes<br/>+ process events"]
   Host --> Manager["RuntimeSessionManager"]
   Manager --> Child["start_turn -> stream_turn"]
   Manager --> Registry["process registry"]
@@ -131,7 +130,7 @@ flowchart LR
   Child --> Parent["usage relay + final result"]
             </div>
           </div>
-          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. <code>BuiltinMonitorToolPluginFactory</code> and <code>BuiltinProcessControlsPluginFactory</code> live in <code>lash_core::runtime_controls</code> (re-exported by the <code>lash</code> facade as <code>lash::plugins::*</code>). A child can fail terminally with <code>call submit_error { reason }</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
+          <p>The public subagent entry is <code>lash_subagents::spawn_agent_tool_definition</code>; the per-session <code>RlmSubagentToolsProvider</code> is crate-private. Process controls live in <code>lash_core::runtime_controls</code>, while the shell-backed <code>monitor</code> tool lives with <code>exec_command</code> and <code>start_command</code> in <code>lash-tool-shell</code>. Monitor starts are ordinary durable <code>ProcessInput::ToolCall</code> records that emit <code>monitor.line</code> events through the process event surface. A child can fail terminally with <code>await TOOL.default.submit_error({ reason: reason })?</code> (defined in <code>crates/lash-subagents/src/shared.rs</code>), which surfaces back to the parent through the <code>spawn_agent</code> result.</p>
         </div>
 
         <div class="section">

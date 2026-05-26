@@ -20,4 +20,5 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.9" }
+lash-tool-shell = { path = "../lash-tool-shell", version = "=0.1.0-alpha.9" }
 tokio = { workspace = true, features = ["full"] }

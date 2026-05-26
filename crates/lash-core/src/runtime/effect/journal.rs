@@ -8,9 +8,7 @@ use crate::llm::transport::LlmTransportError;
 use crate::plugin::{DirectCompletion, DirectLlmCompletion};
 use crate::runtime::session_manager::{CurrentSessionCapability, UsageCapability};
 use crate::sansio::{EffectId, LlmCallError};
-use crate::{
-    DirectRequest, LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage,
-};
+use crate::{DirectRequest, LlmRequest as CoreLlmRequest, PluginError, session_model::TokenUsage};
 
 use super::envelope::{
     EffectInvocationMetadata, EffectOrigin, RuntimeEffectEnvelope, RuntimeEffectKind,

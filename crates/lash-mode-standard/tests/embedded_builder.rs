@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
 use lash_core::{
-    ExecutionMode, LashRuntime, Message, MessageRole, Part, PartKind, PersistedSessionConfig,
-    PersistedTurnState, PruneState, RuntimePersistence, SessionGraph, SessionHead, TokenUsage,
+    ExecutionMode, LashRuntime, Message, MessageRole, ModelSpec, Part, PartKind,
+    PersistedSessionConfig, PersistedTurnState, PruneState, RuntimePersistence, SessionGraph,
+    SessionHead, TokenUsage,
 };
 use lash_sqlite_store::Store;
+
+fn test_model_spec() -> ModelSpec {
+    ModelSpec::from_token_limits("gpt-5.4-mini", None, 200_000, None, None)
+        .expect("valid test model spec")
+}
 
 fn text_message(id: &str, role: MessageRole, content: &str) -> Message {
     Message {
@@ -61,11 +67,9 @@ async fn embedded_runtime_builder_loads_state_from_store() {
         ),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
-            configured_model: "gpt-5.4-mini".into(),
-            context_window: 200_000,
+            model: test_model_spec(),
             execution_mode: ExecutionMode::standard(),
             standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-            model_variant: None,
         },
         checkpoint_ref: Some(checkpoint_ref),
         token_ledger: Vec::new(),
@@ -86,7 +90,7 @@ async fn embedded_runtime_builder_loads_state_from_store() {
     assert_eq!(read_view.messages()[0].parts[0].content, "stored question");
     assert_eq!(state.turn_index, 3);
     assert_eq!(state.token_usage.input_tokens, 20);
-    assert_eq!(state.policy.model, "gpt-5.4-mini");
+    assert_eq!(state.policy.model.id, "gpt-5.4-mini");
     assert_eq!(state.session_id, "stored-session");
 }
 
@@ -99,11 +103,9 @@ async fn embedded_runtime_builder_rejects_store_bound_to_different_session_id() 
         graph: SessionGraph::default(),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
-            configured_model: "gpt-5.4-mini".into(),
-            context_window: 200_000,
+            model: test_model_spec(),
             execution_mode: ExecutionMode::standard(),
             standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-            model_variant: None,
         },
         checkpoint_ref: None,
         token_ledger: Vec::new(),

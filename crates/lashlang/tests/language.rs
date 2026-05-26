@@ -25,12 +25,21 @@ impl TestHost {
 impl ExecutionHost for TestHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::CallTool { name, args } => {
-                self.call_tool(&name, &args).await.map(AbilityResult::Value)
+            AbilityOp::ResourceOperation(operation) => {
+                let empty = Record::new();
+                let args = operation
+                    .args
+                    .first()
+                    .and_then(Value::as_record)
+                    .map_or(&empty, |record| record);
+                self.call_tool(&operation.operation, args)
+                    .await
+                    .map(AbilityResult::Value)
             }
-            AbilityOp::StartToolCall { name, args } => {
-                self.call_tool(&name, &args).await.map(AbilityResult::Value)
-            }
+            AbilityOp::StartProcess(start) => self
+                .call_tool(&start.process, &start.args)
+                .await
+                .map(AbilityResult::Value),
             AbilityOp::Await(handle) => Ok(AbilityResult::Value(handle)),
             AbilityOp::Print(value) => {
                 self.observations
@@ -51,14 +60,14 @@ impl TestHost {
     async fn call_tool(&self, name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
             "read_file" => {
-                let path = expect_string(&args, "path")?;
+                let path = expect_string(args, "path")?;
                 match self.files.get(path) {
                     Some(content) => Ok(Value::String(content.clone().into())),
                     None => Err(ExecutionHostError::new(format!("missing file: {path}"))),
                 }
             }
             "glob" => {
-                let pattern = expect_string(&args, "pattern")?;
+                let pattern = expect_string(args, "pattern")?;
                 let values: Vec<_> = self
                     .globs
                     .get(pattern)
@@ -87,7 +96,7 @@ impl TestHost {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 Ok(Value::String(
-                    expect_string(&args, "value")?.to_string().into(),
+                    expect_string(args, "value")?.to_string().into(),
                 ))
             }
             _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
@@ -123,7 +132,7 @@ async fn execute<H: ExecutionHost>(
 }
 
 fn program_len(program: &lashlang::Program) -> usize {
-    match &program.expr {
+    match &program.main {
         lashlang::Expr::Block(expressions) => expressions.len(),
         _ => 1,
     }
@@ -146,9 +155,12 @@ async fn parser_handles_precedence_and_await_record() {
     let program = parse(
         r#"
         total = 1 + 2 * 3
+        process read(pattern: str, path: str) {
+          finish { pattern: pattern, path: path }
+        }
         fanout = await {
-          left: start call glob { pattern: "src/*.rs" },
-          right: start call read_file { path: "src/lib.rs" }
+          left: start read(pattern: "src/*.rs", path: ""),
+          right: start read(pattern: "", path: "src/lib.rs")
         }
         submit total
         "#,
@@ -170,7 +182,7 @@ async fn parser_accepts_double_slash_comments() {
     )
     .expect("program should parse");
 
-    let lashlang::Expr::Block(expressions) = &program.expr else {
+    let lashlang::Expr::Block(expressions) = &program.main else {
         panic!("program should be a block");
     };
     assert_eq!(expressions.len(), 2);
@@ -201,7 +213,7 @@ async fn start_is_contextual_not_reserved() {
               last = start
             }
             rec = { start: last }
-            h = start call read_file { path: "a.txt" }
+            h = start read_file(path: "a.txt")
             submit { value: start, field: rec.start, awaited: (await h)? }
             "#,
             &mut state,
@@ -472,8 +484,8 @@ async fn parser_allows_await_record_in_expression_position() {
     let program = parse(
         r#"
         results = await {
-          left: start call glob { pattern: "src/*.rs" },
-          right: start call read_file { path: "src/lib.rs" }
+          left: start glob(pattern: "src/*.rs"),
+          right: start read_file(path: "src/lib.rs")
         }
         submit results
         "#,
@@ -493,7 +505,7 @@ async fn parser_allows_bare_expression_statements() {
     )
     .expect("program should parse");
 
-    let lashlang::Expr::Block(expressions) = &program.expr else {
+    let lashlang::Expr::Block(expressions) = &program.main else {
         panic!("program should be a block");
     };
     assert_eq!(expressions.len(), 2);
@@ -512,7 +524,7 @@ async fn parser_allows_bare_finish_at_the_end_of_a_block_or_program() {
     )
     .expect("program should parse");
 
-    let lashlang::Expr::Block(expressions) = &program.expr else {
+    let lashlang::Expr::Block(expressions) = &program.main else {
         panic!("program should be a block");
     };
     assert!(matches!(
@@ -985,7 +997,7 @@ async fn string_concatenation_stringifies_non_string_side() {
     let value = finished(
         execute(
             r#"
-        found = call read_file { path: "src/lib.rs" }
+        found = await TOOL.default.read_file({ path: "src/lib.rs" })
         submit "status=" + found.ok + " value=" + found.value
         "#,
             &mut state,
@@ -1137,8 +1149,8 @@ async fn ternary_fixes_tool_result_formatting_pattern() {
     let value = finished(
         execute(
             r#"
-        found = call read_file { path: "src/lib.rs" }
-        missing = call read_file { path: "src/missing.rs" }
+        found = await TOOL.default.read_file({ path: "src/lib.rs" })
+        missing = await TOOL.default.read_file({ path: "src/missing.rs" })
         summary = format(
           "found={} missing={}",
           found.ok ? "ok" : format("failed: {}", found.error),
@@ -1291,8 +1303,8 @@ async fn tool_calls_return_result_records() {
     let value = finished(
         execute(
             r#"
-        found = call read_file { path: "src/lib.rs" }
-        missing = call read_file { path: "src/missing.rs" }
+        found = await TOOL.default.read_file({ path: "src/lib.rs" })
+        missing = await TOOL.default.read_file({ path: "src/missing.rs" })
         submit { found: found, missing: missing }
         "#,
             &mut state,
@@ -1323,8 +1335,8 @@ async fn explicit_start_and_await_merges_distinct_results() {
     let value = finished(
         execute(
             r#"
-        left = start call sleep_echo { value: "a" }
-        right = start call sleep_echo { value: "b" }
+        left = start sleep_echo(value: "a")
+        right = start sleep_echo(value: "b")
         results = await { left: left, right: right }
         submit { left: results.left?, right: results.right? }
         "#,
@@ -1351,8 +1363,8 @@ async fn await_list_returns_branch_results_in_order() {
         execute(
             r#"
         results = await [
-          start call sleep_echo { value: "a" },
-          start call sleep_echo { value: "b" }
+          start sleep_echo(value: "a"),
+          start sleep_echo(value: "b")
         ]
         submit results
         "#,
@@ -1386,8 +1398,8 @@ async fn await_record_returns_record_results() {
         execute(
             r#"
         results = await {
-          first: start call sleep_echo { value: "a" },
-          second: start call sleep_echo { value: "b" }
+          first: start sleep_echo(value: "a"),
+          second: start sleep_echo(value: "b")
         }
         submit {
           first: results.first?,
@@ -1413,7 +1425,7 @@ async fn removed_parallel_keyword_is_parse_error() {
     let err = lashlang::compile(
         r#"
         parallel {
-          start call sleep_echo { value: "a" }
+          start sleep_echo(value: "a")
         }
         "#,
     )
@@ -1901,8 +1913,8 @@ async fn await_record_accepts_commas_and_keyword_record_keys_execute() {
         execute(
             r#"
         result = await {
-          fanout: start call sleep_echo { value: "ok" },
-          "with space": start call sleep_echo { value: "quoted" },
+          fanout: start sleep_echo(value: "ok"),
+          "with space": start sleep_echo(value: "quoted"),
         }
         submit {
           branch: result.fanout?,
@@ -2123,8 +2135,13 @@ async fn type_is_usable_as_a_tool_call_argument() {
     impl ExecutionHost for CaptureHost {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
             match op {
-                AbilityOp::CallTool { args, .. } => {
-                    *self.captured.lock().unwrap() = args.get("output").cloned();
+                AbilityOp::ResourceOperation(operation) => {
+                    *self.captured.lock().unwrap() = operation
+                        .args
+                        .first()
+                        .and_then(Value::as_record)
+                        .and_then(|record| record.get("output"))
+                        .cloned();
                     Ok(AbilityResult::Value(Value::Null))
                 }
                 AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
@@ -2138,7 +2155,7 @@ async fn type_is_usable_as_a_tool_call_argument() {
     let program = parse(
         r#"
         Shape = Type { name: str, labels: list[enum["a","b"]] }
-        call spawn_agent { task: "find X", output: Shape }
+        await TOOL.default.spawn_agent({ task: "find X", output: Shape })
         submit null
         "#,
     )

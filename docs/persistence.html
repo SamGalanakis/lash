@@ -122,8 +122,7 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .build()?;</code></pre>
           <p>Per-session override (e.g. tests with an isolated store):</p>
@@ -203,8 +202,7 @@ let core = LashCore::builder()
     .install_mode(ModePreset::rlm())
     .default_mode(ModeId::rlm())
     .provider(provider)
-    .model(model.clone(), Some(model_variant.clone()))
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), Some(model_variant.clone()), 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .build()?;
 

@@ -40,7 +40,7 @@ impl ManagedSessionCapability {
                 turn_id: turn_id.clone(),
                 session_id: session_id.to_string(),
                 source: usage_source,
-                model: policy.model.clone(),
+                model: policy.model.id.clone(),
                 token_ledger: Arc::clone(&usage.token_ledger),
                 child_turn_live_usage: Arc::clone(&usage.child_turn_live_usage),
                 relay: usage.child_usage_event_relay.clone(),
@@ -86,7 +86,7 @@ impl ManagedSessionCapability {
         if let Ok(turn) = &turn {
             let source = self.child_usage_source(usage, &session_id);
             if let Some(remainder) = subtract_usage(&live_reported, &turn.token_usage) {
-                usage.record_token_usage(&source, &turn.state.policy.model, &remainder);
+                usage.record_token_usage(&source, &turn.state.policy.model.id, &remainder);
             }
         }
         usage.persist_current_usage_ledger(current).await?;

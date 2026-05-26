@@ -412,11 +412,12 @@ mod tests {
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
-                configured_model: "gpt-test".to_string(),
-                context_window: 200_000,
+                model: lash_core::ModelSpec::from_token_limits(
+                    "gpt-test", None, 200_000, None, None,
+                )
+                .expect("valid model spec"),
                 execution_mode: lash_core::ExecutionMode::standard(),
                 standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-                model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),

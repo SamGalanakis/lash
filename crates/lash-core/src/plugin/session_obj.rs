@@ -133,6 +133,7 @@ pub struct PluginSession {
     pub(super) tool_surface_overlay: ToolSurfaceContribution,
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
+    pub(super) lashlang_abilities: lashlang::LashlangAbilities,
     pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
     pub(super) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
@@ -169,6 +170,10 @@ impl PluginSession {
 
     pub fn subagent_context(&self) -> Option<&SubagentSessionContext> {
         self.subagent.as_ref()
+    }
+
+    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        self.lashlang_abilities
     }
 
     pub fn host(&self) -> &PluginHost {
@@ -231,6 +236,7 @@ impl PluginSession {
             resolve_contract: Some(Arc::clone(&resolve_contract)),
             tool_access: self.tool_access.clone(),
             subagent: self.subagent.clone(),
+            lashlang_abilities: self.lashlang_abilities,
         })?))
     }
 
@@ -275,6 +281,7 @@ impl PluginSession {
                 resolve_contract: ctx.resolve_contract.clone(),
                 tool_access: ctx.tool_access.clone(),
                 subagent: ctx.subagent.clone(),
+                lashlang_abilities: ctx.lashlang_abilities,
             },
             |hook, ctx| hook(ctx),
         )?

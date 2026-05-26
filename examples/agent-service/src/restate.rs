@@ -17,6 +17,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::db::{ChatMessage, ChatModelSelection};
 use crate::routes::{
     ChannelTurnEvents, StreamItem, TurnPersistenceState, assistant_text_for_persistence,
+    model_spec_for_chat_selection,
 };
 use crate::state::{AppError, AppResult, AppStateData};
 
@@ -222,10 +223,11 @@ async fn run_restate_chat_turn_and_persist(
             .map_err(|err| AppError::internal(err.to_string()))?;
         let mut input = TurnInput::text(request.text.clone());
         input.trace_turn_id = Some(request.turn_id.clone());
-        let turn = session
-            .turn(input)
-            .model(request.model.clone(), request.model_variant.clone())
-            .require_submit();
+        let turn_model = model_spec_for_chat_selection(&ChatModelSelection {
+            model: request.model.clone(),
+            model_variant: request.model_variant.clone(),
+        })?;
+        let turn = session.turn(input).model(turn_model).require_submit();
         Ok(turn?
             .stream_with_effect_scope(&ui_events, fresh_scope)
             .await?)
@@ -484,7 +486,6 @@ mod restate_tests {
     fn live_restate_test_state(data_dir: &Path) -> AppStateData {
         let provider = lash_core::testing::TestProvider::builder()
             .kind("mock-provider")
-            .default_model("mock-model")
             .complete(|_request| async {
                 Ok(LlmResponse {
                     full_text: "```lashlang\nsubmit \"done via Restate E2E\"\n```".to_string(),
@@ -501,8 +502,10 @@ mod restate_tests {
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
             .provider(provider)
-            .model("mock-model", None)
-            .max_context_tokens(200_000)
+            .model(
+                lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                    .expect("valid mock model spec"),
+            )
             .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
                 data_dir.join("lash-sessions"),
             )))

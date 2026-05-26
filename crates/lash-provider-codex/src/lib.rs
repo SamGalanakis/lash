@@ -14,9 +14,8 @@ use lash_core::llm::types::{
     ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 use lash_core::provider::{
-    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
-    ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
-    VariantRequestConfig,
+    ProviderComponents, ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy,
+    ProviderOptions, ProviderReliability, ProviderState, ProviderTransport, VariantRequestConfig,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
@@ -1794,10 +1793,6 @@ impl ProviderState for CodexProvider {
 }
 
 impl ProviderModelPolicy for CodexModelPolicy {
-    fn default_model(&self) -> &str {
-        "gpt-5.5"
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if !lower.contains("gpt-5") {
@@ -1819,56 +1814,11 @@ impl ProviderModelPolicy for CodexModelPolicy {
         }
     }
 
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
-            return None;
-        }
-        if model.eq_ignore_ascii_case("gpt-5.5") {
-            return Some("medium");
-        }
-        if variants.contains(&"xhigh") {
-            Some("xhigh")
-        } else {
-            Some("high")
-        }
-    }
-
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
         if !self.supported_variants(model).contains(&variant) {
             return None;
         }
         Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "explore" => Some(AgentModelSelection {
-                model: "gpt-5.5".to_string(),
-                variant: Some("low".to_string()),
-            }),
-            "low" => Some(AgentModelSelection {
-                model: "gpt-5.4-mini".to_string(),
-                variant: Some("low".to_string()),
-            }),
-            "medium" => Some(AgentModelSelection {
-                model: "gpt-5.4".to_string(),
-                variant: Some("medium".to_string()),
-            }),
-            "high" => Some(AgentModelSelection {
-                model: "gpt-5.5".to_string(),
-                variant: Some("medium".to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.contains('/') {
-            model.to_string()
-        } else {
-            format!("openai/{model}")
-        }
     }
 }
 
@@ -2195,6 +2145,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
             output_spec: None,
             stream_events: None,
+            generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
     }
@@ -2207,7 +2158,6 @@ mod tests {
             provider.supported_variants("gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
-        assert_eq!(provider.default_model_variant("gpt-5.5"), Some("medium"));
         assert!(
             provider
                 .request_variant_config("gpt-5.5", "xhigh")

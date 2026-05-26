@@ -30,7 +30,7 @@ fn standard_mode_owns_batch_not_runtime_controls() {
 fn runtime_controls_are_composed_with_standard_mode() {
     let session = PluginHost::new(vec![
         Arc::new(lash_core::BuiltinProcessControlsPluginFactory),
-        Arc::new(lash_core::BuiltinMonitorToolPluginFactory),
+        Arc::new(lash_tool_shell::StandardShellPluginFactory::new()),
         Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
     ])
     .build_standard_session("root", None)

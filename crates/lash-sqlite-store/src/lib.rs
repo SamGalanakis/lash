@@ -345,7 +345,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
                 session_id: request.session_id.clone(),
                 session_name: request.session_id.clone(),
                 created_at: current_timestamp_string(),
-                model: request.policy.model.clone(),
+                model: request.policy.model.id.clone(),
                 cwd: std::env::current_dir()
                     .ok()
                     .and_then(|path| path.to_str().map(str::to_string)),

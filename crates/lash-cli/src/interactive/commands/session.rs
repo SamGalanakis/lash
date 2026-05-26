@@ -1,11 +1,12 @@
 use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, SessionPolicy, ToolState};
+use lash_core::{SessionPolicy, ToolState};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, UiTimelineItem};
 use crate::fork;
+use crate::model_catalog::CachedModelCatalog;
 use crate::resume;
 use crate::session_bootstrap::{CliSessionOpener, OpenedCliLashSession};
 use crate::session_log::{self, SessionLogger};
@@ -70,11 +71,17 @@ fn fallback_policy_for_session_switch(
     current_model_variant: &mut Option<String>,
     current_execution_mode: &mut ExecutionMode,
 ) -> SessionPolicy {
+    let model = lash_core::ModelSpec::from_token_limits(
+        app.model.clone(),
+        current_model_variant.clone(),
+        app.context_window.unwrap_or(1) as usize,
+        None,
+        None,
+    )
+    .unwrap_or_else(|_| lash_core::ModelSpec::default());
     SessionPolicy {
         provider: provider.clone(),
-        model: app.model.clone(),
-        model_variant: current_model_variant.clone(),
-        max_context_tokens: app.context_window.map(|window| window as usize),
+        model,
         execution_mode: current_execution_mode.clone(),
         ..SessionPolicy::default()
     }
@@ -124,7 +131,7 @@ pub(super) async fn handle_clear(
         let policy = rt.policy_snapshot();
         app.session_id = session_id;
         *current_execution_mode = policy.execution_mode;
-        *current_model_variant = policy.model_variant;
+        *current_model_variant = policy.model.variant;
     }
     app.session_name = opened.bootstrap.session_name();
     *desired_tool_state = session.control().tools().state().await?;

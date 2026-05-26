@@ -9,7 +9,10 @@ use lash_core::SessionPolicy;
 
 async fn monitor_test_session() -> lash::LashSession {
     lash::LashCore::standard()
-        .max_context_tokens(200_000)
+        .model(
+            lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                .expect("valid model spec"),
+        )
         .build()
         .expect("core")
         .session("test-session-id")
@@ -280,13 +283,14 @@ fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
 }
 
 #[test]
-fn cleared_session_state_preserves_max_context_tokens() {
+fn cleared_session_state_preserves_model_spec() {
     let state = cleared_session_state(SessionPolicy {
-        max_context_tokens: Some(123_456),
+        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 123_456, None, None)
+            .expect("valid model spec"),
         ..SessionPolicy::default()
     });
 
-    assert_eq!(state.policy.max_context_tokens, Some(123_456));
+    assert_eq!(state.policy.model.context_window_tokens(), 123_456);
 }
 
 #[test]

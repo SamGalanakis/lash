@@ -43,7 +43,7 @@ impl ProcessCapability {
                         session_id: self.process_scope_key(&session_id),
                         descriptor,
                     }),
-                    execution_context,
+                    execution_context: Box::new(execution_context),
                 },
                 Some(runner),
                 scope.effect_metadata,

@@ -297,11 +297,16 @@ impl Session {
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
                 subagent: self.plugins().subagent_context().cloned(),
+                lashlang_abilities: self.plugins().lashlang_abilities(),
             },
         )?);
         let input = crate::ModeBuildInput {
             mode: mode.clone(),
             tool_surface: Arc::clone(&surface),
+            lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
+                &surface,
+                self.plugins().lashlang_abilities(),
+            ),
             extra_prompt_contributions: self.mode_extra_prompt_contributions(&mode),
         };
         let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
@@ -411,6 +416,7 @@ impl Session {
             session_id.to_string(),
             self.execution_mode.clone(),
             dispatch,
+            self.plugins().lashlang_abilities(),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             mode_extension,

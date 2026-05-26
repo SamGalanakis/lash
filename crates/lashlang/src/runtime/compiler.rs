@@ -16,9 +16,9 @@ use std::sync::{Arc, OnceLock};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+use crate::LinkedModule;
 use crate::ast::{
-    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
-    ToolCallMode, TypeExpr, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, Expr, ProcessStartExpr, Program, TypeExpr, UnaryOp,
 };
 use crate::lexer::Span;
 
@@ -33,6 +33,8 @@ use super::{
 };
 
 pub(crate) struct Compiler {
+    module: Program,
+    linked_module: Option<LinkedModule>,
     code: Vec<Instruction>,
     spans: Vec<Option<Span>>,
     constants: Vec<Value>,
@@ -44,7 +46,6 @@ pub(crate) struct Compiler {
     compiled_schemas: Vec<ValidationPlan>,
     assign_paths: Vec<CompiledAssignPath>,
     lowered_loops: Vec<LoweredLoop>,
-    process_blocks: Vec<super::CompiledProcessBlock>,
     compile_stats: Rc<RefCell<CompileStats>>,
     const_slots: Vec<Option<Value>>,
     loop_contexts: Vec<LoopContext>,
@@ -212,7 +213,7 @@ impl LoweredLoopOptimizer<'_, '_> {
             Expr::Break => Some(LoopOp::Break),
             Expr::Continue => Some(LoopOp::Continue),
             Expr::Block(_)
-            | Expr::ToolCall { .. }
+            | Expr::ReceiverCall { .. }
             | Expr::Cancel(_)
             | Expr::Print(_)
             | Expr::Submit(_)
@@ -221,6 +222,11 @@ impl LoweredLoopOptimizer<'_, '_> {
             | Expr::Finish(_)
             | Expr::Fail(_)
             | Expr::StartProcess(_)
+            | Expr::ResourceRef(_)
+            | Expr::SleepFor(_)
+            | Expr::SleepUntil(_)
+            | Expr::WaitSignal
+            | Expr::SignalRun { .. }
             | Expr::Await(_) => None,
             expr => Some(LoopOp::Expr(self.compiler.optimize_loop_expr(expr)?)),
         }
@@ -236,8 +242,29 @@ struct SlotTable {
 impl Compiler {
     pub(crate) fn compile_program(program: &Program) -> (Chunk, CompileStats) {
         let stats = Rc::new(RefCell::new(CompileStats::default()));
-        let mut compiler =
-            Self::with_slots_and_stats(Rc::new(RefCell::new(SlotTable::default())), stats.clone());
+        let mut compiler = Self::with_slots_and_stats(
+            program.clone(),
+            None,
+            Rc::new(RefCell::new(SlotTable::default())),
+            stats.clone(),
+        );
+        compiler.compile_program_block(program);
+        let chunk = compiler.finish();
+        let compile_stats = *stats.borrow();
+        (chunk, compile_stats)
+    }
+
+    pub(crate) fn compile_linked_program(
+        program: &Program,
+        linked_module: &LinkedModule,
+    ) -> (Chunk, CompileStats) {
+        let stats = Rc::new(RefCell::new(CompileStats::default()));
+        let mut compiler = Self::with_slots_and_stats(
+            program.clone(),
+            Some(linked_module.clone()),
+            Rc::new(RefCell::new(SlotTable::default())),
+            stats.clone(),
+        );
         compiler.compile_program_block(program);
         let chunk = compiler.finish();
         let compile_stats = *stats.borrow();
@@ -245,10 +272,14 @@ impl Compiler {
     }
 
     fn with_slots_and_stats(
+        module: Program,
+        linked_module: Option<LinkedModule>,
         slots: Rc<RefCell<SlotTable>>,
         compile_stats: Rc<RefCell<CompileStats>>,
     ) -> Self {
         Self {
+            module,
+            linked_module,
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
@@ -260,7 +291,6 @@ impl Compiler {
             compiled_schemas: Vec::new(),
             assign_paths: Vec::new(),
             lowered_loops: Vec::new(),
-            process_blocks: Vec::new(),
             compile_stats,
             const_slots: Vec::new(),
             loop_contexts: Vec::new(),
@@ -272,6 +302,8 @@ impl Compiler {
         let mut spans = self.spans;
         spans.resize(self.code.len(), None);
         Chunk {
+            module: self.module,
+            linked_module: self.linked_module,
             code: self.code,
             spans,
             constants: self.constants,
@@ -282,7 +314,6 @@ impl Compiler {
             compiled_schemas: self.compiled_schemas,
             assign_paths: self.assign_paths,
             lowered_loops: self.lowered_loops,
-            process_blocks: self.process_blocks,
         }
     }
 
@@ -391,12 +422,6 @@ impl Compiler {
         index
     }
 
-    fn push_process_block(&mut self, block: super::CompiledProcessBlock) -> usize {
-        let index = self.process_blocks.len();
-        self.process_blocks.push(block);
-        index
-    }
-
     fn ensure_const_slot(&mut self, slot: usize) {
         if self.const_slots.len() <= slot {
             self.const_slots.resize(slot + 1, None);
@@ -474,13 +499,13 @@ impl Compiler {
     }
 
     fn compile_program_block(&mut self, program: &Program) {
-        match &program.expr {
+        match &program.main {
             Expr::Block(expressions) => {
                 self.compile_block_value_with_spans(expressions, &program.expression_spans);
             }
             expression => self.compile_expr(expression),
         }
-        if !is_terminal_expr(&program.expr) {
+        if !is_terminal_expr(&program.main) {
             let pop = self.code.len();
             self.code.push(Instruction::Pop);
             if let Some(span) = program.expression_spans.last().copied() {
@@ -811,6 +836,12 @@ impl Compiler {
             Expr::Bool(value) => Some(LoopExpr::Const(Value::Bool(*value))),
             Expr::Number(value) => Some(LoopExpr::Const(Value::Number(*value))),
             Expr::String(value) => Some(LoopExpr::Const(Value::String(value.clone()))),
+            Expr::ResourceRef(resource) => Some(LoopExpr::Const(Value::Resource(
+                super::ResourceHandle::new(
+                    resource.resource_type.to_string(),
+                    resource.alias.to_string(),
+                ),
+            ))),
             Expr::Variable(name) => Some(LoopExpr::Slot(self.push_slot(name))),
             Expr::List(items) => Some(LoopExpr::List(
                 items
@@ -884,9 +915,13 @@ impl Compiler {
             | Expr::For { .. }
             | Expr::Break
             | Expr::Continue
-            | Expr::ToolCall { .. }
+            | Expr::ReceiverCall { .. }
             | Expr::StartProcess(_)
             | Expr::Await(_)
+            | Expr::SleepFor(_)
+            | Expr::SleepUntil(_)
+            | Expr::WaitSignal
+            | Expr::SignalRun { .. }
             | Expr::ResultUnwrap(_)
             | Expr::Cancel(_)
             | Expr::Print(_)
@@ -905,6 +940,10 @@ impl Compiler {
             Expr::Bool(value) => Some(Value::Bool(*value)),
             Expr::Number(value) => Some(Value::Number(*value)),
             Expr::String(value) => Some(Value::String(value.clone())),
+            Expr::ResourceRef(resource) => Some(Value::Resource(super::ResourceHandle::new(
+                resource.resource_type.to_string(),
+                resource.alias.to_string(),
+            ))),
             Expr::Variable(name) => self.const_for_name(name),
             Expr::List(items) => Some(Value::List(
                 items
@@ -1039,9 +1078,13 @@ impl Compiler {
             | Expr::For { .. }
             | Expr::Break
             | Expr::Continue
-            | Expr::ToolCall { .. }
+            | Expr::ReceiverCall { .. }
             | Expr::StartProcess(_)
             | Expr::Await(_)
+            | Expr::SleepFor(_)
+            | Expr::SleepUntil(_)
+            | Expr::WaitSignal
+            | Expr::SignalRun { .. }
             | Expr::ResultUnwrap(_)
             | Expr::Cancel(_)
             | Expr::Print(_)
@@ -1211,22 +1254,66 @@ impl Compiler {
                 let keys = self.push_key_list(entries.iter().map(|(key, _)| key.as_str()));
                 self.code.push(Instruction::BuildRecord(keys));
             }
-            Expr::ToolCall { mode, call } => match mode {
-                ToolCallMode::Call => self.compile_call_expr(call),
-                ToolCallMode::Start => self.compile_start_call_expr(call),
-            },
             Expr::StartProcess(process) => self.compile_start_process_expr(process),
-            Expr::Await(handle) => {
-                self.compile_expr(handle);
-                self.code.push(Instruction::AwaitHandle);
+            Expr::ResourceRef(resource) => {
+                self.emit_push_value(Value::Resource(super::ResourceHandle::new(
+                    resource.resource_type.to_string(),
+                    resource.alias.to_string(),
+                )));
+            }
+            Expr::ReceiverCall {
+                receiver,
+                operation,
+                args,
+            } => self.compile_receiver_call_expr(receiver, operation, args, false),
+            Expr::Await(handle) => match handle.as_ref() {
+                Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    args,
+                } => self.compile_receiver_call_expr(receiver, operation, args, false),
+                Expr::ResultUnwrap(inner) => {
+                    if let Expr::ReceiverCall {
+                        receiver,
+                        operation,
+                        args,
+                    } = inner.as_ref()
+                    {
+                        self.compile_receiver_call_expr(receiver, operation, args, true);
+                    } else {
+                        self.compile_expr(inner);
+                        self.code.push(Instruction::AwaitHandleUnwrap);
+                    }
+                }
+                _ => {
+                    self.compile_expr(handle);
+                    self.code.push(Instruction::AwaitHandle);
+                }
+            },
+            Expr::SleepFor(duration) => {
+                self.compile_expr(duration);
+                self.code.push(Instruction::ProcessSleepFor);
+            }
+            Expr::SleepUntil(deadline) => {
+                self.compile_expr(deadline);
+                self.code.push(Instruction::ProcessSleepUntil);
+            }
+            Expr::WaitSignal => {
+                self.code.push(Instruction::ProcessWaitSignal);
+            }
+            Expr::SignalRun { run, payload } => {
+                self.compile_expr(run);
+                self.compile_expr(payload);
+                self.code.push(Instruction::ProcessSignalRun);
             }
             Expr::ResultUnwrap(expr) => {
-                if let Expr::ToolCall {
-                    mode: ToolCallMode::Call,
-                    call,
+                if let Expr::ReceiverCall {
+                    receiver,
+                    operation,
+                    args,
                 } = expr.as_ref()
                 {
-                    self.compile_call_unwrap_expr(call);
+                    self.compile_receiver_call_expr(receiver, operation, args, true);
                 } else if let Expr::Await(handle) = expr.as_ref() {
                     self.compile_expr(handle);
                     self.code.push(Instruction::AwaitHandleUnwrap);
@@ -1395,63 +1482,38 @@ impl Compiler {
         }
     }
 
-    fn compile_call_expr(&mut self, call: &CallExpr) {
-        for (_, expr) in &call.args {
-            self.compile_expr(expr);
-        }
-        let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
-        let name = self.push_name(&call.name);
-        self.code.push(Instruction::CallTool { name, keys });
-    }
-
-    fn compile_call_unwrap_expr(&mut self, call: &CallExpr) {
-        for (_, expr) in &call.args {
-            self.compile_expr(expr);
-        }
-        let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
-        let name = self.push_name(&call.name);
-        self.code.push(Instruction::CallToolUnwrap { name, keys });
-    }
-
-    fn compile_start_call_expr(&mut self, call: &CallExpr) {
-        for (_, expr) in &call.args {
-            self.compile_expr(expr);
-        }
-        let keys = self.push_key_list(call.args.iter().map(|(name, _)| name.as_str()));
-        let name = self.push_name(&call.name);
-        self.code.push(Instruction::StartCallTool { name, keys });
-    }
-
     fn compile_start_process_expr(&mut self, process: &ProcessStartExpr) {
-        if let Some(name) = process.name.as_ref() {
-            self.compile_expr(name);
+        for (_, expr) in &process.args {
+            self.compile_expr(expr);
         }
-        if let Some(timeout_ms) = process.timeout_ms.as_ref() {
-            self.compile_expr(timeout_ms);
+        let keys = self.push_key_list(process.args.iter().map(|(name, _)| name.as_str()));
+        let process = self.push_name(&process.process);
+        self.code.push(Instruction::StartProcess { process, keys });
+    }
+
+    fn compile_receiver_call_expr(
+        &mut self,
+        receiver: &Expr,
+        operation: &str,
+        args: &[Expr],
+        unwrap: bool,
+    ) {
+        self.compile_expr(receiver);
+        for arg in args {
+            self.compile_expr(arg);
         }
-        if let Some(input) = process.input.as_ref() {
-            self.compile_expr(input);
+        let operation = self.push_name(operation);
+        if unwrap {
+            self.code.push(Instruction::ResourceCallUnwrap {
+                operation,
+                argc: args.len(),
+            });
+        } else {
+            self.code.push(Instruction::ResourceCall {
+                operation,
+                argc: args.len(),
+            });
         }
-        let mut tool_names = std::collections::BTreeSet::new();
-        collect_tool_names_in_expr(&process.body, &mut tool_names);
-        let tool_names = tool_names
-            .into_iter()
-            .map(|name| transient_name(&name))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let block = self.push_process_block(super::CompiledProcessBlock {
-            program: Program {
-                expr: process.body.as_ref().clone(),
-                expression_spans: Vec::new(),
-            },
-            tool_names,
-        });
-        self.code.push(Instruction::StartProcess {
-            block,
-            has_name: process.name.is_some(),
-            has_timeout_ms: process.timeout_ms.is_some(),
-            has_input: process.input.is_some(),
-        });
     }
 
     fn emit_jump_if_false(&mut self) -> usize {
@@ -1641,7 +1703,12 @@ impl Compiler {
 
 pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
-        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => true,
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Number(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::ResourceRef(_) => true,
         Expr::List(items) => items.iter().all(is_pure_expr),
         Expr::Record(entries) => entries.iter().all(|(_, value)| is_pure_expr(value)),
         Expr::ResultUnwrap(expr) => is_pure_expr(expr),
@@ -1661,9 +1728,13 @@ pub(crate) fn is_pure_expr(expr: &Expr) -> bool {
         | Expr::For { .. }
         | Expr::Break
         | Expr::Continue
-        | Expr::ToolCall { .. }
+        | Expr::ReceiverCall { .. }
         | Expr::StartProcess(_)
         | Expr::Await(_)
+        | Expr::SleepFor(_)
+        | Expr::SleepUntil(_)
+        | Expr::WaitSignal
+        | Expr::SignalRun { .. }
         | Expr::Cancel(_)
         | Expr::Print(_)
         | Expr::Submit(_)
@@ -1685,20 +1756,16 @@ fn contains_type_literal(expr: &Expr) -> bool {
         Expr::Record(entries) => entries
             .iter()
             .any(|(_, value)| contains_type_literal(value)),
-        Expr::ToolCall { call, .. } => call
+        Expr::StartProcess(process) => process
             .args
             .iter()
             .any(|(_, value)| contains_type_literal(value)),
-        Expr::StartProcess(process) => {
-            process.name.as_deref().is_some_and(contains_type_literal)
-                || process
-                    .timeout_ms
-                    .as_deref()
-                    .is_some_and(contains_type_literal)
-                || process.input.as_deref().is_some_and(contains_type_literal)
-                || contains_type_literal(&process.body)
+        Expr::ReceiverCall { receiver, args, .. } => {
+            contains_type_literal(receiver) || args.iter().any(contains_type_literal)
         }
         Expr::Await(expr)
+        | Expr::SleepFor(expr)
+        | Expr::SleepUntil(expr)
         | Expr::ResultUnwrap(expr)
         | Expr::Unary { expr, .. }
         | Expr::Cancel(expr)
@@ -1706,6 +1773,9 @@ fn contains_type_literal(expr: &Expr) -> bool {
         | Expr::Yield(expr)
         | Expr::Wake(expr)
         | Expr::Fail(expr) => contains_type_literal(expr),
+        Expr::SignalRun { run, payload } => {
+            contains_type_literal(run) || contains_type_literal(payload)
+        }
         Expr::BuiltinCall { args, .. } => args.iter().any(contains_type_literal),
         Expr::Field { target, .. } => contains_type_literal(target),
         Expr::Index { target, index } => {
@@ -1729,106 +1799,13 @@ fn contains_type_literal(expr: &Expr) -> bool {
         Expr::Submit(expr) | Expr::Finish(expr) => {
             expr.as_deref().is_some_and(contains_type_literal)
         }
-        Expr::Break | Expr::Continue => false,
-        Expr::Null | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Variable(_) => false,
-    }
-}
-
-fn collect_tool_names_in_call(call: &CallExpr, out: &mut std::collections::BTreeSet<String>) {
-    out.insert(call.name.to_string());
-    for (_, expr) in &call.args {
-        collect_tool_names_in_expr(expr, out);
-    }
-}
-
-fn collect_tool_names_in_expr(expr: &Expr, out: &mut std::collections::BTreeSet<String>) {
-    match expr {
-        Expr::ToolCall { call, .. } => collect_tool_names_in_call(call, out),
-        Expr::StartProcess(process) => {
-            if let Some(name) = process.name.as_deref() {
-                collect_tool_names_in_expr(name, out);
-            }
-            if let Some(timeout_ms) = process.timeout_ms.as_deref() {
-                collect_tool_names_in_expr(timeout_ms, out);
-            }
-            if let Some(input) = process.input.as_deref() {
-                collect_tool_names_in_expr(input, out);
-            }
-            collect_tool_names_in_expr(&process.body, out);
-        }
-        Expr::Block(expressions) => {
-            for expression in expressions {
-                collect_tool_names_in_expr(expression, out);
-            }
-        }
-        Expr::Assign { target, expr } => {
-            for step in &target.steps {
-                if let AssignPathStep::Index(index) = step {
-                    collect_tool_names_in_expr(index, out);
-                }
-            }
-            collect_tool_names_in_expr(expr, out);
-        }
-        Expr::List(items) => {
-            for item in items {
-                collect_tool_names_in_expr(item, out);
-            }
-        }
-        Expr::Record(entries) => {
-            for (_, value) in entries {
-                collect_tool_names_in_expr(value, out);
-            }
-        }
-        Expr::Await(expr)
-        | Expr::ResultUnwrap(expr)
-        | Expr::Unary { expr, .. }
-        | Expr::Cancel(expr)
-        | Expr::Print(expr)
-        | Expr::Yield(expr)
-        | Expr::Wake(expr)
-        | Expr::Fail(expr) => {
-            collect_tool_names_in_expr(expr, out);
-        }
-        Expr::BuiltinCall { args, .. } => {
-            for arg in args {
-                collect_tool_names_in_expr(arg, out);
-            }
-        }
-        Expr::Field { target, .. } => collect_tool_names_in_expr(target, out),
-        Expr::Index { target, index } => {
-            collect_tool_names_in_expr(target, out);
-            collect_tool_names_in_expr(index, out);
-        }
-        Expr::If {
-            condition,
-            then_block,
-            else_block,
-        } => {
-            collect_tool_names_in_expr(condition, out);
-            collect_tool_names_in_expr(then_block, out);
-            collect_tool_names_in_expr(else_block, out);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_tool_names_in_expr(left, out);
-            collect_tool_names_in_expr(right, out);
-        }
-        Expr::For { iterable, body, .. } => {
-            collect_tool_names_in_expr(iterable, out);
-            collect_tool_names_in_expr(body, out);
-        }
-        Expr::Submit(expr) | Expr::Finish(expr) => {
-            if let Some(expr) = expr {
-                collect_tool_names_in_expr(expr, out);
-            }
-        }
+        Expr::Break | Expr::Continue | Expr::WaitSignal => false,
         Expr::Null
         | Expr::Bool(_)
         | Expr::Number(_)
         | Expr::String(_)
         | Expr::Variable(_)
-        | Expr::Break
-        | Expr::Continue
-        | Expr::TypeLiteral(_) => {}
+        | Expr::ResourceRef(_) => false,
     }
 }
 

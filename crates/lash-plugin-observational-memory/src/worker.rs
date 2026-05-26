@@ -67,8 +67,8 @@ async fn run_worker_turn(
     let completion = om_host
         .direct_completion(
             DirectRequest {
-                model: policy.model,
-                model_variant: policy.model_variant,
+                model: policy.model.id,
+                model_variant: policy.model.variant,
                 messages: vec![
                     DirectMessage {
                         role: DirectRole::System,
@@ -82,6 +82,7 @@ async fn run_worker_turn(
                 attachments: Vec::new(),
                 output: DirectOutputSpec::Text,
                 stream_events: None,
+                generation: lash_core::GenerationOptions::default(),
                 session_id: Some(format!("{}-om-{worker_kind}", om_host.session_id())),
                 originating_tool_call_id: None,
                 idempotency_key: None,

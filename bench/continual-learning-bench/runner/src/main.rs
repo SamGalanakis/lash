@@ -9,7 +9,7 @@ use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{EventSink, LocalProcessRegistry, TurnFinish, TurnOutcome, TurnStop},
     persistence::{
-        ModeEvent, RuntimeSessionState, RuntimePersistence, load_persisted_session_state,
+        ModeEvent, RuntimePersistence, RuntimeSessionState, load_persisted_session_state,
     },
     plugins::{PluginSpec, StaticPluginFactory},
     provider::ProviderHandle,
@@ -93,16 +93,21 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
     }
 
     let provider = resolve_provider(request.provider_id.as_deref())?;
+    let model_spec = lash::ModelSpec::from_token_limits(
+        request.model.clone(),
+        request.variant.clone(),
+        request
+            .max_context_tokens
+            .unwrap_or(DEFAULT_MAX_CONTEXT_TOKENS),
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let core = LashCore::builder()
         .install_mode(ModePreset::rlm_with_config(clbench_rlm_config()))
         .default_mode(ModeId::rlm())
         .provider(provider)
-        .model(request.model.clone(), request.variant.clone())
-        .max_context_tokens(
-            request
-                .max_context_tokens
-                .unwrap_or(DEFAULT_MAX_CONTEXT_TOKENS),
-        )
+        .model(model_spec)
         .max_turns(request.max_turns.unwrap_or(DEFAULT_MAX_TURNS))
         .prompt_template(lash_harness_opt::clbench::clbench_prompt_template(
             CLBENCH_MEMORY_GUIDANCE,
@@ -184,7 +189,7 @@ fn usage_from_followed_turn(followed: &lash::FollowedTurnResult) -> SessionUsage
         .filter(|turn| turn.usage.total() != 0 || turn.usage.cached_input_tokens != 0)
         .map(|turn| TokenLedgerEntry {
             source: "turn".to_string(),
-            model: turn.state.policy.model.clone(),
+            model: turn.state.policy.model.id.clone(),
             usage: turn.usage.clone(),
         })
         .collect::<Vec<_>>();
@@ -368,8 +373,16 @@ mod tests {
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm_with_config(clbench_rlm_config()))
             .default_mode(ModeId::rlm())
-            .model("mock-model", None)
-            .max_context_tokens(DEFAULT_MAX_CONTEXT_TOKENS)
+            .model(
+                lash::ModelSpec::from_token_limits(
+                    "mock-model",
+                    None,
+                    DEFAULT_MAX_CONTEXT_TOKENS,
+                    None,
+                    None,
+                )
+                .expect("valid model spec"),
+            )
             .process_registry(Arc::new(LocalProcessRegistry::default()))
             .plugins(build_plugin_stack())
             .build()

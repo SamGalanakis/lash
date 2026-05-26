@@ -3,9 +3,6 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lash::advanced::ExecutionMode;
 use lash::provider::ProviderHandle;
-use lash_core::{
-    CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
-};
 #[cfg(test)]
 use lash_sqlite_store::Store;
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiHostEffect};
@@ -14,6 +11,9 @@ use sha2::{Digest, Sha256};
 use crate::SkillCatalog;
 use crate::app::{App, PluginPanelBlock, PreparedTurn, UiTimelineItem};
 use crate::command;
+use crate::model_catalog::{
+    CachedModelCatalog, FileModelCatalogStore, ModelsDevHttpSource, ResolvedModelSpec,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelSelection {
@@ -406,19 +406,7 @@ pub(crate) fn validate_model_selection(
     provider: &ProviderHandle,
     selection: &ModelSelection,
 ) -> Result<(), String> {
-    provider
-        .validate_model_name(&selection.model)
-        .map_err(|err| {
-            let normalized = provider.resolve_model(&selection.model);
-            if normalized != selection.model {
-                format!(
-                    "{err}
-Resolved provider model ID: `{normalized}`"
-                )
-            } else {
-                err
-            }
-        })
+    provider.validate_model_name(&selection.model)
 }
 
 pub(crate) fn resolve_model_selection(
@@ -426,20 +414,32 @@ pub(crate) fn resolve_model_selection(
     selection: &ModelSelection,
     catalog: &CachedModelCatalog,
 ) -> Result<ResolvedModelSpec, String> {
-    let snapshot = catalog.snapshot();
-    provider
-        .resolve_model_spec(&selection.model, &snapshot)
-        .map_err(|err| {
-            let normalized = provider.resolve_model(&selection.model);
-            if normalized != selection.model {
-                format!(
-                    "{err}
-Resolved provider model ID: `{normalized}`"
-                )
-            } else {
-                err
-            }
-        })
+    provider.validate_model_name(&selection.model)?;
+    let configured_model = selection.model.trim();
+    let catalog_model_id =
+        crate::provider_metadata::provider_catalog_model_id(provider.kind(), configured_model);
+    let Some(info) = catalog.get(&catalog_model_id) else {
+        let normalized =
+            crate::provider_metadata::provider_wire_model_id(provider.kind(), configured_model);
+        let mut message = format!(
+            "model `{}` has no context-window entry in the models.dev catalog for {}. Choose a cataloged model.",
+            configured_model,
+            provider.kind(),
+        );
+        if normalized != configured_model {
+            message.push_str(&format!("\nResolved provider model ID: `{normalized}`"));
+        }
+        return Err(message);
+    };
+    Ok(ResolvedModelSpec {
+        configured_model: configured_model.to_string(),
+        provider_model: crate::provider_metadata::provider_wire_model_id(
+            provider.kind(),
+            configured_model,
+        ),
+        catalog_model_id,
+        info,
+    })
 }
 
 pub(crate) fn resolve_model_variant(
@@ -448,11 +448,25 @@ pub(crate) fn resolve_model_variant(
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
     let Some(raw) = requested else {
-        return Ok(provider.default_model_variant(model).map(str::to_string));
+        return Ok(
+            crate::provider_metadata::default_model_variant_for_provider(
+                provider.kind(),
+                model,
+                provider.supported_variants(model),
+            )
+            .map(str::to_string),
+        );
     };
     let variant = parse_variant_input(raw)?;
     if variant == "default" {
-        return Ok(provider.default_model_variant(model).map(str::to_string));
+        return Ok(
+            crate::provider_metadata::default_model_variant_for_provider(
+                provider.kind(),
+                model,
+                provider.supported_variants(model),
+            )
+            .map(str::to_string),
+        );
     }
     provider.validate_variant(model, &variant)?;
     Ok(Some(variant))
@@ -477,7 +491,11 @@ pub(crate) fn variant_lines(
         "Current variant: `{}`",
         current_variant.unwrap_or("(none)")
     ));
-    if let Some(default_variant) = provider.default_model_variant(model) {
+    if let Some(default_variant) = crate::provider_metadata::default_model_variant_for_provider(
+        provider.kind(),
+        model,
+        supported,
+    ) {
         lines.push(format!("Recommended default: `{}`", default_variant));
     }
     lines.push(format!("Available variants: {}", supported.join(", ")));
@@ -553,7 +571,8 @@ pub(crate) fn info_text(
     session_id: Option<&str>,
     session_db_path: Option<&str>,
 ) -> String {
-    let resolved_model = provider.resolve_model(configured_model);
+    let resolved_model =
+        crate::provider_metadata::provider_wire_model_id(provider.kind(), configured_model);
     let mut lines = vec![
         format!("lash-cli: {}", crate::APP_VERSION),
         format!("lash-sansio: {}", lash_core::SANSIO_VERSION),

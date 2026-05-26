@@ -29,8 +29,7 @@ async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> 
 async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
     let core = LashCore::standard()
         .provider(semantic_group_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("turn-stream-last-group").open().await?;
     let mut stream = session
@@ -53,8 +52,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
 async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
     let core = LashCore::standard()
         .provider(semantic_group_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("turn-run-last-group").open().await?;
 
@@ -69,8 +67,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
 async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
     let core = LashCore::standard()
         .provider(retry_once_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("retry-status").open().await?;
     let events = RecordingEvents::default();
@@ -125,8 +122,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("queued-input").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -240,7 +236,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
             "code-1",
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
-                code: "x = (call app_lookup {})?".to_string(),
+                code: "x = await TOOL.default.app_lookup({})?".to_string(),
             },
         ))
         .await;
@@ -275,7 +271,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     assert!(matches!(
         &activities[0].event,
         TurnEvent::CodeBlockStarted { language, code }
-            if language == "lashlang" && code == "x = (call app_lookup {})?"
+            if language == "lashlang" && code == "x = await TOOL.default.app_lookup({})?"
     ));
     assert!(matches!(
         &activities[1].event,
@@ -296,10 +292,9 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     let live = Arc::new(RecordingEvents::default());
     let core = LashCore::standard()
         .provider(tool_roundtrip_provider())
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("fanout-tool-events").open().await?;
 
@@ -368,10 +363,9 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Result<()> {
     let core = LashCore::standard()
         .provider(tool_roundtrip_provider())
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("tool-events").open().await?;
     let events = RecordingEvents::default();
@@ -418,12 +412,11 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
-            "```lashlang\nvalue = (call app_lookup {})?\nsubmit \"done\"\n```",
+            "```lashlang\nvalue = await TOOL.default.app_lookup({})?\nsubmit \"done\"\n```",
         ]))
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("rlm-live-tool-events").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -526,8 +519,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec!["done in prose"]))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("rlm-prose-completion").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -565,8 +557,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
         .provider(queued_text_provider(vec![
             "```lashlang\nsubmit \"done via submit\"\n```",
         ]))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core
         .session("rlm-submit-required-completion")
@@ -607,9 +598,8 @@ async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Re
             "```lashlang\nthis is not valid lashlang\n```",
             "```lashlang\nsubmit \"recovered\"\n```",
         ]))
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("rlm-failed-code-event").open().await?;
     let events = RecordingEvents::default();

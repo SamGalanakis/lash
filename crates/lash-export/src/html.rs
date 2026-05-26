@@ -271,7 +271,7 @@ mod tests {
                 ChronologicalEntry {
                     index: 1,
                     payload: rlm_payload(RlmTrajectoryEntry {
-                        code: "data = (call lookup { q: \"x\" })?".to_string(),
+                        code: "data = await TOOL.default.lookup({ q: \"x\" })?".to_string(),
                         output: Vec::new(),
                         tool_call_ids: vec!["call_1".to_string()],
                         ..rlm_step(0, "rlm_step_0")

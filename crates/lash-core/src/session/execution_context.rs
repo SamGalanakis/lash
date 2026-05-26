@@ -6,11 +6,36 @@ use tokio_util::sync::CancellationToken;
 use crate::tool_dispatch::ToolDispatchContext;
 use crate::{TurnActivity, TurnActivityId, TurnEvent};
 
+pub(crate) fn lashlang_surface_from_tool_surface(
+    surface: &crate::ToolSurface,
+    abilities: lashlang::LashlangAbilities,
+) -> lashlang::LashlangSurface {
+    lashlang::LashlangSurface::new(lashlang_resources_from_tool_surface(surface), abilities)
+}
+
+pub(crate) fn lashlang_resources_from_tool_surface(
+    surface: &crate::ToolSurface,
+) -> lashlang::ResourceCatalog {
+    let mut catalog = lashlang::ResourceCatalog::new();
+    catalog.add_alias("TOOL", "default");
+    for entry in surface.tools.iter() {
+        if entry.availability.is_callable() {
+            catalog.add_operation(
+                "TOOL",
+                entry.manifest.name.clone(),
+                entry.manifest.name.clone(),
+            );
+        }
+    }
+    catalog
+}
+
 #[derive(Clone)]
 pub struct ModeExecutionContext<'run> {
     pub(super) session_id: String,
     pub(super) execution_mode: crate::ExecutionMode,
     pub(super) dispatch: Arc<ToolDispatchContext<'run>>,
+    lashlang_abilities: lashlang::LashlangAbilities,
     attachment_store: Arc<dyn crate::AttachmentStore>,
     chronological_projection: Arc<crate::ChronologicalProjection>,
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
@@ -38,6 +63,7 @@ impl<'run> ModeExecutionContext<'run> {
         session_id: String,
         execution_mode: crate::ExecutionMode,
         dispatch: Arc<ToolDispatchContext<'run>>,
+        lashlang_abilities: lashlang::LashlangAbilities,
         attachment_store: Arc<dyn crate::AttachmentStore>,
         chronological_projection: Arc<crate::ChronologicalProjection>,
         mode_extension: Option<crate::ModeTurnExtensionHandle>,
@@ -47,6 +73,7 @@ impl<'run> ModeExecutionContext<'run> {
             session_id,
             execution_mode,
             dispatch,
+            lashlang_abilities,
             attachment_store,
             chronological_projection,
             mode_extension,
@@ -125,45 +152,48 @@ impl<'run> ModeExecutionContext<'run> {
 
     pub fn prepare_lashlang_process_start(
         &self,
-        start: lashlang::ProcessBlockStart,
+        start: lashlang::ProcessStart,
     ) -> Result<(crate::ProcessRegistration, Option<String>), String> {
-        let display_name = start.name.as_ref().map(lashlang_process_name).transpose()?;
-        let timeout_ms = start
-            .timeout_ms
-            .as_ref()
-            .map(lashlang_process_timeout_ms)
-            .transpose()?;
-        let input = start
-            .input
-            .as_ref()
-            .map(lashlang_process_input)
-            .transpose()?
-            .unwrap_or_default();
-        let mut tool_bindings = Vec::with_capacity(start.tool_names.len());
-        for name in start.tool_names {
-            let manifest = self
-                .callable_tool_manifest(&name)
-                .ok_or_else(|| format!("tool `{name}` is unavailable in this session"))?;
-            tool_bindings.push(crate::LashlangProcessToolBinding {
-                name,
-                tool_id: manifest.id.clone(),
-            });
-        }
-        let program = serde_json::to_value(&start.program)
-            .map_err(|err| format!("failed to serialize lashlang process block: {err}"))?;
+        let display_name = Some(start.process.clone());
+        let linked_module = match start.linked_module {
+            Some(linked_module) => linked_module,
+            None => self.link_lashlang_module(start.module)?,
+        };
+        let module_version = linked_module.module_version.clone();
+        let args = match serde_json::to_value(&lashlang::Value::Record(Arc::new(start.args)))
+            .map_err(|err| format!("failed to serialize process args: {err}"))?
+        {
+            serde_json::Value::Object(map) => map,
+            _ => return Err("process args must serialize as a record".to_string()),
+        };
         let process_id = format!("process:{}", uuid::Uuid::new_v4());
         let registration = crate::ProcessRegistration::new(
             process_id,
-            crate::ProcessInput::LashlangBlock {
-                program,
-                input,
-                tool_bindings,
-                timeout_ms,
-                display_name: display_name.clone(),
+            crate::ProcessInput::LashlangProcess {
+                module_version,
+                linked_module,
+                process_name: start.process,
+                args,
             },
         )
         .with_extra_event_types(crate::lashlang_process_event_types());
         Ok((registration, display_name))
+    }
+
+    pub fn lashlang_surface(&self) -> lashlang::LashlangSurface {
+        lashlang_surface_from_tool_surface(&self.dispatch.surface, self.lashlang_abilities)
+    }
+
+    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        self.lashlang_abilities
+    }
+
+    pub fn link_lashlang_module(
+        &self,
+        program: lashlang::Program,
+    ) -> Result<lashlang::LinkedModule, String> {
+        lashlang::LinkedModule::link(program, self.lashlang_surface())
+            .map_err(|err| err.to_string())
     }
 
     pub fn tool_argument_projection_policy(
@@ -204,40 +234,65 @@ impl<'run> ModeExecutionContext<'run> {
             Err(err) => crate::ModeToolReply::error(serde_json::json!(err.to_string())),
         }
     }
-}
 
-fn lashlang_process_name(value: &lashlang::Value) -> Result<String, String> {
-    match value {
-        lashlang::Value::String(value) => Ok(value.to_string()),
-        _ => Err("process `name` must be a string".to_string()),
-    }
-}
-
-fn lashlang_process_timeout_ms(value: &lashlang::Value) -> Result<u64, String> {
-    match value {
-        lashlang::Value::Number(value)
-            if value.is_finite()
-                && *value >= 0.0
-                && value.fract() == 0.0
-                && *value <= u64::MAX as f64 =>
-        {
-            Ok(*value as u64)
+    pub(crate) async fn sleep_lashlang_process(
+        &self,
+        process_id: &str,
+        sequence: u64,
+        duration_ms: u64,
+    ) -> Result<(), crate::RuntimeEffectControllerError> {
+        let cancellation = self
+            .cancellation_token
+            .clone()
+            .unwrap_or_else(CancellationToken::new);
+        let metadata = if let Some(parent) = self.effect_metadata.as_ref() {
+            crate::EffectInvocationMetadata {
+                session_id: parent.session_id.clone(),
+                origin: parent.origin.clone(),
+                turn_id: parent.turn_id.clone(),
+                turn_index: parent.turn_index,
+                mode_iteration: parent.mode_iteration,
+                effect_id: format!("{}:process:{process_id}:sleep:{sequence}", parent.effect_id),
+                effect_kind: crate::RuntimeEffectKind::Sleep,
+                idempotency_key: format!(
+                    "{}:process:{process_id}:sleep:{sequence}",
+                    parent.idempotency_key
+                ),
+                turn_checkpoint_hash: parent.turn_checkpoint_hash.clone(),
+            }
+        } else {
+            let effect_id = format!("process:{process_id}:sleep:{sequence}");
+            crate::EffectInvocationMetadata {
+                session_id: self.session_id.clone(),
+                origin: crate::EffectOrigin::Turn,
+                turn_id: None,
+                turn_index: None,
+                mode_iteration: None,
+                effect_id: effect_id.clone(),
+                effect_kind: crate::RuntimeEffectKind::Sleep,
+                idempotency_key: effect_id,
+                turn_checkpoint_hash: None,
+            }
+        };
+        let outcome = self
+            .dispatch
+            .effect_controller
+            .as_controller()
+            .execute_effect(
+                crate::RuntimeEffectEnvelope::new(
+                    metadata,
+                    crate::RuntimeEffectCommand::Sleep { duration_ms },
+                ),
+                crate::RuntimeEffectLocalExecutor::sleep(cancellation),
+            )
+            .await?;
+        match outcome {
+            crate::RuntimeEffectOutcome::Sleep => Ok(()),
+            other => Err(crate::RuntimeEffectControllerError::new(
+                "runtime_effect_wrong_outcome",
+                format!("expected sleep outcome, got {}", other.kind().as_str()),
+            )),
         }
-        _ => Err("process `timeout_ms` must be a non-negative integer".to_string()),
-    }
-}
-
-fn lashlang_process_input(
-    value: &lashlang::Value,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    if value.as_record().is_none() {
-        return Err("process `input` must be a record".to_string());
-    }
-    match serde_json::to_value(value)
-        .map_err(|err| format!("failed to serialize process input: {err}"))?
-    {
-        serde_json::Value::Object(map) => Ok(map),
-        _ => Err("process `input` must be a record".to_string()),
     }
 }
 
@@ -306,6 +361,7 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
+            Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -361,6 +417,7 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
+            lashlang::LashlangAbilities::default().with_processes(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -369,12 +426,12 @@ mod tests {
         let mut input = lashlang::Record::new();
         input.insert("root".to_string(), lashlang::Value::String(".".into()));
         let (registration, label) = ctx
-            .prepare_lashlang_process_start(lashlang::ProcessBlockStart {
-                program: lashlang::Program::block(Vec::new()),
-                tool_names: vec!["alpha".to_string()],
-                name: Some(lashlang::Value::String("scan".into())),
-                timeout_ms: Some(lashlang::Value::Number(42.0)),
-                input: Some(lashlang::Value::Record(Arc::new(input))),
+            .prepare_lashlang_process_start(lashlang::ProcessStart {
+                module: lashlang::parse("process scan(root: str) { finish root }")
+                    .expect("process module"),
+                linked_module: None,
+                process: "scan".to_string(),
+                args: input,
             })
             .expect("process start should prepare");
 
@@ -385,21 +442,76 @@ mod tests {
                 .iter()
                 .any(|event_type| event_type.name == "process.wake")
         );
-        let crate::ProcessInput::LashlangBlock {
-            input,
-            tool_bindings,
-            timeout_ms,
-            display_name,
-            ..
+        let crate::ProcessInput::LashlangProcess {
+            args, process_name, ..
         } = registration.input.as_ref()
         else {
             panic!("expected lashlang process input");
         };
-        assert_eq!(input.get("root"), Some(&serde_json::json!(".")));
-        assert_eq!(timeout_ms, &Some(42));
-        assert_eq!(display_name.as_deref(), Some("scan"));
-        assert_eq!(tool_bindings.len(), 1);
-        assert_eq!(tool_bindings[0].name, "alpha");
-        assert_eq!(tool_bindings[0].tool_id, crate::ToolId::new("tool:alpha"));
+        assert_eq!(process_name, "scan");
+        assert_eq!(args.get("root"), Some(&serde_json::json!(".")));
+    }
+
+    #[test]
+    fn lashlang_surface_reflects_host_abilities_without_default_cron() {
+        let tool = crate::ToolDefinition::raw(
+            "tool:alpha",
+            "alpha",
+            "Alpha tool.",
+            crate::ToolDefinition::default_input_schema(),
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        );
+        let plugins = crate::plugin::PluginHost::empty()
+            .build_standard_session("session", None)
+            .expect("plugin session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        let dispatch = Arc::new(ToolDispatchContext {
+            plugins,
+            tools: Arc::new(NoopTools),
+            surface: Arc::new(crate::ToolSurface::from_tools(
+                vec![tool.manifest()],
+                ExecutionMode::standard(),
+                std::collections::BTreeMap::new(),
+            )),
+            host: Arc::new(crate::testing::MockSessionManager::default()),
+            effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+                crate::InlineRuntimeEffectController::default(),
+            )),
+            direct_completions: crate::DirectCompletionClient::unavailable(
+                "direct completions are unavailable in this test context",
+            ),
+            tool_effect_metadata: None,
+            session_id: "session".to_string(),
+            event_tx,
+            turn_injection_bridge: crate::TurnInjectionBridge::new(),
+            attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
+            turn_context: crate::TurnContext::default(),
+        });
+        let ctx = ModeExecutionContext::new(
+            "session".to_string(),
+            ExecutionMode::standard(),
+            dispatch,
+            lashlang::LashlangAbilities::default()
+                .with_processes()
+                .with_process_lifecycle(),
+            Arc::new(crate::InMemoryAttachmentStore::new()),
+            Arc::new(crate::ChronologicalProjection::default()),
+            None,
+            crate::TurnContext::default(),
+        );
+
+        let surface = ctx.lashlang_surface();
+
+        assert!(surface.abilities.processes);
+        assert!(surface.abilities.process_sleep);
+        assert!(surface.abilities.process_signals);
+        assert!(!surface.abilities.triggers);
+        assert!(!surface.abilities.schedules.cron);
+        assert!(
+            surface
+                .resources
+                .resolve_operation("TOOL", "alpha")
+                .is_some()
+        );
     }
 }

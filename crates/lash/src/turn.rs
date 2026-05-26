@@ -9,7 +9,7 @@ pub struct TurnBuilder {
     pub(crate) cancel: CancellationToken,
     pub(crate) mode_turn_options: Option<ModeTurnOptions>,
     pub(crate) provider: Option<ProviderHandle>,
-    pub(crate) model: Option<ModelSelection>,
+    pub(crate) model: Option<lash_core::ModelSpec>,
 }
 
 impl TurnBuilder {
@@ -28,8 +28,8 @@ impl TurnBuilder {
         self
     }
 
-    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.model = Some(ModelSelection::new(model, variant));
+    pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
+        self.model = Some(model);
         self
     }
 
@@ -167,9 +167,7 @@ impl TurnBuilder {
             self.input.turn_context.set_provider(provider);
         }
         if let Some(model) = self.model {
-            self.input
-                .turn_context
-                .set_model(model.model, model.variant);
+            self.input.turn_context.set_model(model);
         }
         validate_required_plugin_inputs(&self.active_plugins, &self.input)?;
         Ok((self.runtime, self.input, self.cancel))
@@ -365,7 +363,10 @@ pub(crate) async fn resume_prepared_assembled(
     let writer_handle = runtime.writer();
     let mut writer = writer_handle.lock().await;
     let turn = writer
-        .resume_turn(turn_id, turn_options(session_events, turn_events, None, cancel))
+        .resume_turn(
+            turn_id,
+            turn_options(session_events, turn_events, None, cancel),
+        )
         .await?;
     runtime.publish_from(&writer);
     Ok(turn)

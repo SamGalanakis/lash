@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::Event as TermEvent;
 use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, TokenUsage, ToolState};
+use lash_core::{TokenUsage, ToolState};
 use lash_sqlite_store::Store;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
+use crate::model_catalog::CachedModelCatalog;
 use crate::prompt_tool::CliPromptBridge;
 use crate::render;
 use crate::resume;
@@ -110,9 +111,12 @@ pub(crate) async fn run_app(
     app.context_window = Some(initial_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
-        provider
-            .default_model_variant(&app.model)
-            .map(str::to_string)
+        crate::provider_metadata::default_model_variant_for_provider(
+            provider.kind(),
+            &app.model,
+            provider.supported_variants(&app.model),
+        )
+        .map(str::to_string)
     });
     app.set_model_variant(current_model_variant.clone());
     let mut current_execution_mode = initial_execution_mode;

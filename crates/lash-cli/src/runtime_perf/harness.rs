@@ -5,10 +5,7 @@ use lash::{
     advanced::{PluginMessage, StandardContextApproach, TurnOutcome},
     messages::MessageRole,
     persistence::SessionStateEnvelope,
-    plugins::{
-        BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginSpec,
-        StaticPluginFactory,
-    },
+    plugins::{BuiltinProcessControlsPluginFactory, PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
 use lash_core::SessionEventRecord;
@@ -29,6 +26,11 @@ const DEFAULT_PROMPT: &str =
     "Inspect the current state and reply with exactly: runtime perf benchmark ok";
 const HISTORY_EXCHANGES: usize = 18;
 const RUNTIME_PERF_MAX_TURNS: usize = 1;
+
+fn benchmark_model_spec() -> lash::ModelSpec {
+    lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+        .expect("valid benchmark model spec")
+}
 
 pub(crate) struct BenchmarkRuntime {
     core: LashCore,
@@ -355,8 +357,7 @@ pub(crate) fn build_embed_core(
     };
     builder = builder
         .provider(benchmark_provider(scenario).into_handle())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(benchmark_model_spec())
         .store_factory(Arc::new(RuntimePerfStoreFactory { store }));
     if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);
@@ -403,7 +404,6 @@ pub(crate) async fn build_runtime_with_store(
         tavily_api_key: None,
     });
     plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
-    plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::default())),
@@ -421,8 +421,7 @@ pub(crate) async fn build_runtime_with_store(
         .install_mode(mode_preset(&mode_id, standard_context_approach)?)
         .default_mode(mode_id.clone())
         .provider(provider)
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(benchmark_model_spec())
         .process_registry(Arc::new(lash::advanced::LocalProcessRegistry::default()))
         .plugins(plugin_stack);
     if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {

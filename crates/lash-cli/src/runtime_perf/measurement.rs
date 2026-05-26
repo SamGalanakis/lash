@@ -787,6 +787,7 @@ fn checkpoint_config(
         model: "mock-model".to_string(),
         max_turns: Some(8),
         model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
         run_session_id: Some("runtime-perf-turn-checkpoint".to_string()),
         autonomous: false,
         tool_specs: Arc::new(Vec::new()),
@@ -1045,10 +1046,15 @@ fn completed_checkpoint_tool(index: usize, call: PendingToolCall) -> CompletedTo
 
 fn checkpoint_exec_code(mode_iteration: usize) -> String {
     format!(
-        r#"print("checkpoint turn {mode_iteration}")
-first = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 1 }}
-second = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 2 }}
-third = start call benchmark_echo {{ value: "runtime perf benchmark ok", ordinal: 3 }}
+        r#"process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {{
+  result = await tool.benchmark_echo({{ value: value, ordinal: ordinal }})?
+  finish result
+}}
+
+print("checkpoint turn {mode_iteration}")
+first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
+third = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 3)
 fanout = await {{
   a: first,
   b: second,

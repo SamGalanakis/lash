@@ -12,13 +12,13 @@ use crate::llm::transport::LlmTransportError;
 use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
 use crate::provider::{
-    AgentModelSelection, ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState,
-    ProviderTransport, VariantRequestConfig,
+    ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState, ProviderTransport,
+    VariantRequestConfig,
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
-    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, OutputState,
-    RuntimeSessionState, ProcessRegistry, ProviderOptions, SessionPolicy, SessionStateEnvelope,
+    AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, ModelSpec, OutputState,
+    ProcessRegistry, ProviderOptions, RuntimeSessionState, SessionPolicy, SessionStateEnvelope,
     TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
 };
 
@@ -26,24 +26,14 @@ type CompletionFuture =
     Pin<Box<dyn Future<Output = Result<LlmResponse, LlmTransportError>> + Send>>;
 type CompletionFn = dyn Fn(LlmRequest) -> CompletionFuture + Send + Sync;
 type SupportedVariantsFn = dyn Fn(&str) -> &'static [&'static str] + Send + Sync;
-type DefaultVariantFn = dyn Fn(&str) -> Option<&'static str> + Send + Sync;
 type RequestVariantConfigFn = dyn Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync;
-type DefaultAgentModelFn = dyn Fn(&str) -> Option<AgentModelSelection> + Send + Sync;
 type SerializeConfigFn = dyn Fn() -> serde_json::Value + Send + Sync;
 
 fn no_supported_variants(_model: &str) -> &'static [&'static str] {
     &[]
 }
 
-fn no_default_variant(_model: &str) -> Option<&'static str> {
-    None
-}
-
 fn no_request_variant_config(_model: &str, _variant: &str) -> Option<VariantRequestConfig> {
-    None
-}
-
-fn no_default_agent_model(_tier: &str) -> Option<AgentModelSelection> {
     None
 }
 
@@ -56,11 +46,8 @@ fn empty_provider_config() -> serde_json::Value {
 #[derive(Clone)]
 pub struct TestProvider {
     kind: &'static str,
-    default_model: String,
     supported_variants: Arc<SupportedVariantsFn>,
-    default_model_variant: Arc<DefaultVariantFn>,
     request_variant_config: Arc<RequestVariantConfigFn>,
-    default_agent_model: Arc<DefaultAgentModelFn>,
     requires_streaming: bool,
     options: ProviderOptions,
     serialize_config: Arc<SerializeConfigFn>,
@@ -71,7 +58,6 @@ impl std::fmt::Debug for TestProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestProvider")
             .field("kind", &self.kind)
-            .field("default_model", &self.default_model)
             .field("requires_streaming", &self.requires_streaming)
             .field("options", &self.options)
             .finish_non_exhaustive()
@@ -104,11 +90,8 @@ impl TestProviderBuilder {
         Self {
             provider: TestProvider {
                 kind: "test",
-                default_model: "mock-model".to_string(),
                 supported_variants: Arc::new(no_supported_variants),
-                default_model_variant: Arc::new(no_default_variant),
                 request_variant_config: Arc::new(no_request_variant_config),
-                default_agent_model: Arc::new(no_default_agent_model),
                 requires_streaming: false,
                 options: ProviderOptions::default(),
                 serialize_config: Arc::new(empty_provider_config),
@@ -128,11 +111,6 @@ impl TestProviderBuilder {
         self
     }
 
-    pub fn default_model(mut self, model: impl Into<String>) -> Self {
-        self.provider.default_model = model.into();
-        self
-    }
-
     pub fn supported_variants<F>(mut self, supported_variants: F) -> Self
     where
         F: Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
@@ -141,27 +119,11 @@ impl TestProviderBuilder {
         self
     }
 
-    pub fn default_model_variant<F>(mut self, default_model_variant: F) -> Self
-    where
-        F: Fn(&str) -> Option<&'static str> + Send + Sync + 'static,
-    {
-        self.provider.default_model_variant = Arc::new(default_model_variant);
-        self
-    }
-
     pub fn request_variant_config<F>(mut self, request_variant_config: F) -> Self
     where
         F: Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync + 'static,
     {
         self.provider.request_variant_config = Arc::new(request_variant_config);
-        self
-    }
-
-    pub fn default_agent_model<F>(mut self, default_agent_model: F) -> Self
-    where
-        F: Fn(&str) -> Option<AgentModelSelection> + Send + Sync + 'static,
-    {
-        self.provider.default_agent_model = Arc::new(default_agent_model);
         self
     }
 
@@ -250,20 +212,8 @@ impl ProviderTransport for TestProvider {
 }
 
 impl ProviderModelPolicy for TestProvider {
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        (self.default_agent_model)(tier)
-    }
-
-    fn default_model(&self) -> &str {
-        &self.default_model
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         (self.supported_variants)(model)
-    }
-
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        (self.default_model_variant)(model)
     }
 
     fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
@@ -277,13 +227,13 @@ pub fn mock_session_policy() -> SessionPolicy {
     SessionPolicy {
         provider: TestProvider::builder()
             .kind("stub")
-            .default_model("mock-model")
             .complete_error(
                 "TestProvider::complete was called; tests must supply a real provider or mock",
             )
             .build()
             .into_handle(),
-        model: "mock-model".to_string(),
+        model: ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            .expect("valid mock model spec"),
         execution_mode: ExecutionMode::standard(),
         ..Default::default()
     }
@@ -342,6 +292,69 @@ where
         progress: None,
     })
     .await
+}
+
+struct EmptyModeExecutionTools;
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for EmptyModeExecutionTools {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        Vec::new()
+    }
+
+    fn resolve_contract(&self, _name: &str) -> Option<Arc<crate::ToolContract>> {
+        None
+    }
+
+    async fn execute(&self, _call: crate::ToolCall<'_>) -> crate::ToolResult {
+        crate::ToolResult::err_fmt("test mode execution context has no tools")
+    }
+}
+
+pub fn mode_execution_context_with_lashlang_abilities(
+    abilities: lashlang::LashlangAbilities,
+) -> crate::ModeExecutionContext<'static> {
+    let session_id = "test-session".to_string();
+    let execution_mode = ExecutionMode::new("rlm");
+    let plugins = crate::PluginHost::new(test_mode_factories())
+        .with_lashlang_abilities(abilities)
+        .build_session(session_id.clone(), execution_mode.clone(), None, None)
+        .expect("test plugin session");
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+    let attachment_store = Arc::new(crate::InMemoryAttachmentStore::new());
+    let dispatch = Arc::new(crate::tool_dispatch::ToolDispatchContext {
+        plugins,
+        tools: Arc::new(EmptyModeExecutionTools),
+        surface: Arc::new(crate::ToolSurface::from_tools(
+            Vec::new(),
+            execution_mode.clone(),
+            std::collections::BTreeMap::new(),
+        )),
+        host: Arc::new(MockSessionManager::default()),
+        effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
+            crate::InlineRuntimeEffectController::default(),
+        )),
+        direct_completions: crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+        tool_effect_metadata: None,
+        session_id: session_id.clone(),
+        event_tx,
+        turn_injection_bridge: crate::TurnInjectionBridge::new(),
+        attachment_store: attachment_store.clone(),
+        turn_context: crate::TurnContext::default(),
+    });
+
+    crate::ModeExecutionContext::new(
+        session_id,
+        execution_mode,
+        dispatch,
+        abilities,
+        attachment_store,
+        Arc::new(crate::ChronologicalProjection::default()),
+        None,
+        crate::TurnContext::default(),
+    )
 }
 
 /// Build an empty `AssembledTurn` whose assistant text is `summary`.
@@ -725,7 +738,6 @@ mod test_mode_fakes {
     pub fn test_mode_factories() -> Vec<Arc<dyn PluginFactory>> {
         vec![
             Arc::new(crate::BuiltinProcessControlsPluginFactory::new()),
-            Arc::new(crate::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(TestModeFactory {
                 id: "mode_standard",
                 mode: ExecutionMode::standard(),

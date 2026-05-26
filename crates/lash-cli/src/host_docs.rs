@@ -234,7 +234,6 @@ mod tests {
         let docs_dir = PathBuf::from("/tmp/lash-home/docs/lash-cli");
         let plugin_host = lash_core::PluginHost::new(vec![
             Arc::new(lash_core::BuiltinProcessControlsPluginFactory::new()),
-            Arc::new(lash_core::BuiltinMonitorToolPluginFactory::new()),
             Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
             Arc::new(HostDocsPluginFactory::new(docs_dir.clone())),
         ]);

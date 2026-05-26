@@ -24,3 +24,4 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 http = "1"
 http-body-util = "0.1"
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.8" }

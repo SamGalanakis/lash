@@ -12,7 +12,7 @@ use lash_core::plugin::{
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
-    AssembledTurn, ExecutionMode, MessageRole, RuntimeSessionState, PluginHost,
+    AssembledTurn, ExecutionMode, MessageRole, PluginHost, RuntimeSessionState,
     SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
     SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
     ToolResult, TurnHookContext, TurnResultHookContext,
@@ -482,6 +482,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
+            lashlang_abilities: Default::default(),
         })
         .expect("tool surface");
     assert!(

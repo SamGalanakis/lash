@@ -7,7 +7,7 @@ use super::*;
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
-    processes_available: bool,
+    lashlang_abilities: lashlang::LashlangAbilities,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -43,27 +43,26 @@ impl PluginHost {
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),
-            processes_available: false,
+            lashlang_abilities: lashlang::LashlangAbilities::default(),
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn with_processes(mut self) -> Self {
-        self.processes_available = true;
-        self
-    }
-
-    pub fn with_processes_available(mut self, available: bool) -> Self {
-        self.processes_available = available;
+    pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
+        self.lashlang_abilities = abilities;
         self
     }
 
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
-            processes_available: self.processes_available,
+            lashlang_abilities: self.lashlang_abilities,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        self.lashlang_abilities
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
@@ -227,7 +226,7 @@ impl PluginHost {
             standard_context_approach: standard_context_approach.clone(),
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
-            processes_available: self.processes_available,
+            lashlang_abilities: self.lashlang_abilities,
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -298,6 +297,7 @@ impl PluginHost {
             tool_surface_overlay,
             tool_access: authority.tool_access,
             subagent: authority.subagent,
+            lashlang_abilities: self.lashlang_abilities,
             prompt_contributors: reg.prompt_contributors,
             tool_surface_contributors: reg.tool_surface_contributors,
             tool_discovery_contributors: reg.tool_discovery_contributors,

@@ -115,13 +115,8 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.session_spec = self.session_spec.model(model, variant);
-        self
-    }
-
-    pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
-        self.session_spec = self.session_spec.max_context_tokens(max_context_tokens);
+    pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
+        self.session_spec = self.session_spec.model(model);
         self
     }
 
@@ -218,25 +213,12 @@ impl LashCoreBuilder {
         if !self.modes.contains_key(&default_mode) {
             return Err(EmbedError::DefaultModeNotInstalled { mode: default_mode });
         }
-        let max_context_tokens = self
-            .session_spec
-            .max_context_tokens
-            .ok_or(EmbedError::MissingMaxContextTokens)?;
         let provider = self.session_spec.provider.clone().unwrap_or_default();
         let model = self
             .session_spec
             .model
             .clone()
-            .unwrap_or_else(|| provider.default_model().to_string());
-        let model_variant = self
-            .session_spec
-            .model_variant
-            .clone()
-            .unwrap_or_else(|| provider.default_model_variant(&model).map(str::to_string));
-        let model = ModelSelection {
-            model,
-            variant: model_variant,
-        };
+            .ok_or(EmbedError::MissingModelSpec)?;
 
         let default_preset = self
             .modes
@@ -244,9 +226,7 @@ impl LashCoreBuilder {
             .expect("default mode was validated");
         let base_policy = SessionPolicy {
             provider,
-            model: model.model,
-            model_variant: model.variant,
-            max_context_tokens: Some(max_context_tokens),
+            model,
             max_turns: self.session_spec.max_turns.flatten(),
             execution_mode: default_mode.execution_mode(),
             standard_context_approach: default_preset.standard_context_approach.clone(),

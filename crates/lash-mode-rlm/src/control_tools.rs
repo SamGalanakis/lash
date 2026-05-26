@@ -132,7 +132,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-        r#"call continue_as { task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } }"#.into(),
+        r#"await TOOL.default.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
     ])
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
@@ -277,6 +277,11 @@ mod tests {
     use lash_core::{RuntimeSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
+    fn model_spec(model: &str) -> lash_core::ModelSpec {
+        lash_core::ModelSpec::from_token_limits(model, None, 200_000, None, None)
+            .expect("valid test model spec")
+    }
+
     #[derive(Default)]
     struct BatonManager {
         snapshot: RuntimeSessionState,
@@ -392,8 +397,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                     ..SessionPolicy::default()
                 },
@@ -488,8 +492,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -547,8 +550,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -602,8 +604,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()

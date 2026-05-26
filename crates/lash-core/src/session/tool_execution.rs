@@ -124,7 +124,7 @@ impl ModeExecutionContext<'_> {
                     self.execute_prepared_tool_process(prepared, effect_metadata)
                         .await
                 }
-                ToolPreparationOutcome::Completed(outcome) => outcome,
+                ToolPreparationOutcome::Completed(outcome) => *outcome,
             };
         outcome.record.call_id = Some(call_id.clone());
 

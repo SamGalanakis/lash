@@ -156,7 +156,6 @@ async fn standard_runtime_trace_records_stream_event_entries() {
 async fn extended_runtime_trace_records_provider_stream_events() {
     let transport = TestProvider::builder()
         .kind("mock")
-        .default_model("mock-model")
         .requires_streaming(true)
         .complete(|req| async move {
             if let Some(tx) = req.provider_trace.as_ref() {

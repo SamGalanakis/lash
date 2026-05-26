@@ -68,9 +68,7 @@ struct LeasedTurnFinish {
 
 impl LashRuntime {
     fn max_context_tokens(&self) -> usize {
-        self.policy
-            .max_context_tokens
-            .expect("lash runtime requires explicit max_context_tokens")
+        self.policy.context_window_tokens()
     }
     #[doc(hidden)]
     pub fn set_turn_phase_probe(&mut self, probe: Arc<dyn RuntimeTurnPhaseProbe>) {
@@ -120,7 +118,7 @@ impl LashRuntime {
         if assembler.token_usage.total() > 0 || assembler.token_usage.cached_input_tokens > 0 {
             turn_usage_delta.push(TokenLedgerEntry {
                 source: "turn".to_string(),
-                model: policy.model.clone(),
+                model: policy.model.id.clone(),
                 usage: assembler.token_usage.clone(),
             });
         }
@@ -409,7 +407,6 @@ impl LashRuntime {
         let mut turn_policy = self.policy.clone();
         turn_policy.execution_mode = checkpoint_record.machine_config.execution_mode.clone();
         turn_policy.model = checkpoint_record.model.clone();
-        turn_policy.model_variant = checkpoint_record.model_variant.clone();
         turn_policy.max_turns = checkpoint_record.machine_config.max_turns;
         self.mode_turn_options = checkpoint_record.mode_turn_options.clone();
         let resume_turn_index = checkpoint_record.turn_index;
@@ -998,15 +995,10 @@ impl LashRuntime {
         let child_usage_event_relay = ChildUsageEventRelay::new(event_tx.clone());
         let mut turn_policy = self.policy.clone();
         if let Some(provider) = turn_context.provider().cloned() {
-            let model = provider.default_model().to_string();
-            let model_variant = provider.default_model_variant(&model).map(str::to_string);
             turn_policy.provider = provider;
-            turn_policy.model = model;
-            turn_policy.model_variant = model_variant;
         }
-        if let Some((model, variant)) = turn_context.model_selection() {
-            turn_policy.model = model.to_string();
-            turn_policy.model_variant = variant.map(str::to_string);
+        if let Some(model) = turn_context.model_spec() {
+            turn_policy.model = model.clone();
         }
         let effective_mode_turn_options = mode_turn_options
             .clone()
