@@ -243,7 +243,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         .provider(standard_provider)
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
-                        .process_registry(Arc::new(LocalProcessRegistry::default()))
+                        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection.clone());
                         })
@@ -283,7 +283,7 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                         ]))
                         .model(mock_model_spec())
                         .tools(Arc::new(LongTextTools))
-                        .process_registry(Arc::new(LocalProcessRegistry::default()))
+                        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
                         .configure_plugins(|plugins| {
                             plugins.replace(projection);
                         })

@@ -86,9 +86,11 @@ pub use error::{RuntimeError, RuntimeErrorCode};
 pub use host::{EmbeddedRuntimeHost, ProcessRuntimeHost, RuntimeCoreConfig};
 use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
+#[cfg(any(test, feature = "testing"))]
+pub use process::TestLocalProcessRegistry;
 pub use process::{
-    LocalProcessRegistry, ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest,
-    ProcessCleanupRequest, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
+    ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest, ProcessCleanupRequest,
+    ProcessCreatorScope, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
     ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
     ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
     ProcessListRequest, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRequestScope,

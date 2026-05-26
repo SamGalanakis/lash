@@ -4,11 +4,18 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 impl ProcessCapability {
+    pub(in crate::runtime::session_manager) fn process_scope(
+        &self,
+        session_id: &str,
+    ) -> crate::ProcessCreatorScope {
+        crate::ProcessCreatorScope::new(self.runtime_scope_id.as_ref(), session_id)
+    }
+
     pub(in crate::runtime::session_manager) fn process_scope_key(
         &self,
         session_id: &str,
     ) -> String {
-        format!("{}:{session_id}", self.runtime_scope_id)
+        self.process_scope(session_id).scope_key()
     }
 
     pub(in crate::runtime::session_manager) async fn start_process(
@@ -33,11 +40,10 @@ impl ProcessCapability {
             ));
         };
         self.mark_current_process_sync_needed(current, &session_id);
-        let creator_scope_key = self.process_scope_key(&session_id);
-        let registration = registration.with_provenance(
-            creator_scope_key.clone(),
-            current.host.core.host_profile_id.clone(),
-        );
+        let creator_scope = self.process_scope(&session_id);
+        let creator_scope_key = creator_scope.scope_key();
+        let registration =
+            registration.with_provenance(creator_scope, current.host.core.host_profile_id.clone());
         if execution_context.wake_target_scope_key.is_none() {
             let wake_scope_key = execution_context
                 .wake_session_id
@@ -61,6 +67,7 @@ impl ProcessCapability {
                 Some(runner),
                 scope.effect_metadata,
                 scope.effect_controller,
+                scope.turn_lease,
             )
             .await?;
         match outcome {
@@ -92,6 +99,7 @@ impl ProcessCapability {
                 None,
                 scope.effect_metadata,
                 scope.effect_controller,
+                scope.turn_lease,
             )
             .await?;
         match outcome {
@@ -123,6 +131,7 @@ impl ProcessCapability {
                 None,
                 scope.effect_metadata,
                 scope.effect_controller,
+                scope.turn_lease,
             )
             .await?;
         match outcome {
@@ -167,6 +176,7 @@ impl ProcessCapability {
                 None,
                 scope.effect_metadata,
                 scope.effect_controller,
+                scope.turn_lease,
             )
             .await?;
         match outcome {
@@ -266,6 +276,7 @@ impl ProcessCapability {
                 None,
                 scope.effect_metadata,
                 scope.effect_controller,
+                scope.turn_lease,
             )
             .await?;
         match outcome {
@@ -362,6 +373,7 @@ impl ProcessCapability {
         runner: Option<Arc<dyn crate::runtime::effect::ProcessRunner>>,
         parent_metadata: Option<crate::EffectInvocationMetadata>,
         effect_controller: Option<&dyn crate::RuntimeEffectController>,
+        scope_turn_lease: Option<crate::RuntimeTurnLease>,
     ) -> Result<crate::ProcessEffectOutcome, crate::PluginError> {
         let effect_id = command.effect_id();
         let metadata = self.process_effect_metadata(current, &effect_id, parent_metadata)?;
@@ -370,9 +382,13 @@ impl ProcessCapability {
             crate::RuntimeEffectCommand::Process { command },
         );
         let controller = effect_controller.unwrap_or(current.host.core.effect_controller.as_ref());
+        let turn_lease = scope_turn_lease.as_ref().or(current.turn_lease.as_ref());
+        // Process registry/workflow idempotency is the replay boundary when a
+        // process control call is issued outside an active turn lease.
+        let journal_store = turn_lease.and(current.store.as_ref().map(|store| store.as_ref()));
         let outcome = crate::runtime::effect::execute_effect_with_journal(
-            current.store.as_ref().map(|store| store.as_ref()),
-            current.turn_lease.as_ref(),
+            journal_store,
+            turn_lease,
             controller,
             envelope,
             crate::RuntimeEffectLocalExecutor::process(registry, runner),

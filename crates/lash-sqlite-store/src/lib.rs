@@ -2772,7 +2772,10 @@ mod tests {
                 metadata: serde_json::Value::Null,
             },
         )
-        .with_provenance("runtime:session", "test-host")
+        .with_provenance(
+            lash_core::ProcessCreatorScope::new("runtime", "session"),
+            "test-host",
+        )
     }
 
     fn monitor_line_event_type() -> lash_core::ProcessEventType {
@@ -2835,6 +2838,13 @@ mod tests {
             .expect("persisted process");
 
         assert_eq!(record.created_by_scope_key, "runtime:session");
+        assert_eq!(
+            record
+                .created_by_scope
+                .as_ref()
+                .map(|scope| scope.session_id.as_str()),
+            Some("session")
+        );
         assert_eq!(
             registry
                 .await_process("proc-persist")

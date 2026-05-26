@@ -195,6 +195,7 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
         let context = context.with_effect_metadata(effect_metadata);
+        let context = context.with_turn_lease(self.turn_lease.clone());
         let result = mode_session
             .execute_code(
                 context,

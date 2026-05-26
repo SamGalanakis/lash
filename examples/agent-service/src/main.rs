@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::routing::get;
+#[cfg(feature = "restate")]
+use lash::PluginBinding;
 use lash::{
     LashCore, ModeId, ModePreset,
     advanced::InlineRuntimeEffectController,
@@ -23,11 +25,15 @@ mod ui;
 
 use crate::db::AppDb;
 #[cfg(feature = "restate")]
+use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
+#[cfg(feature = "restate")]
 use crate::restate::{AgentServiceTurnWorkflow, AgentServiceTurnWorkflowImpl};
 use crate::routes::{
     create_chat, index, list_chats, list_messages, send_message, settings, update_chat_model,
 };
 use crate::state::{AgentServiceDurability, AppStateData, anyhow_like};
+#[cfg(feature = "restate")]
+use lash_restate::{LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner};
 
 #[derive(Default)]
 struct StderrTraceSink {
@@ -103,6 +109,9 @@ async fn main() -> anyhow_like::Result<()> {
     let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
         data_dir.join("lash-sessions"),
     ));
+    let app_db = AppDb::open(&data_dir.join("app.db")).map_err(|err| err.to_string())?;
+    #[cfg(feature = "restate")]
+    let shared_db = Arc::new(Mutex::new(app_db));
     let model_spec = lash::ModelSpec::from_token_limits(
         model.clone(),
         Some(model_variant.clone()),
@@ -130,12 +139,12 @@ async fn main() -> anyhow_like::Result<()> {
     let process_registry = Arc::new(
         lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
             .map_err(|err| err.to_string())?,
-    );
+    ) as Arc<dyn lash::advanced::ProcessRegistry>;
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
             .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
-            .process_registry(process_registry)
+            .process_registry(Arc::clone(&process_registry))
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
@@ -143,7 +152,7 @@ async fn main() -> anyhow_like::Result<()> {
             {
                 core_builder
                     .advanced()
-                    .process_registry(process_registry)
+                    .process_registry(Arc::clone(&process_registry))
                     .build()
                     .map_err(|err| err.to_string())?
             }
@@ -152,14 +161,28 @@ async fn main() -> anyhow_like::Result<()> {
         }
     };
 
-    let app_db = AppDb::open(&data_dir.join("app.db")).map_err(|err| err.to_string())?;
+    #[cfg(feature = "restate")]
+    let process_worker = if durability == AgentServiceDurability::Restate {
+        let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
+            db: Arc::clone(&shared_db),
+        });
+        Some(lash::advanced::DurableProcessWorker::new(
+            core.durable_process_worker_config_with_plugins(
+                Arc::clone(&process_registry),
+                [demo_factory],
+            )
+            .map_err(|err| err.to_string())?,
+        ))
+    } else {
+        None
+    };
     #[cfg(feature = "restate")]
     let restate_ingress_url =
         (durability == AgentServiceDurability::Restate).then_some(restate_ingress_url);
     #[cfg(feature = "restate")]
-    let state = AppStateData::new(
+    let state = AppStateData::from_shared_db(
         core,
-        app_db,
+        Arc::clone(&shared_db),
         model,
         Some(model_variant),
         durability,
@@ -170,8 +193,14 @@ async fn main() -> anyhow_like::Result<()> {
 
     #[cfg(feature = "restate")]
     if durability == AgentServiceDurability::Restate {
+        let process_runner = Arc::new(RestateCoreProcessRunner::new(
+            process_worker.expect("process worker configured for Restate"),
+        ));
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
+            .bind(
+                LashProcessWorkflowImpl::new(process_runner, Arc::clone(&process_registry)).serve(),
+            )
             .build();
         tokio::spawn(async move {
             restate_sdk::http_server::HttpServer::new(endpoint)

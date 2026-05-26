@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(any(test, feature = "testing"))]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "testing"))]
 use tokio::sync::Mutex;
 
 use crate::plugin::PluginError;
@@ -107,6 +110,7 @@ impl ProcessExecutionContext {
 pub struct ProcessRequestScope<'scope> {
     pub effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
+    pub turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
 impl<'scope> ProcessRequestScope<'scope> {
@@ -127,6 +131,11 @@ impl<'scope> ProcessRequestScope<'scope> {
         effect_controller: &'scope dyn crate::RuntimeEffectController,
     ) -> Self {
         self.effect_controller = Some(effect_controller);
+        self
+    }
+
+    pub fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
+        self.turn_lease = turn_lease;
         self
     }
 }
@@ -451,6 +460,29 @@ pub struct ProcessWake {
     pub dedupe_key: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessCreatorScope {
+    pub runtime_scope_id: String,
+    pub session_id: String,
+}
+
+impl ProcessCreatorScope {
+    pub fn new(runtime_scope_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            runtime_scope_id: runtime_scope_id.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn scope_key(&self) -> String {
+        format!("{}:{}", self.runtime_scope_id, self.session_id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.runtime_scope_id.is_empty() || self.session_id.is_empty()
+    }
+}
+
 /// Serializable process spec used to start or recover a runtime process.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProcessRegistration {
@@ -458,6 +490,8 @@ pub struct ProcessRegistration {
     pub input: Arc<ProcessInput>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
+    #[serde(default)]
+    pub created_by_scope: Option<ProcessCreatorScope>,
     #[serde(default)]
     pub created_by_scope_key: String,
     #[serde(default)]
@@ -470,6 +504,7 @@ impl Clone for ProcessRegistration {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
             event_types: self.event_types.clone(),
+            created_by_scope: self.created_by_scope.clone(),
             created_by_scope_key: self.created_by_scope_key.clone(),
             host_profile_id: self.host_profile_id.clone(),
         }
@@ -482,6 +517,7 @@ impl ProcessRegistration {
             id: id.into(),
             input: Arc::new(input),
             event_types: default_process_event_types(),
+            created_by_scope: None,
             created_by_scope_key: String::new(),
             host_profile_id: String::new(),
         }
@@ -489,10 +525,11 @@ impl ProcessRegistration {
 
     pub fn with_provenance(
         mut self,
-        created_by_scope_key: impl Into<String>,
+        created_by_scope: ProcessCreatorScope,
         host_profile_id: impl Into<String>,
     ) -> Self {
-        self.created_by_scope_key = created_by_scope_key.into();
+        self.created_by_scope_key = created_by_scope.scope_key();
+        self.created_by_scope = Some(created_by_scope);
         self.host_profile_id = host_profile_id.into();
         self
     }
@@ -551,6 +588,8 @@ pub struct ProcessRecord {
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
     #[serde(default)]
+    pub created_by_scope: Option<ProcessCreatorScope>,
+    #[serde(default)]
     pub created_by_scope_key: String,
     #[serde(default)]
     pub host_profile_id: String,
@@ -567,6 +606,7 @@ pub struct ProcessRecord {
 impl ProcessRecord {
     pub fn from_registration(mut registration: ProcessRegistration) -> Self {
         ensure_core_event_types(&mut registration);
+        ensure_process_provenance(&mut registration);
         validate_process_registration(&registration)
             .expect("process registration should be valid before record construction");
         let registration_hash = process_registration_hash(&registration)
@@ -584,6 +624,7 @@ impl ProcessRecord {
             registration_hash,
             input: registration.input,
             event_types: registration.event_types,
+            created_by_scope: registration.created_by_scope,
             created_by_scope_key: registration.created_by_scope_key,
             host_profile_id: registration.host_profile_id,
             created_at_ms: now_ms,
@@ -800,14 +841,16 @@ pub trait ProcessRegistry: Send + Sync {
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
 }
 
-/// In-memory process registry shared across runtime sessions.
-pub struct LocalProcessRegistry {
+/// In-memory process registry for core tests.
+#[cfg(any(test, feature = "testing"))]
+pub struct TestLocalProcessRegistry {
     managed: Arc<Mutex<ManagedProcessMap>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
     wake_inbox: Arc<Mutex<ManagedWakeInbox>>,
 }
 
-impl Default for LocalProcessRegistry {
+#[cfg(any(test, feature = "testing"))]
+impl Default for TestLocalProcessRegistry {
     fn default() -> Self {
         Self {
             managed: Arc::new(Mutex::new(HashMap::new())),
@@ -817,15 +860,20 @@ impl Default for LocalProcessRegistry {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
+#[cfg(any(test, feature = "testing"))]
 type ManagedGrantMap = HashMap<String, HashMap<String, ProcessHandleGrant>>;
+#[cfg(any(test, feature = "testing"))]
 type ManagedWakeInbox = HashMap<String, ManagedWakeDelivery>;
 
+#[cfg(any(test, feature = "testing"))]
 struct ManagedWakeDelivery {
     delivery: ProcessWakeDelivery,
     acked: bool,
 }
 
+#[cfg(any(test, feature = "testing"))]
 struct ManagedProcessRecord {
     record: ProcessRecord,
     events: Vec<ProcessEvent>,
@@ -834,12 +882,14 @@ struct ManagedProcessRecord {
     notify: Arc<tokio::sync::Notify>,
 }
 
-impl LocalProcessRegistry {
+#[cfg(any(test, feature = "testing"))]
+impl TestLocalProcessRegistry {
     async fn insert_process(
         &self,
         mut registration: ProcessRegistration,
     ) -> Result<ProcessRecord, PluginError> {
         ensure_core_event_types(&mut registration);
+        ensure_process_provenance(&mut registration);
         validate_process_registration(&registration)?;
         let registration_hash = process_registration_hash(&registration)?;
         let mut managed = self.managed.lock().await;
@@ -873,7 +923,8 @@ impl LocalProcessRegistry {
 }
 
 #[async_trait::async_trait]
-impl ProcessRegistry for LocalProcessRegistry {
+#[cfg(any(test, feature = "testing"))]
+impl ProcessRegistry for TestLocalProcessRegistry {
     async fn register_process(
         &self,
         registration: ProcessRegistration,
@@ -1283,6 +1334,7 @@ pub fn prepare_process_registration(
     mut registration: ProcessRegistration,
 ) -> Result<(ProcessRegistration, String), PluginError> {
     ensure_core_event_types(&mut registration);
+    ensure_process_provenance(&mut registration);
     validate_process_registration(&registration)?;
     let registration_hash = process_registration_hash(&registration)?;
     Ok((registration, registration_hash))
@@ -1402,11 +1454,35 @@ fn ensure_core_event_types(registration: &mut ProcessRegistration) {
     }
 }
 
+fn ensure_process_provenance(registration: &mut ProcessRegistration) {
+    if registration.created_by_scope_key.is_empty()
+        && let Some(scope) = &registration.created_by_scope
+    {
+        registration.created_by_scope_key = scope.scope_key();
+    }
+}
+
 fn validate_process_registration(registration: &ProcessRegistration) -> Result<(), PluginError> {
     if registration.id.trim().is_empty() {
         return Err(PluginError::Session(
             "process id must be a non-empty string".to_string(),
         ));
+    }
+    if let Some(scope) = &registration.created_by_scope {
+        if scope.is_empty() {
+            return Err(PluginError::Session(format!(
+                "process `{}` creator scope must include runtime scope and session id",
+                registration.id
+            )));
+        }
+        if !registration.created_by_scope_key.is_empty()
+            && registration.created_by_scope_key != scope.scope_key()
+        {
+            return Err(PluginError::Session(format!(
+                "process `{}` creator scope key does not match structured creator scope",
+                registration.id
+            )));
+        }
     }
     let mut names = HashSet::new();
     for event_type in &registration.event_types {
@@ -1639,7 +1715,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_registry_validates_custom_events_and_materializes_wakes() {
-        let registry = LocalProcessRegistry::default();
+        let registry = TestLocalProcessRegistry::default();
         let mut properties = serde_json::Map::new();
         properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
         properties.insert(
@@ -1722,7 +1798,7 @@ mod tests {
 
     #[tokio::test]
     async fn await_process_reads_terminal_event_materialized_output() {
-        let registry = LocalProcessRegistry::default();
+        let registry = TestLocalProcessRegistry::default();
         registry
             .register_process(registration("proc-2"))
             .await
@@ -1756,7 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn transfer_handle_grants_moves_addressability_without_process_events() {
-        let registry = LocalProcessRegistry::default();
+        let registry = TestLocalProcessRegistry::default();
         registry
             .register_process(registration("proc-3"))
             .await
@@ -1801,7 +1877,7 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_sessions_can_hold_grants_to_one_process() {
-        let registry = LocalProcessRegistry::default();
+        let registry = TestLocalProcessRegistry::default();
         registry
             .register_process(registration("proc-5"))
             .await
@@ -1855,7 +1931,7 @@ mod tests {
 
     #[tokio::test]
     async fn processes_can_exist_with_zero_grants() {
-        let registry = LocalProcessRegistry::default();
+        let registry = TestLocalProcessRegistry::default();
         registry
             .register_process(registration("proc-4"))
             .await

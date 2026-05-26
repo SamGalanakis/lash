@@ -322,11 +322,13 @@ mod restate_tests {
     use super::*;
     use crate::board::BoardState;
     use crate::db::AppDb;
+    use crate::demo_plugin::{DemoPlugin, DemoPluginConfig};
     use crate::state::AgentServiceDurability;
+    use lash::PluginBinding;
     use lash::{LashCore, ModeId, ModePreset};
     use lash_core::LlmOutputPart;
-    use lash_core::LocalProcessRegistry;
     use lash_core::llm::types::LlmResponse;
+    use lash_restate::LashProcessWorkflow;
 
     fn runtime_error(code: RuntimeErrorCode) -> lash::EmbedError {
         lash::advanced::RuntimeError::new(code, "test resume failure").into()
@@ -372,9 +374,29 @@ mod restate_tests {
         assert!(err.message.contains("test resume failure"));
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore = "requires a running Restate server; set RESTATE_INGRESS_URL and run with --ignored"]
-    async fn live_restate_ingress_runs_agent_turn_workflow_end_to_end() {
+    fn live_restate_ingress_runs_agent_turn_and_process_workflow_end_to_end() {
+        std::thread::Builder::new()
+            .name("agent-service-restate-e2e".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .thread_stack_size(16 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build live Restate E2E runtime")
+                    .block_on(
+                        live_restate_ingress_runs_agent_turn_and_process_workflow_end_to_end_async(
+                        ),
+                    )
+            })
+            .expect("spawn live Restate E2E thread")
+            .join()
+            .expect("live Restate E2E thread");
+    }
+
+    async fn live_restate_ingress_runs_agent_turn_and_process_workflow_end_to_end_async() {
         let Some(ingress_url) = std::env::var("RESTATE_INGRESS_URL").ok() else {
             eprintln!("skipping live Restate E2E: RESTATE_INGRESS_URL is not set");
             return;
@@ -389,7 +411,8 @@ mod restate_tests {
             .unwrap_or_else(|_| format!("http://{bind_addr}"));
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let state = live_restate_test_state(temp.path());
+        let harness = live_restate_test_state(temp.path());
+        let state = harness.state.clone();
         let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .expect("bind Restate endpoint");
@@ -401,6 +424,15 @@ mod restate_tests {
         };
         let endpoint = restate_sdk::endpoint::Endpoint::builder()
             .bind(AgentServiceTurnWorkflowImpl::new(state.clone()).serve())
+            .bind(
+                lash_restate::LashProcessWorkflowImpl::new(
+                    Arc::new(lash_restate::RestateCoreProcessRunner::new(
+                        harness.process_worker.clone(),
+                    )),
+                    Arc::clone(&harness.process_registry),
+                )
+                .serve(),
+            )
             .build();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -483,14 +515,38 @@ mod restate_tests {
         server.await.expect("endpoint server task");
     }
 
-    fn live_restate_test_state(data_dir: &Path) -> AppStateData {
+    struct LiveRestateTestHarness {
+        state: AppStateData,
+        process_registry: Arc<dyn lash_core::ProcessRegistry>,
+        process_worker: lash_core::DurableProcessWorker,
+    }
+
+    fn live_restate_test_state(data_dir: &Path) -> LiveRestateTestHarness {
+        let app_db = Arc::new(Mutex::new(
+            AppDb::open(&data_dir.join("app.db")).expect("open app db"),
+        ));
+        let process_registry = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+                .expect("open process registry"),
+        ) as Arc<dyn lash_core::ProcessRegistry>;
         let provider = lash_core::testing::TestProvider::builder()
             .kind("mock-provider")
             .complete(|_request| async {
+                let text = r#"```lashlang
+tool = TOOL.default
+process play_center(tool: TOOL) {
+  board = await tool.read_board({})?
+  move = await tool.play_move({ cell: 4 })?
+  finish { before: board, move: move }
+}
+handle = start play_center(tool: tool)
+result = (await handle)?
+submit "done via Restate E2E"
+```"#;
                 Ok(LlmResponse {
-                    full_text: "```lashlang\nsubmit \"done via Restate E2E\"\n```".to_string(),
+                    full_text: text.to_string(),
                     parts: vec![LlmOutputPart::Text {
-                        text: "```lashlang\nsubmit \"done via Restate E2E\"\n```".to_string(),
+                        text: text.to_string(),
                         response_meta: None,
                     }],
                     ..LlmResponse::default()
@@ -498,6 +554,9 @@ mod restate_tests {
             })
             .build()
             .into_handle();
+        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            data_dir.join("lash-sessions"),
+        ));
         let core = LashCore::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
@@ -506,24 +565,37 @@ mod restate_tests {
                 lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
                     .expect("valid mock model spec"),
             )
-            .store_factory(Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
-                data_dir.join("lash-sessions"),
-            )))
+            .store_factory(store_factory)
             .attachment_store(Arc::new(lash::persistence::FileAttachmentStore::new(
                 data_dir.join("attachments"),
             )))
             .advanced()
-            .process_registry(Arc::new(LocalProcessRegistry::default()))
+            .process_registry(Arc::clone(&process_registry))
             .build()
             .expect("build test core");
-        AppStateData::new(
+        let demo_factory = DemoPlugin::factory(&DemoPluginConfig {
+            db: Arc::clone(&app_db),
+        });
+        let process_worker = lash_core::DurableProcessWorker::new(
+            core.durable_process_worker_config_with_plugins(
+                Arc::clone(&process_registry),
+                [demo_factory],
+            )
+            .expect("process worker config"),
+        );
+        let state = AppStateData::from_shared_db(
             core,
-            AppDb::open(&data_dir.join("app.db")).expect("open app db"),
+            app_db,
             "mock-model".to_string(),
             None,
             AgentServiceDurability::Restate,
             std::env::var("RESTATE_INGRESS_URL").ok(),
-        )
+        );
+        LiveRestateTestHarness {
+            state,
+            process_registry,
+            process_worker,
+        }
     }
 
     async fn wait_for_endpoint_socket(addr: SocketAddr) {
@@ -576,10 +648,19 @@ mod restate_tests {
             if events.iter().any(|event| event.is_done) {
                 return;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for Restate workflow turn outbox to finish"
-            );
+            if std::time::Instant::now() >= deadline {
+                let mut tail = events
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .map(|event| (event.id, event.is_done, event.item_json.as_str()))
+                    .collect::<Vec<_>>();
+                tail.reverse();
+                panic!(
+                    "timed out waiting for Restate workflow turn outbox to finish; event_count={}; tail={tail:#?}",
+                    events.len(),
+                );
+            }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }

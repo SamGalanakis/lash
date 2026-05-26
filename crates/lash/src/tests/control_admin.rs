@@ -43,7 +43,7 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .advanced()
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
     let turn_session = session.clone();
@@ -131,7 +131,7 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
         .model(mock_model_spec())
         .advanced()
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("child-observation-parent").open().await?;
     let children = session.control().children();

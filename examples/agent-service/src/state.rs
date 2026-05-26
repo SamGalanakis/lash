@@ -27,9 +27,9 @@ pub(crate) struct AppStateData {
 
 impl AppStateData {
     #[cfg(feature = "restate")]
-    pub(crate) fn new(
+    pub(crate) fn from_shared_db(
         core: LashCore,
-        db: AppDb,
+        db: Arc<Mutex<AppDb>>,
         default_model: String,
         default_model_variant: Option<String>,
         durability: AgentServiceDurability,
@@ -37,7 +37,7 @@ impl AppStateData {
     ) -> Self {
         Self {
             core,
-            db: Arc::new(Mutex::new(db)),
+            db,
             default_model,
             default_model_variant,
             durability,

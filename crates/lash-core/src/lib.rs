@@ -186,15 +186,17 @@ pub use provider::{
     ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
     VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
 };
+#[cfg(any(test, feature = "testing"))]
+pub use runtime::TestLocalProcessRegistry;
 pub use runtime::{
     AssembledTurn, AssistantOutput, CodeOutputRecord, DirectCompletionClient, DirectRequestSpec,
     DurableProcessWorker, DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin,
     EmbeddedRuntimeBuilder, EmbeddedRuntimeHost, EventSink, ExecutionSummary, FollowedTurn,
     InlineRuntimeEffectController, InputItem, LashRuntime, LlmAttachmentSpec, LlmRequestSpec,
-    LocalProcessRegistry, ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension,
-    ModeTurnExtensionHandle, NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession,
-    PersistedSessionSnapshot, ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest,
-    ProcessCleanupRequest, ProcessCommand, ProcessEffectOutcome, ProcessEvent,
+    ModeSessionExtension, ModeSessionExtensionHandle, ModeTurnExtension, ModeTurnExtensionHandle,
+    NoopEventSink, NoopTurnActivitySink, OutputState, ParkedSession, PersistedSessionSnapshot,
+    ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest, ProcessCleanupRequest,
+    ProcessCommand, ProcessCreatorScope, ProcessEffectOutcome, ProcessEvent,
     ProcessEventAppendRequest, ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType,
     ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant,
     ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessListRequest, ProcessRecord,

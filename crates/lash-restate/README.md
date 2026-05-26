@@ -82,4 +82,8 @@ fn endpoint(
 
 The controller submits workflow `run` with workflow key
 `ProcessRegistration.id` and sends cancellation to the workflow's shared
-`cancel` handler.
+`cancel` handler. The workflow runner should be built from the host's
+deployment config: plugin factories, runtime core config, session-store
+factory, process registry, attachment store, provider policy, and host profile.
+Process rows carry the process input plus structured creator scope and host
+profile only; workers do not parse grant keys to recover the creator session.

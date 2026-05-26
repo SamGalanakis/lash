@@ -109,15 +109,18 @@ impl DurableProcessWorker {
                 control: None,
             });
         }
-        let session_id = session_id_from_scope_key(&registration.created_by_scope_key)
+        let session_id = registration
+            .created_by_scope
+            .as_ref()
+            .filter(|scope| !scope.is_empty())
+            .map(|scope| scope.session_id.as_str())
             .ok_or_else(|| {
                 PluginError::Session(format!(
-                    "process `{}` is missing a creator scope key",
+                    "process `{}` is missing a structured creator scope",
                     registration.id
                 ))
-            })?
-            .to_string();
-        let runtime = self.rebuild_runtime(&session_id).await?;
+            })?;
+        let runtime = self.rebuild_runtime(session_id).await?;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None).map_err(|err| {
             PluginError::Session(format!(
                 "failed to rebuild runtime session `{session_id}` for process `{}`: {err}",
@@ -193,22 +196,5 @@ impl DurableProcessWorker {
             "process `{}` was created for host profile `{actual}` but this worker is `{expected}`",
             registration.id
         )))
-    }
-}
-
-fn session_id_from_scope_key(scope_key: &str) -> Option<&str> {
-    let (_, session_id) = scope_key.rsplit_once(':')?;
-    (!session_id.is_empty()).then_some(session_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_session_id_from_scope_key() {
-        assert_eq!(session_id_from_scope_key("runtime:root"), Some("root"));
-        assert_eq!(session_id_from_scope_key("runtime:"), None);
-        assert_eq!(session_id_from_scope_key("root"), None);
     }
 }

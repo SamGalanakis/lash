@@ -5,16 +5,16 @@ pub(crate) use std::sync::{Arc, Mutex as StdMutex};
 pub(crate) use async_trait::async_trait;
 pub(crate) use lash_core::plugin::StaticPluginFactory;
 pub(crate) use lash_core::{
-    ExecutionMode, LashRuntime, MessageRole, PluginHost, PluginSpec, PluginStack,
-    RuntimeCoreConfig, RuntimeEnvironment, RuntimeHandle, RuntimeObservation, RuntimeSessionState,
-    SessionPolicy, SessionSpec,
+    DurableProcessWorkerConfig, ExecutionMode, LashRuntime, MessageRole, PluginHost, PluginSpec,
+    PluginStack, RuntimeCoreConfig, RuntimeEnvironment, RuntimeHandle, RuntimeObservation,
+    RuntimeSessionState, SessionPolicy, SessionSpec,
 };
 pub(crate) use tokio::sync::mpsc;
 pub(crate) use tokio::task::JoinHandle;
 pub(crate) use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
-pub(crate) use lash_core::LocalProcessRegistry;
+pub(crate) use lash_core::TestLocalProcessRegistry;
 pub(crate) use lash_core::plugin::runtime_host::RuntimeSessionHost;
 pub(crate) use lash_core::{
     AssembledTurn, AttachmentStore, EventSink, ExecutionSummary, Message, ModeTurnOptions,

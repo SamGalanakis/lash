@@ -14,6 +14,8 @@ pub enum EmbedError {
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]
     StoreSessionMismatch { loaded: String, requested: String },
+    #[error("durable process worker requires a LashCore store factory")]
+    MissingProcessWorkerStoreFactory,
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
     #[error("runtime session error: {0}")]

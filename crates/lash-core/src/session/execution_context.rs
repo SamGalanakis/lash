@@ -41,6 +41,7 @@ pub struct ModeExecutionContext<'run> {
     mode_extension: Option<crate::ModeTurnExtensionHandle>,
     turn_context: crate::TurnContext,
     pub(super) effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub(super) turn_lease: Option<crate::RuntimeTurnLease>,
     pub(super) turn_event_tx: Option<Sender<TurnActivity>>,
     pub(super) cancellation_token: Option<CancellationToken>,
 }
@@ -53,6 +54,7 @@ impl<'run> ModeExecutionContext<'run> {
         crate::ProcessRequestScope::new()
             .with_effect_metadata(effect_metadata)
             .with_effect_controller(self.dispatch.effect_controller.as_controller())
+            .with_turn_lease(self.turn_lease.clone())
     }
 
     #[allow(
@@ -79,6 +81,7 @@ impl<'run> ModeExecutionContext<'run> {
             mode_extension,
             turn_context,
             effect_metadata: None,
+            turn_lease: None,
             turn_event_tx: None,
             cancellation_token: None,
         }
@@ -130,6 +133,11 @@ impl<'run> ModeExecutionContext<'run> {
         metadata: crate::EffectInvocationMetadata,
     ) -> Self {
         self.effect_metadata = Some(metadata);
+        self
+    }
+
+    pub(crate) fn with_turn_lease(mut self, turn_lease: Option<crate::RuntimeTurnLease>) -> Self {
+        self.turn_lease = turn_lease;
         self
     }
 

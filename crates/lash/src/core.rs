@@ -44,6 +44,32 @@ impl LashCore {
     pub fn installed_modes(&self) -> impl Iterator<Item = &ModeId> {
         self.modes.keys()
     }
+
+    pub fn durable_process_worker_config(
+        &self,
+        process_registry: Arc<dyn ProcessRegistry>,
+    ) -> Result<DurableProcessWorkerConfig> {
+        self.durable_process_worker_config_with_plugins(process_registry, Vec::new())
+    }
+
+    pub fn durable_process_worker_config_with_plugins(
+        &self,
+        process_registry: Arc<dyn ProcessRegistry>,
+        extra_plugin_factories: impl IntoIterator<Item = Arc<dyn PluginFactory>>,
+    ) -> Result<DurableProcessWorkerConfig> {
+        let Some(store_factory) = self.store_factory.as_ref() else {
+            return Err(EmbedError::MissingProcessWorkerStoreFactory);
+        };
+        let mut factories = self.plugin_factories.as_ref().clone();
+        factories.extend(extra_plugin_factories);
+        Ok(DurableProcessWorkerConfig::from_plugin_factories(
+            factories,
+            self.env.core.clone(),
+            Arc::clone(store_factory),
+            process_registry,
+        )
+        .with_session_policy(self.policy.clone()))
+    }
 }
 
 #[derive(Default)]

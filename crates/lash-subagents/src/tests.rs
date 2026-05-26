@@ -8,8 +8,8 @@ use crate::rlm_support::{
 };
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
 use lash_core::{
-    ExecutionMode, LashRuntime, LocalProcessRegistry, PluginFactory, PluginHost,
-    ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices, RuntimeSessionState, SessionPolicy,
+    ExecutionMode, LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig,
+    RuntimeServices, RuntimeSessionState, SessionPolicy, TestLocalProcessRegistry,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
 use lash_mode_rlm::RlmTurnInputExt;
@@ -541,7 +541,7 @@ async fn run_seed_probe(
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
         lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-        Arc::new(LocalProcessRegistry::default()),
+        Arc::new(TestLocalProcessRegistry::default()),
     );
     let policy = SessionPolicy {
         provider: provider.into_handle(),

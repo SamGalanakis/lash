@@ -397,7 +397,7 @@ pub struct MockSessionManager {
     pub tool_catalog: Vec<serde_json::Value>,
     pub turn: AssembledTurn,
     pub tool_registry: Option<crate::ToolRegistry>,
-    pub process_registry: Arc<crate::LocalProcessRegistry>,
+    pub process_registry: Arc<crate::TestLocalProcessRegistry>,
     pub created: Mutex<Vec<SessionCreateRequest>>,
     pub closed: Mutex<Vec<String>>,
 }
@@ -409,7 +409,7 @@ impl Default for MockSessionManager {
             tool_catalog: Vec::new(),
             turn: mock_assembled_turn("root", ""),
             tool_registry: None,
-            process_registry: Arc::new(crate::LocalProcessRegistry::default()),
+            process_registry: Arc::new(crate::TestLocalProcessRegistry::default()),
             created: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
         }

@@ -21,7 +21,7 @@ mod tests {
     ) -> crate::LashRuntime {
         let mut runtime =
             runtime_with_plugins_and_tools(plugins, tools, mock_provider(Vec::new())).await;
-        runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+        runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
         runtime
     }
 
@@ -29,7 +29,7 @@ mod tests {
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
     ) -> crate::LashRuntime {
         let mut runtime = runtime_with_plugins(plugins, mock_provider(Vec::new())).await;
-        runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+        runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
         runtime
     }
 
@@ -170,7 +170,10 @@ mod tests {
     }
 
     fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
-        registration.with_provenance("worker-runtime:root", "worker-profile")
+        registration.with_provenance(
+            crate::ProcessCreatorScope::new("worker-runtime", "root"),
+            "worker-profile",
+        )
     }
 
     fn process_worker(
@@ -205,6 +208,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn durable_process_worker_requires_structured_creator_scope_without_parsing_scope_key() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let worker = process_worker(
+            Arc::clone(&registry_dyn),
+            factory as Arc<dyn crate::SessionStoreFactory>,
+        );
+        let mut registration = crate::ProcessRegistration::new(
+            "worker-unstructured-scope",
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    "tool-call-unstructured",
+                    "process_echo",
+                    serde_json::json!({ "value": "tool" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        );
+        registration.created_by_scope_key = "worker-runtime:root".to_string();
+        registration.host_profile_id = "worker-profile".to_string();
+
+        let err = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("worker should not parse creator session from scope key");
+
+        assert!(
+            err.to_string()
+                .contains("missing a structured creator scope"),
+            "{err}"
+        );
+    }
+
     #[derive(Clone, Default)]
     struct RecordingProcessEffectController {
         records: Arc<std::sync::Mutex<Vec<crate::EffectInvocationMetadata>>>,
@@ -235,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_process_worker_rebuilds_context_for_tool_lashlang_and_session_turn() {
-        let registry = Arc::new(crate::LocalProcessRegistry::default());
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
         let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
         let factory =
             Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());

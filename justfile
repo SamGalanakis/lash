@@ -49,7 +49,7 @@ agent-service-restate-e2e:
   AGENT_SERVICE_E2E_ENDPOINT_BIND="$endpoint_bind" \
   AGENT_SERVICE_E2E_ENDPOINT_URL="$endpoint_url" \
   cargo test -p agent-service --features restate \
-    live_restate_ingress_runs_agent_turn_workflow_end_to_end -- --ignored --nocapture
+    live_restate_ingress_runs_agent_turn_and_process_workflow_end_to_end -- --ignored --nocapture
 
 # ── crates.io publishing ─────────────────────────────────────
 # Topological order of every publishable crate. Computed once via

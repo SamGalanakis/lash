@@ -294,7 +294,7 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("fanout-tool-events").open().await?;
 
@@ -365,7 +365,7 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
         .provider(tool_roundtrip_provider())
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("tool-events").open().await?;
     let events = RecordingEvents::default();
@@ -416,7 +416,7 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         ]))
         .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("rlm-live-tool-events").open().await?;
     let events = Arc::new(RecordingEvents::default());
