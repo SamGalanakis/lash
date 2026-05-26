@@ -12,19 +12,25 @@ use lash_core::llm::types::{
     ProviderReasoningReplay,
 };
 use lash_core::provider::{
-    AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
+    CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, resolve_generation_policy,
 };
 use lash_llm_transport::streaming::drive_sse_response;
 use lash_llm_transport::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
-    send_request,
+    build_http_client, header_pairs, read_response_text, request_body_snapshot,
+    response_start_timeout, send_request,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnthropicThinkingConfig {
+    Adaptive { effort: String },
+    Budget { budget_tokens: i32 },
+}
 
 fn emit_provider_trace(
     tx: Option<&lash_core::llm::types::LlmProviderTraceSender>,
@@ -292,8 +298,8 @@ impl AnthropicProvider {
             .collect()
     }
 
-    fn cache_control_value(&self) -> Option<Value> {
-        match self.options.cache_retention {
+    fn cache_control_value(cache_retention: CacheRetention) -> Option<Value> {
+        match cache_retention {
             CacheRetention::None => None,
             CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
             CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
@@ -302,11 +308,12 @@ impl AnthropicProvider {
 
     fn apply_cache_control(
         &self,
+        cache_retention: CacheRetention,
         system: &mut Option<Value>,
         messages: &mut [Value],
         tools: &mut [Value],
     ) {
-        let Some(ctrl) = self.cache_control_value() else {
+        let Some(ctrl) = Self::cache_control_value(cache_retention) else {
             for msg in messages {
                 if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
                     for block in content {
@@ -393,11 +400,16 @@ impl AnthropicProvider {
         let (system_text, mut messages) = self.build_messages(req);
         let mut tools = self.build_tools(req);
 
-        let max_output_tokens = self
-            .options
-            .max_output_tokens
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let thinking_config = req
+            .model_variant
+            .as_deref()
+            .and_then(|variant| AnthropicModelPolicy.thinking_config(&req.model, variant));
+        let policy = resolve_generation_policy(
+            &req.generation,
+            &self.options,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            thinking_config,
+        );
 
         let mut system_value: Option<Value> = system_text.map(|text| {
             json!([{
@@ -409,11 +421,16 @@ impl AnthropicProvider {
         // Cache control: mark system, last user message, and last tool as
         // ephemeral to benefit from prompt caching. Applied before the body
         // is assembled so we only serialize the final state once.
-        self.apply_cache_control(&mut system_value, &mut messages, &mut tools);
+        self.apply_cache_control(
+            policy.cache_retention,
+            &mut system_value,
+            &mut messages,
+            &mut tools,
+        );
 
         let mut body = json!({
             "model": req.model,
-            "max_tokens": max_output_tokens,
+            "max_tokens": policy.max_output_tokens,
             "messages": messages,
         });
 
@@ -432,16 +449,14 @@ impl AnthropicProvider {
         // Extended thinking. Temperature is incompatible with thinking; omit
         // it whenever thinking is enabled (matches Anthropic API rules).
         let mut thinking_enabled = false;
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(cfg) = AnthropicModelPolicy.request_variant_config(&req.model, variant)
-        {
-            let display = if self.options.thinking.expose {
+        if let Some(cfg) = policy.thinking {
+            let display = if policy.expose_thinking {
                 "summarized"
             } else {
                 "omitted"
             };
             match cfg {
-                VariantRequestConfig::AnthropicAdaptiveThinking { effort } => {
+                AnthropicThinkingConfig::Adaptive { effort } => {
                     let clamped = clamp_effort(&req.model, &effort);
                     body["thinking"] = json!({
                         "type": "adaptive",
@@ -450,7 +465,7 @@ impl AnthropicProvider {
                     body["output_config"] = json!({ "effort": clamped });
                     thinking_enabled = true;
                 }
-                VariantRequestConfig::AnthropicThinkingBudget { budget_tokens } => {
+                AnthropicThinkingConfig::Budget { budget_tokens } => {
                     body["thinking"] = json!({
                         "type": "enabled",
                         "budget_tokens": budget_tokens,
@@ -458,7 +473,6 @@ impl AnthropicProvider {
                     });
                     thinking_enabled = true;
                 }
-                _ => {}
             }
         }
         if !thinking_enabled {
@@ -966,10 +980,6 @@ impl ProviderState for AnthropicProvider {
 }
 
 impl ProviderModelPolicy for AnthropicModelPolicy {
-    fn default_model(&self) -> &str {
-        "claude-opus-4-7"
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if anthropic_supports_adaptive_thinking(model) {
@@ -989,22 +999,10 @@ impl ProviderModelPolicy for AnthropicModelPolicy {
             &[]
         }
     }
+}
 
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        let variants = self.supported_variants(model);
-        if variants.is_empty() {
-            return None;
-        }
-        if variants.contains(&"xhigh") {
-            Some("xhigh")
-        } else if variants.contains(&"max") {
-            Some("max")
-        } else {
-            Some("high")
-        }
-    }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
+impl AnthropicModelPolicy {
+    fn thinking_config(&self, model: &str, variant: &str) -> Option<AnthropicThinkingConfig> {
         if !self.supported_variants(model).contains(&variant) {
             return None;
         }
@@ -1012,7 +1010,7 @@ impl ProviderModelPolicy for AnthropicModelPolicy {
             if variant == "none" {
                 return None;
             }
-            Some(VariantRequestConfig::AnthropicAdaptiveThinking {
+            Some(AnthropicThinkingConfig::Adaptive {
                 effort: variant.to_string(),
             })
         } else {
@@ -1023,33 +1021,7 @@ impl ProviderModelPolicy for AnthropicModelPolicy {
                 "high" => 12_288,
                 _ => return None,
             };
-            Some(VariantRequestConfig::AnthropicThinkingBudget { budget_tokens })
-        }
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "low" => Some(AgentModelSelection {
-                model: "claude-haiku-4-6".to_string(),
-                variant: None,
-            }),
-            "medium" => Some(AgentModelSelection {
-                model: "claude-sonnet-4-6".to_string(),
-                variant: Some("medium".to_string()),
-            }),
-            "high" => Some(AgentModelSelection {
-                model: "claude-opus-4-7".to_string(),
-                variant: Some("high".to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.starts_with("anthropic/") {
-            model.to_string()
-        } else {
-            format!("anthropic/{model}")
+            Some(AnthropicThinkingConfig::Budget { budget_tokens })
         }
     }
 }
@@ -1117,7 +1089,7 @@ impl ProviderTransport for AnthropicProvider {
             };
             let mut err = LlmTransportError::new(message)
                 .with_status(status.as_u16())
-                .with_headers(&headers)
+                .with_headers(header_pairs(&headers))
                 .with_raw(text)
                 .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
             if let Some(request_body) = request_body {
@@ -1202,6 +1174,7 @@ mod tests {
     use lash_core::llm::types::{
         LlmAttachment, LlmContentBlock, LlmJsonSchema, LlmMessage, LlmToolSpec,
     };
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     fn request(messages: Vec<LlmMessage>) -> LlmRequest {
@@ -1215,6 +1188,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
             output_spec: None,
             stream_events: None,
+            generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
     }
@@ -1458,15 +1432,20 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_uses_shared_options() {
+    fn output_token_cap_maps_to_max_tokens() {
         let provider = AnthropicProvider::new("key").with_options(ProviderOptions {
-            max_output_tokens: Some(2048),
+            max_output_tokens: Some(9999),
             ..ProviderOptions::default()
         });
-        let req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.generation.output_token_cap = NonZeroUsize::new(2048);
 
         let body = provider.build_request_body(&req).expect("body");
 
         assert_eq!(body["max_tokens"], 2048);
+        let provider_limited_body = provider
+            .build_request_body(&request(vec![LlmMessage::text(LlmRole::User, "hello")]))
+            .expect("body");
+        assert_eq!(provider_limited_body["max_tokens"], 9999);
     }
 }

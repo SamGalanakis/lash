@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::{AttachmentRef, SchemaProjectionOverride};
@@ -257,6 +258,21 @@ pub enum LlmOutputSpec {
     JsonSchema(LlmJsonSchema),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_cap: Option<NonZeroUsize>,
+}
+
+impl GenerationOptions {
+    pub fn output_token_cap_u64(&self) -> Option<u64> {
+        self.output_token_cap
+            .map(NonZeroUsize::get)
+            .map(|value| value as u64)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LlmRequest {
     pub model: String,
@@ -265,6 +281,8 @@ pub struct LlmRequest {
     pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
+    #[serde(default)]
+    pub generation: GenerationOptions,
     pub session_id: Option<String>,
     pub output_spec: Option<LlmOutputSpec>,
     #[serde(default, skip)]

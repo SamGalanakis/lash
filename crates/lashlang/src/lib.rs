@@ -1,23 +1,32 @@
 mod ast;
+mod graph;
 mod lexer;
+mod linker;
 mod parser;
 mod runtime;
 
 pub use ast::{
-    AssignPathStep, AssignTarget, BinaryOp, CallExpr, Expr, ProcessStartExpr, Program,
-    ToolCallMode, TypeExpr, TypeField, UnaryOp,
+    AssignPathStep, AssignTarget, BinaryOp, Declaration, Expr, ProcessDecl, ProcessParam,
+    ProcessStartExpr, Program, ResourceRefExpr, ScheduleCadence, ScheduleDecl, TriggerDecl,
+    TriggerSource, TypeDecl, TypeExpr, TypeField, UnaryOp,
 };
+pub use graph::{linked_static_graph_json, static_graph_json};
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
+pub use linker::{
+    LashlangAbilities, LashlangScheduleAbilities, LashlangSurface, LinkError, LinkedModule,
+    ResourceCatalog, ResourceOperationBinding, ResourceTypeCatalog,
+};
 pub use parser::{ParseError, parse};
 pub use runtime::{
     AbilityOp, AbilityResult, CompileStats, CompiledProgram, CompiledProgramCache,
     CompiledProgramCacheStats, ExecutableProgram, ExecutionEnvironment, ExecutionHost,
     ExecutionHostError, ExecutionMode, ExecutionOutcome, ExecutionScratch, ImageValue,
-    LASH_TYPE_KEY, ListValue, ProcessBlockEvent, ProcessBlockEventKind, ProcessBlockStart,
-    ProfileReport, ProfileStat, ProjectedBindingError, ProjectedBindings, ProjectedFuture,
-    ProjectedHostValue, ProjectedReadRequest, ProjectedReadResponse, ProjectedValue, Record,
-    RuntimeError, RuntimeFailure, Snapshot, State, Value, compile, execute, from_json, prewarm,
-    unwrap_type_value,
+    LASH_TYPE_KEY, ListValue, ProcessEvent, ProcessEventKind, ProcessSignal, ProcessSleep,
+    ProcessSleepKind, ProcessStart, ProfileReport, ProfileStat, ProjectedBindingError,
+    ProjectedBindings, ProjectedFuture, ProjectedHostValue, ProjectedReadRequest,
+    ProjectedReadResponse, ProjectedValue, Record, ResourceHandle, ResourceOperation, RuntimeError,
+    RuntimeFailure, Snapshot, State, Value, compile, compile_linked, compile_linked_process,
+    compile_process, execute, from_json, prewarm, unwrap_type_value,
 };
 
 pub fn format_parse_diagnostic(source: &str, error: &ParseError) -> String {
@@ -34,6 +43,13 @@ pub fn format_runtime_diagnostic(source: &str, error: &RuntimeError, span: Optio
         return format_message_with_hint(&error.to_string(), runtime_hint(error));
     };
     format_source_diagnostic(source, span.start, &error.to_string(), runtime_hint(error))
+}
+
+pub fn format_link_diagnostic(source: &str, error: &LinkError) -> String {
+    match error.span() {
+        Some(span) => format_source_diagnostic(source, span.start, &error.to_string(), None),
+        None => error.to_string(),
+    }
 }
 
 fn format_source_diagnostic(
@@ -136,6 +152,11 @@ mod tests {
     impl ExecutionHost for Host {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
             match op {
+                AbilityOp::ResourceOperation(operation) if operation.operation == "anything" => {
+                    Ok(AbilityResult::Value(Value::Record(std::sync::Arc::new(
+                        Record::from_iter([("ok".to_string(), Value::Bool(true))]),
+                    ))))
+                }
                 AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
@@ -254,7 +275,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_success_path_uses_host() {
-        let compiled = compile("v = call anything {} submit v").expect("source should compile");
+        let compiled = compile("v = await TOOL.default.anything({})? submit v")
+            .expect("source should compile");
         let mut state = State::new();
         let outcome = execute(&compiled, &mut state, &Host)
             .await

@@ -297,7 +297,7 @@ pub(crate) fn submit_error_tool_definition() -> ToolDefinition {
     ToolDefinition::raw(
         "tool:submit_error",
         "submit_error",
-        "End the current subagent task as a terminal failure with a concise reason. Use `call submit_error { reason: \"...\" }` when the child cannot produce a valid result.",
+        "End the current subagent task as a terminal failure with a concise reason. Use `await TOOL.default.submit_error({ reason: \"...\" })?` when the child cannot produce a valid result.",
         json!({
             "type": "object",
             "properties": {

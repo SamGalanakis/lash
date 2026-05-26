@@ -208,7 +208,7 @@ mod tests {
     use lash_core::plugin::PromptHookContext;
     use lash_core::testing::{MockSessionManager, mock_assembled_turn};
     use lash_core::{
-        RuntimeSessionState, PluginHost, PromptSlot, SessionPolicy, SessionReadView,
+        PluginHost, PromptSlot, RuntimeSessionState, SessionPolicy, SessionReadView,
         SessionSnapshot, SessionStateEnvelope,
     };
 

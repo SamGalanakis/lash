@@ -17,7 +17,7 @@ pub(crate) mod edit;
 pub(crate) mod exploration;
 pub(crate) mod generic;
 pub(crate) mod lashlang;
-pub(crate) mod monitor;
+pub(crate) mod process;
 pub(crate) mod shell;
 pub(crate) mod subagents;
 pub(crate) mod update_plan;
@@ -35,7 +35,7 @@ pub(super) fn register_builtins(state: &mut ActivityState) {
     state.register(exploration::ExplorationProjector);
     state.register(generic::GenericProjector);
     state.register(lashlang::LashlangProjector);
-    state.register(monitor::MonitorProjector);
+    state.register(process::ProcessProjector);
     state.register(shell::ShellProjector);
     state.register(subagents::SubagentProjector);
     state.register(update_plan::UpdatePlanProjector);

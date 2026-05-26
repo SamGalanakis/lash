@@ -16,15 +16,15 @@ Every completed turn lands as one lease-fenced `RuntimeCommit` against a `Sessio
 
 ### Sans-IO state machine for workflow integration
 
-`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata, idempotency keys, checkpoint digests, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal. Process handles are explicit runtime support: install a `ProcessRegistry` such as `LocalProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
+`lash-core::RuntimeEffectController` is the durable boundary around nondeterministic work. LLM calls, individual tool calls, RLM exec, process control, checkpoints, retry sleeps, execution-surface sync, and direct/plugin LLM completions all cross it with stable invocation metadata, idempotency keys, checkpoint digests, and ref-only attachment specs. The default inline controller runs in process; workflow adapters pass a scoped controller with a stable turn id, while `LashRuntime::resume_turn(...)` / `LashSession::resume_turn(...)` reload the saved turn checkpoint and replay completed effects from the runtime journal. Process handles are explicit runtime support: install a deployment-level `ProcessRegistry` such as `lash-sqlite-store::SqliteProcessRegistry` when the host wants background process control; otherwise process start/list/await/cancel/transfer/cleanup fail loudly.
 
 ### Two execution modes, one commit unit
 
-`standard` uses the provider's native tool-calling protocol — the model emits multiple independent tool calls in a single response, and the runtime dispatches them concurrently. `rlm` runs `lashlang` programs in a sandboxed VM with no filesystem, process, or network surface; every effect crosses the Lashlang `ExecutionHost`. Use RLM when the model should compose multiple tool calls per turn instead of one.
+`standard` uses the provider's native tool-calling protocol — the model emits multiple independent tool calls in a single response, and the runtime dispatches them concurrently. `rlm` runs `lashlang` programs in a sandboxed VM with no direct filesystem, OS-process, or network surface; every effect crosses the Lashlang `ExecutionHost` and the linked host surface decides which resource/process abilities exist. Use RLM when the model should compose multiple tool calls per turn instead of one.
 
 ### Lashlang
 
-A small typed DSL the model can emit and the runtime can execute deterministically. Explicit `start call` + `await` fanout for concurrent tool batches, projected read-only bindings from stable host projection refs, no syscalls, fully checkpointable.
+A small typed DSL the model can emit and the runtime can execute deterministically. Receiver-first resource operations and named background `process` declarations are host-provided abilities: unavailable abilities still parse, but fail during linking and are omitted from the RLM prompt. Linked process modules are stored with the process input so nested starts survive later host ability drift. Trigger and cron schedule declarations are parsed and gated by the same host surface, but runtime activation for resource events and cron ticks remains a follow-up.
 
 ### Plugin architecture
 
@@ -40,8 +40,8 @@ JSONL by default with a self-contained HTML viewer; optional OpenTelemetry expor
 
 ## Workspace layout
 
-- `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output.
-- `lash-core` — async runtime internals, plugin host, providers, persistence, session graph, child-session orchestration, built-in tools.
+- `lash-sansio` — pure turn machine, prompt model, messages, effects, responses, checkpoints, tool contracts, and canonical tool-call output; no Lashlang dependency.
+- `lash-core` — async runtime internals, plugin host, mode build input, providers, persistence, session graph, child-session orchestration, built-in tools, and Lashlang host-surface construction.
 - `lash` — app-facing facade for runtime construction, sessions, turn streaming, provider / mode / plugin wiring, host integrations.
 - `lash-mode-standard` / `lash-mode-rlm` — execution-mode plugins.
 - `lash-standard-plugins`, `lash-subagents`, `lash-plugin-*`, `lash-provider-*` — first-party tool, plugin, and provider crates.
@@ -67,7 +67,7 @@ The library is still imported as `lash` — only the crate name on
 crates.io changes:
 
 ```rust
-use lash::{provider::ProviderHandle, LashCore, TurnInput};
+use lash::{provider::ProviderHandle, LashCore, ModelSpec, TurnInput};
 use lash_provider_openai::{OPENROUTER_BASE_URL, OpenAiCompatibleProvider};
 
 #[tokio::main]
@@ -77,10 +77,18 @@ async fn main() -> anyhow::Result<()> {
         OpenAiCompatibleProvider::new(api_key, OPENROUTER_BASE_URL).into_components(),
     );
 
+    let model = ModelSpec::from_token_limits(
+        "anthropic/claude-sonnet-4.6",
+        None,
+        200_000,
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
+
     let core = LashCore::standard()
         .provider(provider)
-        .model("anthropic/claude-sonnet-4.6", None)
-        .max_context_tokens(200_000)
+        .model(model)
         .build()?;
 
     let session = core.session("hello-1").open().await?;

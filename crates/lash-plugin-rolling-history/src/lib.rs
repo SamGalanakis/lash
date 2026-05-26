@@ -19,15 +19,17 @@ use sha2::{Digest, Sha256};
 
 use lash_core::PreparedContext;
 use lash_core::plugin::{
-    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES, HistoryError,
-    HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory, PluginRegistrar,
-    PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
+    HistoryError, HistoryRewriter, HistoryState, ModeExtras, PluginError, PluginFactory,
+    PluginRegistrar, PluginSessionContext, RewriteContext, RewriteTrigger, SessionContextSurface,
     SessionCreateRequest, SessionPlugin, SessionStartPoint, TurnContextTransform,
     TurnTransformContext,
 };
 use lash_core::{
     ExecutionMode, InputItem, Message, MessageOrigin, MessageRole, Part, PartKind, PromptUsage,
     RollingHistoryConfig, SessionStateEnvelope, StandardContextApproach, ToolCallRecord, TurnInput,
+};
+use lash_plugin_tool_output_budget::{
+    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
 };
 
 fn tool_spill_dir() -> std::path::PathBuf {
@@ -850,7 +852,7 @@ impl HistoryRewriter for RollingHistoryRewriter {
             RewriteTrigger::WindowShrink { .. } => {
                 if !compaction_needed(
                     ctx.state.last_prompt_usage(),
-                    ctx.state.policy().max_context_tokens,
+                    Some(ctx.state.policy().context_window_tokens()),
                 ) {
                     return Ok(input);
                 }

@@ -1,18 +1,27 @@
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, ExecutionMode, HostModeProtocol,
-    HydratedSessionCheckpoint, ModeConfig, ModePreamble, ModeTurnOptions, PersistedSessionConfig,
-    RuntimeSessionState, PersistedTurnState, PluginSessionSnapshot, PreparedPrompt,
-    PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit, RuntimeEffectJournalRecord,
-    RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence, RuntimeTurnCheckpoint,
-    RuntimeTurnCompletion, RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead,
-    SessionPolicy, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
-    StandardContextApproach, StoreError, TokenLedgerEntry, TokenUsage, ToolState,
+    HydratedSessionCheckpoint, ModeConfig, ModePreamble, ModeTurnOptions, ModelSpec,
+    PersistedSessionConfig, PersistedTurnState, PluginSessionSnapshot, PreparedPrompt,
+    PromptContext, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeEffectJournalRecord, RuntimeEffectKind, RuntimeEffectOutcome, RuntimePersistence,
+    RuntimeSessionState, RuntimeTurnCheckpoint, RuntimeTurnCompletion,
+    RuntimeTurnMachineConfigSnapshot, SessionGraph, SessionHead, SessionPolicy, SessionReadScope,
+    SessionStoreCreateRequest, SessionStoreFactory, StandardContextApproach, StoreError,
+    TokenLedgerEntry, TokenUsage, ToolState,
 };
 use lash_sqlite_store::{
     BlobArtifactDescriptor, BuiltinBlobProfile, SqliteSessionStoreFactory, Store, StoreGcPolicy,
     StoreOptions,
 };
 use std::sync::Arc;
+
+fn model_spec(id: &str) -> ModelSpec {
+    ModelSpec::from_token_limits(id, None, 200_000, None, None).expect("valid test model spec")
+}
+
+fn test_model_spec() -> ModelSpec {
+    model_spec("gpt-5.4-mini")
+}
 
 #[test]
 fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
@@ -40,11 +49,9 @@ fn gc_unreachable_keeps_rooted_checkpoint_blobs() {
         graph: SessionGraph::default(),
         config: PersistedSessionConfig {
             provider_id: "openai-compatible".into(),
-            configured_model: "gpt-5.4-mini".into(),
-            context_window: 200_000,
+            model: test_model_spec(),
             execution_mode: ExecutionMode::standard(),
             standard_context_approach: Some(StandardContextApproach::default()),
-            model_variant: None,
         },
         checkpoint_ref: Some(stored.checkpoint_ref.clone()),
         token_ledger: Vec::new(),
@@ -191,7 +198,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
             originating_tool_call_id: None,
         },
         policy: SessionPolicy {
-            model: "first-model".to_string(),
+            model: model_spec("first-model"),
             ..SessionPolicy::default()
         },
     };
@@ -223,7 +230,7 @@ async fn sqlite_factory_creates_metadata_once_and_preserves_on_reopen() {
     let reopened = factory
         .create_store(&SessionStoreCreateRequest {
             policy: SessionPolicy {
-                model: "second-model".to_string(),
+                model: model_spec("second-model"),
                 ..SessionPolicy::default()
             },
             ..request
@@ -248,7 +255,7 @@ async fn sqlite_factory_is_explicitly_usable_as_session_store_factory() {
         session_id: "explicit".to_string(),
         relation: lash_core::SessionRelation::Root,
         policy: SessionPolicy {
-            model: "model".to_string(),
+            model: model_spec("model"),
             ..SessionPolicy::default()
         },
     };
@@ -654,6 +661,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         },
         max_turns: None,
         model_variant: None,
+        generation: lash_core::GenerationOptions::default(),
         emit_llm_trace: false,
         termination: termination.clone(),
     });
@@ -672,8 +680,8 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
             session_id: session_id.to_string(),
             run_session_id: None,
             autonomous: false,
-            model: "mock-model".to_string(),
-            model_variant: None,
+            model: model_spec("mock-model"),
+            generation: lash_core::GenerationOptions::default(),
             max_turns: None,
             sync_execution_surface: false,
             tool_specs: Vec::new(),
@@ -684,8 +692,7 @@ fn runtime_turn_checkpoint(session_id: &str, turn_id: &str) -> RuntimeTurnCheckp
         mode_turn_options: ModeTurnOptions::default(),
         turn_prompt_layer: lash_core::PromptLayer::new(),
         provider_id: "mock-provider".to_string(),
-        model: "mock-model".to_string(),
-        model_variant: None,
+        model: model_spec("mock-model"),
         updated_at_epoch_ms: 1,
     }
 }

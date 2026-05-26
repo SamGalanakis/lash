@@ -595,24 +595,31 @@ pub async fn fork_current_session(
     let child_meta = child_store
         .load_session_meta()
         .ok_or_else(|| anyhow!("Fork child session metadata was not created"))?;
-    let parent_head = logger
-        .store()
-        .load_session_head()
-        .unwrap_or(lash_core::SessionHead {
+    let parent_head = if let Some(head) = logger.store().load_session_head() {
+        head
+    } else {
+        let model = lash_core::ModelSpec::from_token_limits(
+            configured_model,
+            _model_variant.map(str::to_string),
+            usize::try_from(_context_window).context("fork context window does not fit usize")?,
+            None,
+            None,
+        )
+        .map_err(anyhow::Error::msg)?;
+        lash_core::SessionHead {
             session_id: child_meta.session_id.clone(),
             head_revision: 0,
             graph: lash_core::SessionGraph::default(),
             config: lash_core::PersistedSessionConfig {
                 provider_id: _provider.kind().to_string(),
-                configured_model: configured_model.to_string(),
-                context_window: _context_window,
+                model,
                 execution_mode: lash_core::ExecutionMode::standard(),
                 standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-                model_variant: _model_variant.map(str::to_string),
             },
             checkpoint_ref: None,
             token_ledger: Vec::new(),
-        });
+        }
+    };
     materialize_child_from_graph(
         &child_meta.session_id,
         child_store.as_ref(),
@@ -691,11 +698,10 @@ mod fork_tests {
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: dummy_provider().kind().to_string(),
-                configured_model: "gpt-test".to_string(),
-                context_window: 1024,
+                model: lash_core::ModelSpec::from_token_limits("gpt-test", None, 1024, None, None)
+                    .expect("valid model spec"),
                 execution_mode: lash_core::ExecutionMode::standard(),
                 standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-                model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),

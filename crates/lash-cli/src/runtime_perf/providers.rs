@@ -26,7 +26,6 @@ pub(crate) struct BenchmarkStreamProfile {
 pub(crate) fn benchmark_provider(scenario: RuntimePerfScenario) -> TestProvider {
     TestProvider::builder()
         .kind("benchmark")
-        .default_model("mock-model")
         .requires_streaming(true)
         .complete(move |req| async move {
             let profile = benchmark_stream_profile_for_request(scenario, &req);
@@ -722,17 +721,10 @@ fn benchmark_stream_profile_for_request(
         }
         RuntimePerfScenario::RlmToolCalls => {
             let text = r#"```lashlang
-first = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
-second = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
-third = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 3 }
-fourth = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 4 }
-fanout = await {
-  a: first,
-  b: second,
-  c: third,
-  d: fourth
-}
-first = fanout.a?
+first = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 1 })?
+second = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 2 })?
+third = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 3 })?
+fourth = await TOOL.default.benchmark_echo({ value: "runtime perf benchmark ok", ordinal: 4 })?
 submit first.value
 ```"#
                 .to_string();
@@ -740,10 +732,20 @@ submit first.value
         }
         RuntimePerfScenario::RlmProcessHandles => {
             let text = r#"```lashlang
-first = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 1 }
-second = start call benchmark_echo { value: "runtime perf benchmark ok", ordinal: 2 }
-slow = start call benchmark_slow { value: "cancelled", delay_ms: 50 }
-live = (call list_process_handles {})?
+process benchmark_echo_process(tool: TOOL, value: str, ordinal: int) {
+  result = await tool.benchmark_echo({ value: value, ordinal: ordinal })?
+  finish result
+}
+
+process benchmark_slow_process(tool: TOOL, value: str, delay_ms: int) {
+  result = await tool.benchmark_slow({ value: value, delay_ms: delay_ms })?
+  finish result
+}
+
+first = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 1)
+second = start benchmark_echo_process(tool: TOOL.default, value: "runtime perf benchmark ok", ordinal: 2)
+slow = start benchmark_slow_process(tool: TOOL.default, value: "cancelled", delay_ms: 50)
+live = await TOOL.default.list_process_handles({})?
 cancel slow
 first_result = (await first)?
 second_result = (await second)?
@@ -754,7 +756,7 @@ submit first_result.value
         }
         RuntimePerfScenario::RlmLlmQuery => {
             let text = r#"```lashlang
-result = (call llm_query {
+result = await TOOL.default.llm_query({
   task: "Return the exact benchmark marker.",
   inputs: { marker: "runtime perf benchmark ok" }
 })?

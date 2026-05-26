@@ -13,12 +13,21 @@ struct DeterministicHost;
 impl ExecutionHost for DeterministicHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::CallTool { name, args } => match name.as_str() {
+            AbilityOp::ResourceOperation(operation) => match operation.operation.as_str() {
                 "echo" => Ok(AbilityResult::Value(
-                    args.get("value").cloned().unwrap_or(Value::Null),
+                    operation
+                        .args
+                        .first()
+                        .and_then(Value::as_record)
+                        .and_then(|record| record.get("value"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 )),
                 "fail" => Err(ExecutionHostError::new("fail")),
-                _ => Err(ExecutionHostError::new(format!("unknown tool: {name}"))),
+                _ => Err(ExecutionHostError::new(format!(
+                    "unknown resource operation: {}",
+                    operation.operation
+                ))),
             },
             AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                 Ok(AbilityResult::Value(value))
@@ -287,7 +296,10 @@ proptest! {
     fn tool_result_contract_is_stable_for_generated_values(
         value in gen_value_strategy()
     ) {
-        let source = format!("r = call echo {{ value: {} }}\nsubmit r\n", value.to_source());
+        let source = format!(
+            "r = await TOOL.default.echo({{ value: {} }})\nsubmit r\n",
+            value.to_source()
+        );
         let host = DeterministicHost;
         let mut state = State::new();
 

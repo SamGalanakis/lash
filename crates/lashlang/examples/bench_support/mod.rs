@@ -179,8 +179,8 @@ for item in items {
     labels = labels + [format("{0}:{1}", item.label, item.weight)]
   }
 }
-lookup_handle = start call echo { value: join(labels, ",") }
-stats_handle = start call echo { value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) } }
+lookup_handle = start echo(value: join(labels, ","))
+stats_handle = start echo(value: { total: total, count: len(items), seen: len(history), index_count: len(all_indexes) })
 fanout = await { lookup: lookup_handle, stats: stats_handle }
 lookup_value = fanout.lookup?
 stats_value = validate(fanout.stats?, Type { total: int, count: int, seen: int, index_count: int })
@@ -234,21 +234,21 @@ choice = logic ? "yes" : "no"
 json_text = "{\"attempt\":" + to_string(ctx.attempt) + ",\"ok\":true}"
 parsed = json_parse(json_text)
 positional_results = await [
-  start call echo { value: format("left:{0}", tokens[0]) },
-  start call echo { value: tokens[1] },
-  start call echo { value: len(tokens) }
+  start echo(value: format("left:{0}", tokens[0])),
+  start echo(value: tokens[1]),
+  start echo(value: len(tokens))
 ]
 positional = [positional_results[0]?, positional_results[1], positional_results[2]?]
 named_results = await {
-  lookup: start call echo { value: source },
-  summary: start call echo { value: format("{0}:{1}", trimmed_user, count) }
+  lookup: start echo(value: source),
+  summary: start echo(value: format("{0}:{1}", trimmed_user, count))
 }
 named = { lookup: named_results.lookup, summary: named_results.summary? }
-cancelled = start call echo { value: "cancelled" }
+cancelled = start echo(value: "cancelled")
 cancel cancelled
-handle = start call echo { value: "awaited" }
+handle = start echo(value: "awaited")
 awaited = (await handle)?
-direct = (call echo { value: trimmed_user })?
+direct = await TOOL.default.echo({ value: trimmed_user })?
 print direct
 state = {
   tags: push(tokens, "delta"),
@@ -311,9 +311,9 @@ submit {
         Scenario::AsyncAwait => {
             r#"
 handles = {
-  alpha: start call echo { value: "alpha" },
-  beta: start call echo { value: "beta" },
-  gamma: start call echo { value: "gamma" }
+  alpha: start echo(value: "alpha"),
+  beta: start echo(value: "beta"),
+  gamma: start echo(value: "gamma")
 }
 results = await handles
 formatted = [results.alpha?, results.beta?, results.gamma?]
@@ -322,9 +322,9 @@ submit join(formatted, ",")
         }
         Scenario::DirectUnwrap => {
             r#"
-first = (call echo { value: "alpha" })?
-second = (call echo { value: format("{0}:{1}", first, "beta") })?
-third = (call echo { value: join([first, second], ",") })?
+first = await TOOL.default.echo({ value: "alpha" })?
+second = await TOOL.default.echo({ value: format("{0}:{1}", first, "beta") })?
+third = await TOOL.default.echo({ value: join([first, second], ",") })?
 submit third
 "#
         }
@@ -332,8 +332,8 @@ submit third
             r#"
 seed = ["alpha", "beta", "gamma"]
 results = await {
-  left: start call echo { value: format("{0}:{1}", seed[0], len(seed)) },
-  right: start call echo { value: format("{0}:{1}", seed[1], len(seed)) }
+  left: start echo(value: format("{0}:{1}", seed[0], len(seed))),
+  right: start echo(value: format("{0}:{1}", seed[1], len(seed)))
 }
 submit format("{0}|{1}", results.left?, results.right?)
 "#
@@ -554,10 +554,10 @@ submit {
         }
         Scenario::WrappedErrorPaths => {
             r#"
-missing = call missing_tool { value: "x" }
-boom = call boom { reason: "explicit" }
-ok = call echo { value: "still-running" }
-probe = call exec_command { cmd: "test -f Cargo.lock", allow_nonzero_exit: true }
+missing = await TOOL.default.missing_tool({ value: "x" })
+boom = await TOOL.default.boom({ reason: "explicit" })
+ok = await TOOL.default.echo({ value: "still-running" })
+probe = await TOOL.default.exec_command({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })
 submit {
   missing_ok: missing.ok,
   missing_error: contains(missing.error, "unknown tool"),
@@ -571,25 +571,24 @@ submit {
         }
         Scenario::ToolControlSurface => {
             r#"
-first = start call spawn_agent { task: "inspect auth", capability: "explore" }
-second = start call spawn_agent { task: "inspect api", capability: "explore" }
-llm = start call llm_query { prompt: "summarize benchmark", model: "gpt-5.4-mini" }
-monitor = start call monitor { command: "tail -f app.log", description: "app log", timeout_ms: 1000 }
-handles = (call list_process_handles {})?
+first = start spawn_agent(task: "inspect auth", capability: "explore")
+second = start spawn_agent(task: "inspect api", capability: "explore")
+llm = start llm_query(prompt: "summarize benchmark", model: "gpt-5.4-mini")
+probe = start echo(value: "app log")
+handles = await TOOL.default.list_process_handles({})?
 results = await {
   first: first,
   second: second,
   llm: llm,
-  monitor: monitor
+  probe: probe
 }
 cancel second
 submit {
   first: results.first.value.claim,
   second: results.second.value.claim,
   llm: results.llm.value.text,
-  monitor: results.monitor.value.description,
-  tools: len(keys(handles.tool)),
-  monitors: len(keys(handles.monitor))
+  probe: results.probe.value,
+  tools: len(keys(handles.tool))
 }
 "#
         }
@@ -612,9 +611,9 @@ submit {
         }
         Scenario::ContinueAsSeedSurface => {
             r#"
-agent = start call spawn_agent { task: "inspect carry-forward", capability: "explore" }
-handles = (call list_process_handles {})?
-handoff = (call continue_as {
+agent = start spawn_agent(task: "inspect carry-forward", capability: "explore")
+handles = await TOOL.default.list_process_handles({})?
+handoff = await TOOL.default.continue_as({
   task: "continue from compact state",
   seed: {
     projected_problem: proj.text,
@@ -704,13 +703,13 @@ submit {
         }
         Scenario::FanoutExpressionSurface => {
             r#"
-left = call echo { value: "left" }
-right = call echo { value: "right" }
+left = await TOOL.default.echo({ value: "left" })
+right = await TOOL.default.echo({ value: "right" })
 computed = len(history) + 39
 discarded = ["branch_a", 40 + 2, len(history)]
 batched_results = await {
-  first: start call echo { value: left.value },
-  second: start call echo { value: right.value }
+  first: start echo(value: left.value),
+  second: start echo(value: right.value)
 }
 batched = { first: batched_results.first, second: batched_results.second, computed: computed }
 submit {
@@ -1218,11 +1217,17 @@ pub struct BenchHost;
 impl ExecutionHost for BenchHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::CallTool { name, args } => {
-                bench_call(&name, &args).map(AbilityResult::Value)
+            AbilityOp::ResourceOperation(operation) => {
+                let empty = Record::new();
+                let args = operation
+                    .args
+                    .first()
+                    .and_then(Value::as_record)
+                    .unwrap_or(&empty);
+                bench_call(&operation.operation, args).map(AbilityResult::Value)
             }
-            AbilityOp::StartToolCall { name, args } => {
-                Self::task_handle(&name, &args).map(AbilityResult::Value)
+            AbilityOp::StartProcess(start) => {
+                Self::task_handle(&start.process, &start.args).map(AbilityResult::Value)
             }
             AbilityOp::Await(handle) => {
                 let record = handle
@@ -1290,22 +1295,6 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
             record.insert(
                 "claim".to_string(),
                 Value::String(format!("done:{task}").into()),
-            );
-            Ok(Value::Record(Arc::new(record)))
-        }
-        "monitor" => {
-            let mut record = Record::default();
-            record.insert(
-                "process_id".to_string(),
-                Value::String("monitor:app-log".into()),
-            );
-            record.insert("producer".to_string(), Value::String("monitor".into()));
-            record.insert("state".to_string(), Value::String("running".into()));
-            record.insert(
-                "description".to_string(),
-                args.get("description")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String("monitor".into())),
             );
             Ok(Value::Record(Arc::new(record)))
         }
@@ -1396,10 +1385,6 @@ fn process_handles_record() -> Value {
     tool.insert("spawn_two".to_string(), Value::Record(Arc::new(chunk_2)));
 
     let mut out = Record::default();
-    out.insert(
-        "monitor".to_string(),
-        Value::Record(Arc::new(Record::default())),
-    );
     out.insert("tool".to_string(), Value::Record(Arc::new(tool)));
     Value::Record(Arc::new(out))
 }
@@ -1420,7 +1405,7 @@ fn unknown_tool(name: &str) -> ExecutionHostError {
 impl BenchHost {
     fn task_handle(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
-            "echo" | "llm_query" | "spawn_agent" | "monitor" | "continue_as" => {
+            "echo" | "llm_query" | "spawn_agent" | "continue_as" => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("process".into()));
                 record.insert("tool".to_string(), Value::String(name.to_string().into()));

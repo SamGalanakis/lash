@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::LashConfig;
 use lash::control::SessionConfigPatch;
-use lash::{LashSession, ModelSelection, advanced::ExecutionMode, provider::ProviderHandle};
-use lash_core::CachedModelCatalog;
+use lash::{LashSession, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_tui::Terminal;
 
 use crate::app::App;
+use crate::model_catalog::CachedModelCatalog;
 use crate::setup;
 use crate::{
     ensure_supported_execution_mode, execution_mode_label, execution_mode_usage,
@@ -87,19 +87,28 @@ pub(super) async fn handle_model(
             return Ok(false);
         }
     };
-    let model_variant = provider
-        .default_model_variant(&selection.model)
-        .map(str::to_string);
+    let model_variant = crate::provider_metadata::default_model_variant_for_provider(
+        provider.kind(),
+        &selection.model,
+        provider.supported_variants(&selection.model),
+    )
+    .map(str::to_string);
+    let model_spec = match resolved_model_spec
+        .clone()
+        .into_model_spec(model_variant.clone())
+    {
+        Ok(spec) => spec,
+        Err(err) => {
+            push_system_message(app, format!("Model rejected: {}", err));
+            return Ok(false);
+        }
+    };
     if let Some(rt) = runtime.as_mut() {
         let _ = rt
             .control()
             .config()
             .update(SessionConfigPatch {
-                model: Some(ModelSelection::new(
-                    selection.model.clone(),
-                    model_variant.clone(),
-                )),
-                max_context_tokens: Some(resolved_model_spec.context_window() as usize),
+                model: Some(model_spec),
                 ..SessionConfigPatch::default()
             })
             .await;
@@ -157,11 +166,13 @@ pub(super) async fn handle_variant(
         }
     };
     if let Some(rt) = runtime.as_mut() {
+        let mut model_spec = rt.policy_snapshot().model;
+        model_spec.variant = variant.clone();
         let _ = rt
             .control()
             .config()
             .update(SessionConfigPatch {
-                model: Some(ModelSelection::new(app.model.clone(), variant.clone())),
+                model: Some(model_spec),
                 ..SessionConfigPatch::default()
             })
             .await;
@@ -287,7 +298,7 @@ pub(super) async fn handle_change_provider(
             crate::expose_provider_thinking(&mut new_provider);
             *provider = new_provider;
             if let Err(err) = model_catalog
-                .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
+                .refresh_if_stale(crate::model_catalog::DEFAULT_REFRESH_INTERVAL)
                 .await
             {
                 push_system_message(
@@ -295,10 +306,22 @@ pub(super) async fn handle_change_provider(
                     format!("Warning: failed to refresh models.dev catalog: {}", err),
                 );
             }
-            let new_model = new_cfg
+            let new_model = match new_cfg
                 .model_default(provider.kind())
                 .map(|default| default.model.clone())
-                .unwrap_or_else(|| provider.default_model().to_string());
+            {
+                Some(model) => model,
+                None => match crate::provider_metadata::default_model_for_provider(provider.kind())
+                {
+                    Ok(model) => model.to_string(),
+                    Err(err) => {
+                        push_system_message(app, err);
+                        *current_model_variant = previous_variant;
+                        app.set_model_variant(current_model_variant.clone());
+                        return Ok(false);
+                    }
+                },
+            };
             let selection = match parse_model_selection(&new_model) {
                 Ok(s) => s,
                 Err(e) => {
@@ -366,9 +389,31 @@ pub(super) async fn handle_change_provider(
                         }
                     }
                 }
-                None => provider
-                    .default_model_variant(&selection.model)
-                    .map(str::to_string),
+                None => crate::provider_metadata::default_model_variant_for_provider(
+                    provider.kind(),
+                    &selection.model,
+                    provider.supported_variants(&selection.model),
+                )
+                .map(str::to_string),
+            };
+            let model_spec = match resolved_model_spec
+                .clone()
+                .into_model_spec(model_variant.clone())
+            {
+                Ok(spec) => spec,
+                Err(err) => {
+                    push_system_message(
+                        app,
+                        format!("Provider default model failed validation: {}", err),
+                    );
+                    *provider = previous_provider;
+                    app.model = previous_model;
+                    app.context_window = previous_context_window;
+                    app.context_usage_excludes_cached_input = previous_context_usage;
+                    *current_model_variant = previous_variant;
+                    app.set_model_variant(current_model_variant.clone());
+                    return Ok(false);
+                }
             };
             if let Some(rt) = runtime.as_mut() {
                 let _ = rt
@@ -376,11 +421,7 @@ pub(super) async fn handle_change_provider(
                     .config()
                     .update(SessionConfigPatch {
                         provider: Some(provider.clone()),
-                        model: Some(ModelSelection::new(
-                            selection.model.clone(),
-                            model_variant.clone(),
-                        )),
-                        max_context_tokens: Some(resolved_model_spec.context_window() as usize),
+                        model: Some(model_spec),
                         ..SessionConfigPatch::default()
                     })
                     .await;

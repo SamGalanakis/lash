@@ -40,11 +40,10 @@ async fn observation_reads_do_not_wait_for_active_turn() -> Result<()> {
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .advanced()
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("nonblocking-observation").open().await?;
     let turn_session = session.clone();
@@ -82,7 +81,7 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
     let observed = session.observe();
     assert_eq!(observed.read_view().messages().len(), 2);
     assert_eq!(observed.usage_report().usage.output_tokens, 2);
-    assert_eq!(observed.policy_snapshot().model, "mock-model");
+    assert_eq!(observed.policy_snapshot().model.id, "mock-model");
     Ok(())
 }
 
@@ -90,8 +89,7 @@ async fn observation_updates_after_completed_turn() -> Result<()> {
 async fn config_and_tool_mutations_publish_observation_immediately() -> Result<()> {
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
     let session = core.session("observation-mutations").open().await?;
@@ -131,10 +129,9 @@ async fn child_session_snapshot_does_not_wait_for_child_turn() -> Result<()> {
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .advanced()
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("child-observation-parent").open().await?;
     let children = session.control().children();

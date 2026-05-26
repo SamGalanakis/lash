@@ -8,12 +8,14 @@ pub enum EmbedError {
     DefaultModeNotInstalled { mode: ModeId },
     #[error("mode `{mode}` is not installed on this LashCore")]
     ModeNotInstalled { mode: ModeId },
-    #[error("max_context_tokens is required; hosts must supply explicit model metadata")]
-    MissingMaxContextTokens,
+    #[error("model spec is required; hosts must supply explicit model metadata")]
+    MissingModelSpec,
     #[error("failed to create store for session `{session_id}`: {message}")]
     StoreFactory { session_id: String, message: String },
     #[error("store is bound to session `{loaded}` but builder requested `{requested}`")]
     StoreSessionMismatch { loaded: String, requested: String },
+    #[error("durable process worker requires a LashCore store factory")]
+    MissingProcessWorkerStoreFactory,
     #[error("missing required turn input for plugin `{plugin_id}`")]
     MissingPluginTurnInput { plugin_id: &'static str },
     #[error("runtime session error: {0}")]

@@ -16,7 +16,9 @@ members = [
     "crates/lash-plugin-mcp",
     "crates/lash-plugin-observational-memory",
     "crates/lash-plugin-plan-mode",
+    "crates/lash-plugin-process-controls",
     "crates/lash-plugin-rolling-history",
+    "crates/lash-plugin-tool-output-budget",
     "crates/lash-plugin-tool-discovery",
     "crates/lash-llm-tools",
     "crates/lash-tool-support",
@@ -25,6 +27,7 @@ members = [
     "crates/lash-tool-search",
     "crates/lash-tool-shell",
     "crates/lash-tool-web",
+    "crates/lash-local-store",
     "crates/lash-standard-plugins",
     "crates/lash-provider-anthropic",
     "crates/lash-provider-codex",
@@ -41,12 +44,6 @@ members = [
     "crates/lash-file-index",
     "crates/lashlang",
     "examples/agent-service",
-    "bench/frontier-cs/runner",
-    "bench/oolong/runner",
-    "bench/longcot/runner",
-    "bench/longmemeval-rlm/runner",
-    "bench/swebench/runner",
-    "bench/continual-learning-bench/runner",
 ]
 # `cargo build` from the repo root compiles only the publishable SDK surface.
 # Internal bins/benches/examples build with `cargo build --workspace` or `-p <name>`.
@@ -73,18 +70,21 @@ default-members = [
     "crates/lash-tool-search",
     "crates/lash-tool-shell",
     "crates/lash-tool-web",
+    "crates/lash-local-store",
     "crates/lash-standard-plugins",
     "crates/lash-plugin-mcp",
     "crates/lash-plugin-observational-memory",
     "crates/lash-plugin-plan-mode",
+    "crates/lash-plugin-process-controls",
     "crates/lash-plugin-rolling-history",
+    "crates/lash-plugin-tool-output-budget",
     "crates/lash-plugin-tool-discovery",
     "crates/lash-subagents",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 license = "MIT"
 edition = "2024"
 authors = ["Samuel Galanakis"]

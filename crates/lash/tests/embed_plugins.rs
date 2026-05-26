@@ -202,8 +202,11 @@ fn core_with_responses(responses: Vec<LlmResponse>) -> LashCore {
     LashCore::builder()
         .install_mode(ModePreset::standard())
         .provider(provider)
-        .process_registry(Arc::new(lash_core::LocalProcessRegistry::default()))
-        .max_context_tokens(16_000)
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()))
+        .model(
+            lash::ModelSpec::from_token_limits("mock-model", None, 16_000, None, None)
+                .expect("valid model spec"),
+        )
         .build()
         .expect("core")
 }

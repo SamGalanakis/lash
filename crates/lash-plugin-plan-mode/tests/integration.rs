@@ -12,13 +12,17 @@ use lash_core::plugin::{
     ToolResultHookContext, ToolSurfaceContext,
 };
 use lash_core::{
-    AssembledTurn, ExecutionMode, MessageRole, RuntimeSessionState, PluginHost,
+    AssembledTurn, ExecutionMode, MessageRole, PluginHost, RuntimeSessionState,
     SessionCreateRequest, SessionHandle, SessionPolicy, SessionReadView, SessionSnapshot,
     SessionStateEnvelope, ToolContract, ToolDefinition, ToolManifest, ToolProvider, ToolRegistry,
     ToolResult, TurnHookContext, TurnResultHookContext,
 };
 
 use lash_core::testing::{MockSessionManager, mock_assembled_turn};
+
+fn unavailable_processes() -> Arc<dyn lash_core::ProcessService> {
+    Arc::new(lash_core::UnavailableProcessService)
+}
 
 #[async_trait::async_trait]
 trait PlanTestHostCore: Send + Sync {
@@ -251,7 +255,14 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     let enabled = session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
     assert!(enabled.is_success());
@@ -273,7 +284,14 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
         .build_standard_session("restored", Some(&snapshot))
         .expect("restored");
     let restored_toggle = restored
-        .invoke_plugin_action("plan_mode.toggle", json!({}), None, true, manager)
+        .invoke_plugin_action(
+            "plan_mode.toggle",
+            json!({}),
+            None,
+            true,
+            manager,
+            unavailable_processes(),
+        )
         .await
         .expect("toggle restored");
     let restored_toggle_value = restored_toggle.value_for_projection();
@@ -294,6 +312,7 @@ async fn plan_mode_plugin_enable_toggle_and_restore_round_trip() {
             None,
             true,
             Arc::new(mock_session_manager("run-session")),
+            unavailable_processes(),
         )
         .await
         .expect("toggle reset");
@@ -331,6 +350,7 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
             None,
             true,
             manager_host.clone(),
+            unavailable_processes(),
         )
         .await
         .expect("enable");
@@ -346,7 +366,14 @@ async fn plan_mode_toggles_dynamic_plan_exit_tool_state() {
     }));
 
     session
-        .invoke_plugin_action("plan_mode.disable", json!({}), None, true, manager_host)
+        .invoke_plugin_action(
+            "plan_mode.disable",
+            json!({}),
+            None,
+            true,
+            manager_host,
+            unavailable_processes(),
+        )
         .await
         .expect("disable");
 
@@ -371,7 +398,14 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -482,6 +516,7 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
             resolve_contract: Some(Arc::new(move |name| contracts.get(name).cloned())),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
+            lashlang_abilities: Default::default(),
         })
         .expect("tool surface");
     assert!(
@@ -564,11 +599,25 @@ async fn plan_mode_plugin_injects_guidance_and_blocks_implementation_tools() {
     )));
 
     session
-        .invoke_plugin_action("plan_mode.disable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.disable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("disable");
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -613,7 +662,14 @@ async fn plan_mode_does_not_reinject_entry_guidance_on_later_turns() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -667,7 +723,14 @@ async fn plan_mode_plugin_uses_configured_allowlist() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -787,6 +850,7 @@ async fn plan_mode_tool_exit_disables_mode_after_user_approval() {
             None,
             true,
             manager_host.clone(),
+            unavailable_processes(),
         )
         .await
         .expect("enable");
@@ -907,7 +971,14 @@ async fn plan_mode_tool_exit_allows_exit_without_validation() {
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -1006,7 +1077,14 @@ async fn plan_mode_tool_exit_can_execute_with_fresh_context() {
     let manager: Arc<dyn RuntimeSessionHost> = manager;
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -1101,7 +1179,14 @@ async fn plan_mode_after_tool_call_creates_fresh_context_session_on_approval() {
     let manager = Arc::new(CapturingSessionManager::default());
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 
@@ -1167,7 +1252,14 @@ async fn plan_mode_plugin_does_not_rewrite_assistant_output() {
     let manager: Arc<dyn RuntimeSessionHost> = Arc::new(mock_session_manager("run-session"));
 
     session
-        .invoke_plugin_action("plan_mode.enable", json!({}), None, true, manager.clone())
+        .invoke_plugin_action(
+            "plan_mode.enable",
+            json!({}),
+            None,
+            true,
+            manager.clone(),
+            unavailable_processes(),
+        )
         .await
         .expect("enable");
 

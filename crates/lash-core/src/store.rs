@@ -175,11 +175,9 @@ fn persisted_session_config_from_state(
 ) -> crate::PersistedSessionConfig {
     crate::PersistedSessionConfig {
         provider_id: state.policy.provider.kind().to_string(),
-        configured_model: state.policy.model.clone(),
-        context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
+        model: state.policy.model.clone(),
         execution_mode: state.policy.execution_mode.clone(),
         standard_context_approach: state.policy.standard_context_approach.clone(),
-        model_variant: state.policy.model_variant.clone(),
     }
 }
 
@@ -249,14 +247,6 @@ pub struct RuntimeCommitResult {
     pub manifest: SessionCheckpoint,
 }
 
-/// Wire-format version stamped on every persisted [`RuntimeTurnCheckpoint`].
-///
-/// Bump when the on-wire shape of `RuntimeTurnCheckpoint` changes in a way that
-/// older code cannot safely deserialize (enum-variant renames, field-meaning
-/// changes, removed required fields). Bytes carrying older or newer versions
-/// are rejected at load via [`ensure_supported_schema_version`] so a binary
-/// upgrade against in-flight durable state (Restate / SQLite) fails closed
-/// rather than silently misparsing.
 // =============================================================================
 // Attachment write-ahead manifest
 // =============================================================================
@@ -363,7 +353,8 @@ macro_rules! impl_noop_attachment_manifest {
             fn list_uncommitted(
                 &self,
                 _older_than_epoch_ms: u64,
-            ) -> ::std::result::Result<Vec<$crate::AttachmentManifestEntry>, $crate::StoreError> {
+            ) -> ::std::result::Result<Vec<$crate::AttachmentManifestEntry>, $crate::StoreError>
+            {
                 Ok(Vec::new())
             }
 
@@ -377,6 +368,14 @@ macro_rules! impl_noop_attachment_manifest {
     };
 }
 
+/// Wire-format version stamped on every persisted [`RuntimeTurnCheckpoint`].
+///
+/// Bump when the on-wire shape of `RuntimeTurnCheckpoint` changes in a way that
+/// older code cannot safely deserialize (enum-variant renames, field-meaning
+/// changes, removed required fields). Bytes carrying older or newer versions
+/// are rejected at load via [`ensure_supported_schema_version`] so a binary
+/// upgrade against in-flight durable state (Restate / SQLite) fails closed
+/// rather than silently misparsing.
 pub const RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 /// Wire-format version for [`RuntimeTurnLease`]. See
 /// [`RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION`] for upgrade semantics.
@@ -411,9 +410,9 @@ pub struct RuntimeTurnMachineConfigSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_session_id: Option<String>,
     pub autonomous: bool,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
+    pub model: crate::ModelSpec,
+    #[serde(default)]
+    pub generation: crate::GenerationOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
     pub sync_execution_surface: bool,
@@ -435,9 +434,7 @@ pub struct RuntimeTurnCheckpoint {
     pub mode_turn_options: crate::ModeTurnOptions,
     pub turn_prompt_layer: crate::PromptLayer,
     pub provider_id: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
+    pub model: crate::ModelSpec,
     pub updated_at_epoch_ms: u64,
 }
 
@@ -606,13 +603,9 @@ fn persisted_session_state_from_head(
         head_revision: Some(head.head_revision),
         graph_replace_required: false,
     };
-    state.policy.model = head.config.configured_model.clone();
-    if head.config.context_window > 0 {
-        state.policy.max_context_tokens = Some(head.config.context_window as usize);
-    }
+    state.policy.model = head.config.model.clone();
     state.policy.execution_mode = head.config.execution_mode;
     state.policy.standard_context_approach = head.config.standard_context_approach.clone();
-    state.policy.model_variant = head.config.model_variant.clone();
     if let Some(checkpoint) = checkpoint {
         state.turn_index = checkpoint.turn_state.turn_index;
         state.token_usage = checkpoint.turn_state.token_usage;

@@ -45,8 +45,9 @@ restate deployments register http://host.docker.internal:9080
 
 For the live E2E, use the one-command recipe. It starts the agent-service
 Restate endpoint in-process, registers it through the Restate Admin API, submits
-a turn through Restate ingress, verifies app outbox/message persistence, and
-removes the container on exit:
+a turn through Restate ingress, runs a named Lashlang background process against
+the tic-tac-toe board through `LashProcessWorkflow`, verifies app
+outbox/message persistence, and removes the container on exit:
 
 ```bash
 just agent-service-restate-e2e
@@ -62,9 +63,13 @@ local Docker networking needs different addresses.
 In Restate mode the Axum app still serves `AGENT_SERVICE_ADDR`, the same process
 also serves a Restate endpoint on `AGENT_SERVICE_RESTATE_ADDR`, and browser
 turns submit the app-specific `AgentServiceTurnWorkflow/{turn_id}/run` through
-`RESTATE_INGRESS_URL`. `AgentServiceTurnWorkflowRequest` carries only stable
-turn, chat, text, model, and model-variant data; board state stays in the app
-database. The workflow creates a `RestateRuntimeEffectController`, first attempts
+`RESTATE_INGRESS_URL`. The endpoint also binds Lash's generic
+`LashProcessWorkflow`, backed by `RestateCoreProcessRunner` and the same
+deployment-level `processes.db`, so background process starts from a turn are
+reconstructed from SQLite session stores instead of running in the route
+process. `AgentServiceTurnWorkflowRequest` carries only stable turn, chat, text,
+model, and model-variant data; board state stays in the app database. The
+workflow creates a `RestateRuntimeEffectController`, first attempts
 `session.resume_turn(turn_id).stream_with_effect_scope(...)`, and falls back to
 a fresh `session.turn(...).stream_with_effect_scope(...)` only when Lash has no
 checkpoint for that turn id yet. Turn progress is written to an app-owned

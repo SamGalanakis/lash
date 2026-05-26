@@ -26,7 +26,7 @@
 <div class="section" id="rlm-execution-path">
           <div class="section-header">
             <h2>RLM Execution Path</h2>
-            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> in scope, and the resulting trajectory is persisted as mode events. A block ending with <code>continue_as</code> finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
+            <p>The model emits code, the runtime executes it locally with the host's <code>ProjectedBindings</code> and resource handles in scope, and the resulting trajectory is persisted as mode events. A block that invokes <code>continue_as</code> through an explicit receiver finishes the turn as <code>TurnOutcome::Handoff</code> instead of looping back to the model.</p>
           </div>
           <div class="diagram">
             <div class="diagram-title">RLM and Lashlang execution</div>
@@ -42,16 +42,25 @@ sequenceDiagram
   Model-->>Driver: prose + ```lashlang fence
   Driver-->>Runtime: DriverAction::StartExec(code)
   Runtime->>Executor: execute_code(code, ProjectedBindings)
-  Executor->>Host: call / start / await / cancel tool
-  Host-->>Executor: ToolResult / handle / error
+  Executor->>Host: resource operation / start / await / cancel
+  Host-->>Executor: OperationResult / handle / error
   Executor-->>Runtime: ExecResponse + observations + images
-  Runtime->>Commit: records tool calls + RLM trajectory in turn events
+  Runtime->>Commit: records resource operations + RLM trajectory in turn events
   Runtime-->>Driver: Response::ExecResult or TurnOutcome::Handoff (continue_as)
             </div>
           </div>
-          <p>An end-to-end fanout-and-merge program. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a successor when the budget would be exceeded.</p>
+          <p>An end-to-end fanout-and-merge program for a host surface that enables <code>TOOL.default</code> operations and background processes. It enumerates candidate files, starts per-file analyses as handles, awaits them as a record, builds a histogram with nested path assignment, and either finishes the trajectory or hands the partial work to a successor when the budget would be exceeded.</p>
           <pre><code>```lashlang
-paths = (call glob { pattern: "crates/lash/src/**/*.rs" })?
+process review_file(tool: TOOL, path: str) {
+  report = await tool.spawn_agent({
+    task: format("review {} for TODOs and panics", path),
+    capability: "explore",
+    output: Type { owner: str, todos: int, panics: int }
+  })?
+  finish report
+}
+
+paths = await TOOL.default.glob({ pattern: "crates/lash/src/**/*.rs" })?
 if empty(paths) {
   submit { reviewed: 0, by_owner: {} }
 }
@@ -60,11 +69,7 @@ if empty(paths) {
 batch = slice(paths, null, 8)
 handles = {}
 for path in batch {
-  handles[path] = start call spawn_agent {
-    task: format("review {} for TODOs and panics", path),
-    capability: "explore",
-    output: Type { owner: str, todos: int, panics: int }
-  }
+  handles[path] = start review_file(tool: TOOL.default, path: path)
 }
 
 // Resolve the whole record concurrently, then collapse into a histogram.
@@ -87,10 +92,10 @@ for path in keys(resolved) {
 
 // Hand off the rest if we only got through a slice; otherwise submit.
 if len(paths) > len(batch) {
-  call continue_as {
+  await TOOL.default.continue_as({
     task: "continue the review over the remaining files",
     seed: { remaining: slice(paths, 8, null), by_owner: by_owner, errors: errors }
-  }
+  })?
 }
 submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
 ```</code></pre>
@@ -118,19 +123,19 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
             <li>
               <div>
                 <h3>Parser</h3>
-                <p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds one expression AST rooted at <code>Program</code>, with assignment targets, tool/process calls, blocks, control flow, and type expressions.</p>
+                <p><code>lexer.rs</code> tokenizes strings (including <code>r"""..."""</code> / <code>r'''...'''</code> raws), <code>//</code> comments, operators, and keywords. <code>parser.rs</code> builds a module AST rooted at <code>Program</code>, with declarations, assignment targets, receiver operations, named process starts, blocks, control flow, and type expressions. Host ability checks happen later in the linker, not in the grammar.</p>
               </div>
             </li>
             <li>
               <div>
                 <h3>Compiler</h3>
-                <p><code>runtime/compiler.rs</code> lowers the AST into a <code>Chunk</code> of <code>Instruction</code>s (defined in <code>runtime/instruction.rs</code>), folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit tool/process effects. <code>cache.rs</code> reuses compiled programs across fenced blocks via a normalized, desugared AST hash.</p>
+                <p><code>runtime/compiler.rs</code> lowers a linked AST into a <code>Chunk</code> of <code>Instruction</code>s (defined in <code>runtime/instruction.rs</code>), folds static type literals, compiles assignment paths, loop cleanup jumps, builtin calls (specialized to <code>Instruction::Len</code>, <code>Range</code>, <code>Push</code>, <code>FormatCompiled</code>, <code>ValidateCompiled</code>, etc.), and explicit resource/process effects that the linked <code>LashlangSurface</code> allowed. Lashlang process starts persist a <code>LinkedModule</code> inside <code>ProcessInput::LashlangProcess</code>, so the process runner compiles named process entry points from the stored linked snapshot; live resource operation dispatch still uses the current callable tool surface.</p>
               </div>
             </li>
             <li>
               <div>
                 <h3>VM</h3>
-                <p><code>runtime/vm/</code> walks the compiled <code>Chunk</code>, stores globals in <code>state.rs</code>'s <code>State</code>, dispatches host effects through <code>host.rs</code>'s <code>ExecutionHost</code>, recursively awaits records/lists of handles, and consults the <code>ProjectedBindings</code> defined in <code>value.rs</code> for any name not present in <code>State</code>. The VM is split into <code>vm/mod.rs</code> (instruction dispatch), <code>vm/effects.rs</code> (the <code>VmEffect</code> seam that calls into <code>ExecutionHost::perform</code>), <code>vm/control.rs</code> (run loop, mode entry points, and the <code>VmStep</code> / <code>VmOutcome</code> step machinery), and <code>vm/lowered_loop.rs</code> (the optimizer's loop IR). Every effectful op — tool call, start, await, cancel, print, process start, process event, and the program terminators <code>submit</code> / <code>finish</code> / <code>fail</code> — goes through <code>perform</code>; handlers may transform the value but the VM enforces divergence for the terminator ops. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment; <code>format.rs</code> and <code>json.rs</code> own <code>format(...)</code> and <code>json_parse</code>/serialization helpers. <code>entry_points.rs</code> wires the public <code>compile</code> / <code>execute</code> surface re-exported from the crate root.</p>
+                <p><code>runtime/vm/</code> walks the compiled <code>Chunk</code>, stores globals in <code>state.rs</code>'s <code>State</code>, dispatches host effects through <code>host.rs</code>'s <code>ExecutionHost</code>, recursively awaits records/lists of handles, and consults the <code>ProjectedBindings</code> defined in <code>value.rs</code> for any name not present in <code>State</code>. The VM is split into <code>vm/mod.rs</code> (instruction dispatch), <code>vm/effects.rs</code> (the <code>VmEffect</code> seam that calls into <code>ExecutionHost::perform</code>), <code>vm/control.rs</code> (run loop, mode entry points, and the <code>VmStep</code> / <code>VmOutcome</code> step machinery), and <code>vm/lowered_loop.rs</code> (the optimizer's loop IR). Every enabled effectful op — resource operation, start, await, cancel, print, process start, process event, and the program terminators <code>submit</code> / <code>finish</code> / <code>fail</code> — goes through <code>perform</code>; handlers may transform the value but the VM enforces divergence for the terminator ops. <code>ops.rs</code> holds value coercions and builtin bodies; <code>access.rs</code> handles field/index reads and path assignment; <code>format.rs</code> and <code>json.rs</code> own <code>format(...)</code> and <code>json_parse</code>/serialization helpers. <code>entry_points.rs</code> wires the public <code>compile</code> / <code>execute</code> surface re-exported from the crate root.</p>
               </div>
             </li>
             <li>
@@ -152,11 +157,11 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
               <thead><tr><th>Path</th><th>Role</th></tr></thead>
               <tbody>
                 <tr><td><code>crates/lashlang/src/lexer.rs</code></td><td>Tokens, including raw triple-single-quote strings used for embedded code and heredoc-like content.</td></tr>
-                <tr><td><code>crates/lashlang/src/ast.rs</code></td><td>AST node types (<code>Program</code>, <code>Expr</code>, <code>AssignTarget</code>, <code>ToolCallMode</code>, <code>TypeExpr</code>, …) shared by the parser and compiler.</td></tr>
-                <tr><td><code>crates/lashlang/src/parser.rs</code></td><td>AST construction for the one expression grammar, type literals, calls, async, control flow, and await record/list fanout forms.</td></tr>
+                <tr><td><code>crates/lashlang/src/ast.rs</code></td><td>AST node types (<code>Program</code>, <code>Declaration</code>, <code>Expr</code>, <code>AssignTarget</code>, <code>ReceiverCall</code>, <code>ResourceRef</code>, <code>TypeExpr</code>, …) shared by the parser and compiler.</td></tr>
+                <tr><td><code>crates/lashlang/src/parser.rs</code></td><td>AST construction for the module grammar, type declarations, process declarations, receiver operations, named starts, async, control flow, and await record/list fanout forms.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/mod.rs</code></td><td>Cross-cutting runtime types (<code>RuntimeError</code>, <code>RuntimeFailure</code>, <code>ExecutionScratch</code>, <code>ExecutionOutcome</code>, <code>CompiledProgram</code>, <code>ProfileReport</code>, <code>CompileStats</code>) and the <code>pub use</code> wiring that re-exports each focused submodule.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/compiler.rs</code></td><td>AST → bytecode <code>Chunk</code> lowering, type-literal const-folding, loop cleanup, effect lowering, and builtin specialization.</td></tr>
-                <tr><td><code>crates/lashlang/src/runtime/instruction.rs</code></td><td><code>Instruction</code> opcode enum and supporting types (profile tags, loop ops, compiled process blocks).</td></tr>
+                <tr><td><code>crates/lashlang/src/runtime/instruction.rs</code></td><td><code>Instruction</code> opcode enum and supporting types (profile tags, loop ops, receiver operations, and named process starts).</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/vm/</code></td><td>Bytecode executor split across <code>mod.rs</code> (instruction dispatch), <code>effects.rs</code> (the <code>VmEffect</code> seam that calls <code>ExecutionHost::perform</code>, including the terminator ops <code>Submit</code>/<code>Finish</code>/<code>Fail</code>), <code>control.rs</code> (run loop, mode-aware entry points, <code>VmStep</code>/<code>VmOutcome</code>), and <code>lowered_loop.rs</code> (optimizer loop IR).</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/value.rs</code></td><td><code>Value</code>, <code>ListValue</code>, <code>ImageValue</code>, <code>LASH_TYPE_KEY</code>, and the <code>ProjectedBindings</code> / <code>ProjectedValue</code> / <code>ProjectedHostValue</code> / <code>ProjectedRead*</code> seam, including optional projection-ref metadata.</td></tr>
                 <tr><td><code>crates/lashlang/src/runtime/state.rs</code></td><td><code>State</code> globals, mutation rules, and <code>Snapshot</code>/restore. Ref-backed projected snapshots restore as unresolved projected placeholders for RLM to rehydrate before execution.</td></tr>
@@ -171,7 +176,7 @@ submit { reviewed: len(batch), by_owner: by_owner, errors: errors }
                 <tr><td><code>crates/lashlang/src/runtime/entry_points.rs</code></td><td>Top-level <code>compile</code> / <code>execute</code> / <code>prewarm</code> entry points re-exported from the crate root.</td></tr>
                 <tr><td><code>crates/lash-mode-rlm/src/protocol.rs</code></td><td>Shared RLM execution prompt, <code>RlmPromptFeatures</code>, language reference shown to the model, and the <code>first_lashlang_fence_span</code> / <code>extract_first_lashlang_fence</code> extractors.</td></tr>
                 <tr><td><code>crates/lash-mode-rlm/src/executor.rs</code></td><td>RLM execution orchestration: snapshot/restore, program compilation, protected global pruning, and assembling <code>ExecResponse</code>.</td></tr>
-                <tr><td><code>crates/lash-mode-rlm/src/executor/host_bridge.rs</code></td><td>Lashlang <code>ExecutionHost</code> bridge: direct/async tool calls, print observations, collected tool-call output, process effects, and image attachment conversion.</td></tr>
+                <tr><td><code>crates/lash-mode-rlm/src/executor/host_bridge.rs</code></td><td>Lashlang <code>ExecutionHost</code> bridge: receiver resource operations, print observations, collected operation output, process effects, and image attachment conversion.</td></tr>
                 <tr><td><code>crates/lash-mode-rlm/src/executor/projections.rs</code></td><td>Built-in <code>history</code> binding, session/turn projected binding assembly, projection-ref rehydration, and projected-name pruning.</td></tr>
                 <tr><td><code>crates/lash-mode-rlm/src/projection.rs</code>, <code>projection_transport.rs</code></td><td><code>projection.rs</code> assembles session/turn projected bindings (including the live <code>history</code> projection) and the projection registry shape RLM hands the executor. <code>projection_transport.rs</code> is the shared wire codec for projected JSON normalization, seed-field preservation, Lashlang value JSON conversion, output formatting, and projection-ref extraction.</td></tr>
                 <tr><td><code>crates/lashlang/tests/rlm_prompt_claims.rs</code></td><td>Tests that prompt claims about language behavior remain true.</td></tr>

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::event::Event as TermEvent;
 use lash::{LashSession, TurnEvent, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, TokenUsage, ToolState};
+use lash_core::{TokenUsage, ToolState};
 use lash_sqlite_store::Store;
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiSlashInvocation};
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::{self, App, PreparedTurn, UiTimelineItem};
 use crate::command;
 use crate::event::{AppEvent, AppEventPump};
+use crate::model_catalog::CachedModelCatalog;
 use crate::prompt_tool::CliPromptBridge;
 use crate::render;
 use crate::resume;
@@ -53,7 +54,7 @@ pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
     activate_foreground_session_handoff, apply_terminal_action, handle_key_event,
-    handle_mouse_event, handle_surface_input, process_pending_monitor_wakes,
+    handle_mouse_event, handle_surface_input, process_pending_process_wakes,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -64,7 +65,7 @@ use self::helpers::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-use self::input_handling::enqueue_pending_monitor_wakes;
+use self::input_handling::enqueue_pending_process_wakes;
 
 fn session_activity_is_current(
     stream_id: u64,
@@ -110,9 +111,12 @@ pub(crate) async fn run_app(
     app.context_window = Some(initial_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
     let mut current_model_variant = initial_model_variant.or_else(|| {
-        provider
-            .default_model_variant(&app.model)
-            .map(str::to_string)
+        crate::provider_metadata::default_model_variant_for_provider(
+            provider.kind(),
+            &app.model,
+            provider.supported_variants(&app.model),
+        )
+        .map(str::to_string)
     });
     app.set_model_variant(current_model_variant.clone());
     let mut current_execution_mode = initial_execution_mode;
@@ -337,8 +341,8 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
-        if app.has_pending_monitor_wakes() {
-            match process_pending_monitor_wakes(
+        if app.has_pending_process_wakes() {
+            match process_pending_process_wakes(
                 &mut app,
                 &mut ui_trace,
                 logger,
@@ -355,7 +359,7 @@ pub(crate) async fn run_app(
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(err) => {
-                    push_system_message(&mut app, format!("Failed to inject monitor wake: {err}"))
+                    push_system_message(&mut app, format!("Failed to inject process wake: {err}"))
                 }
             }
         }
@@ -413,7 +417,7 @@ pub(crate) async fn run_app(
                     {
                         let session_id = session_id.clone();
                         app.stop_turn();
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
                         if activate_foreground_session_handoff(
@@ -474,7 +478,7 @@ pub(crate) async fn run_app(
                         );
                     }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.policy_snapshot();
                             let _ = rt.control().state().reset().await;
@@ -584,7 +588,7 @@ pub(crate) async fn run_app(
                         app.invalidate_height_cache();
                         app.scroll_to_bottom();
                         promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
                         dispatch_next_queued_turn(
@@ -619,7 +623,7 @@ pub(crate) async fn run_app(
                     }
 
                     app.finish_turn_from_read_view(&read_view);
-                    app.recycle_unaccepted_monitor_wakes();
+                    app.recycle_unaccepted_process_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -662,7 +666,7 @@ pub(crate) async fn run_app(
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     tracing::debug!("runtime return channel closed before delivering runtime");
                     app.stop_turn();
-                    app.recycle_unaccepted_monitor_wakes();
+                    app.recycle_unaccepted_process_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -976,7 +980,7 @@ pub(crate) async fn run_app(
                         .iter()
                         .map(|input| input.message.clone())
                         .collect::<Vec<_>>();
-                    app.acknowledge_monitor_wakes(&messages);
+                    app.acknowledge_process_wakes(&messages);
                 }
                 app.handle_turn_activity(activity);
                 apply_ui_host_effects(&mut app, ui_effects);

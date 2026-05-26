@@ -682,7 +682,7 @@ fn user_input_highlights_every_detected_slash_command() {
     app.skills = skill_catalog_with(&[
         ("spring-cleaning", "cleanup"),
         ("yolopush", "ship changes"),
-        ("ghmonitor", "monitor"),
+        ("ghmonitor", "ci status"),
     ]);
     app.timeline = vec![UiTimelineItem::UserInput(
         "/spring-cleaning /yolopush and then /ghmonitor status".into(),
@@ -702,7 +702,7 @@ fn user_input_highlights_every_detected_slash_command() {
 #[test]
 fn user_input_does_not_highlight_unknown_inline_slash_words() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-    app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
+    app.skills = skill_catalog_with(&[("ghmonitor", "ci status")]);
     app.timeline = vec![UiTimelineItem::UserInput(
         "Please check /not-a-command and /ghmonitor soon".into(),
     )]
@@ -724,7 +724,7 @@ fn user_input_does_not_highlight_unknown_inline_slash_words() {
 #[test]
 fn queue_preview_highlights_multiple_detected_slash_commands() {
     let mut app = App::new("gpt-5.4".into(), "test".into(), "test-session-id".into());
-    app.skills = skill_catalog_with(&[("ghmonitor", "monitor")]);
+    app.skills = skill_catalog_with(&[("ghmonitor", "ci status")]);
     let turn = PreparedTurn::prepare(
         "/retry then /ghmonitor and /bogus".into(),
         Vec::new(),
@@ -1086,7 +1086,7 @@ fn snippet_preview_wraps_long_markdown_bullets_to_viewport_width() {
 #[test]
 fn lashlang_code_block_is_hidden_below_full_expand() {
     let blocks = vec![UiTimelineItem::LashlangCode(
-        "r = call read_file { path: \"a\" }\nsubmit r.value".to_string(),
+        "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value".to_string(),
     )];
     for level in [0u8, 1] {
         let rendered = render_block(&blocks, 0, level, 80, 24);
@@ -1109,17 +1109,14 @@ fn lashlang_code_block_is_hidden_below_full_expand() {
 fn activity_detail_lines_are_visible_at_l0() {
     let mut state = ActivityState::default();
     let blocks = state.project_tool_call(
-        "monitor",
+        "list_process_handles",
+        serde_json::json!({}),
         serde_json::json!({
-            "description": "build",
-            "command": "cargo build",
-        }),
-        serde_json::json!({
-            "description": "build",
-            "command": "cargo build",
-            "persistent": false,
-            "timeout_ms": 300000,
-            "state": "running",
+            "processes": [{
+                "process_id": "build-process",
+                "descriptor": { "kind": "tool", "label": "build" },
+                "terminal": "running",
+            }],
         }),
         true,
         3,
@@ -1136,7 +1133,8 @@ fn activity_detail_lines_are_visible_at_l0() {
         })
         .collect();
     assert!(
-        text.iter().any(|line| line.contains("running · build")),
+        text.iter()
+            .any(|line| line.contains("running · tool · build")),
         "detail lines should render at L0; got {text:?}",
     );
 }
@@ -1403,7 +1401,7 @@ fn live_reasoning_compacts_after_turn_stops() {
 
 #[test]
 fn lashlang_code_block_renders_header_and_body_at_full_expand() {
-    let code = "r = call read_file { path: \"a\" }\nsubmit r.value";
+    let code = "r = await TOOL.default.read_file({ path: \"a\" })\nsubmit r.value";
     let blocks = vec![UiTimelineItem::LashlangCode(code.to_string())];
     let rendered = render_block(&blocks, 0, 2, 80, 24);
     let text: Vec<String> = rendered
@@ -1422,7 +1420,7 @@ fn lashlang_code_block_renders_header_and_body_at_full_expand() {
     );
     assert!(
         text.iter()
-            .any(|line| line.starts_with("╎ r = call read_file")),
+            .any(|line| line.starts_with("╎ r = await TOOL.default.read_file")),
         "missing first code line in {text:?}",
     );
     assert!(

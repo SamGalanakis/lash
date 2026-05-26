@@ -1,10 +1,10 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
-assertion_line: 202
+assertion_line: 210
 expression: "serde_json::to_string_pretty(&program).expect(\"program should serialize\")"
 ---
 {
-  "expr": {
+  "main": {
     "Block": [
       {
         "Assign": {
@@ -200,5 +200,35 @@ expression: "serde_json::to_string_pretty(&program).expect(\"program should seri
         }
       }
     ]
-  }
+  },
+  "expression_spans": [
+    {
+      "start": 1,
+      "end": 28
+    },
+    {
+      "start": 29,
+      "end": 62
+    },
+    {
+      "start": 63,
+      "end": 98
+    },
+    {
+      "start": 99,
+      "end": 110
+    },
+    {
+      "start": 111,
+      "end": 182
+    },
+    {
+      "start": 183,
+      "end": 265
+    },
+    {
+      "start": 266,
+      "end": 358
+    }
+  ]
 }

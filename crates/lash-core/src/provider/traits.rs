@@ -27,19 +27,7 @@ pub trait ProviderTransport: Send + Sync + std::fmt::Debug {
 }
 
 pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
-    fn default_model(&self) -> &str;
     fn supported_variants(&self, model: &str) -> &'static [&'static str];
-    fn default_model_variant(&self, model: &str) -> Option<&'static str>;
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig>;
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection>;
-
-    fn resolve_model(&self, model: &str) -> String {
-        model.to_string()
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        model.to_string()
-    }
 
     fn input_usage_excludes_cached_tokens(&self) -> bool {
         false

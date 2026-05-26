@@ -234,7 +234,11 @@ impl SessionBuilder {
             factories.extend(self.plugin_factories);
             let mut plugin_host = PluginHost::new(factories);
             if env.process_registry.is_some() {
-                plugin_host = plugin_host.with_processes();
+                let abilities = plugin_host
+                    .lashlang_abilities()
+                    .with_processes()
+                    .with_process_lifecycle();
+                plugin_host = plugin_host.with_lashlang_abilities(abilities);
             }
             env.plugin_host = Some(Arc::new(plugin_host));
         }
@@ -291,8 +295,7 @@ pub struct LashSession {
 #[derive(Clone, Debug, Default)]
 pub struct SessionConfigPatch {
     pub provider: Option<ProviderHandle>,
-    pub model: Option<ModelSelection>,
-    pub max_context_tokens: Option<usize>,
+    pub model: Option<lash_core::ModelSpec>,
     pub prompt: Option<PromptLayer>,
 }
 
@@ -365,8 +368,8 @@ impl LashSession {
         ToolsControl::new(self.control())
     }
 
-    pub fn processes(&self) -> Processes {
-        Processes::new(self.control())
+    pub fn process_control(&self) -> ProcessControl {
+        ProcessControl::new(self.control())
     }
 
     pub fn handoffs(&self) -> Handoffs {

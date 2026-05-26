@@ -6,7 +6,7 @@ use crossterm::event::{
 };
 use lash::{LashSession, TurnInput, advanced::ExecutionMode, provider::ProviderHandle};
 use lash_core::session_model::Message;
-use lash_core::{CachedModelCatalog, InjectedTurnInput, ToolState};
+use lash_core::{InjectedTurnInput, ToolState};
 use lash_tui::{InputEvent as TuiInputEvent, Terminal, normalize_event};
 use lash_tui_extensions::{TuiExtensionContext, TuiExtensions, TuiInputOutcome, TuiSurfaceSlot};
 use tokio::task;
@@ -16,6 +16,7 @@ use crate::app::{App, PreparedTurn, UiTimelineItem};
 use crate::editor::SuggestionKind;
 use crate::event::AppEvent;
 use crate::input_items::insert_inline_marker;
+use crate::model_catalog::CachedModelCatalog;
 use crate::render;
 use crate::session_log::SessionLogger;
 use crate::turn_runner::{RuntimeRunResult, make_turn_input};
@@ -31,7 +32,7 @@ use super::commands::{
     switch_to_session_identifier,
 };
 use super::helpers::{
-    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, monitor_wake_message,
+    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, process_wake_message,
     queued_turn_edit_matches, record_queue_pending_steer, record_queue_turn,
     should_preserve_selection_for_key,
 };
@@ -251,11 +252,11 @@ pub(super) async fn activate_foreground_session_handoff(
     true
 }
 
-pub(super) async fn enqueue_pending_monitor_wakes(
+pub(super) async fn enqueue_pending_process_wakes(
     app: &mut App,
     session: &LashSession,
 ) -> Result<usize, String> {
-    let wakes = app.take_pending_monitor_wakes();
+    let wakes = app.take_pending_process_wakes();
     if wakes.is_empty() {
         return Ok(0);
     }
@@ -263,7 +264,7 @@ pub(super) async fn enqueue_pending_monitor_wakes(
         .iter()
         .map(|input| InjectedTurnInput {
             id: None,
-            message: monitor_wake_message(input),
+            message: process_wake_message(input),
         })
         .collect::<Vec<_>>();
     session
@@ -272,12 +273,12 @@ pub(super) async fn enqueue_pending_monitor_wakes(
         .inject_turn_inputs(messages)
         .await
         .map_err(|err| err.to_string())?;
-    app.mark_monitor_wakes_in_flight(&wakes);
+    app.mark_process_wakes_in_flight(&wakes);
     Ok(wakes.len())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn process_pending_monitor_wakes(
+pub(super) async fn process_pending_process_wakes(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
     logger: &mut SessionLogger,
@@ -295,7 +296,7 @@ pub(super) async fn process_pending_monitor_wakes(
     let Some(session) = runtime.as_ref() else {
         return Ok(false);
     };
-    let injected = enqueue_pending_monitor_wakes(app, session).await?;
+    let injected = enqueue_pending_process_wakes(app, session).await?;
     if injected == 0 {
         return Ok(false);
     }

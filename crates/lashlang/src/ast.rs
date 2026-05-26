@@ -7,31 +7,120 @@ pub type AstString = CompactString;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Program {
-    pub expr: Expr,
-    #[serde(default, skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<Declaration>,
+    pub main: Expr,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration_spans: Vec<Span>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expression_spans: Vec<Span>,
 }
 
 impl Program {
     pub fn block(expressions: Vec<Expr>) -> Self {
         Self {
-            expr: Expr::Block(expressions),
+            declarations: Vec::new(),
+            main: Expr::Block(expressions),
+            declaration_spans: Vec::new(),
             expression_spans: Vec::new(),
         }
     }
 
-    pub(crate) fn block_with_spans(expressions: Vec<Expr>, expression_spans: Vec<Span>) -> Self {
+    pub(crate) fn module_with_spans(
+        declarations: Vec<Declaration>,
+        declaration_spans: Vec<Span>,
+        expressions: Vec<Expr>,
+        expression_spans: Vec<Span>,
+    ) -> Self {
         Self {
-            expr: Expr::Block(expressions),
+            declarations,
+            main: Expr::Block(expressions),
+            declaration_spans,
             expression_spans,
         }
+    }
+
+    pub fn process(&self, name: &str) -> Option<&ProcessDecl> {
+        self.declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Process(process) if process.name.as_str() == name => Some(process),
+                _ => None,
+            })
     }
 }
 
 impl PartialEq for Program {
     fn eq(&self, other: &Self) -> bool {
-        self.expr == other.expr
+        self.declarations == other.declarations && self.main == other.main
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Declaration {
+    Type(TypeDecl),
+    Process(ProcessDecl),
+    Trigger(TriggerDecl),
+    Schedule(ScheduleDecl),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeDecl {
+    pub name: AstString,
+    pub ty: TypeExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessDecl {
+    pub name: AstString,
+    pub params: Vec<ProcessParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_ty: Option<TypeExpr>,
+    pub body: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessParam {
+    pub name: AstString,
+    pub ty: TypeExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TriggerDecl {
+    pub name: AstString,
+    pub source: TriggerSource,
+    pub event_binding: AstString,
+    pub body: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TriggerSource {
+    Binding {
+        resource: ResourceRefExpr,
+        event: AstString,
+    },
+    Each {
+        resource_type: AstString,
+        event: AstString,
+        resource_binding: AstString,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleDecl {
+    pub name: AstString,
+    pub cadence: ScheduleCadence,
+    pub tick_binding: AstString,
+    pub body: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ScheduleCadence {
+    Cron {
+        expression: Expr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<(AstString, Expr)>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,12 +175,21 @@ pub enum Expr {
     },
     Break,
     Continue,
-    ToolCall {
-        mode: ToolCallMode,
-        call: CallExpr,
-    },
     StartProcess(ProcessStartExpr),
+    ResourceRef(ResourceRefExpr),
+    ReceiverCall {
+        receiver: Box<Expr>,
+        operation: AstString,
+        args: Vec<Expr>,
+    },
     Await(Box<Expr>),
+    SleepFor(Box<Expr>),
+    SleepUntil(Box<Expr>),
+    WaitSignal,
+    SignalRun {
+        run: Box<Expr>,
+        payload: Box<Expr>,
+    },
     ResultUnwrap(Box<Expr>),
     Cancel(Box<Expr>),
     Print(Box<Expr>),
@@ -124,12 +222,6 @@ pub enum Expr {
     TypeLiteral(Box<TypeExpr>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ToolCallMode {
-    Call,
-    Start,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Any,
@@ -159,20 +251,15 @@ pub struct TypeField {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CallExpr {
-    pub name: AstString,
+pub struct ProcessStartExpr {
+    pub process: AstString,
     pub args: Vec<(AstString, Expr)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProcessStartExpr {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<Box<Expr>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<Box<Expr>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<Box<Expr>>,
-    pub body: Box<Expr>,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceRefExpr {
+    pub resource_type: AstString,
+    pub alias: AstString,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

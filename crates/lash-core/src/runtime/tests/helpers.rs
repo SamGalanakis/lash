@@ -645,7 +645,6 @@ pub(crate) fn mock_provider(calls: Vec<MockCall>) -> TestProvider {
     let calls = Arc::new(Mutex::new(calls));
     TestProvider::builder()
         .kind("mock")
-        .default_model("mock-model")
         .requires_streaming(true)
         .complete(move |req| {
             let calls = Arc::clone(&calls);
@@ -666,8 +665,8 @@ pub(crate) fn standard_test_policy() -> SessionPolicy {
     SessionPolicy {
         execution_mode: ExecutionMode::standard(),
         provider: mock_provider(Vec::new()).into_handle(),
-        model: "mock-model".to_string(),
-        max_context_tokens: Some(200_000),
+        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            .expect("valid model spec"),
         ..SessionPolicy::default()
     }
 }
@@ -677,7 +676,10 @@ pub(crate) fn test_host_config() -> EmbeddedRuntimeHost {
 }
 
 pub(crate) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_trace_jsonl_path(Some(path)))
+    EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default()
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path)))),
+    )
 }
 
 pub(crate) fn test_host_config_with_trace_path_and_stream_events(
@@ -685,7 +687,7 @@ pub(crate) fn test_host_config_with_trace_path_and_stream_events(
 ) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
-            .with_trace_jsonl_path(Some(path))
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path))))
             .with_trace_level(lash_trace::TraceLevel::Extended),
     )
 }
@@ -711,7 +713,7 @@ impl SessionStoreFactory for RecordingSessionStoreFactory {
             session_id: request.session_id.clone(),
             session_name: request.session_id.clone(),
             created_at: "2026-04-06T00:00:00Z".to_string(),
-            model: request.policy.model.clone(),
+            model: request.policy.model.id.clone(),
             cwd: None,
             relation: request.relation.clone(),
         });
@@ -774,7 +776,7 @@ pub(crate) async fn standard_runtime_with_transport(transport: TestProvider) -> 
     )
     .await
     .expect("runtime");
-    runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
     runtime.policy.provider = transport.clone().into_handle();
     runtime
 }
@@ -879,7 +881,7 @@ pub(crate) async fn runtime_with_plugins_and_tools_and_host(
     )
     .await
     .expect("runtime");
-    runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+    runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
     runtime.policy.provider = transport.clone().into_handle();
     runtime
 }

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::llm::types::{LlmEventSender, LlmStreamEvent};
 use crate::plugin::PluginMessage;
 use crate::provider::ProviderHandle;
-use crate::{ExecutionMode, StandardContextApproach};
+use crate::{ExecutionMode, ModelSpec, StandardContextApproach};
 
 pub use lash_sansio::format_tool_output_content;
 pub use lash_sansio::session_model::{
@@ -138,10 +138,8 @@ pub(crate) fn plugin_message_to_message(plugin_message: &PluginMessage) -> Messa
 /// concrete provider types they support at startup.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionPolicy {
-    pub model: String,
+    pub model: ModelSpec,
     pub provider: ProviderHandle,
-    pub max_context_tokens: Option<usize>,
-    pub model_variant: Option<String>,
     pub session_id: Option<String>,
     #[serde(default)]
     pub autonomous: bool,
@@ -154,6 +152,18 @@ pub struct SessionPolicy {
 }
 
 impl SessionPolicy {
+    pub fn model_id(&self) -> &str {
+        &self.model.id
+    }
+
+    pub fn model_variant(&self) -> Option<&str> {
+        self.model.variant.as_deref()
+    }
+
+    pub fn context_window_tokens(&self) -> usize {
+        self.model.context_window_tokens()
+    }
+
     /// Drop policy fields that only apply to the standard execution mode.
     pub fn normalize_for_execution_mode(&mut self) {
         if self.execution_mode != ExecutionMode::standard() {
@@ -176,10 +186,8 @@ impl SessionPolicy {
 pub struct SessionSpec {
     inherit: bool,
     pub provider: Option<ProviderHandle>,
-    pub model: Option<String>,
-    pub model_variant: Option<Option<String>>,
+    pub model: Option<ModelSpec>,
     pub execution_mode: Option<ExecutionMode>,
-    pub max_context_tokens: Option<usize>,
     pub max_turns: Option<Option<usize>>,
     pub prompt: Option<crate::PromptLayer>,
 }
@@ -192,9 +200,7 @@ impl SessionSpec {
             inherit: false,
             provider: None,
             model: None,
-            model_variant: None,
             execution_mode: None,
-            max_context_tokens: None,
             max_turns: None,
             prompt: None,
         }
@@ -218,29 +224,13 @@ impl SessionSpec {
         self
     }
 
-    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.model = Some(model.into());
-        self.model_variant = Some(variant);
-        self
-    }
-
-    pub fn model_variant(mut self, variant: impl Into<String>) -> Self {
-        self.model_variant = Some(Some(variant.into()));
-        self
-    }
-
-    pub fn clear_model_variant(mut self) -> Self {
-        self.model_variant = Some(None);
+    pub fn model(mut self, model: ModelSpec) -> Self {
+        self.model = Some(model);
         self
     }
 
     pub fn mode(mut self, mode: ExecutionMode) -> Self {
         self.execution_mode = Some(mode);
-        self
-    }
-
-    pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
-        self.max_context_tokens = Some(max_context_tokens);
         self
     }
 
@@ -263,20 +253,9 @@ impl SessionSpec {
         let mut policy = base.clone();
         if let Some(provider) = self.provider.as_ref() {
             policy.provider = provider.clone();
-            if self.model.is_none() {
-                let model = provider.default_model().to_string();
-                policy.model_variant = provider.default_model_variant(&model).map(str::to_string);
-                policy.model = model;
-            }
         }
         if let Some(model) = self.model.as_ref() {
             policy.model = model.clone();
-        }
-        if let Some(model_variant) = self.model_variant.as_ref() {
-            policy.model_variant = model_variant.clone();
-        }
-        if let Some(max_context_tokens) = self.max_context_tokens {
-            policy.max_context_tokens = Some(max_context_tokens);
         }
         if let Some(max_turns) = self.max_turns {
             policy.max_turns = max_turns;
@@ -300,10 +279,8 @@ impl Default for SessionSpec {
 impl Default for SessionPolicy {
     fn default() -> Self {
         Self {
-            model: String::new(),
+            model: ModelSpec::default(),
             provider: ProviderHandle::default(),
-            max_context_tokens: None,
-            model_variant: None,
             session_id: None,
             autonomous: false,
             max_turns: None,

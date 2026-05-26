@@ -18,6 +18,7 @@ pub struct SansIoTurnInput<M: ModeProtocol = UnitModeProtocol> {
     pub prepared_prompt: PreparedPrompt,
     pub max_turns: Option<usize>,
     pub model_variant: Option<String>,
+    pub generation: crate::llm::types::GenerationOptions,
     pub emit_llm_trace: bool,
     pub termination: M::Termination,
 }
@@ -37,6 +38,7 @@ pub fn build_turn<M: ModeProtocol>(input: SansIoTurnInput<M>) -> PreparedTurnMac
             model: input.model,
             max_turns: input.max_turns,
             model_variant: input.model_variant,
+            generation: input.generation,
             run_session_id: input.run_session_id,
             autonomous: input.autonomous,
             tool_specs: input.mode_preamble.tool_specs.clone(),
@@ -174,6 +176,7 @@ mod tests {
             prepared_prompt,
             max_turns: Some(3),
             model_variant: Some("mini".to_string()),
+            generation: crate::llm::types::GenerationOptions::default(),
             emit_llm_trace: true,
             termination: (),
         });

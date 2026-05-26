@@ -8,6 +8,19 @@ use lash_core::llm::types::{
 };
 use tokio::sync::{Mutex as TokioMutex, oneshot};
 
+fn model_spec(
+    model: impl Into<String>,
+    variant: Option<String>,
+    context_window_tokens: usize,
+) -> lash_core::ModelSpec {
+    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None, None)
+        .expect("valid model spec")
+}
+
+fn mock_model_spec() -> lash_core::ModelSpec {
+    model_spec("mock-model", None, 200_000)
+}
+
 #[derive(Default)]
 struct SnapshotStore {
     read: std::sync::Mutex<Option<lash_core::PersistedSessionRead>>,
@@ -27,11 +40,9 @@ impl SnapshotStore {
         let turn_state = state.turn_state();
         let config = lash_core::PersistedSessionConfig {
             provider_id: state.policy.provider.kind().to_string(),
-            configured_model: state.policy.model.clone(),
-            context_window: state.policy.max_context_tokens.unwrap_or_default() as u64,
+            model: state.policy.model.clone(),
             execution_mode: state.policy.execution_mode.clone(),
             standard_context_approach: state.policy.standard_context_approach.clone(),
-            model_variant: state.policy.model_variant.clone(),
         };
         Self {
             read: std::sync::Mutex::new(Some(lash_core::PersistedSessionRead {
@@ -680,7 +691,6 @@ impl lash_core::SessionPlugin for SurfacePlugin {
 fn mock_provider() -> ProviderHandle {
     lash_core::testing::TestProvider::builder()
         .kind("embed-test")
-        .default_model("mock-model")
         .requires_streaming(true)
         .complete(|request| async move {
             let user_text = last_user_text(&request);
@@ -729,7 +739,6 @@ fn tool_roundtrip_provider() -> ProviderHandle {
     ])));
     lash_core::testing::TestProvider::builder()
         .kind("embed-test")
-        .default_model("mock-model")
         .complete(move |_request| {
             let responses = Arc::clone(&responses);
             async move { Ok(responses.lock().await.pop_front().expect("queued response")) }
@@ -765,7 +774,6 @@ fn queued_text_provider(texts: Vec<&'static str>) -> ProviderHandle {
     )));
     lash_core::testing::TestProvider::builder()
         .kind("embed-test")
-        .default_model("mock-model")
         .complete(move |_request| {
             let responses = Arc::clone(&responses);
             async move { Ok(responses.lock().await.pop_front().expect("queued response")) }
@@ -777,7 +785,6 @@ fn queued_text_provider(texts: Vec<&'static str>) -> ProviderHandle {
 fn semantic_group_provider() -> ProviderHandle {
     lash_core::testing::TestProvider::builder()
         .kind("embed-test")
-        .default_model("mock-model")
         .complete(|_request| async move {
             Ok(LlmResponse {
                 full_text: "firstsecond".to_string(),
@@ -806,10 +813,9 @@ fn semantic_group_provider() -> ProviderHandle {
         .into_handle()
 }
 
-fn text_provider(kind: &'static str, model: &'static str, text: &'static str) -> ProviderHandle {
+fn text_provider(kind: &'static str, _model: &'static str, text: &'static str) -> ProviderHandle {
     lash_core::testing::TestProvider::builder()
         .kind(kind)
-        .default_model(model)
         .complete(move |_request| async move {
             Ok(LlmResponse {
                 full_text: text.to_string(),
@@ -828,14 +834,13 @@ type SeenModels = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
 
 fn recording_text_provider(
     kind: &'static str,
-    model: &'static str,
-    variant: Option<&'static str>,
+    _model: &'static str,
+    _variant: Option<&'static str>,
     text: &'static str,
     seen: SeenModels,
 ) -> ProviderHandle {
     lash_core::testing::TestProvider::builder()
         .kind(kind)
-        .default_model(model)
         .supported_variants(|_| {
             &[
                 "core-variant",
@@ -845,11 +850,6 @@ fn recording_text_provider(
                 "manual-variant",
             ]
         })
-        .default_model_variant(
-            move |requested| {
-                if requested == model { variant } else { None }
-            },
-        )
         .complete(move |request| {
             let seen = Arc::clone(&seen);
             async move {
@@ -912,7 +912,6 @@ fn system_text(request: &LlmRequest) -> String {
 fn recording_prompt_provider(seen: Arc<std::sync::Mutex<Vec<String>>>) -> ProviderHandle {
     lash_core::testing::TestProvider::builder()
         .kind("prompt-test")
-        .default_model("mock-model")
         .complete(move |request| {
             let seen = Arc::clone(&seen);
             async move {
@@ -937,7 +936,6 @@ fn retry_once_provider() -> ProviderHandle {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     lash_core::testing::TestProvider::builder()
         .kind("retry-test")
-        .default_model("mock-model")
         .requires_streaming(true)
         .options(lash_core::ProviderOptions {
             reliability: lash_core::provider::ProviderReliability::builder()
@@ -976,7 +974,6 @@ fn checkpoint_gated_provider(
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     lash_core::testing::TestProvider::builder()
         .kind("checkpoint-gated")
-        .default_model("mock-model")
         .complete(move |request| {
             let entered_tx = Arc::clone(&entered_tx);
             let release_rx = Arc::clone(&release_rx);
@@ -1006,8 +1003,7 @@ fn checkpoint_gated_provider(
 fn standard_core() -> LashCore {
     LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()
         .expect("standard core")
 }

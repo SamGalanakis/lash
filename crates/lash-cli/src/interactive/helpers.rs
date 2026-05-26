@@ -316,7 +316,7 @@ pub(super) fn key_chord_from_event(key: crossterm::event::KeyEvent) -> Option<Ui
     })
 }
 
-pub(super) fn monitor_wake_message(input: &str) -> PluginMessage {
+pub(super) fn process_wake_message(input: &str) -> PluginMessage {
     PluginMessage::text(MessageRole::System, input)
 }
 

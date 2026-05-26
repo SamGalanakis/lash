@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use lash_core::plugin::{PluginError, runtime_host::RuntimeSessionHost};
+use lash_core::plugin::{ModeNativeToolsPlugin, PluginError, runtime_host::RuntimeSessionHost};
 use lash_core::{
     MessageRole, ModeExtras, PluginMessage, SessionCreateRequest, SessionPluginMode,
-    SessionSnapshot, ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract,
-    ToolControl, ToolDefinition, ToolExecutionMode, ToolManifest, ToolProvider, ToolResult,
+    SessionSnapshot, ToolArgumentProjectionPolicy, ToolContract, ToolControl, ToolDefinition,
+    ToolExecutionMode, ToolManifest, ToolResult,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -13,29 +13,37 @@ use crate::projection::RlmSeed;
 
 pub(crate) struct RlmControlToolsProvider;
 
+struct ContinueAsRuntime<'a, 'scope> {
+    session_id: &'a str,
+    host: &'a dyn RuntimeSessionHost,
+    processes: &'a dyn lash_core::ProcessService,
+    process_scope: lash_core::ProcessOpScope<'scope>,
+}
+
 impl RlmControlToolsProvider {
     async fn continue_as(
         &self,
         args: &Value,
-        context: &ToolContext<'_>,
+        runtime: ContinueAsRuntime<'_, '_>,
     ) -> Result<ContinueAsResult, String> {
         let task = required_string(args, "task")?;
         let seed = RlmSeed::from_tool_args(args).map_err(|err| format!("continue_as {err}"))?;
         let referenced_handles = collect_seed_process_handle_ids(args.get("seed"));
         let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
-        context
-            .processes()
-            .validate_process_handles_visible(&referenced_handles_vec)
+        runtime
+            .processes
+            .validate_visible(runtime.session_id, &referenced_handles_vec)
             .await
             .map_err(|err| format!("continue_as process handle validation failed: {err}"))?;
 
-        let current_snapshot = context
-            .session_snapshot()
+        let current_snapshot = runtime
+            .host
+            .snapshot_session(runtime.session_id)
             .await
             .map_err(|err| format!("failed to snapshot current session: {err}"))?;
         let successor_session_id = create_continue_as_successor(
-            &context.sessions(),
-            context.session_id(),
+            runtime.host,
+            runtime.session_id,
             current_snapshot,
             task.clone(),
             seed,
@@ -46,20 +54,26 @@ impl RlmControlToolsProvider {
             },
         )
         .await?;
-        if let Err(err) = context
-            .processes()
-            .transfer_process_handles_to_session(&successor_session_id, &referenced_handles_vec)
+        if let Err(err) = runtime
+            .processes
+            .transfer(
+                runtime.session_id,
+                &successor_session_id,
+                referenced_handles_vec.clone(),
+                runtime.process_scope.clone(),
+            )
             .await
         {
-            let _ = context
-                .sessions()
-                .close_session(&successor_session_id)
-                .await;
+            let _ = runtime.host.close_session(&successor_session_id).await;
             return Err(format!("continue_as process handle transfer failed: {err}"));
         }
-        if let Err(err) = context
-            .processes()
-            .cancel_unreferenced_process_handles(&referenced_handles_vec)
+        if let Err(err) = runtime
+            .processes
+            .cancel_unreferenced(
+                runtime.session_id,
+                referenced_handles_vec.clone(),
+                runtime.process_scope.clone(),
+            )
             .await
         {
             if referenced_handles_vec.is_empty() && process_support_unavailable(&err) {
@@ -74,10 +88,7 @@ impl RlmControlToolsProvider {
                     },
                 });
             }
-            let _ = context
-                .sessions()
-                .close_session(&successor_session_id)
-                .await;
+            let _ = runtime.host.close_session(&successor_session_id).await;
             return Err(format!(
                 "continue_as process handle cleanup failed after successor creation: {err}"
             ));
@@ -105,7 +116,7 @@ fn process_support_unavailable(err: &PluginError) -> bool {
 }
 
 #[async_trait]
-impl ToolProvider for RlmControlToolsProvider {
+impl ModeNativeToolsPlugin for RlmControlToolsProvider {
     fn tool_manifests(&self) -> Vec<ToolManifest> {
         vec![continue_as_tool_definition().manifest()]
     }
@@ -114,12 +125,29 @@ impl ToolProvider for RlmControlToolsProvider {
         (name == "continue_as").then(|| Arc::new(continue_as_tool_definition().contract()))
     }
 
-    async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
-        let result = match call.name {
-            "continue_as" => self.continue_as(call.args, call.context).await,
-            _ => Err(format!("Unknown tool: {}", call.name)),
+    async fn execute(
+        &self,
+        context: &lash_core::tool_dispatch::ToolDispatchContext<'_>,
+        name: &str,
+        args: &Value,
+        _progress: Option<&lash_core::ProgressSender>,
+    ) -> Option<ToolResult> {
+        let result = match name {
+            "continue_as" => {
+                self.continue_as(
+                    args,
+                    ContinueAsRuntime {
+                        session_id: &context.session_id,
+                        host: context.host.as_ref(),
+                        processes: context.processes.as_ref(),
+                        process_scope: context.process_scope(),
+                    },
+                )
+                .await
+            }
+            _ => return None,
         };
-        finalise_tool_result(result)
+        Some(finalise_tool_result(result))
     }
 }
 
@@ -132,7 +160,7 @@ pub fn continue_as_tool_definition() -> ToolDefinition {
         json!({ "type": "object", "additionalProperties": true }),
     )
     .with_examples(vec![
-        r#"call continue_as { task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } }"#.into(),
+        r#"await TOOL.default.continue_as({ task: "continue the audit from the summarized findings", seed: { problem: input.prompt, findings: findings } })?"#.into(),
     ])
     .with_argument_projection(ToolArgumentProjectionPolicy::preserve_projected_refs_in_field(
         "seed",
@@ -277,6 +305,11 @@ mod tests {
     use lash_core::{RuntimeSessionState, SessionAppendNode, SessionPolicy, SessionStartPoint};
     use lash_rlm_types::{RlmCreateExtras, RlmModeEvent, RlmTermination};
 
+    fn model_spec(model: &str) -> lash_core::ModelSpec {
+        lash_core::ModelSpec::from_token_limits(model, None, 200_000, None, None)
+            .expect("valid test model spec")
+    }
+
     #[derive(Default)]
     struct BatonManager {
         snapshot: RuntimeSessionState,
@@ -333,7 +366,41 @@ mod tests {
                 .push(session_id.to_string());
             Ok(())
         }
-        async fn validate_process_handles_visible(
+    }
+
+    #[async_trait]
+    impl lash_core::ProcessService for BatonManager {
+        async fn start(
+            &self,
+            _session_id: &str,
+            _registration: lash_core::ProcessRegistration,
+            _options: lash_core::ProcessStartOptions,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessRecord, PluginError> {
+            Err(PluginError::Session(
+                "process starts are unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn await_process(
+            &self,
+            _process_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessAwaitOutput, PluginError> {
+            Err(PluginError::Session(
+                "process awaiting is unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn list_visible(
+            &self,
+            _session_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<Vec<lash_core::ProcessHandleGrantEntry>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_visible(
             &self,
             _session_id: &str,
             handle_ids: &[String],
@@ -345,28 +412,72 @@ mod tests {
             Ok(())
         }
 
-        async fn transfer_process_handles(
+        async fn cancel(
             &self,
-            request: lash_core::ProcessTransferRequest<'_>,
+            _session_id: &str,
+            _process_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessRecord, PluginError> {
+            Err(PluginError::Session(
+                "process cancellation is unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn cancel_all(
+            &self,
+            _session_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn transfer(
+            &self,
+            from_session_id: &str,
+            to_session_id: &str,
+            process_ids: Vec<String>,
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
             self.transferred.lock().expect("transferred").push((
-                request.from_session_id,
-                request.to_session_id,
-                request.process_ids,
+                from_session_id.to_string(),
+                to_session_id.to_string(),
+                process_ids,
             ));
             Ok(())
         }
 
-        async fn cancel_unreferenced_process_handles(
+        async fn cancel_unreferenced(
             &self,
-            request: lash_core::ProcessCleanupRequest<'_>,
+            _session_id: &str,
+            keep_process_ids: Vec<String>,
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
             self.cleanup_keep
                 .lock()
                 .expect("cleanup keep")
-                .push(request.keep_process_ids);
+                .push(keep_process_ids);
             Ok(Vec::new())
         }
+    }
+
+    async fn run_continue_as(
+        provider: &RlmControlToolsProvider,
+        manager: Arc<BatonManager>,
+        args: &Value,
+    ) -> ToolResult {
+        finalise_tool_result(
+            provider
+                .continue_as(
+                    args,
+                    ContinueAsRuntime {
+                        session_id: "test-session",
+                        host: manager.as_ref(),
+                        processes: manager.as_ref(),
+                        process_scope: lash_core::ProcessOpScope::new(),
+                    },
+                )
+                .await,
+        )
     }
 
     #[test]
@@ -392,8 +503,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     standard_context_approach: Some(lash_core::StandardContextApproach::default()),
                     ..SessionPolicy::default()
                 },
@@ -415,20 +525,12 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
             "task": "finish from here",
             "seed": { "x": 1, "query": "original" }
         });
-        let result = provider
-            .execute(ToolCall {
-                name: "continue_as",
-                args: &args,
-                context: &context,
-                progress: None,
-            })
-            .await;
+        let result = run_continue_as(&provider, manager.clone(), &args).await;
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
@@ -488,8 +590,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -498,7 +599,6 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
         let args = json!({
             "task": "finish from here",
@@ -507,14 +607,7 @@ mod tests {
                 "glob": 7
             }
         });
-        let result = provider
-            .execute(ToolCall {
-                name: "continue_as",
-                args: &args,
-                context: &context,
-                progress: None,
-            })
-            .await;
+        let result = run_continue_as(&provider, manager.clone(), &args).await;
         assert!(result.is_success(), "{:?}", result.value_for_projection());
 
         let created = manager.created.lock().expect("created");
@@ -547,8 +640,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -558,22 +650,15 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
-        let result = provider
-            .execute(ToolCall {
-                name: "continue_as",
-                args: &json!({
-                    "task": "continue with background work",
-                    "seed": {
-                        "one": { "__handle__": "process", "id": "h1", "tool": "slow" },
-                        "nested": [{ "h": { "__handle__": "process", "id": "h2", "tool": "slow" } }]
-                    }
-                }),
-                context: &context,
-                progress: None,
-            })
-            .await;
+        let args = json!({
+            "task": "continue with background work",
+            "seed": {
+                "one": { "__handle__": "process", "id": "h1", "tool": "slow" },
+                "nested": [{ "h": { "__handle__": "process", "id": "h2", "tool": "slow" } }]
+            }
+        });
+        let result = run_continue_as(&provider, manager.clone(), &args).await;
 
         assert!(result.is_success(), "{:?}", result.value_for_projection());
         let value = result.value_for_projection();
@@ -602,8 +687,7 @@ mod tests {
             snapshot: RuntimeSessionState {
                 policy: SessionPolicy {
                     execution_mode: lash_core::ExecutionMode::new("rlm"),
-                    model: "model".to_string(),
-                    max_context_tokens: Some(200_000),
+                    model: model_spec("model"),
                     ..SessionPolicy::default()
                 },
                 ..RuntimeSessionState::default()
@@ -612,19 +696,12 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
 
-        let result = provider
-            .execute(ToolCall {
-                name: "continue_as",
-                args: &json!({
-                    "task": "continue",
-                    "seed": { "h": { "__handle__": "process", "id": "missing", "tool": "slow" } }
-                }),
-                context: &context,
-                progress: None,
-            })
-            .await;
+        let args = json!({
+            "task": "continue",
+            "seed": { "h": { "__handle__": "process", "id": "missing", "tool": "slow" } }
+        });
+        let result = run_continue_as(&provider, manager.clone(), &args).await;
 
         assert!(!result.is_success());
         assert!(manager.created.lock().expect("created").is_empty());

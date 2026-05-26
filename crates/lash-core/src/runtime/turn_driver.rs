@@ -1,6 +1,7 @@
 use super::*;
 use crate::{ModePreamble, PluginError, ToolSurface};
 use lash_sansio::{PreparedPrompt, PromptCache, PromptContributionSet, PromptLayer};
+use std::num::NonZeroUsize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod effects;
@@ -250,6 +251,16 @@ fn current_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn generation_options_from_provider(provider: &crate::ProviderHandle) -> crate::GenerationOptions {
+    crate::GenerationOptions {
+        output_token_cap: provider
+            .options()
+            .max_output_tokens
+            .and_then(|value| usize::try_from(value).ok())
+            .and_then(NonZeroUsize::new),
+    }
+}
+
 fn prose_before_lashlang_fence(text: &str) -> &str {
     let Some(open) = text.find("```") else {
         return text;
@@ -379,10 +390,10 @@ impl<'run> RuntimeTurnDriver<'run> {
             RuntimeEffectEnvelope::new(
                 metadata,
                 RuntimeEffectCommand::LlmCall {
-                    request: LlmRequestSpec::from_request(
+                    request: Box::new(LlmRequestSpec::from_request(
                         &request,
                         self.host.core.attachment_store.as_ref(),
-                    )?,
+                    )?),
                 },
             ),
             RuntimeEffectOutcome::into_llm_call,
@@ -469,6 +480,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             .mode_execution_context(
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                manager.clone() as Arc<dyn crate::ProcessService>,
                 effect_controller,
                 direct_completions,
                 tool_event_tx.clone(),
@@ -491,7 +503,7 @@ impl<'run> RuntimeTurnDriver<'run> {
                             index,
                             call_id.clone(),
                             replay,
-                            outcome,
+                            *outcome,
                             crate::TurnActivityId::new(format!("tool:{call_id}")),
                         )
                         .await
@@ -628,7 +640,6 @@ impl<'run> RuntimeTurnDriver<'run> {
             turn_prompt_layer: self.turn_context.prompt_layer().clone(),
             provider_id: self.policy.provider.kind().to_string(),
             model: self.policy.model.clone(),
-            model_variant: self.policy.model_variant.clone(),
             updated_at_epoch_ms: current_epoch_ms(),
         };
         store
@@ -848,9 +859,10 @@ impl<'run> RuntimeTurnDriver<'run> {
             protocol_driver: mode_preamble.config.protocol.clone(),
             projector: mode_preamble.config.projector.clone(),
             sync_execution_surface: checkpoint_record.machine_config.sync_execution_surface,
-            model: checkpoint_record.machine_config.model.clone(),
+            model: checkpoint_record.machine_config.model.id.clone(),
             max_turns: checkpoint_record.machine_config.max_turns,
-            model_variant: checkpoint_record.machine_config.model_variant.clone(),
+            model_variant: checkpoint_record.machine_config.model.variant.clone(),
+            generation: checkpoint_record.machine_config.generation.clone(),
             run_session_id: checkpoint_record.machine_config.run_session_id.clone(),
             autonomous: checkpoint_record.machine_config.autonomous,
             tool_specs: Arc::new(checkpoint_record.machine_config.tool_specs.clone()),
@@ -1254,8 +1266,8 @@ impl<'run> RuntimeTurnDriver<'run> {
             session_id: self.session_id.clone(),
             run_session_id: session_policy.session_id.clone(),
             autonomous: session_policy.autonomous,
-            model: model.clone(),
-            model_variant: session_policy.model_variant.clone(),
+            model: session_policy.model.clone(),
+            generation: generation_options_from_provider(&session_policy.provider),
             max_turns: session_policy.max_turns,
             sync_execution_surface: execution_surface
                 .mode_preamble
@@ -1277,7 +1289,8 @@ impl<'run> RuntimeTurnDriver<'run> {
             mode_preamble: execution_surface.mode_preamble,
             prepared_prompt,
             max_turns: session_policy.max_turns,
-            model_variant: session_policy.model_variant.clone(),
+            model_variant: session_policy.model.variant.clone(),
+            generation: generation_options_from_provider(&session_policy.provider),
             emit_llm_trace: false,
             termination: self.mode_turn_options.clone(),
         });
@@ -1413,6 +1426,7 @@ impl<'run> RuntimeTurnDriver<'run> {
                     session_id: self.session_id.clone(),
                     host: self.session_manager.clone()
                         as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                    processes: self.session_manager.clone() as Arc<dyn crate::ProcessService>,
                     state: self.checkpoint_state_view(
                         machine.message_sequence(),
                         machine.mode_iteration(),

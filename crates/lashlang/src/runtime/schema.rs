@@ -77,7 +77,7 @@ impl PrimitiveMask {
             Value::Number(number) if number.is_finite() => Self::NUMBER.0,
             Value::Bool(_) => Self::BOOLEAN.0,
             Value::List(_) => Self::ARRAY.0,
-            Value::Record(_) | Value::Image(_) => Self::OBJECT.0,
+            Value::Record(_) | Value::Image(_) | Value::Resource(_) => Self::OBJECT.0,
             Value::Null => Self::NULL.0,
             Value::Projected(value) => match value.value_type_name() {
                 "list" => Self::ARRAY.0,
@@ -434,6 +434,7 @@ fn schema_value_type_name(value: &Value) -> &'static str {
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::Image(_) => "object",
+        Value::Resource(_) => "object",
         Value::List(_) => "array",
         Value::Record(_) => "object",
         Value::Projected(value) => match value.value_type_name() {

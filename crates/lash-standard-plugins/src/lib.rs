@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
-use lash_core::{
-    PluginStack, StandardContextApproach, ToolOutputBudgetPluginFactory, ToolProvider,
-};
+use lash_core::{PluginStack, StandardContextApproach, ToolProvider};
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
+use lash_plugin_process_controls::ProcessControlsPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_plugin_tool_discovery::ToolDiscoveryPluginFactory;
+use lash_plugin_tool_output_budget::{ToolOutputBudgetPluginFactory, tool_output_budget_stack};
 use lash_tool_apply_patch::ApplyPatchTool;
 use lash_tool_files::{Glob, Ls, ReadFilePluginFactory};
 use lash_tool_search::Grep;
@@ -31,7 +31,7 @@ pub fn standard_tool_stack(options: StandardToolStackOptions) -> PluginStack {
 }
 
 pub fn locked_down_rlm_plugin_stack() -> PluginStack {
-    PluginStack::runtime()
+    tool_output_budget_stack()
 }
 
 fn push_core_runtime_tools(stack: &mut PluginStack) {
@@ -55,6 +55,7 @@ fn push_standard_context_tools(
 }
 
 fn push_local_runtime_tools(stack: &mut PluginStack) {
+    stack.push(Arc::new(ProcessControlsPluginFactory::new()));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "apply_patch",

@@ -17,6 +17,22 @@ impl RuntimeTurnDriver<'_> {
             .turn_input_injection_bridge()
             .drain()
             .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
+        let durable_wakes = if let Some(registry) = self.session_manager.process_registry() {
+            let scope_key = self.session_manager.process_scope_key(&self.session_id);
+            registry
+                .drain_wake_inputs(&scope_key, 256)
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
+                })?
+        } else {
+            Vec::new()
+        };
+        let mut injected = injected;
+        injected.extend(durable_wakes.iter().map(|wake| crate::InjectedTurnInput {
+            id: Some(wake.wake_id.clone()),
+            message: crate::PluginMessage::text(crate::MessageRole::System, wake.input.clone()),
+        }));
         let injected_messages = injected
             .iter()
             .map(|item| item.message.clone())
@@ -50,6 +66,19 @@ impl RuntimeTurnDriver<'_> {
                 },
             )
             .await;
+            if let Some(registry) = self.session_manager.process_registry() {
+                for wake in durable_wakes {
+                    registry
+                        .ack_wake_input(&wake.wake_id)
+                        .await
+                        .map_err(|err| {
+                            RuntimeError::new(
+                                RuntimeErrorCode::TurnInputInjectionBridge,
+                                err.to_string(),
+                            )
+                        })?;
+                }
+            }
         }
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;
@@ -75,8 +104,8 @@ impl RuntimeTurnDriver<'_> {
         &mut self,
         policy: &mut SessionPolicy,
     ) -> Result<String, SessionEvent> {
-        let model = policy.provider.resolve_model(&policy.model);
-        if let Some(variant) = policy.model_variant.as_deref()
+        let model = policy.model.id.clone();
+        if let Some(variant) = policy.model.variant.as_deref()
             && let Err(message) = policy.provider.validate_variant(&model, variant)
         {
             return Err(make_error_event(
@@ -156,6 +185,7 @@ impl RuntimeTurnDriver<'_> {
             .mode_execution_context(
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                manager.clone() as Arc<dyn crate::ProcessService>,
                 effect_controller,
                 direct_completions,
                 session_event_tx.clone(),
@@ -166,6 +196,7 @@ impl RuntimeTurnDriver<'_> {
             .map_err(|err| err.to_string())?
             .with_turn_event_sender(turn_event_tx.clone());
         let context = context.with_effect_metadata(effect_metadata);
+        let context = context.with_turn_lease(self.turn_lease.clone());
         let result = mode_session
             .execute_code(
                 context,

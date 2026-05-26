@@ -88,12 +88,6 @@ impl PluginFactory for SubagentsPluginFactory {
         let parent_subagent = ctx.subagent.clone();
 
         let is_rlm = execution_mode == lash_core::ExecutionMode::new("rlm");
-        if is_rlm && !ctx.processes_available {
-            return Err(PluginError::Registration(
-                "subagents require session process support; configure a ProcessRegistry before installing SubagentsPluginFactory"
-                    .to_string(),
-            ));
-        }
         let provider: Option<Arc<dyn ToolProvider>> = if is_rlm {
             Some(Arc::new(rlm::RlmSubagentToolsProvider {
                 registry: Arc::clone(&registry),

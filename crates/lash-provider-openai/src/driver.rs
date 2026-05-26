@@ -135,7 +135,7 @@ pub(crate) async fn complete(
             });
         return Err(LlmTransportError::new(message)
             .with_status(status.as_u16())
-            .with_headers(&headers)
+            .with_headers(header_pairs(&headers))
             .with_raw(text)
             .with_request_body(String::from_utf8_lossy(&request_body).into_owned())
             .retryable(status.as_u16() == 429 || status.as_u16() >= 500));

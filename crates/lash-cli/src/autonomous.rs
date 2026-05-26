@@ -297,7 +297,7 @@ pub(crate) async fn run_autonomous(
                     if done.result.usage.total() > 0 || done.result.usage.cached_input_tokens > 0 {
                         vec![TokenLedgerEntry {
                             source: "turn".to_string(),
-                            model: done.result.state.policy.model.clone(),
+                            model: done.result.state.policy.model.id.clone(),
                             usage: done.result.usage.clone(),
                         }]
                     } else {

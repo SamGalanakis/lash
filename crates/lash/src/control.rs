@@ -46,43 +46,20 @@ impl SessionControl {
     }
 
     async fn update_config(&self, patch: SessionConfigPatch) -> Result<()> {
-        let (provider, model) = match (patch.provider, patch.model) {
-            (Some(provider), Some(model)) => (Some(provider), Some(model)),
-            (Some(provider), None) => {
-                let model = provider.default_model().to_string();
-                let variant = provider.default_model_variant(&model).map(str::to_string);
-                (Some(provider), Some(ModelSelection { model, variant }))
-            }
-            (None, model) => (None, model),
-        };
-        let (model, model_variant) = match model {
-            Some(model) => (Some(model.model), Some(model.variant)),
-            None => (None, None),
-        };
-        self.update_session_config(
-            provider,
-            model,
-            model_variant,
-            patch.max_context_tokens,
-            patch.prompt,
-        )
-        .await;
+        self.update_session_config(patch.provider, patch.model, patch.prompt)
+            .await;
         Ok(())
     }
 
     async fn update_session_config(
         &self,
         provider: Option<ProviderHandle>,
-        model: Option<String>,
-        model_variant: Option<Option<String>>,
-        max_context_tokens: Option<usize>,
+        model: Option<lash_core::ModelSpec>,
         prompt: Option<PromptLayer>,
     ) {
         let writer = self.runtime.writer();
         let mut runtime = writer.lock().await;
-        runtime
-            .update_session_config(provider, model, model_variant, max_context_tokens, prompt)
-            .await;
+        runtime.update_session_config(provider, model, prompt).await;
         self.runtime.publish_from(&runtime);
     }
 
@@ -307,9 +284,9 @@ impl SessionControl {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .cancel_process(lash_core::ProcessCancelRequest::new(session_id, process_id))
+        let processes = runtime.process_service()?;
+        processes
+            .cancel(&session_id, process_id, lash_core::ProcessOpScope::new())
             .await
             .map_err(Into::into)
     }
@@ -318,9 +295,9 @@ impl SessionControl {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .cancel_all_processes(&session_id)
+        let processes = runtime.process_service()?;
+        processes
+            .cancel_all(&session_id, lash_core::ProcessOpScope::new())
             .await
             .map_err(Into::into)
     }
@@ -502,13 +479,11 @@ impl ConfigControl {
     pub async fn update_session_config(
         &self,
         provider: Option<ProviderHandle>,
-        model: Option<String>,
-        model_variant: Option<Option<String>>,
-        max_context_tokens: Option<usize>,
+        model: Option<lash_core::ModelSpec>,
         prompt: Option<PromptLayer>,
     ) {
         self.control
-            .update_session_config(provider, model, model_variant, max_context_tokens, prompt)
+            .update_session_config(provider, model, prompt)
             .await;
     }
 
@@ -621,11 +596,11 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct Processes {
+pub struct ProcessControl {
     control: SessionControl,
 }
 
-impl Processes {
+impl ProcessControl {
     pub(crate) fn new(control: SessionControl) -> Self {
         Self { control }
     }

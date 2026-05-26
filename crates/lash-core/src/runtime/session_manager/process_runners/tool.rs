@@ -5,12 +5,21 @@ impl RuntimeSessionManager {
     pub(in crate::runtime::session_manager::process_runners) async fn run_process_tool_call(
         &self,
         registration: crate::ProcessRegistration,
+        registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+        wake_target_scope_key: Option<String>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         let result = self
-            .execute_process_tool_call(registration, call, tool_effect_metadata, cancellation)
+            .execute_process_tool_call(
+                registration,
+                registry,
+                call,
+                tool_effect_metadata,
+                wake_target_scope_key,
+                cancellation,
+            )
             .await;
         match result {
             Ok(output) => crate::ProcessAwaitOutput::from_tool_output(output),
@@ -27,8 +36,10 @@ impl RuntimeSessionManager {
     async fn execute_process_tool_call(
         &self,
         registration: crate::ProcessRegistration,
+        registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+        wake_target_scope_key: Option<String>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
@@ -52,6 +63,7 @@ impl RuntimeSessionManager {
                 self.current.policy.execution_mode.clone(),
             )?,
             host: Arc::clone(&host),
+            processes: Arc::new(self.clone()),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
@@ -66,13 +78,12 @@ impl RuntimeSessionManager {
         let tool_context = crate::ToolContext::new(
             self.current.session_id.clone(),
             host,
-            crate::TurnContext::default(),
             Arc::clone(&self.current.host.core.attachment_store),
             direct_completions,
-            dispatch.effect_controller.clone_scoped(),
             Some(call.call_id.clone()),
         )
         .with_async_process(registration.id.clone(), cancellation)
+        .with_process_events(registration.id.clone(), registry, wake_target_scope_key)
         .with_tool_effect_metadata(tool_effect_metadata);
         let outcome = crate::tool_dispatch::dispatch_prepared_tool_call_with_execution_context(
             &dispatch,

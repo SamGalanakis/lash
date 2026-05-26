@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    RuntimeSessionState, RuntimeError, RuntimeErrorCode, TurnCommitDraft, merge_ledger_entry,
+    RuntimeError, RuntimeErrorCode, RuntimeSessionState, TurnCommitDraft, merge_ledger_entry,
 };
 
 pub(super) struct ProgressBoundaryCommit {
@@ -31,6 +31,16 @@ pub(super) struct TurnCommitPipeline {
     draft: Option<TurnCommitDraft>,
     final_state: Option<RuntimeSessionState>,
     final_graph_commit: Option<GraphCommitDelta>,
+}
+
+struct FinalCommitInput<'a> {
+    returned_state: &'a crate::SessionStateEnvelope,
+    plugins: Option<&'a PluginSession>,
+    execution_state_snapshot: Option<Option<Vec<u8>>>,
+    store: Option<&'a (dyn RuntimePersistence + 'a)>,
+    usage_deltas: &'a [crate::TokenLedgerEntry],
+    outcome: &'a TurnOutcome,
+    completed_turn: Option<crate::RuntimeTurnCompletion>,
 }
 
 enum PersistedGraphMark {
@@ -269,15 +279,15 @@ impl TurnCommitPipeline {
             }
             None => (None, None, None),
         };
-        self.final_commit_with_snapshots(
-            &returned_turn.state,
-            plugins.as_deref(),
+        self.final_commit_with_snapshots(FinalCommitInput {
+            returned_state: &returned_turn.state,
+            plugins: plugins.as_deref(),
             execution_state_snapshot,
-            store.as_ref().map(|store| store.as_ref()),
+            store: store.as_ref().map(|store| store.as_ref()),
             usage_deltas,
-            &returned_turn.outcome,
+            outcome: &returned_turn.outcome,
             completed_turn,
-        )
+        })
         .await
         .map_err(|err| RuntimeError::new(RuntimeErrorCode::StoreCommitFailed, err.to_string()))?;
         returned_turn.state = self.final_state_mut().export_state();
@@ -334,14 +344,17 @@ impl TurnCommitPipeline {
 
     async fn final_commit_with_snapshots(
         &mut self,
-        returned_state: &crate::SessionStateEnvelope,
-        plugins: Option<&PluginSession>,
-        execution_state_snapshot: Option<Option<Vec<u8>>>,
-        store: Option<&(dyn RuntimePersistence + '_)>,
-        usage_deltas: &[crate::TokenLedgerEntry],
-        outcome: &TurnOutcome,
-        completed_turn: Option<crate::RuntimeTurnCompletion>,
+        input: FinalCommitInput<'_>,
     ) -> Result<(), StoreError> {
+        let FinalCommitInput {
+            returned_state,
+            plugins,
+            execution_state_snapshot,
+            store,
+            usage_deltas,
+            outcome,
+            completed_turn,
+        } = input;
         let state = self.final_state_mut();
         state.apply_exported_state(returned_state);
         for entry in usage_deltas.iter().cloned() {
@@ -750,15 +763,15 @@ mod tests {
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
-            .final_commit_with_snapshots(
-                &returned_state,
-                None,
-                Some(Some(b"runtime".to_vec())),
-                Some(&store),
-                &usage,
-                &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
-                None,
-            )
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &returned_state,
+                plugins: None,
+                execution_state_snapshot: Some(Some(b"runtime".to_vec())),
+                store: Some(&store),
+                usage_deltas: &usage,
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                completed_turn: None,
+            })
             .await
             .expect("commit");
 
@@ -787,15 +800,15 @@ mod tests {
         let returned_state = pipeline.export_state_for_assembly();
 
         pipeline
-            .final_commit_with_snapshots(
-                &returned_state,
-                None,
-                None,
-                None,
-                &[],
-                &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
-                None,
-            )
+            .final_commit_with_snapshots(FinalCommitInput {
+                returned_state: &returned_state,
+                plugins: None,
+                execution_state_snapshot: None,
+                store: None,
+                usage_deltas: &[],
+                outcome: &TurnOutcome::Stopped(crate::TurnStop::Cancelled),
+                completed_turn: None,
+            })
             .await
             .expect("no-store commit");
 

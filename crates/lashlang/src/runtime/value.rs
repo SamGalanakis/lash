@@ -146,6 +146,21 @@ impl<'de> Deserialize<'de> for ImageValue {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceHandle {
+    pub resource_type: String,
+    pub alias: String,
+}
+
+impl ResourceHandle {
+    pub fn new(resource_type: impl Into<String>, alias: impl Into<String>) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            alias: alias.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Value {
     Null,
@@ -153,6 +168,7 @@ pub enum Value {
     Number(f64),
     String(CompactString),
     Image(ImageValue),
+    Resource(ResourceHandle),
     List(ListValue),
     Record(Arc<Record>),
     Projected(ProjectedValue),
@@ -175,6 +191,7 @@ impl PartialEq for Value {
             (Self::Number(left), Self::Number(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Image(left), Self::Image(right)) => left == right,
+            (Self::Resource(left), Self::Resource(right)) => left == right,
             (Self::List(left), Self::List(right)) => left == right,
             (Self::Record(left), Self::Record(right)) => left == right,
             (Self::Projected(left), Self::Projected(right)) => left == right,
@@ -764,7 +781,11 @@ impl fmt::Display for Value {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write_number(f, *value),
             Self::String(value) => write!(f, "{value}"),
-            Self::Image(_) | Self::List(_) | Self::Record(_) | Self::Projected(_) => write!(
+            Self::Image(_)
+            | Self::Resource(_)
+            | Self::List(_)
+            | Self::Record(_)
+            | Self::Projected(_) => write!(
                 f,
                 "{}",
                 serde_json::to_string(&RuntimeJson(self)).unwrap_or_default()

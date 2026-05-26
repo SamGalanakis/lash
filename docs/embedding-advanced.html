@@ -53,8 +53,7 @@
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .advanced()
     .residency(Residency::ActivePathOnly)
@@ -89,8 +88,7 @@ let subagents = SubagentsPluginFactory::new(registry)
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .plugin(Arc::new(subagents) as Arc&lt;dyn PluginFactory&gt;)
     .build()?;</code></pre>
           <p>Capabilities return <code>SessionSpec</code> overlays. <code>StaticCapability</code> pins exact child authority; <code>TierCapability</code> backs the built-in <code>explore</code> and <code>peer</code> tiers. Do not construct <code>SessionPolicy</code> directly — it's the resolved runtime artifact.</p>
@@ -135,8 +133,7 @@ let mcp = McpPluginFactory::new(servers).await?;
 
 let core = LashCore::rlm()
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .plugin(std::sync::Arc::new(mcp))
     .build()?;</code></pre>
           <p>Tools appear as <code>mcp__&lt;server&gt;__&lt;tool&gt;</code> with original schemas preserved. <code>attach_server</code> / <code>detach_server</code> mutate the live pool without rebuilding the core.</p>
@@ -156,12 +153,11 @@ mcp.detach_server("old-tool").await?;</code></pre>
         <div class="section" id="advanced-runtime">
           <div class="section-header">
             <h2>Advanced Runtime</h2>
-            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared process hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-controller methods are thin core mutators.</p>
+            <p><code>.advanced()</code> exposes runtime-host concerns: custom plugin hosts, shared process hosts, residency policy, and a replaceable <code>RuntimeCoreConfig</code>. Installing a <code>ProcessRegistry</code> derives the explicit Lashlang process/lifecycle abilities for sessions built from the environment; plugin hosts do not have a separate process-availability boolean. <code>RuntimeEnvironment</code> stores that config as <code>core</code>; the environment builder's attachment, prompt, trace, termination, and effect-controller methods are thin core mutators.</p>
           </div>
           <pre><code>let core = LashCore::rlm()
     .provider(provider)
-    .model("anthropic/claude-sonnet-4.6", None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits("anthropic/claude-sonnet-4.6", None, 200_000, None, None).expect("valid model metadata"))
     .store_factory(store_factory)
     .advanced()
     .residency(Residency::ActivePathOnly)

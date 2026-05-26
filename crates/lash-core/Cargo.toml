@@ -22,9 +22,9 @@ otel-trace = ["lash-trace/otel"]
 testing = []
 
 [dependencies]
-lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.8" }
-lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.8" }
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.8" }
+lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.9" }
+lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.9" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.9" }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
@@ -34,12 +34,9 @@ async-trait = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 thiserror = { workspace = true }
-tempfile = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 tokio-util = { workspace = true, features = ["rt"] }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
-libc = "0.2"

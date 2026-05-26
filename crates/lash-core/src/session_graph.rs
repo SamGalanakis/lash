@@ -137,13 +137,10 @@ pub enum SessionNodePayload {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PersistedSessionConfig {
     pub provider_id: String,
-    pub configured_model: String,
-    pub context_window: u64,
+    pub model: crate::ModelSpec,
     pub execution_mode: ExecutionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standard_context_approach: Option<StandardContextApproach>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_variant: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]

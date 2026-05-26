@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
+use lash::LashSession;
 use lash::control::SessionConfigPatch;
-use lash::{LashSession, ModelSelection};
 use lash_core::session_model::{
     Message, MessageRole, Part, PartKind, PruneState, fresh_message_id,
 };
 use lash_core::{
-    CachedModelCatalog, ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage,
-    ProviderHandle, TokenUsage, ToolState,
+    ExecutionMode, PersistedSessionConfig, PersistedTurnState, PromptUsage, ProviderHandle,
+    TokenUsage, ToolState,
 };
 use lash_sqlite_store::Store;
 
 use crate::app::{App, UiTimelineItem};
+use crate::model_catalog::CachedModelCatalog;
 use crate::session_log;
 
 fn push_history_system_message(history: &mut Vec<Message>, content: String) {
@@ -89,12 +90,12 @@ async fn restore_model_from_graph_config(
     app: &mut App,
     runtime: &mut Option<LashSession>,
     provider: &ProviderHandle,
-    model_catalog: &CachedModelCatalog,
+    _model_catalog: &CachedModelCatalog,
 ) -> Result<(), String> {
     let Some(config) = config else {
         return Ok(());
     };
-    let restored_model = config.configured_model.as_str();
+    let restored_model = config.model.id.as_str();
     if restored_model.is_empty() {
         return Ok(());
     }
@@ -106,20 +107,7 @@ async fn restore_model_from_graph_config(
                 restored_model, err
             )
         })?;
-    let restored_context_window = Some(config.context_window).filter(|window| *window > 0)
-        .or_else(|| {
-            let snapshot = model_catalog.snapshot();
-            provider
-                .resolve_model_spec(restored_model, &snapshot)
-                .ok()
-                .map(|spec| spec.context_window())
-        })
-        .ok_or_else(|| {
-            format!(
-                "Cannot resume session with model `{}`: no context-window entry was saved and the supplied model catalog does not contain it.",
-                restored_model
-            )
-        })?;
+    let restored_context_window = config.model.context_window_tokens() as u64;
     app.model = restored_model.to_string();
     app.context_window = Some(restored_context_window);
     app.context_usage_excludes_cached_input = provider.input_usage_excludes_cached_tokens();
@@ -128,8 +116,7 @@ async fn restore_model_from_graph_config(
             .control()
             .config()
             .update(SessionConfigPatch {
-                model: Some(ModelSelection::new(app.model.clone(), None)),
-                max_context_tokens: Some(restored_context_window as usize),
+                model: Some(config.model.clone()),
                 ..SessionConfigPatch::default()
             })
             .await;
@@ -203,11 +190,14 @@ async fn apply_graph_resume_state(
 
     *current_model_variant = config
         .as_ref()
-        .and_then(|state| state.model_variant.clone())
+        .and_then(|state| state.model.variant.clone())
         .or_else(|| {
-            provider
-                .default_model_variant(&app.model)
-                .map(str::to_string)
+            crate::provider_metadata::default_model_variant_for_provider(
+                provider.kind(),
+                &app.model,
+                provider.supported_variants(&app.model),
+            )
+            .map(str::to_string)
         });
     app.set_model_variant(current_model_variant.clone());
 
@@ -238,11 +228,11 @@ async fn apply_graph_resume_state(
             .config()
             .update(SessionConfigPatch {
                 provider: Some(provider.clone()),
-                model: Some(ModelSelection::new(
-                    app.model.clone(),
-                    current_model_variant.clone(),
-                )),
-                max_context_tokens: app.context_window.map(|window| window as usize),
+                model: config.as_ref().map(|config| {
+                    let mut model = config.model.clone();
+                    model.variant = current_model_variant.clone();
+                    model
+                }),
                 ..SessionConfigPatch::default()
             })
             .await
@@ -373,7 +363,7 @@ mod tests {
     use super::*;
     use crate::test_support::{EnvVarGuard, TempDirGuard, env_lock};
 
-    use lash_core::MemoryModelCatalogStore;
+    use crate::model_catalog::MemoryModelCatalogStore;
 
     fn persist_session_head(
         store: &Store,
@@ -387,11 +377,10 @@ mod tests {
             graph,
             config: lash_core::PersistedSessionConfig {
                 provider_id: "openai_generic".to_string(),
-                configured_model: "gpt-5".to_string(),
-                context_window: 200_000,
+                model: lash_core::ModelSpec::from_token_limits("gpt-5", None, 200_000, None, None)
+                    .expect("valid model spec"),
                 execution_mode: ExecutionMode::standard(),
                 standard_context_approach: Some(lash_core::StandardContextApproach::default()),
-                model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: Vec::new(),

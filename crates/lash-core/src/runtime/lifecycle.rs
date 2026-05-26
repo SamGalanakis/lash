@@ -24,14 +24,14 @@ impl LashRuntime {
         // by fresh-session constructors) carries an unconfigured policy.
         // Fill it in from the caller's policy so tests and hosts that
         // pass a real policy alongside default state don't trip the
-        // max_context_tokens guard below.
+        // explicit model-spec guard below.
         if state.policy.provider.kind() == "unconfigured" {
             state.policy = policy.clone();
         }
         normalize_session_graph(&mut state);
-        if policy.max_context_tokens.is_none() {
+        if policy.model.id.trim().is_empty() {
             return Err(SessionError::Protocol(
-                "session policy missing max_context_tokens; hosts must supply explicit model metadata"
+                "session policy missing model spec; hosts must supply explicit model metadata"
                     .to_string(),
             ));
         }
@@ -187,10 +187,12 @@ impl LashRuntime {
                 "RuntimeEnvironment.plugin_host is required for from_environment".to_string(),
             )
         })?;
-        let plugin_host = plugin_host
-            .as_ref()
-            .clone()
-            .with_processes_available(env.process_registry.is_some());
+        let plugin_host = plugin_host.as_ref().clone().with_lashlang_abilities(
+            super::builder::lashlang_abilities_for_process_registry(
+                plugin_host.lashlang_abilities(),
+                env.process_registry.is_some(),
+            ),
+        );
         let plugin_session = plugin_host
             .build_session(
                 state.session_id.as_str(),

@@ -19,14 +19,14 @@ impl LashCore {
         Self::builder()
             .install_mode(ModePreset::standard())
             .default_mode(ModeId::standard())
-            .plugins(PluginStack::runtime())
+            .plugins(default_runtime_stack())
     }
 
     pub fn rlm() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
-            .plugins(PluginStack::runtime())
+            .plugins(default_runtime_stack())
     }
 
     pub fn session(&self, session_id: impl Into<String>) -> SessionBuilder {
@@ -44,6 +44,36 @@ impl LashCore {
     pub fn installed_modes(&self) -> impl Iterator<Item = &ModeId> {
         self.modes.keys()
     }
+
+    pub fn durable_process_worker_config(
+        &self,
+        process_registry: Arc<dyn ProcessRegistry>,
+    ) -> Result<DurableProcessWorkerConfig> {
+        self.durable_process_worker_config_with_plugins(process_registry, Vec::new())
+    }
+
+    pub fn durable_process_worker_config_with_plugins(
+        &self,
+        process_registry: Arc<dyn ProcessRegistry>,
+        extra_plugin_factories: impl IntoIterator<Item = Arc<dyn PluginFactory>>,
+    ) -> Result<DurableProcessWorkerConfig> {
+        let Some(store_factory) = self.store_factory.as_ref() else {
+            return Err(EmbedError::MissingProcessWorkerStoreFactory);
+        };
+        let mut factories = self.plugin_factories.as_ref().clone();
+        factories.extend(extra_plugin_factories);
+        Ok(DurableProcessWorkerConfig::from_plugin_factories(
+            factories,
+            self.env.core.clone(),
+            Arc::clone(store_factory),
+            process_registry,
+        )
+        .with_session_policy(self.policy.clone()))
+    }
+}
+
+fn default_runtime_stack() -> PluginStack {
+    lash_plugin_tool_output_budget::tool_output_budget_stack()
 }
 
 #[derive(Default)]
@@ -115,13 +145,8 @@ impl LashCoreBuilder {
         self
     }
 
-    pub fn model(mut self, model: impl Into<String>, variant: Option<String>) -> Self {
-        self.session_spec = self.session_spec.model(model, variant);
-        self
-    }
-
-    pub fn max_context_tokens(mut self, max_context_tokens: usize) -> Self {
-        self.session_spec = self.session_spec.max_context_tokens(max_context_tokens);
+    pub fn model(mut self, model: lash_core::ModelSpec) -> Self {
+        self.session_spec = self.session_spec.model(model);
         self
     }
 
@@ -190,7 +215,9 @@ impl LashCoreBuilder {
     }
 
     pub fn trace_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.core = self.core.with_trace_jsonl_path(path);
+        self.core = self.core.with_trace_sink(path.map(|path| {
+            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        }));
         self
     }
 
@@ -218,25 +245,12 @@ impl LashCoreBuilder {
         if !self.modes.contains_key(&default_mode) {
             return Err(EmbedError::DefaultModeNotInstalled { mode: default_mode });
         }
-        let max_context_tokens = self
-            .session_spec
-            .max_context_tokens
-            .ok_or(EmbedError::MissingMaxContextTokens)?;
         let provider = self.session_spec.provider.clone().unwrap_or_default();
         let model = self
             .session_spec
             .model
             .clone()
-            .unwrap_or_else(|| provider.default_model().to_string());
-        let model_variant = self
-            .session_spec
-            .model_variant
-            .clone()
-            .unwrap_or_else(|| provider.default_model_variant(&model).map(str::to_string));
-        let model = ModelSelection {
-            model,
-            variant: model_variant,
-        };
+            .ok_or(EmbedError::MissingModelSpec)?;
 
         let default_preset = self
             .modes
@@ -244,9 +258,7 @@ impl LashCoreBuilder {
             .expect("default mode was validated");
         let base_policy = SessionPolicy {
             provider,
-            model: model.model,
-            model_variant: model.variant,
-            max_context_tokens: Some(max_context_tokens),
+            model,
             max_turns: self.session_spec.max_turns.flatten(),
             execution_mode: default_mode.execution_mode(),
             standard_context_approach: default_preset.standard_context_approach.clone(),

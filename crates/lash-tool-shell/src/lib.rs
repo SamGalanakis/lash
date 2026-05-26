@@ -1251,8 +1251,14 @@ impl ToolProvider for StandardShell {
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolResult {
         let cancellation_token = call.context.cancellation_token().cloned();
-        self.dispatch(call.name, call.args, call.progress, cancellation_token)
-            .await
+        self.dispatch(
+            call.name,
+            call.args,
+            call.context,
+            call.progress,
+            cancellation_token,
+        )
+        .await
     }
 }
 
@@ -1396,9 +1402,11 @@ impl StandardShell {
         &self,
         name: &str,
         args: &serde_json::Value,
+        context: &lash_core::ToolContext<'_>,
         progress: Option<&ProgressSender>,
         cancel: Option<CancellationToken>,
     ) -> ToolResult {
+        let _ = context;
         match name {
             "exec_command" => {
                 let params = match self.parse_exec_command_params(args) {

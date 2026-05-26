@@ -1,7 +1,6 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
+use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::process::ProcessRegistry;
 use super::{
@@ -11,6 +10,7 @@ use super::{
 /// Required host configuration for all runtimes.
 #[derive(Clone)]
 pub struct RuntimeCoreConfig {
+    pub host_profile_id: String,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
@@ -23,6 +23,7 @@ pub struct RuntimeCoreConfig {
 impl Default for RuntimeCoreConfig {
     fn default() -> Self {
         Self {
+            host_profile_id: "default".to_string(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
@@ -40,6 +41,11 @@ impl RuntimeCoreConfig {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         self.attachment_store = attachment_store;
+        self
+    }
+
+    pub fn with_host_profile_id(mut self, host_profile_id: impl Into<String>) -> Self {
+        self.host_profile_id = host_profile_id.into();
         self
     }
 
@@ -69,12 +75,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
         self.prompt = prompt;
-        self
-    }
-
-    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
-        self.trace_sink =
-            trace_path.map(|path| Arc::new(JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
         self
     }
 

@@ -15,8 +15,10 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
             crate::ProcessInput::ToolCall { call } => {
                 self.run_process_tool_call(
                     registration,
+                    Arc::clone(&registry),
                     call.clone(),
                     execution_context.tool_effect_metadata,
+                    execution_context.wake_target_scope_key,
                     cancellation,
                 )
                 .await
@@ -34,42 +36,18 @@ impl crate::runtime::effect::ProcessRunner for RuntimeSessionManager {
                 )
                 .await
             }
-            crate::ProcessInput::Command {
-                command,
-                cwd,
-                env,
-                timeout_ms,
-                persistent,
-                line_event,
-            } => {
-                self.run_command_process(
-                    registration,
-                    registry,
-                    command.clone(),
-                    cwd.clone(),
-                    env.clone(),
-                    *timeout_ms,
-                    *persistent,
-                    line_event.clone(),
-                    execution_context.wake_session_id,
-                    cancellation,
-                )
-                .await
-            }
-            crate::ProcessInput::LashlangBlock {
-                program,
-                input,
-                tool_bindings,
-                timeout_ms,
-                display_name: _,
+            crate::ProcessInput::LashlangProcess {
+                linked_module,
+                process_name,
+                args,
+                ..
             } => {
                 self.run_lashlang_process(
                     registration,
                     registry,
-                    program.clone(),
-                    input.clone(),
-                    tool_bindings.clone(),
-                    *timeout_ms,
+                    linked_module.clone(),
+                    process_name.clone(),
+                    args.clone(),
                     execution_context,
                     cancellation,
                 )

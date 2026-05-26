@@ -783,7 +783,6 @@ mod tests {
         let context = lash_core::ToolContext::__for_testing(
             "test-session".into(),
             Arc::new(lash_core::testing::MockSessionManager::default()),
-            lash_core::TurnContext::new(),
             store.clone(),
             lash_core::DirectCompletionClient::from_fn(|_, _| {
                 Err(lash_core::PluginError::Session(

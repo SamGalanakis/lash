@@ -8,7 +8,7 @@
 
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ExecutionOutcome, ParseError,
-    ProcessBlockStart, Record, State, Value, parse,
+    ProcessStart, Record, State, Value, parse,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -48,13 +48,17 @@ impl MockHost {
 impl ExecutionHost for MockHost {
     async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
         match op {
-            AbilityOp::CallTool { name, args } => {
-                self.call_tool(&name, args).await.map(AbilityResult::Value)
+            AbilityOp::ResourceOperation(operation) => {
+                let args = operation
+                    .args
+                    .first()
+                    .and_then(Value::as_record)
+                    .cloned()
+                    .unwrap_or_default();
+                self.call_tool(&operation.operation, args)
+                    .await
+                    .map(AbilityResult::Value)
             }
-            AbilityOp::StartToolCall { name, args } => self
-                .start_tool_call(name, args)
-                .await
-                .map(AbilityResult::Value),
             AbilityOp::StartProcess(start) => {
                 self.start_process(start).await.map(AbilityResult::Value)
             }
@@ -147,7 +151,6 @@ impl MockHost {
             }
             "list_process_handles" => {
                 let mut out = Record::default();
-                out.insert("monitor".into(), Value::Record(Record::default().into()));
                 out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
             }
@@ -156,39 +159,21 @@ impl MockHost {
         }
     }
 
-    async fn start_tool_call(
-        &self,
-        name: String,
-        args: Record,
-    ) -> Result<Value, ExecutionHostError> {
-        // Allocate a handle id, run the sync call now, stash the result.
-        let handle_id = {
-            let mut counter = self.next_handle.lock().unwrap();
-            *counter += 1;
-            format!("h{}", *counter)
-        };
-        let result = self.call_tool(&name, args.clone()).await?;
-        self.pending
-            .lock()
-            .unwrap()
-            .insert(handle_id.clone(), result);
-        let mut record = Record::default();
-        record.insert("__handle__".into(), Value::String("process".into()));
-        record.insert("id".into(), Value::String(handle_id.into()));
-        record.insert("tool".into(), Value::String(name.into()));
-        Ok(Value::Record(record.into()))
-    }
-
-    async fn start_process(&self, _start: ProcessBlockStart) -> Result<Value, ExecutionHostError> {
+    async fn start_process(&self, start: ProcessStart) -> Result<Value, ExecutionHostError> {
         let handle_id = {
             let mut counter = self.next_handle.lock().unwrap();
             *counter += 1;
             format!("p{}", *counter)
         };
+        let result = if start.process == "scan" {
+            start.args.get("root").cloned().unwrap_or(Value::Null)
+        } else {
+            self.call_tool(&start.process, start.args.clone()).await?
+        };
         self.pending
             .lock()
             .unwrap()
-            .insert(handle_id.clone(), Value::Null);
+            .insert(handle_id.clone(), result);
         let mut record = Record::default();
         record.insert("__handle__".into(), Value::String("process".into()));
         record.insert("id".into(), Value::String(handle_id.into()));
@@ -337,7 +322,10 @@ submit { counts: counts, items: items }
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
     let host = MockHost::default().with_file("a.txt", "hello world");
-    let Value::Record(r) = run(&host, r#"submit call read_file { path: "a.txt" }"#) else {
+    let Value::Record(r) = run(
+        &host,
+        r#"submit await TOOL.default.read_file({ path: "a.txt" })"#,
+    ) else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(true));
@@ -347,7 +335,7 @@ async fn prompt_claim_tool_call_success_is_wrapped_with_ok_and_value() {
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_claim_tool_call_failure_is_wrapped_with_ok_false_and_error() {
     let host = MockHost::default();
-    let Value::Record(r) = run(&host, "submit call boom {}") else {
+    let Value::Record(r) = run(&host, "submit await TOOL.default.boom({})") else {
         panic!("expected wrapped record");
     };
     assert_eq!(r["ok"], Value::Bool(false));
@@ -363,7 +351,7 @@ async fn prompt_claim_value_field_reaches_the_underlying_tool_output() {
     assert_eq!(
         run(
             &host,
-            r#"r = call read_file { path: "a.txt" }
+            r#"r = await TOOL.default.read_file({ path: "a.txt" })
 submit r.value"#,
         ),
         Value::String("file text".to_string().into())
@@ -376,7 +364,7 @@ async fn prompt_claim_question_unwraps_successful_tool_results() {
     assert_eq!(
         run(
             &host,
-            r#"text = (call read_file { path: "a.txt" })?
+            r#"text = await TOOL.default.read_file({ path: "a.txt" })?
 submit text"#,
         ),
         Value::String("file text".to_string().into())
@@ -387,7 +375,7 @@ submit text"#,
 async fn prompt_claim_question_aborts_failed_tool_results_with_error() {
     let host = MockHost::default();
     let mut state = State::new();
-    let err = execute("submit (call boom {})?", &mut state, &host)
+    let err = execute("submit await TOOL.default.boom({})?", &mut state, &host)
         .await
         .expect_err("failed result unwrap should abort");
     let ExecuteError::Runtime(err) = err else {
@@ -400,7 +388,7 @@ async fn prompt_claim_question_aborts_failed_tool_results_with_error() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Prompt claim: "`start call tool { arg: expr }` returns a handle
+// Prompt claim: "`start tool(arg: expr)` returns a handle
 // (not wrapped). Resolve with `await handle` — that returns the same
 // `{ ok, value }` wrapper as a synchronous call."
 // ─────────────────────────────────────────────────────────────────────
@@ -410,7 +398,7 @@ async fn prompt_claim_start_returns_unwrapped_handle() {
     let host = MockHost::default().with_file("a.txt", "x");
     let Value::Record(handle) = run(
         &host,
-        r#"h = start call read_file { path: "a.txt" }
+        r#"h = start read_file(path: "a.txt")
 submit h"#,
     ) else {
         panic!("expected handle record");
@@ -424,14 +412,15 @@ submit h"#,
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_claim_start_block_returns_unwrapped_handle() {
+async fn prompt_claim_named_process_start_returns_unwrapped_handle() {
     let host = MockHost::default();
     let Value::Record(handle) = run(
         &host,
         r#"root = "."
-h = start(name: "scan", timeout_ms: 1000, input: { root: root }) {
+process scan(root: str) {
   finish root
 }
+h = start scan(root: root)
 submit h"#,
     ) else {
         panic!("expected handle record");
@@ -449,7 +438,7 @@ async fn prompt_claim_await_handle_wraps_result_with_ok_value() {
     let host = MockHost::default().with_file("a.txt", "body");
     let Value::Record(r) = run(
         &host,
-        r#"h = start call read_file { path: "a.txt" }
+        r#"h = start read_file(path: "a.txt")
 submit await h"#,
     ) else {
         panic!("expected wrapped record");
@@ -464,7 +453,7 @@ async fn prompt_claim_question_unwraps_awaited_handle_results() {
     assert_eq!(
         run(
             &host,
-            r#"h = start call read_file { path: "a.txt" }
+            r#"h = start read_file(path: "a.txt")
 submit (await h)?"#,
         ),
         Value::String("body".to_string().into())
@@ -479,8 +468,8 @@ async fn prompt_claim_await_list_returns_wrappers_in_order() {
     let Value::List(items) = run(
         &host,
         r#"results = await [
-  start call read_file { path: "a.txt" },
-  start call read_file { path: "b.txt" },
+  start read_file(path: "a.txt"),
+  start read_file(path: "b.txt"),
 ]
 submit results"#,
     ) else {
@@ -503,8 +492,8 @@ async fn prompt_claim_await_record_returns_wrappers_by_name() {
     let Value::Record(items) = run(
         &host,
         r#"results = await {
-  a: start call read_file { path: "a.txt" },
-  b: start call read_file { path: "b.txt" },
+  a: start read_file(path: "a.txt"),
+  b: start read_file(path: "b.txt"),
 }
 submit results"#,
     ) else {
@@ -529,7 +518,7 @@ async fn prompt_claim_cancel_handle_runs_without_error() {
     let host = MockHost::default().with_file("a.txt", "x");
     run(
         &host,
-        r#"h = start call read_file { path: "a.txt" }
+        r#"h = start read_file(path: "a.txt")
 cancel h
 submit "done""#,
     );
@@ -1005,7 +994,7 @@ async fn prompt_claim_builtin_validate_checks_type_literals_mid_program() {
 
 // ─────────────────────────────────────────────────────────────────────
 // Simple worked example from the prompt's "Example format" block:
-//   r = call read_file { path: "Cargo.toml" }
+//   r = await TOOL.default.read_file({ path: "Cargo.toml" })
 //   submit split(r.value, "\n")[2]
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1015,7 +1004,7 @@ async fn prompt_example_format_block_executes_as_shown() {
     assert_eq!(
         run(
             &host,
-            r#"r = call read_file { path: "Cargo.toml" }
+            r#"r = await TOOL.default.read_file({ path: "Cargo.toml" })
 submit split(r.value, "\n")[2]"#,
         ),
         Value::String("line2".to_string().into())
@@ -1031,8 +1020,8 @@ async fn prompt_fanout_example_unwraps_spawn_and_wait_results_with_question() {
     let host = MockHost::default();
     let Value::List(results) = run(
         &host,
-        r#"a = start call spawn_agent { task: "chunk_1", capability: "explore" }
-b = start call spawn_agent { task: "chunk_2", capability: "explore" }
+        r#"a = start spawn_agent(task: "chunk_1", capability: "explore")
+b = start spawn_agent(task: "chunk_2", capability: "explore")
 results = await { a: a, b: b }
 a_result = results.a?
 b_result = results.b?
@@ -1051,7 +1040,7 @@ async fn prompt_example_allow_nonzero_exit_inspects_shell_exit_code() {
     assert_eq!(
         run(
             &host,
-            r#"probe = (call exec_command { cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
+            r#"probe = await TOOL.default.exec_command({ cmd: "test -f Cargo.lock", allow_nonzero_exit: true })?
 submit probe.exit_code == 0 ? "Cargo.lock exists" : "Cargo.lock is missing""#,
         ),
         Value::String("Cargo.lock is missing".into())
@@ -1067,7 +1056,7 @@ async fn prompt_example_loop_builds_collection_without_comprehension() {
         &host,
         r#"items = []
 for path in ["Cargo.toml", "README.md"] {
-  text = (call read_file { path: path })?
+  text = await TOOL.default.read_file({ path: path })?
   items = push(items, { path: path, chars: len(text) })
 }
 submit items"#,
@@ -1089,7 +1078,7 @@ async fn prompt_example_prints_targeted_slice_for_large_values() {
     let host = MockHost::default().with_file("Cargo.toml", "abcdef");
     let (outcome, _) = run_continued(
         &host,
-        r#"text = (call read_file { path: "Cargo.toml" })?
+        r#"text = await TOOL.default.read_file({ path: "Cargo.toml" })?
 print { chars: len(text), head: slice(text, 0, 3) }"#,
     );
     assert!(matches!(outcome, ExecutionOutcome::Continued));
@@ -1111,8 +1100,8 @@ async fn prompt_example_validates_nontrivial_edit_before_submit() {
 -old
 +new
 *** End Patch"""
-(call apply_patch { input: patch })?
-check = (call exec_command { cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
+await TOOL.default.apply_patch({ input: patch })?
+check = await TOOL.default.exec_command({ cmd: "cargo check --workspace --all-targets", allow_nonzero_exit: true })?
 if check.exit_code != 0 {
   print slice(check.output, 0, 4000)
 } else {

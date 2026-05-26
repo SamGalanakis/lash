@@ -1,6 +1,5 @@
 use super::*;
 
-mod command;
 mod control;
 mod lashlang;
 mod runner;
@@ -11,7 +10,8 @@ mod tool;
 mod tests {
     use super::*;
     use crate::runtime::tests::helpers::{
-        mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
+        MockCall, mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
+        standard_test_policy,
     };
     use std::sync::Arc;
 
@@ -21,7 +21,7 @@ mod tests {
     ) -> crate::LashRuntime {
         let mut runtime =
             runtime_with_plugins_and_tools(plugins, tools, mock_provider(Vec::new())).await;
-        runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+        runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
         runtime
     }
 
@@ -29,7 +29,7 @@ mod tests {
         plugins: Vec<Arc<dyn crate::PluginFactory>>,
     ) -> crate::LashRuntime {
         let mut runtime = runtime_with_plugins(plugins, mock_provider(Vec::new())).await;
-        runtime.host.process_registry = Some(Arc::new(crate::LocalProcessRegistry::default()));
+        runtime.host.process_registry = Some(Arc::new(crate::TestLocalProcessRegistry::default()));
         runtime
     }
 
@@ -51,25 +51,58 @@ mod tests {
         .with_extra_event_types([probe_event_type()])
     }
 
-    fn lashlang_block_registration(
+    fn lashlang_process_registration(
         process_id: &str,
         program: ::lashlang::Program,
-        input: serde_json::Map<String, serde_json::Value>,
+        args: serde_json::Map<String, serde_json::Value>,
     ) -> crate::ProcessRegistration {
-        crate::ProcessRegistration::new(
+        try_lashlang_process_registration(process_id, program, args)
+            .expect("link lashlang test module")
+    }
+
+    fn try_lashlang_process_registration(
+        process_id: &str,
+        program: ::lashlang::Program,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<crate::ProcessRegistration, ::lashlang::LinkError> {
+        let module = if program.process("main").is_some() {
+            program
+        } else {
+            ::lashlang::Program {
+                declarations: vec![::lashlang::Declaration::Process(::lashlang::ProcessDecl {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    return_ty: None,
+                    body: program.main,
+                })],
+                main: ::lashlang::Expr::Block(Vec::new()),
+                declaration_spans: Vec::new(),
+                expression_spans: Vec::new(),
+            }
+        };
+        let mut resources = ::lashlang::ResourceCatalog::new();
+        resources.add_alias("TOOL", "default");
+        resources.add_operation("TOOL", "process_echo", "process_echo");
+        let linked_module = ::lashlang::LinkedModule::link(
+            module,
+            ::lashlang::LashlangSurface::new(
+                resources,
+                ::lashlang::LashlangAbilities::default()
+                    .with_processes()
+                    .with_process_lifecycle(),
+            ),
+        )?;
+        let module_version = linked_module.module_version.clone();
+        Ok(crate::ProcessRegistration::new(
             process_id,
-            crate::ProcessInput::LashlangBlock {
-                program: serde_json::to_value(program).expect("serialize lashlang program"),
-                input,
-                tool_bindings: vec![crate::LashlangProcessToolBinding {
-                    name: "alias".to_string(),
-                    tool_id: crate::ToolId::new("tool:process_echo"),
-                }],
-                timeout_ms: None,
-                display_name: Some("block".to_string()),
+            crate::ProcessInput::LashlangProcess {
+                module_version,
+                linked_module,
+                process_name: "main".to_string(),
+                args,
             },
         )
-        .with_extra_event_types(crate::lashlang_process_event_types())
+        .with_extra_event_types(crate::lashlang_process_event_types()))
     }
 
     struct ProcessEchoTool;
@@ -112,8 +145,10 @@ mod tests {
         registry
             .append_event(
                 process_id,
-                "probe.event".to_string(),
-                serde_json::json!({ "marker": process_id }),
+                crate::ProcessEventAppendRequest::new(
+                    "probe.event",
+                    serde_json::json!({ "marker": process_id }),
+                ),
             )
             .await
             .expect("append probe event");
@@ -132,6 +167,86 @@ mod tests {
             )
             .await
             .expect("grant handle");
+    }
+
+    fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
+        registration.with_provenance(
+            crate::ProcessCreatorScope::new("worker-runtime", "root"),
+            "worker-profile",
+        )
+    }
+
+    fn process_worker(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+    ) -> crate::DurableProcessWorker {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(ProcessEchoTool);
+        let plugin_host =
+            crate::PluginHost::new(vec![Arc::new(crate::plugin::StaticPluginFactory::new(
+                "worker-test-tools",
+                crate::PluginSpec::new().with_tool_provider(tools),
+            ))]);
+        crate::DurableProcessWorker::new(
+            crate::DurableProcessWorkerConfig::new(
+                Arc::new(plugin_host),
+                crate::RuntimeCoreConfig::default().with_host_profile_id("worker-profile"),
+                factory,
+                registry,
+            )
+            .with_session_policy(standard_test_policy()),
+        )
+    }
+
+    fn successful_text_response(text: &str) -> crate::LlmResponse {
+        crate::LlmResponse {
+            full_text: text.to_string(),
+            parts: vec![crate::LlmOutputPart::Text {
+                text: text.to_string(),
+                response_meta: None,
+            }],
+            ..crate::LlmResponse::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_process_worker_requires_structured_creator_scope_without_parsing_scope_key() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let worker = process_worker(
+            Arc::clone(&registry_dyn),
+            factory as Arc<dyn crate::SessionStoreFactory>,
+        );
+        let mut registration = crate::ProcessRegistration::new(
+            "worker-unstructured-scope",
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    "tool-call-unstructured",
+                    "process_echo",
+                    serde_json::json!({ "value": "tool" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        );
+        registration.created_by_scope_key = "worker-runtime:root".to_string();
+        registration.host_profile_id = "worker-profile".to_string();
+
+        let err = worker
+            .run_process(
+                registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("worker should not parse creator session from scope key");
+
+        assert!(
+            err.to_string()
+                .contains("missing a structured creator scope"),
+            "{err}"
+        );
     }
 
     #[derive(Clone, Default)]
@@ -163,7 +278,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lashlang_block_process_runs_with_input_events_wake_and_captured_tool_id() {
+    async fn durable_process_worker_rebuilds_context_for_tool_lashlang_and_session_turn() {
+        let registry = Arc::new(crate::TestLocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let factory_dyn = Arc::clone(&factory) as Arc<dyn crate::SessionStoreFactory>;
+        let worker = process_worker(Arc::clone(&registry_dyn), factory_dyn);
+
+        let tool_registration = worker_registration(crate::ProcessRegistration::new(
+            "worker-tool",
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    "tool-call-1",
+                    "process_echo",
+                    serde_json::json!({ "value": "tool" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        ));
+        registry_dyn
+            .register_process(tool_registration.clone())
+            .await
+            .expect("register tool process");
+        let tool_output = worker
+            .run_process(
+                tool_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run tool process");
+        assert!(matches!(
+            tool_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "payload": "raw:tool" })
+        ));
+
+        let mut args = serde_json::Map::new();
+        args.insert("value".to_string(), serde_json::json!("linked"));
+        let lashlang_registration = worker_registration(lashlang_process_registration(
+            "worker-lashlang",
+            ::lashlang::parse(
+                r#"
+                process main(value: str) {
+                  finish { value: value }
+                }
+                "#,
+            )
+            .expect("process module"),
+            args,
+        ));
+        let crate::ProcessInput::LashlangProcess { linked_module, .. } =
+            lashlang_registration.input.as_ref()
+        else {
+            panic!("expected lashlang process input");
+        };
+        let relink_without_process_abilities = ::lashlang::LinkedModule::link(
+            linked_module.program.clone(),
+            ::lashlang::LashlangSurface::new(
+                linked_module.surface.resources.clone(),
+                ::lashlang::LashlangAbilities::default(),
+            ),
+        )
+        .expect_err("current worker host abilities should not be required to relink");
+        assert!(
+            relink_without_process_abilities
+                .to_string()
+                .contains("lashlang feature `processes` is disabled by this host"),
+            "{relink_without_process_abilities}"
+        );
+        registry_dyn
+            .register_process(lashlang_registration.clone())
+            .await
+            .expect("register lashlang process");
+        let lashlang_output = worker
+            .run_process(
+                lashlang_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run lashlang process");
+        assert!(matches!(
+            lashlang_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "value": "linked" })
+        ));
+
+        let child_policy = crate::SessionPolicy {
+            provider: mock_provider(vec![MockCall {
+                stream_events: Vec::new(),
+                response: Ok(successful_text_response("child done")),
+            }])
+            .into_handle(),
+            ..standard_test_policy()
+        };
+        let session_registration = worker_registration(crate::ProcessRegistration::new(
+            "worker-session",
+            crate::ProcessInput::SessionTurn {
+                create_request: Box::new(crate::SessionCreateRequest::child(
+                    "root",
+                    crate::SessionStartPoint::Empty,
+                    child_policy,
+                    crate::ModeExtras::default(),
+                    "worker-test",
+                )),
+                turn_input: Box::new(crate::TurnInput::text("run child")),
+                output_contract: crate::ToolOutputContract::Static,
+            },
+        ));
+        registry_dyn
+            .register_process(session_registration.clone())
+            .await
+            .expect("register session process");
+        let session_output = worker
+            .run_process(
+                session_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run session process");
+        assert!(matches!(
+            session_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value.get("turn").is_some()
+                    && value.get("child_session_id").and_then(serde_json::Value::as_str).is_some()
+        ));
+    }
+
+    #[tokio::test]
+    async fn lashlang_process_runs_with_input_events_wake_and_receiver_operation() {
         let runtime = runtime_with_processes_and_tools(Vec::new(), Arc::new(ProcessEchoTool)).await;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
@@ -191,58 +438,26 @@ mod tests {
             .expect("wake target session");
         let mut input = serde_json::Map::new();
         input.insert("root".to_string(), serde_json::json!("seed"));
-        let program = ::lashlang::Program::block(vec![
-            ::lashlang::Expr::Yield(Box::new(::lashlang::Expr::Variable("root".into()))),
-            ::lashlang::Expr::Assign {
-                target: ::lashlang::AssignTarget::variable("called".into()),
-                expr: Box::new(::lashlang::Expr::ResultUnwrap(Box::new(
-                    ::lashlang::Expr::ToolCall {
-                        mode: ::lashlang::ToolCallMode::Call,
-                        call: ::lashlang::CallExpr {
-                            name: "alias".into(),
-                            args: vec![("value".into(), ::lashlang::Expr::Variable("root".into()))],
-                        },
-                    },
-                ))),
-            },
-            ::lashlang::Expr::Wake(Box::new(::lashlang::Expr::Field {
-                target: Box::new(::lashlang::Expr::Variable("called".into())),
-                field: "payload".into(),
-            })),
-            ::lashlang::Expr::Assign {
-                target: ::lashlang::AssignTarget::variable("handle".into()),
-                expr: Box::new(::lashlang::Expr::ToolCall {
-                    mode: ::lashlang::ToolCallMode::Start,
-                    call: ::lashlang::CallExpr {
-                        name: "alias".into(),
-                        args: vec![("value".into(), ::lashlang::Expr::String("nested".into()))],
-                    },
-                }),
-            },
-            ::lashlang::Expr::Assign {
-                target: ::lashlang::AssignTarget::variable("nested".into()),
-                expr: Box::new(::lashlang::Expr::ResultUnwrap(Box::new(
-                    ::lashlang::Expr::Await(Box::new(::lashlang::Expr::Variable("handle".into()))),
-                ))),
-            },
-            ::lashlang::Expr::Finish(Some(Box::new(::lashlang::Expr::Record(vec![
-                (
-                    "first".into(),
-                    ::lashlang::Expr::Field {
-                        target: Box::new(::lashlang::Expr::Variable("called".into())),
-                        field: "payload".into(),
-                    },
-                ),
-                (
-                    "nested".into(),
-                    ::lashlang::Expr::Field {
-                        target: Box::new(::lashlang::Expr::Variable("nested".into())),
-                        field: "payload".into(),
-                    },
-                ),
-            ])))),
-        ]);
-        let registration = lashlang_block_registration("block-1", program, input);
+        input.insert(
+            "tool".to_string(),
+            serde_json::to_value(::lashlang::Value::Resource(
+                ::lashlang::ResourceHandle::new("TOOL", "default"),
+            ))
+            .expect("resource handle json"),
+        );
+        let program = ::lashlang::parse(
+            r#"
+            process main(root: str, tool: TOOL) {
+              yield root
+              called = await tool.process_echo({ value: root })?
+              wake called.payload
+              nested = await tool.process_echo({ value: "nested" })?
+              finish { first: called.payload, nested: nested.payload }
+            }
+            "#,
+        )
+        .expect("lashlang process body");
+        let registration = lashlang_process_registration("process-1", program, input);
 
         manager
             .processes
@@ -250,22 +465,21 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    registration,
-                    crate::ProcessExecutionContext::default()
-                        .with_wake_session_id(wake_target.session_id.clone()),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("block"),
-                )),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_wake_session_id(wake_target.session_id.clone())
+                    .with_descriptor(crate::ProcessHandleDescriptor::new(
+                        Some("lashlang"),
+                        Some("block"),
+                    )),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
         let output = manager
             .processes
-            .await_process(&manager.current, crate::ProcessAwaitRequest::new("block-1"))
+            .await_process(&manager.current, "process-1", crate::ProcessOpScope::new())
             .await
             .expect("await process");
 
@@ -282,7 +496,7 @@ mod tests {
             .process_registry
             .as_ref()
             .expect("process registry");
-        let events = registry.events_after("block-1", 0).await.expect("events");
+        let events = registry.events_after("process-1", 0).await.expect("events");
         assert!(
             events
                 .iter()
@@ -291,37 +505,220 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.event_type == "process.wake"
             && event.payload["text"] == serde_json::json!("raw:seed")));
-        assert!(
-            registry
-                .wake_events_after("block-1", 0)
-                .await
-                .expect("wake events")
-                .is_empty()
-        );
-        let child_runtime = manager
-            .managed
-            .registry
-            .lock()
+        let wakes = registry
+            .drain_wake_inputs(
+                &manager.processes.process_scope_key(&wake_target.session_id),
+                10,
+            )
             .await
-            .get(&wake_target.session_id)
-            .cloned()
-            .expect("wake target runtime");
-        let injected = child_runtime
-            .runtime
-            .lock()
-            .await
-            .session
-            .as_ref()
-            .expect("wake target session")
-            .turn_input_injection_bridge()
-            .drain()
-            .expect("injected input");
-        assert_eq!(injected.len(), 1);
-        assert_eq!(injected[0].message.content, "raw:seed");
+            .expect("durable wakes");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].input, "raw:seed");
     }
 
     #[tokio::test]
-    async fn lashlang_block_process_failure_retains_raw_value() {
+    async fn lashlang_process_uses_stored_linked_module_for_nested_starts() {
+        let runtime = runtime_with_processes(Vec::new()).await;
+        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+            .expect("runtime session manager");
+        assert!(
+            !manager.current.plugins.lashlang_abilities().processes,
+            "current plugin surface should not provide process linking"
+        );
+
+        let program = ::lashlang::parse(
+            r#"
+            process child(value: str) {
+              finish { child: value }
+            }
+            process main() {
+              handle = start child(value: "stored")
+              result = (await handle)?
+              finish { nested: result.child }
+            }
+            "#,
+        )
+        .expect("process module");
+        let registration =
+            lashlang_process_registration("snapshot-parent", program, serde_json::Map::new());
+        let crate::ProcessInput::LashlangProcess { linked_module, .. } =
+            registration.input.as_ref()
+        else {
+            panic!("expected lashlang process input");
+        };
+        let relink = ::lashlang::LinkedModule::link(
+            linked_module.program.clone(),
+            ::lashlang::LashlangSurface::new(
+                linked_module.surface.resources.clone(),
+                manager.current.plugins.lashlang_abilities(),
+            ),
+        )
+        .expect_err("current host surface should not be able to link this module");
+        assert!(
+            relink
+                .to_string()
+                .contains("lashlang feature `processes` is disabled by this host"),
+            "{relink}"
+        );
+
+        manager
+            .processes
+            .start_process(
+                &manager.current,
+                &manager.managed,
+                Arc::new(manager.clone()),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("snapshot-parent")),
+                ),
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("start process");
+        let output = manager
+            .processes
+            .await_process(
+                &manager.current,
+                "snapshot-parent",
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("await process");
+
+        assert!(matches!(
+            output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "nested": "stored" })
+        ));
+    }
+
+    #[tokio::test]
+    async fn lashlang_process_lifecycle_wait_signal_signal_run_and_sleep() {
+        let mut runtime = runtime_with_processes(Vec::new()).await;
+        let controller = RecordingProcessEffectController::default();
+        runtime.host.core.effect_controller = Arc::new(controller.clone());
+        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
+            .expect("runtime session manager");
+        let registry = runtime
+            .host
+            .process_registry
+            .as_ref()
+            .expect("process registry")
+            .clone();
+
+        let target = lashlang_process_registration(
+            "signal-target",
+            ::lashlang::parse(
+                r#"
+                process main() {
+                  value = wait signal
+                  finish value
+                }
+                "#,
+            )
+            .expect("target process"),
+            serde_json::Map::new(),
+        );
+        manager
+            .processes
+            .start_process(
+                &manager.current,
+                &manager.managed,
+                Arc::new(manager.clone()),
+                "root",
+                target,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("target")),
+                ),
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("start target");
+
+        let mut signaler_args = serde_json::Map::new();
+        signaler_args.insert(
+            "target".to_string(),
+            crate::lashlang_bridge::process_handle_json("signal-target"),
+        );
+        let signaler = lashlang_process_registration(
+            "signal-sender",
+            ::lashlang::parse(
+                r#"
+                process main(target: any) {
+                  sleep for "0ms"
+                  signal run target with { ok: true }
+                  finish "sent"
+                }
+                "#,
+            )
+            .expect("signaler process"),
+            signaler_args,
+        );
+        manager
+            .processes
+            .start_process(
+                &manager.current,
+                &manager.managed,
+                Arc::new(manager.clone()),
+                "root",
+                signaler,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("signaler")),
+                ),
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("start signaler");
+
+        let signaler_output = manager
+            .processes
+            .await_process(
+                &manager.current,
+                "signal-sender",
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("await signaler");
+        assert!(matches!(
+            signaler_output,
+            crate::ProcessAwaitOutput::Success { value, .. } if value == serde_json::json!("sent")
+        ));
+
+        let target_output = manager
+            .processes
+            .await_process(
+                &manager.current,
+                "signal-target",
+                crate::ProcessOpScope::new(),
+            )
+            .await
+            .expect("await target");
+        assert!(matches!(
+            target_output,
+            crate::ProcessAwaitOutput::Success { value, .. } if value == serde_json::json!({ "ok": true })
+        ));
+        let events = registry
+            .events_after("signal-target", 0)
+            .await
+            .expect("target events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "process.signal"
+                    && event.payload["payload"] == serde_json::json!({ "ok": true }))
+        );
+        let sleep_records = controller
+            .records()
+            .into_iter()
+            .filter(|record| record.effect_kind == crate::RuntimeEffectKind::Sleep)
+            .collect::<Vec<_>>();
+        assert_eq!(sleep_records.len(), 1);
+        assert!(sleep_records[0].idempotency_key.contains("signal-sender"));
+    }
+
+    #[tokio::test]
+    async fn lashlang_process_failure_retains_raw_value() {
         let runtime = runtime_with_processes_and_tools(Vec::new(), Arc::new(ProcessEchoTool)).await;
         let manager = RuntimeSessionManager::new(&runtime, true, None, None)
             .expect("runtime session manager");
@@ -332,7 +729,7 @@ mod tests {
             )]),
         ))]);
         let registration =
-            lashlang_block_registration("block-fail", program, serde_json::Map::new());
+            lashlang_process_registration("process-fail", program, serde_json::Map::new());
 
         manager
             .processes
@@ -340,15 +737,12 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    registration,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("fail"),
-                )),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("fail")),
+                ),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
@@ -356,7 +750,8 @@ mod tests {
             .processes
             .await_process(
                 &manager.current,
-                crate::ProcessAwaitRequest::new("block-fail"),
+                "process-fail",
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("await process");
@@ -367,109 +762,37 @@ mod tests {
         else {
             panic!("process should fail");
         };
-        assert_eq!(code, "process_block_failed");
+        assert_eq!(code, "process_failed");
         assert_eq!(raw, Some(serde_json::json!({ "reason": "bad" })));
         assert!(message.contains("reason"));
         assert!(message.contains("bad"));
     }
 
     #[tokio::test]
-    async fn lashlang_block_process_has_no_parent_capture_or_tool_name_fallback() {
-        let runtime = runtime_with_processes_and_tools(Vec::new(), Arc::new(ProcessEchoTool)).await;
-        let manager = RuntimeSessionManager::new(&runtime, true, None, None)
-            .expect("runtime session manager");
+    async fn lashlang_process_has_no_parent_capture_or_tool_name_fallback() {
         let no_parent_program = ::lashlang::Program::block(vec![::lashlang::Expr::Finish(Some(
             Box::new(::lashlang::Expr::Variable("parent".into())),
         ))]);
-        let no_parent = lashlang_block_registration(
-            "block-no-parent",
+        let err = try_lashlang_process_registration(
+            "process-no-parent",
             no_parent_program,
             serde_json::Map::new(),
-        );
-        manager
-            .processes
-            .start_process(
-                &manager.current,
-                &manager.managed,
-                Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    no_parent,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("no-parent"),
-                )),
-            )
-            .await
-            .expect("start no-parent process");
-        let output = manager
-            .processes
-            .await_process(
-                &manager.current,
-                crate::ProcessAwaitRequest::new("block-no-parent"),
-            )
-            .await
-            .expect("await no-parent process");
-        let crate::ProcessAwaitOutput::Failure { message, .. } = output else {
-            panic!("process should fail");
-        };
-        assert!(message.contains("unknown name `parent`"), "{message}");
+        )
+        .expect_err("linked process should reject parent capture");
+        assert!(err.to_string().contains("unknown name `parent`"), "{err}");
 
         let fallback_program =
-            ::lashlang::Program::block(vec![::lashlang::Expr::Finish(Some(Box::new(
-                ::lashlang::Expr::ResultUnwrap(Box::new(::lashlang::Expr::ToolCall {
-                    mode: ::lashlang::ToolCallMode::Call,
-                    call: ::lashlang::CallExpr {
-                        name: "process_echo".into(),
-                        args: vec![("value".into(), ::lashlang::Expr::String("x".into()))],
-                    },
-                })),
-            )))]);
-        let fallback_registration = crate::ProcessRegistration::new(
-            "block-no-fallback",
-            crate::ProcessInput::LashlangBlock {
-                program: serde_json::to_value(fallback_program).expect("serialize program"),
-                input: serde_json::Map::new(),
-                tool_bindings: Vec::new(),
-                timeout_ms: None,
-                display_name: None,
-            },
+            ::lashlang::parse(r#"process main() { finish await process_echo({ value: "x" })? }"#)
+                .expect("fallback process body");
+        let err = try_lashlang_process_registration(
+            "process-no-fallback",
+            fallback_program,
+            serde_json::Map::new(),
         )
-        .with_extra_event_types(crate::lashlang_process_event_types());
-        manager
-            .processes
-            .start_process(
-                &manager.current,
-                &manager.managed,
-                Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    fallback_registration,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("no-fallback"),
-                )),
-            )
-            .await
-            .expect("start no-fallback process");
-        let output = manager
-            .processes
-            .await_process(
-                &manager.current,
-                crate::ProcessAwaitRequest::new("block-no-fallback"),
-            )
-            .await
-            .expect("await no-fallback process");
-        let crate::ProcessAwaitOutput::Failure { message, .. } = output else {
-            panic!("process should fail");
-        };
+        .expect_err("bare operation-name fallback should be rejected by linker");
         assert!(
-            message.contains("tool `process_echo` was not captured"),
-            "{message}"
+            err.to_string().contains("unknown builtin `process_echo`"),
+            "{err}"
         );
     }
 
@@ -519,7 +842,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", vec!["keep".to_string()]),
+                "root",
+                vec!["keep".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("cancel unreferenced handles");
@@ -558,10 +883,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![other_scope]
         );
-        assert_eq!(
-            process_event_projection(&registry, &process_ids).await,
-            events_before
-        );
+        let events_after = process_event_projection(&registry, &process_ids).await;
+        assert_eq!(events_after[0], events_before[0]);
+        assert_eq!(events_after[2], events_before[2]);
+        assert!(events_after[1].1.iter().any(|(_, event_type, payload)| {
+            event_type == "process.cancel_requested"
+                && payload["reason"] == serde_json::json!("requested by host")
+        }));
     }
 
     #[tokio::test]
@@ -588,7 +916,7 @@ mod tests {
             turn_checkpoint_hash: Some("0".repeat(64)),
         };
         let scoped_request = || {
-            crate::ProcessRequestScope::new()
+            crate::ProcessOpScope::new()
                 .with_effect_metadata(Some(metadata.clone()))
                 .with_effect_controller(&controller)
         };
@@ -602,12 +930,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new(
-                    "root",
-                    "successor",
-                    vec!["transfer-me".to_string()],
-                )
-                .with_scope(scoped_request()),
+                "root",
+                "successor",
+                vec!["transfer-me".to_string()],
+                scoped_request(),
             )
             .await
             .expect("transfer handles");
@@ -628,8 +954,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", Vec::<String>::new())
-                    .with_scope(scoped_request()),
+                "root",
+                Vec::<String>::new(),
+                scoped_request(),
             )
             .await
             .expect("cleanup handles");
@@ -657,7 +984,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new("root", "successor", Vec::<String>::new()),
+                "root",
+                "successor",
+                Vec::<String>::new(),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("empty transfer remains a no-op");
@@ -683,11 +1013,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new(
-                    "root",
-                    "successor",
-                    vec!["missing".to_string()],
-                ),
+                "root",
+                "successor",
+                vec!["missing".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("transfer should fail");
@@ -703,7 +1032,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", Vec::<String>::new()),
+                "root",
+                Vec::<String>::new(),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("cleanup should fail");

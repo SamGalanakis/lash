@@ -155,6 +155,7 @@ mod tests {
             })),
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
+            lashlang_abilities: Default::default(),
         })
         .unwrap();
         let surface = build_tool_surface(ToolSurfaceBuildInput {
@@ -179,6 +180,7 @@ mod tests {
             resolve_contract: None,
             tool_access: lash_core::SessionToolAccess::default(),
             subagent: None,
+            lashlang_abilities: Default::default(),
         })
         .unwrap();
 

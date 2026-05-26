@@ -67,8 +67,8 @@ fn register_singleton_hook<H>(
     Ok(())
 }
 
-pub struct PluginRegistrar {
-    pub(crate) tool_names: BTreeSet<String>,
+#[derive(Clone, Default)]
+pub(crate) struct PluginContributions {
     pub(crate) tool_providers: Vec<Arc<dyn ToolProvider>>,
     pub(crate) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
     pub(crate) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
@@ -84,13 +84,17 @@ pub struct PluginRegistrar {
     pub(crate) runtime_event_hooks: Vec<PluginLifecycleEventHook>,
     pub(crate) session_config_mutators: Vec<SessionConfigMutator>,
     pub(crate) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
-    pub(crate) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
     pub(crate) turn_context_transforms: Vec<(i32, Arc<dyn TurnContextTransform>)>,
     pub(crate) history_rewriters: Vec<(i32, Arc<dyn HistoryRewriter>)>,
     pub(crate) mode_session: Option<RegisteredExclusiveHook<Arc<dyn ModeSessionPlugin>>>,
-    pub(crate) mode_native_tools: Vec<RegisteredHook<Arc<dyn ModeNativeToolsPlugin>>>,
+    pub(crate) mode_native_tools: Vec<Arc<dyn ModeNativeToolsPlugin>>,
     pub(crate) mode_protocol_driver:
         Option<RegisteredExclusiveHook<Arc<dyn ModeProtocolDriverPlugin>>>,
+}
+
+pub struct PluginRegistrar {
+    pub(crate) tool_names: BTreeSet<String>,
+    pub(crate) contributions: PluginContributions,
     pub(crate) registering_plugin_id: Option<String>,
 }
 
@@ -196,21 +200,11 @@ pub struct SessionRegistrations<'a> {
 
 impl SessionRegistrations<'_> {
     pub fn on_event(self, hook: PluginLifecycleEventHook) {
-        self.reg.runtime_event_hooks.push(hook);
+        self.reg.contributions.runtime_event_hooks.push(hook);
     }
 
     pub fn config_mutator(self, hook: SessionConfigMutator) {
-        self.reg.session_config_mutators.push(hook);
-    }
-}
-
-pub struct MonitorRegistrations<'a> {
-    reg: &'a mut PluginRegistrar,
-}
-
-impl MonitorRegistrations<'_> {
-    pub fn register(self, spec: crate::MonitorSpec) {
-        self.reg.add_monitor_spec(spec);
+        self.reg.contributions.session_config_mutators.push(hook);
     }
 }
 
@@ -268,12 +262,18 @@ pub struct HistoryRegistrations<'a> {
 impl HistoryRegistrations<'_> {
     /// Register a per-turn context transform. Higher priority runs first.
     pub fn prepare_turn(self, priority: i32, transform: Arc<dyn TurnContextTransform>) {
-        self.reg.turn_context_transforms.push((priority, transform));
+        self.reg
+            .contributions
+            .turn_context_transforms
+            .push((priority, transform));
     }
 
     /// Register a permanent history rewriter. Higher priority runs first.
     pub fn rewrite(self, priority: i32, rewriter: Arc<dyn HistoryRewriter>) {
-        self.reg.history_rewriters.push((priority, rewriter));
+        self.reg
+            .contributions
+            .history_rewriters
+            .push((priority, rewriter));
     }
 }
 
@@ -306,27 +306,7 @@ impl PluginRegistrar {
     pub(crate) fn new() -> Self {
         Self {
             tool_names: BTreeSet::new(),
-            tool_providers: Vec::new(),
-            prompt_contributors: Vec::new(),
-            tool_surface_contributors: Vec::new(),
-            tool_discovery_contributors: Vec::new(),
-            before_turn_hooks: Vec::new(),
-            before_tool_call_hooks: Vec::new(),
-            after_tool_call_hooks: Vec::new(),
-            after_turn_hooks: Vec::new(),
-            checkpoint_hooks: Vec::new(),
-            assistant_stream_hooks: Vec::new(),
-            assistant_response_hooks: Vec::new(),
-            tool_result_projector: None,
-            runtime_event_hooks: Vec::new(),
-            session_config_mutators: Vec::new(),
-            plugin_actions: BTreeMap::new(),
-            monitor_specs: Vec::new(),
-            turn_context_transforms: Vec::new(),
-            history_rewriters: Vec::new(),
-            mode_session: None,
-            mode_native_tools: Vec::new(),
-            mode_protocol_driver: None,
+            contributions: PluginContributions::default(),
             registering_plugin_id: None,
         }
     }
@@ -371,10 +351,6 @@ impl PluginRegistrar {
         PluginActionRegistrations { reg: self }
     }
 
-    pub fn monitors(&mut self) -> MonitorRegistrations<'_> {
-        MonitorRegistrations { reg: self }
-    }
-
     pub fn history(&mut self) -> HistoryRegistrations<'_> {
         HistoryRegistrations { reg: self }
     }
@@ -392,13 +368,13 @@ impl PluginRegistrar {
                 )));
             }
         }
-        self.tool_providers.push(provider);
+        self.contributions.tool_providers.push(provider);
         Ok(())
     }
 
     fn add_prompt_contributor(&mut self, contributor: PromptContributor) {
         push_registered_hook(
-            &mut self.prompt_contributors,
+            &mut self.contributions.prompt_contributors,
             &self.registering_plugin_id,
             contributor,
         );
@@ -406,7 +382,7 @@ impl PluginRegistrar {
 
     fn add_tool_surface_contributor(&mut self, contributor: ToolSurfaceContributor) {
         push_registered_hook(
-            &mut self.tool_surface_contributors,
+            &mut self.contributions.tool_surface_contributors,
             &self.registering_plugin_id,
             contributor,
         );
@@ -414,7 +390,7 @@ impl PluginRegistrar {
 
     fn add_tool_discovery_contributor(&mut self, contributor: ToolDiscoveryContributor) {
         push_registered_hook(
-            &mut self.tool_discovery_contributors,
+            &mut self.contributions.tool_discovery_contributors,
             &self.registering_plugin_id,
             contributor,
         );
@@ -422,7 +398,7 @@ impl PluginRegistrar {
 
     fn add_before_turn_hook(&mut self, hook: BeforeTurnHook) {
         push_registered_hook(
-            &mut self.before_turn_hooks,
+            &mut self.contributions.before_turn_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -430,7 +406,7 @@ impl PluginRegistrar {
 
     fn add_before_tool_call_hook(&mut self, hook: BeforeToolCallHook) {
         push_registered_hook(
-            &mut self.before_tool_call_hooks,
+            &mut self.contributions.before_tool_call_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -438,7 +414,7 @@ impl PluginRegistrar {
 
     fn add_after_tool_call_hook(&mut self, hook: AfterToolCallHook) {
         push_registered_hook(
-            &mut self.after_tool_call_hooks,
+            &mut self.contributions.after_tool_call_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -446,7 +422,7 @@ impl PluginRegistrar {
 
     fn add_after_turn_hook(&mut self, hook: AfterTurnHook) {
         push_registered_hook(
-            &mut self.after_turn_hooks,
+            &mut self.contributions.after_turn_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -454,7 +430,7 @@ impl PluginRegistrar {
 
     fn add_checkpoint_hook(&mut self, hook: CheckpointHook) {
         push_registered_hook(
-            &mut self.checkpoint_hooks,
+            &mut self.contributions.checkpoint_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -462,7 +438,7 @@ impl PluginRegistrar {
 
     fn add_assistant_stream_hook(&mut self, hook: AssistantStreamHook) {
         push_registered_hook(
-            &mut self.assistant_stream_hooks,
+            &mut self.contributions.assistant_stream_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -470,7 +446,7 @@ impl PluginRegistrar {
 
     fn add_assistant_response_hook(&mut self, hook: AssistantResponseHook) {
         push_registered_hook(
-            &mut self.assistant_response_hooks,
+            &mut self.contributions.assistant_response_hooks,
             &self.registering_plugin_id,
             hook,
         );
@@ -478,7 +454,7 @@ impl PluginRegistrar {
 
     fn add_tool_result_projector(&mut self, hook: ToolResultProjector) -> Result<(), PluginError> {
         register_singleton_hook(
-            &mut self.tool_result_projector,
+            &mut self.contributions.tool_result_projector,
             &self.registering_plugin_id,
             "tool result projector",
             "model_observation",
@@ -491,22 +467,16 @@ impl PluginRegistrar {
         def: PluginActionDef,
         handler: PluginActionHandler,
     ) -> Result<(), PluginError> {
-        if self.plugin_actions.contains_key(&def.name) {
+        if self.contributions.plugin_actions.contains_key(&def.name) {
             return Err(PluginError::Registration(format!(
                 "duplicate plugin action name `{}`",
                 def.name
             )));
         }
-        self.plugin_actions
+        self.contributions
+            .plugin_actions
             .insert(def.name.clone(), RegisteredPluginAction { def, handler });
         Ok(())
-    }
-
-    fn add_monitor_spec(&mut self, spec: crate::MonitorSpec) {
-        self.monitor_specs.push(PluginOwned {
-            plugin_id: current_plugin_id(&self.registering_plugin_id),
-            value: spec,
-        });
     }
 
     fn add_mode_session(
@@ -514,7 +484,7 @@ impl PluginRegistrar {
         provider: Arc<dyn ModeSessionPlugin>,
     ) -> Result<(), PluginError> {
         register_singleton_hook(
-            &mut self.mode_session,
+            &mut self.contributions.mode_session,
             &self.registering_plugin_id,
             "mode session capability",
             "mode_session",
@@ -526,11 +496,7 @@ impl PluginRegistrar {
         &mut self,
         provider: Arc<dyn ModeNativeToolsPlugin>,
     ) -> Result<(), PluginError> {
-        push_registered_hook(
-            &mut self.mode_native_tools,
-            &self.registering_plugin_id,
-            provider,
-        );
+        self.contributions.mode_native_tools.push(provider);
         Ok(())
     }
 
@@ -539,7 +505,7 @@ impl PluginRegistrar {
         provider: Arc<dyn ModeProtocolDriverPlugin>,
     ) -> Result<(), PluginError> {
         register_singleton_hook(
-            &mut self.mode_protocol_driver,
+            &mut self.contributions.mode_protocol_driver,
             &self.registering_plugin_id,
             "mode protocol driver capability",
             "mode_protocol_driver",

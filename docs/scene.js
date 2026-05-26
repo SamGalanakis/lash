@@ -480,6 +480,18 @@
       baseY: brazierPeak.peakY + rand(2, 8),
       scale: rand(SCALE_MIN, SCALE_MAX),
     };
+    // Guarantee the silhouette lands on-canvas. Zone selection is
+    // fraction-based but the figure's half-width is fixed local units
+    // (dish/base spans ±32), and the empty-zone fallback can pick a peak
+    // past the intended cap — so clamp baseX once scale is known. No-op
+    // for the ~90%+ of runs already inside bounds; nudges the edge cases
+    // inward by at most a few dozen units (figure stays on its peak).
+    const EDGE_PAD = 6;
+    const clampBaseX = (x, scale) => {
+      const half = 32 * scale + EDGE_PAD;
+      return Math.min(Math.max(x, half), W - half);
+    };
+    brazier.baseX = clampBaseX(brazier.baseX, brazier.scale);
     const brazierFocal = {
       x: brazier.baseX,
       y: brazier.baseY - 44 * brazier.scale,
@@ -497,6 +509,7 @@
       baseY: nunPeak.peakY + rand(30, 50),
       scale: rand(SCALE_MIN, SCALE_MAX),
     };
+    nun.baseX = clampBaseX(nun.baseX, nun.scale);
     const nunFocal = {
       x: nun.baseX,
       y: nun.baseY - 108 * nun.scale,

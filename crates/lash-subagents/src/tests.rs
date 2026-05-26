@@ -8,12 +8,21 @@ use crate::rlm_support::{
 };
 use lash_core::llm::types::{LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole};
 use lash_core::{
-    ExecutionMode, LashRuntime, LocalProcessRegistry, RuntimeSessionState, PluginFactory,
-    PluginHost, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeServices, SessionPolicy,
+    ExecutionMode, LashRuntime, PluginFactory, PluginHost, ProcessRuntimeHost, RuntimeCoreConfig,
+    RuntimeServices, RuntimeSessionState, SessionPolicy, TestLocalProcessRegistry,
 };
 use lash_core::{ToolArgumentProjectionPolicy, ToolDefinition, ToolOutputContract, TurnInput};
 use lash_mode_rlm::RlmTurnInputExt;
 use serde_json::json;
+
+fn model_spec(
+    model: impl Into<String>,
+    variant: Option<String>,
+    context_window_tokens: usize,
+) -> lash_core::ModelSpec {
+    lash_core::ModelSpec::from_token_limits(model, variant, context_window_tokens, None, None)
+        .expect("valid model spec")
+}
 
 static SEED_PROBE_FACTORY: Once = Once::new();
 static SEED_PROBE_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -64,20 +73,19 @@ fn ensure_seed_probe_provider_factory() {
 #[test]
 fn static_capability_policy_fields_distinguish_inherit_set_and_clear() {
     let current = SessionPolicy {
-        model: "parent-model".to_string(),
-        model_variant: Some("parent-variant".to_string()),
+        model: model_spec("parent-model", Some("parent-variant".to_string()), 200_000),
         execution_mode: lash_core::ExecutionMode::standard(),
         ..SessionPolicy::default()
     };
     let spec = SessionSpec::inherit()
-        .model("child-model", None)
+        .model(model_spec("child-model", None, 100_000))
         .mode(lash_core::ExecutionMode::new("rlm"));
     let registry = CapabilityRegistry::new().with(Arc::new(StaticCapability::new("child", spec)));
 
     let policy = build_session_policy(&registry, &current, "child").expect("policy");
 
-    assert_eq!(policy.model, "child-model");
-    assert_eq!(policy.model_variant, None);
+    assert_eq!(policy.model.id, "child-model");
+    assert_eq!(policy.model.variant, None);
     assert_eq!(policy.execution_mode, lash_core::ExecutionMode::new("rlm"));
 }
 
@@ -111,7 +119,7 @@ fn rlm_definitions_expose_spawn_without_mini_api() {
         rlm_spawn
             .examples
             .iter()
-            .any(|example| example.contains("start call spawn_agent"))
+            .any(|example| example.contains("await TOOL.default.spawn_agent"))
     );
 }
 
@@ -224,40 +232,29 @@ fn single_capability_spawn_can_omit_capability_field() {
 async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
     // Two distinct stub providers so we can verify that spawn
     // resolves against the *live* policy, not the factory's stale
-    // one. Each stub returns a different per-tier model from
-    // `default_agent_model` so the final child policy's model shows
-    // which provider the capability lookup resolved against.
+    // one. The final child policy inherits the live policy's explicit
+    // model spec.
     fn tiered_provider(tag: &'static str) -> lash_core::testing::TestProvider {
-        let (kind, default_model, explore_model) = match tag {
-            "stale" => ("stale-stub", "stale-model", "stale-explore"),
-            "live" => ("live-stub", "live-model", "live-explore"),
-            _ => ("stub", "mock-model", "mock-explore"),
+        let kind = match tag {
+            "stale" => "stale-stub",
+            "live" => "live-stub",
+            _ => "stub",
         };
         lash_core::testing::TestProvider::builder()
             .kind(kind)
-            .default_model(default_model)
-            .default_agent_model(move |tier| {
-                if tier == "explore" {
-                    Some(lash_core::AgentModelSelection {
-                        model: explore_model.to_string(),
-                        variant: None,
-                    })
-                } else {
-                    None
-                }
-            })
             .complete_error("stub")
             .build()
     }
     let stale_policy = SessionPolicy {
         provider: tiered_provider("stale").into_handle(),
+        model: model_spec("stale-parent", None, 200_000),
         execution_mode: lash_core::ExecutionMode::standard(),
         ..SessionPolicy::default()
     };
     let live_policy = SessionPolicy {
         provider: tiered_provider("live").into_handle(),
         execution_mode: lash_core::ExecutionMode::standard(),
-        max_context_tokens: Some(1234),
+        model: model_spec("live-parent", None, 1234),
         ..SessionPolicy::default()
     };
     let registry = Arc::new(default_registry(&BTreeMap::new()));
@@ -292,11 +289,11 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
         .model;
     assert_eq!(child_policy.provider, live_policy.provider);
     assert_eq!(
-        child_policy.max_context_tokens,
-        live_policy.max_context_tokens
+        child_policy.model.context_window_tokens(),
+        live_policy.model.context_window_tokens()
     );
-    assert_ne!(child_policy.model, stale_choice);
-    assert_eq!(child_policy.model, "live-explore");
+    assert_ne!(child_policy.model.id, stale_choice.id);
+    assert_eq!(child_policy.model.id, "live-parent");
     assert!(request.tool_access.tools.is_empty());
 
     let structured_request = build_spawn_create_request(SpawnCreateRequestInput {
@@ -330,7 +327,7 @@ async fn spawn_uses_live_parent_provider_when_selecting_subagent_model() {
 async fn rlm_spawn_seed_is_visible_to_child_executor_and_prompt() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-result = (call spawn_agent {
+result = await TOOL.default.spawn_agent({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
@@ -358,12 +355,16 @@ submit result
 async fn rlm_spawn_process_handle_returns_child_submitted_value() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-handle = start call spawn_agent {
-  capability: "default",
-  task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
-  seed: { chunk: ["a", "b"] },
-  output: Type { len: int }
+process spawn_child(tool: TOOL) {
+  result = await tool.spawn_agent({
+    capability: "default",
+    task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
+    seed: { chunk: ["a", "b"] },
+    output: Type { len: int }
+  })?
+  finish result
 }
+handle = start spawn_child(tool: TOOL.default)
 result = (await handle)?
 submit result
 ```"#,
@@ -387,7 +388,7 @@ submit result
 async fn rlm_spawn_defaults_single_capability_when_omitted() {
     let (outcome, prompt) = run_seed_probe(
         r#"```lashlang
-result = (call spawn_agent {
+result = await TOOL.default.spawn_agent({
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: ["a", "b"] },
   output: Type { len: int }
@@ -435,7 +436,7 @@ for line in lines {
   }
 }
 chunk = slice(data, 0, 2)
-result = (call spawn_agent {
+result = await TOOL.default.spawn_agent({
   capability: "default",
   task: "Submit `{ len: len(chunk) }` using the seeded `chunk` variable.",
   seed: { chunk: chunk },
@@ -463,7 +464,6 @@ fn seed_probe_provider(id: String, state: Arc<SeedProbeState>) -> lash_core::tes
     let config_id = id.clone();
     lash_core::testing::TestProvider::builder()
         .kind("seed-probe")
-        .default_model("seed-probe-model")
         .serialize_config(move || json!({ "id": config_id.clone() }))
         .complete(move |request| {
             let state = Arc::clone(&state);
@@ -530,19 +530,23 @@ async fn run_seed_probe(
             ))),
         ))),
     ];
-    let plugins = PluginHost::new(factories)
+    let host = PluginHost::new(factories);
+    let process_abilities = host
+        .lashlang_abilities()
         .with_processes()
+        .with_process_lifecycle();
+    let plugins = host
+        .with_lashlang_abilities(process_abilities)
         .build_session("root", ExecutionMode::new("rlm"), None, None)
         .expect("plugin session");
     let host = ProcessRuntimeHost::new(
         lash_core::EmbeddedRuntimeHost::new(RuntimeCoreConfig::default()),
-        Arc::new(LocalProcessRegistry::default()),
+        Arc::new(TestLocalProcessRegistry::default()),
     );
     let policy = SessionPolicy {
         provider: provider.into_handle(),
-        model: "seed-probe-model".to_string(),
+        model: model_spec("seed-probe-model", None, 64_000),
         execution_mode: ExecutionMode::new("rlm"),
-        max_context_tokens: Some(64_000),
         max_turns: Some(4),
         ..SessionPolicy::default()
     };
@@ -609,7 +613,7 @@ async fn standard_provider_does_not_expose_subagent_tools() {
         standard_context_approach: None,
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
-        processes_available: false,
+        lashlang_abilities: Default::default(),
         parent_session_id: None,
     };
     let plugin = factory.build(&ctx).expect("plugin");
@@ -617,7 +621,7 @@ async fn standard_provider_does_not_expose_subagent_tools() {
 }
 
 #[tokio::test]
-async fn rlm_provider_requires_process_support() {
+async fn rlm_provider_does_not_require_process_support() {
     let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
     let ctx = PluginSessionContext {
         session_id: "parent".to_string(),
@@ -625,19 +629,12 @@ async fn rlm_provider_requires_process_support() {
         standard_context_approach: None,
         tool_access: lash_core::SessionToolAccess::default(),
         subagent: None,
-        processes_available: false,
+        lashlang_abilities: Default::default(),
         parent_session_id: None,
     };
 
-    let err = match factory.build(&ctx) {
-        Ok(_) => panic!("rlm build should fail"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string()
-            .contains("subagents require session process support"),
-        "{err}"
-    );
+    let plugin = factory.build(&ctx).expect("rlm plugin");
+    assert_eq!(plugin.id(), "subagents");
 }
 
 fn dummy_tool(name: &str) -> ToolDefinition {
@@ -681,6 +678,7 @@ fn subagent_surface_reports_authority_notes() {
             depth: 1,
             max_depth: 5,
         }),
+        lashlang_abilities: Default::default(),
     };
 
     let contribution =

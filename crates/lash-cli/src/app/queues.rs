@@ -15,43 +15,43 @@ impl App {
         self.queued_turns.push_back(turn);
     }
 
-    pub fn queue_monitor_wake(&mut self, input: String) {
+    pub fn queue_process_wake(&mut self, input: String) {
         if input.trim().is_empty() {
             return;
         }
-        self.pending_monitor_wakes.push_back(input);
+        self.pending_process_wakes.push_back(input);
     }
 
-    pub fn has_pending_monitor_wakes(&self) -> bool {
-        !self.pending_monitor_wakes.is_empty()
+    pub fn has_pending_process_wakes(&self) -> bool {
+        !self.pending_process_wakes.is_empty()
     }
 
-    pub fn take_pending_monitor_wakes(&mut self) -> Vec<String> {
-        self.pending_monitor_wakes.drain(..).collect::<Vec<_>>()
+    pub fn take_pending_process_wakes(&mut self) -> Vec<String> {
+        self.pending_process_wakes.drain(..).collect::<Vec<_>>()
     }
 
-    pub fn mark_monitor_wakes_in_flight(&mut self, wakes: &[String]) {
-        self.in_flight_monitor_wakes.extend(wakes.iter().cloned());
+    pub fn mark_process_wakes_in_flight(&mut self, wakes: &[String]) {
+        self.in_flight_process_wakes.extend(wakes.iter().cloned());
     }
 
-    pub fn acknowledge_monitor_wakes(&mut self, messages: &[PluginMessage]) {
+    pub fn acknowledge_process_wakes(&mut self, messages: &[PluginMessage]) {
         for message in messages {
             if !matches!(message.role, MessageRole::System) {
                 continue;
             }
             if let Some(idx) = self
-                .in_flight_monitor_wakes
+                .in_flight_process_wakes
                 .iter()
                 .position(|candidate| candidate == &message.content)
             {
-                let _ = self.in_flight_monitor_wakes.remove(idx);
+                let _ = self.in_flight_process_wakes.remove(idx);
             }
         }
     }
 
-    pub fn recycle_unaccepted_monitor_wakes(&mut self) {
-        while let Some(wake) = self.in_flight_monitor_wakes.pop_back() {
-            self.pending_monitor_wakes.push_front(wake);
+    pub fn recycle_unaccepted_process_wakes(&mut self) {
+        while let Some(wake) = self.in_flight_process_wakes.pop_back() {
+            self.pending_process_wakes.push_front(wake);
         }
     }
 

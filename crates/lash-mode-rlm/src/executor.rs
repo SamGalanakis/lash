@@ -4,10 +4,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use lash_core::{
-    ExecRequest, ExecResponse, ModeExecutionContext, SessionError, ToolOutputBudgetConfig,
-};
-use lashlang::{CompiledProgramCache, ExecutionOutcome, ExecutionScratch, State as FlowState};
+use lash_core::{ExecRequest, ExecResponse, ModeExecutionContext, SessionError};
+use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
+use lashlang::{ExecutionOutcome, ExecutionScratch, State as FlowState};
 use serde_json::json;
 
 use self::host_bridge::HostBridge;
@@ -21,7 +20,6 @@ const RLM_SNAPSHOT_VERSION: u32 = 3;
 
 pub struct RlmExecutionState {
     rlm: FlowState,
-    program_cache: CompiledProgramCache,
     scratch: ExecutionScratch,
     scratch_dir: tempfile::TempDir,
     observe_projection: ToolOutputBudgetConfig,
@@ -32,7 +30,6 @@ impl RlmExecutionState {
     pub fn new(config: ToolOutputBudgetConfig) -> Result<Self, SessionError> {
         Ok(Self {
             rlm: FlowState::new(),
-            program_cache: CompiledProgramCache::default(),
             scratch: ExecutionScratch::new(),
             scratch_dir: tempfile::TempDir::new()?,
             observe_projection: config,
@@ -158,8 +155,8 @@ async fn execute_code_inner(
     projection_resolver: Arc<dyn ProjectionResolver>,
 ) -> ExecResponse {
     state.dirty = true;
-    let compiled = match state.program_cache.get_or_compile(code) {
-        Ok(compiled) => compiled,
+    let program = match lashlang::parse(code) {
+        Ok(program) => program,
         Err(err) => {
             return ExecResponse {
                 output: String::new(),
@@ -174,6 +171,23 @@ async fn execute_code_inner(
             };
         }
     };
+    let linked = match lashlang::LinkedModule::link(program, ctx.lashlang_surface()) {
+        Ok(linked) => linked,
+        Err(err) => {
+            return ExecResponse {
+                output: String::new(),
+                observations: Vec::new(),
+                observation_truncation: Vec::new(),
+                tool_calls: Vec::new(),
+                images: Vec::new(),
+                printed_images: Vec::new(),
+                error: Some(lashlang::format_link_diagnostic(code, &err)),
+                duration_ms: start.elapsed().as_millis() as u64,
+                terminal_finish: None,
+            };
+        }
+    };
+    let compiled = Arc::new(lashlang::compile_linked(&linked));
 
     if let Err(err) =
         rehydrate_projected_globals(&mut state.rlm, Arc::clone(&projection_resolver)).await
@@ -374,8 +388,8 @@ fn clear_dir(root: &Path) {
 mod tests {
     use super::*;
     use crate::projection::{
-        ProjectionRef, flow_record_to_json_value, flow_record_to_tool_args, flow_to_json_value,
-        projected_index,
+        ProjectionRef, ProjectionRegistry, flow_record_to_json_value, flow_record_to_tool_args,
+        flow_to_json_value, projected_index,
     };
     use lash_rlm_types::PROJECTED_JSON_TAG;
     use lashlang::{
@@ -393,9 +407,10 @@ mod tests {
     impl ExecutionHost for NoopHost {
         async fn perform(&self, op: AbilityOp) -> Result<AbilityResult, ExecutionHostError> {
             match op {
-                AbilityOp::CallTool { name, .. } | AbilityOp::StartToolCall { name, .. } => {
-                    Err(ExecutionHostError::new(format!("unknown tool: {name}")))
-                }
+                AbilityOp::ResourceOperation(operation) => Err(ExecutionHostError::new(format!(
+                    "unknown resource operation: {}",
+                    operation.operation
+                ))),
                 AbilityOp::Submit(value) | AbilityOp::Finish(value) | AbilityOp::Fail(value) => {
                     Ok(AbilityResult::Value(value))
                 }
@@ -494,6 +509,134 @@ mod tests {
             ProjectedValue::custom("history", Arc::new(TestProjectedValue(values))),
         );
         projected
+    }
+
+    async fn execute_with_lashlang_abilities(
+        code: &str,
+        abilities: lashlang::LashlangAbilities,
+    ) -> ExecResponse {
+        let state = RlmExecutionState::new(ToolOutputBudgetConfig::default()).expect("state");
+        let ctx = lash_core::testing::mode_execution_context_with_lashlang_abilities(abilities);
+        let (_, response) = execute_code(
+            state,
+            ctx,
+            ExecRequest {
+                code: code.to_string(),
+                accept_finish: true,
+            },
+            RlmProjectedBindings::default(),
+            Arc::new(ProjectionRegistry::new()),
+        )
+        .await
+        .expect("execute code");
+        response
+    }
+
+    #[test]
+    fn executor_reports_disabled_lashlang_abilities_at_link_time() {
+        struct DisabledCase {
+            name: &'static str,
+            code: &'static str,
+            abilities: lashlang::LashlangAbilities,
+            feature: &'static str,
+        }
+
+        let cases = [
+            DisabledCase {
+                name: "process declaration",
+                code: "process worker() { finish null }",
+                abilities: lashlang::LashlangAbilities::default(),
+                feature: "processes",
+            },
+            DisabledCase {
+                name: "process start",
+                code: "start worker()",
+                abilities: lashlang::LashlangAbilities::default(),
+                feature: "processes",
+            },
+            DisabledCase {
+                name: "process sleep",
+                code: r#"process worker() { sleep for "1s" }"#,
+                abilities: lashlang::LashlangAbilities::default().with_processes(),
+                feature: "process sleep",
+            },
+            DisabledCase {
+                name: "wait signal",
+                code: "process worker() { payload = wait signal }",
+                abilities: lashlang::LashlangAbilities::default().with_processes(),
+                feature: "process signals",
+            },
+            DisabledCase {
+                name: "signal run",
+                code: "process worker(target: any) { signal run target with null }",
+                abilities: lashlang::LashlangAbilities::default().with_processes(),
+                feature: "process signals",
+            },
+            DisabledCase {
+                name: "trigger",
+                code: r#"
+                    trigger changed on TOOL.default.changed as event {
+                      print event
+                    }
+                "#,
+                abilities: lashlang::LashlangAbilities::default().with_cron_schedules(),
+                feature: "triggers",
+            },
+            DisabledCase {
+                name: "cron schedule",
+                code: r#"
+                    schedule hourly every cron("0 * * * *") as tick {
+                      print tick
+                    }
+                "#,
+                abilities: lashlang::LashlangAbilities::default()
+                    .with_processes()
+                    .with_process_lifecycle()
+                    .with_triggers(),
+                feature: "cron schedules",
+            },
+        ];
+
+        block_on(async {
+            for case in cases {
+                lashlang::parse(case.code)
+                    .unwrap_or_else(|err| panic!("{} should parse: {err}", case.name));
+                let response = execute_with_lashlang_abilities(case.code, case.abilities).await;
+                let error = response
+                    .error
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{} should fail at link time", case.name));
+
+                assert!(
+                    error.contains(&format!(
+                        "lashlang feature `{}` is disabled by this host",
+                        case.feature
+                    )),
+                    "{} error was {error}",
+                    case.name
+                );
+                assert!(
+                    response.tool_calls.is_empty(),
+                    "{} should not call runtime tools",
+                    case.name
+                );
+                assert!(
+                    response.observations.is_empty(),
+                    "{} should not emit observations",
+                    case.name
+                );
+                assert!(
+                    response.images.is_empty() && response.printed_images.is_empty(),
+                    "{} should not emit images",
+                    case.name
+                );
+                assert!(
+                    response.terminal_finish.is_none(),
+                    "{} should not finish terminally",
+                    case.name
+                );
+            }
+        });
     }
 
     #[test]

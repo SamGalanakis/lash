@@ -329,7 +329,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 let (result, text_streamed) = runner
                     .driver
                     .run_standard_llm_call(
-                        Arc::new(request.into_request(None, None)),
+                        Arc::new((*request).into_request(None, None)),
                         mode_iteration,
                         &runner.event_tx,
                         &runner.cancellation,
@@ -418,13 +418,13 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
                 normalized_request, ..
             } => Ok(RuntimeEffectOutcome::DirectCompletion {
                 result: self
-                    .run_direct_llm_request(normalized_request.into_request(None, None))
+                    .run_direct_llm_request((*normalized_request).into_request(None, None))
                     .await,
             }),
             RuntimeEffectCommand::DirectLlmCompletion { request, .. } => {
                 Ok(RuntimeEffectOutcome::DirectLlmCompletion {
                     result: self
-                        .run_direct_llm_request(request.into_request(None, None))
+                        .run_direct_llm_request((*request).into_request(None, None))
                         .await,
                 })
             }
@@ -539,12 +539,16 @@ impl InlineRuntimeEffectController {
         execution_context: crate::ProcessExecutionContext,
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<ProcessRecord, PluginError> {
+        let already_registered = registry.get_process(&registration.id).await.is_some();
         let registration_for_record = registration.clone();
         let record = registry.register_process(registration_for_record).await?;
         if let Some(grant) = grant {
             registry
                 .grant_handle(&grant.session_id, &registration.id, grant.descriptor)
                 .await?;
+        }
+        if already_registered {
+            return Ok(record);
         }
         let process_id = registration.id.clone();
         let cancellation = CancellationToken::new();
@@ -589,7 +593,12 @@ impl InlineRuntimeEffectController {
         process_id: &str,
         reason: Option<String>,
     ) -> Result<ProcessRecord, PluginError> {
-        let _ = reason;
+        registry
+            .append_event(
+                process_id,
+                crate::ProcessEventAppendRequest::cancel_requested(process_id, reason.clone()),
+            )
+            .await?;
         let record = registry
             .get_process(process_id)
             .await
@@ -624,7 +633,7 @@ impl InlineRuntimeEffectController {
                     ));
                 };
                 let record = self
-                    .start_process(registry, registration, grant, execution_context, runner)
+                    .start_process(registry, registration, grant, *execution_context, runner)
                     .await?;
                 Ok(ProcessEffectOutcome::Start { record })
             }

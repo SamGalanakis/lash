@@ -167,13 +167,18 @@ mod tests {
             graph: graph.clone(),
             config: PersistedSessionConfig {
                 provider_id: "openai-compatible".into(),
-                configured_model: "gpt-5.4-mini".into(),
-                context_window: 0,
+                model: lash_core::ModelSpec::from_token_limits(
+                    "gpt-5.4-mini",
+                    None,
+                    200_000,
+                    None,
+                    None,
+                )
+                .expect("valid model spec"),
                 execution_mode: ExecutionMode::new("rlm"),
                 standard_context_approach: Some(StandardContextApproach::RollingHistory(
                     RollingHistoryConfig,
                 )),
-                model_variant: None,
             },
             checkpoint_ref: Some(checkpoint_ref),
             token_ledger: ledger,

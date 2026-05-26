@@ -1,5 +1,41 @@
 use super::*;
 
+struct BlockingAppTools {
+    entered_tx: StdMutex<Option<oneshot::Sender<()>>>,
+    release_rx: TokioMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl BlockingAppTools {
+    fn new(entered_tx: oneshot::Sender<()>, release_rx: oneshot::Receiver<()>) -> Self {
+        Self {
+            entered_tx: StdMutex::new(Some(entered_tx)),
+            release_rx: TokioMutex::new(Some(release_rx)),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for BlockingAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "app_lookup");
+        if let Some(tx) = self.entered_tx.lock().expect("entered tx").take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.release_rx.lock().await.take() {
+            let _ = rx.await;
+        }
+        lash_core::ToolResult::ok(serde_json::json!({ "answer": "ready" }))
+    }
+}
+
 #[tokio::test]
 async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> {
     let core = standard_core();
@@ -29,8 +65,7 @@ async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> 
 async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
     let core = LashCore::standard()
         .provider(semantic_group_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("turn-stream-last-group").open().await?;
     let mut stream = session
@@ -53,8 +88,7 @@ async fn turn_stream_finish_returns_last_assistant_prose_group() -> Result<()> {
 async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -> Result<()> {
     let core = LashCore::standard()
         .provider(semantic_group_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("turn-run-last-group").open().await?;
 
@@ -69,8 +103,7 @@ async fn turn_run_collects_activities_and_returns_last_assistant_prose_group() -
 async fn retry_status_streams_as_semantic_turn_event() -> Result<()> {
     let core = LashCore::standard()
         .provider(retry_once_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("retry-status").open().await?;
     let events = RecordingEvents::default();
@@ -125,8 +158,7 @@ async fn queued_input_acceptance_streams_semantic_ack_with_id() -> Result<()> {
     let (release_tx, release_rx) = oneshot::channel();
     let core = LashCore::standard()
         .provider(checkpoint_gated_provider(entered_tx, release_rx))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("queued-input").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -240,7 +272,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
             "code-1",
             TurnEvent::CodeBlockStarted {
                 language: "lashlang".to_string(),
-                code: "x = (call app_lookup {})?".to_string(),
+                code: "x = await TOOL.default.app_lookup({})?".to_string(),
             },
         ))
         .await;
@@ -275,7 +307,7 @@ async fn private_run_collector_records_ordered_activities() -> Result<()> {
     assert!(matches!(
         &activities[0].event,
         TurnEvent::CodeBlockStarted { language, code }
-            if language == "lashlang" && code == "x = (call app_lookup {})?"
+            if language == "lashlang" && code == "x = await TOOL.default.app_lookup({})?"
     ));
     assert!(matches!(
         &activities[1].event,
@@ -296,10 +328,9 @@ async fn turn_event_fanout_streams_to_collector_and_live_sink() -> Result<()> {
     let live = Arc::new(RecordingEvents::default());
     let core = LashCore::standard()
         .provider(tool_roundtrip_provider())
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("fanout-tool-events").open().await?;
 
@@ -368,10 +399,9 @@ async fn stream_returns_terminal_metadata_without_prose() -> Result<()> {
 async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Result<()> {
     let core = LashCore::standard()
         .provider(tool_roundtrip_provider())
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("tool-events").open().await?;
     let events = RecordingEvents::default();
@@ -418,12 +448,11 @@ async fn stream_emits_chronological_tool_events_without_prose_pollution() -> Res
 async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec![
-            "```lashlang\nvalue = (call app_lookup {})?\nsubmit \"done\"\n```",
+            "```lashlang\nvalue = await TOOL.default.app_lookup({})?\nsubmit \"done\"\n```",
         ]))
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
-        .max_context_tokens(200_000)
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
         .build()?;
     let session = core.session("rlm-live-tool-events").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -523,11 +552,55 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
 }
 
 #[tokio::test]
+async fn process_control_lists_started_ordinary_tool_until_awaited() -> Result<()> {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = LashCore::rlm()
+        .provider(queued_text_provider(vec![
+            "```lashlang\nh = start app_lookup()\nvalue = await h\nsubmit value\n```",
+        ]))
+        .model(mock_model_spec())
+        .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-process-control-tool").open().await?;
+    let turn_session = session.clone();
+    let turn =
+        tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .expect("tool process should start")
+        .expect("tool provider entered");
+
+    let processes = session.process_control().list().await?;
+    let running_app_lookup = processes.iter().any(|(grant, record)| {
+        grant.descriptor.kind.as_deref() == Some("tool")
+            && grant.descriptor.label.as_deref() == Some("app_lookup")
+            && record.terminal.is_none()
+    });
+    assert!(
+        running_app_lookup,
+        "expected running app_lookup tool process, got {processes:?}"
+    );
+
+    release_tx.send(()).expect("release tool provider");
+    let result = turn.await.expect("turn task")?;
+    assert_eq!(
+        result.submitted_value(),
+        Some(&serde_json::json!({
+            "ok": true,
+            "value": { "answer": "ready" },
+        }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn prose_or_submit_rlm_completion_emits_no_terminal_output() -> Result<()> {
     let core = LashCore::rlm()
         .provider(queued_text_provider(vec!["done in prose"]))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("rlm-prose-completion").open().await?;
     let events = Arc::new(RecordingEvents::default());
@@ -565,8 +638,7 @@ async fn submit_required_rlm_completion_emits_terminal_output() -> Result<()> {
         .provider(queued_text_provider(vec![
             "```lashlang\nsubmit \"done via submit\"\n```",
         ]))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core
         .session("rlm-submit-required-completion")
@@ -607,9 +679,8 @@ async fn rlm_failed_code_emits_failed_code_completion_without_fake_tools() -> Re
             "```lashlang\nthis is not valid lashlang\n```",
             "```lashlang\nsubmit \"recovered\"\n```",
         ]))
-        .model("mock-model", None)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
-        .max_context_tokens(200_000)
         .build()?;
     let session = core.session("rlm-failed-code-event").open().await?;
     let events = RecordingEvents::default();

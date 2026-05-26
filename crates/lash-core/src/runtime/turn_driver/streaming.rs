@@ -52,6 +52,34 @@ fn refine_terminal_reason_for_context_window(
     }
 }
 
+fn validate_generation_options(
+    model: &crate::ModelSpec,
+    generation: &crate::GenerationOptions,
+) -> Result<(), LlmCallError> {
+    let Some(requested) = generation.output_token_cap else {
+        return Ok(());
+    };
+    let Some(capacity) = model.limits.output_token_capacity else {
+        return Ok(());
+    };
+    if requested <= capacity {
+        return Ok(());
+    }
+    Err(LlmCallError {
+        message: format!(
+            "requested output_token_cap {} exceeds model `{}` output_token_capacity {}",
+            requested.get(),
+            model.id,
+            capacity.get()
+        ),
+        retryable: false,
+        raw: None,
+        code: Some("output_token_cap_exceeds_model_capacity".to_string()),
+        terminal_reason: crate::LlmTerminalReason::ProviderError,
+        request_body: None,
+    })
+}
+
 impl RuntimeTurnDriver<'_> {
     async fn transform_assistant_stream_chunk(
         &mut self,
@@ -140,6 +168,9 @@ impl RuntimeTurnDriver<'_> {
         cancel: &CancellationToken,
     ) -> (Result<LlmResponse, LlmCallError>, bool) {
         let request = (*request).clone();
+        if let Err(err) = validate_generation_options(&self.policy.model, &request.generation) {
+            return (Err(err), false);
+        }
         let request = match crate::attachments::resolve_llm_request_attachments(
             request,
             self.host.core.attachment_store.as_ref(),
@@ -178,6 +209,7 @@ impl RuntimeTurnDriver<'_> {
         let llm_request = LlmRequest {
             stream_events: transport_stream_events(&self.policy.provider, Some(llm_stream_tx)),
             provider_trace,
+            generation: request.generation.clone(),
             ..request
         };
 
@@ -311,7 +343,7 @@ impl RuntimeTurnDriver<'_> {
         let result = result.map(|mut response| {
             refine_terminal_reason_for_context_window(
                 &mut response,
-                self.policy.max_context_tokens,
+                Some(self.policy.context_window_tokens()),
             );
             response
         });

@@ -1,17 +1,30 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
 use crate::{
-    EmbeddedRuntimeHost, LashRuntime, RuntimeSessionState, PersistentRuntimeServices,
-    PluginStack, ProcessRegistry, ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController,
-    RuntimePersistence, RuntimeServices, SessionError, SessionPolicy, SessionStoreFactory,
+    EmbeddedRuntimeHost, LashRuntime, PersistentRuntimeServices, PluginStack, ProcessRegistry,
+    ProcessRuntimeHost, RuntimeCoreConfig, RuntimeEffectController, RuntimePersistence,
+    RuntimeServices, RuntimeSessionState, SessionError, SessionPolicy, SessionStoreFactory,
     TerminationPolicy, TurnInjectionBridge, TurnInputInjectionBridge,
 };
 
 enum PluginSource {
     Host(PluginHost),
     Session(Arc<PluginSession>),
+}
+
+pub(super) fn lashlang_abilities_for_process_registry(
+    mut abilities: lashlang::LashlangAbilities,
+    process_registry_available: bool,
+) -> lashlang::LashlangAbilities {
+    if process_registry_available {
+        abilities.with_processes().with_process_lifecycle()
+    } else {
+        abilities.processes = false;
+        abilities.process_sleep = false;
+        abilities.process_signals = false;
+        abilities
+    }
 }
 
 pub struct EmbeddedRuntimeBuilder {
@@ -144,11 +157,6 @@ impl EmbeddedRuntimeBuilder {
         self
     }
 
-    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
-        self.core = self.core.with_trace_jsonl_path(trace_path);
-        self
-    }
-
     pub fn with_trace_sink(mut self, sink: Option<Arc<dyn lash_trace::TraceSink>>) -> Self {
         self.core = self.core.with_trace_sink(sink);
         self
@@ -193,7 +201,9 @@ impl EmbeddedRuntimeBuilder {
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.process_registry = Some(process_registry);
         if let PluginSource::Host(host) = &mut self.plugin_source {
-            *host = host.clone().with_processes();
+            let abilities =
+                lashlang_abilities_for_process_registry(host.lashlang_abilities(), true);
+            *host = host.clone().with_lashlang_abilities(abilities);
         }
         self
     }
@@ -257,7 +267,10 @@ impl EmbeddedRuntimeBuilder {
             PluginSource::Session(session) => Ok(Arc::clone(session)),
             PluginSource::Host(host) => host
                 .clone()
-                .with_processes_available(self.process_registry.is_some())
+                .with_lashlang_abilities(lashlang_abilities_for_process_registry(
+                    host.lashlang_abilities(),
+                    self.process_registry.is_some(),
+                ))
                 .isolated_registry()
                 .build_session(
                     state.session_id.clone(),

@@ -159,8 +159,7 @@ pub fn load_tree_from_paths(root_db: &Path, trace_path: &Path) -> Result<LoadedS
         let head = store.load_session_head();
         let context_window_tokens = head
             .as_ref()
-            .map(|h| h.config.context_window)
-            .filter(|t| *t > 0);
+            .map(|h| h.config.model.context_window_tokens() as u64);
         let graph = head
             .map(|h| h.graph)
             .unwrap_or_else(|| store.load_session_graph());

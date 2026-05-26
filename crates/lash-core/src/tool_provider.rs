@@ -31,9 +31,9 @@ pub struct ToolContext<'run> {
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
+    pub(crate) process_events: Option<ToolProcessEventContext>,
     pub(crate) attachment_store: Arc<dyn AttachmentStore>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
-    pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) prepared_payload: serde_json::Value,
     /// The id of the in-flight tool call that is invoking this tool. Set by
     /// the runtime tool dispatcher; tools should propagate it onto any
@@ -44,6 +44,13 @@ pub struct ToolContext<'run> {
     pub(crate) max_attempts: u32,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ToolProcessEventContext {
+    process_id: String,
+    registry: Arc<dyn crate::ProcessRegistry>,
+    wake_target_scope_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,113 +107,12 @@ impl RuntimeSessionHost for ToolSessionControl {
     }
 }
 
-#[derive(Clone)]
-pub struct ToolProcessControl<'run> {
-    session_id: String,
-    host: Arc<dyn RuntimeSessionHost>,
-    tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
-    effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
-}
-
-impl<'run> ToolProcessControl<'run> {
-    pub async fn start_process(
-        &self,
-        registration: crate::ProcessRegistration,
-        descriptor: Option<crate::ProcessHandleDescriptor>,
-    ) -> Result<crate::ProcessRecord, PluginError> {
-        let execution_context = crate::ProcessExecutionContext::default()
-            .with_tool_effect_metadata(self.tool_effect_metadata.clone())
-            .with_wake_session_id(self.session_id.clone());
-        self.host
-            .start_process(
-                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
-                    .with_scope(
-                        crate::ProcessRequestScope::new()
-                            .with_effect_metadata(self.tool_effect_metadata.clone())
-                            .with_effect_controller(self.effect_controller.as_controller()),
-                    )
-                    .with_optional_descriptor(descriptor),
-            )
-            .await
-    }
-
-    pub async fn await_process(
-        &self,
-        process_id: &str,
-    ) -> Result<crate::ProcessAwaitOutput, PluginError> {
-        self.host
-            .await_process(
-                crate::ProcessAwaitRequest::new(process_id).with_scope(
-                    crate::ProcessRequestScope::new()
-                        .with_effect_metadata(self.tool_effect_metadata.clone())
-                        .with_effect_controller(self.effect_controller.as_controller()),
-                ),
-            )
-            .await
-    }
-
-    pub async fn validate_process_handles_visible(
-        &self,
-        handle_ids: &[String],
-    ) -> Result<(), PluginError> {
-        self.host
-            .validate_process_handles_visible(&self.session_id, handle_ids)
-            .await
-    }
-
-    pub async fn transfer_process_handles_to_session(
-        &self,
-        successor_session_id: &str,
-        handle_ids: &[String],
-    ) -> Result<(), PluginError> {
-        self.host
-            .transfer_process_handles(
-                crate::ProcessTransferRequest::new(
-                    &self.session_id,
-                    successor_session_id,
-                    handle_ids.to_vec(),
-                )
-                .with_scope(
-                    crate::ProcessRequestScope::new()
-                        .with_effect_metadata(self.tool_effect_metadata.clone())
-                        .with_effect_controller(self.effect_controller.as_controller()),
-                ),
-            )
-            .await
-    }
-
-    pub async fn cancel_unreferenced_process_handles(
-        &self,
-        keep_handle_ids: &[String],
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        self.host
-            .cancel_unreferenced_process_handles(
-                crate::ProcessCleanupRequest::new(&self.session_id, keep_handle_ids.to_vec())
-                    .with_scope(
-                        crate::ProcessRequestScope::new()
-                            .with_effect_metadata(self.tool_effect_metadata.clone())
-                            .with_effect_controller(self.effect_controller.as_controller()),
-                    ),
-            )
-            .await
-    }
-
-    pub async fn cancel_all_processes_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        self.host.cancel_all_processes(session_id).await
-    }
-}
-
 impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
-        _turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
-        effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         tool_call_id: Option<String>,
     ) -> Self {
         Self {
@@ -214,9 +120,9 @@ impl<'run> ToolContext<'run> {
             host,
             cancellation_token: None,
             async_process_id: None,
+            process_events: None,
             attachment_store,
             direct_completions,
-            effect_controller,
             prepared_payload: serde_json::Value::Null,
             tool_call_id,
             attempt_number: 1,
@@ -233,8 +139,8 @@ impl<'run> ToolContext<'run> {
     pub async fn session_model(&self) -> Result<ToolSessionModel, PluginError> {
         let snapshot = self.session_snapshot().await?;
         Ok(ToolSessionModel {
-            model: snapshot.policy.model,
-            model_variant: snapshot.policy.model_variant,
+            model: snapshot.policy.model.id,
+            model_variant: snapshot.policy.model.variant,
         })
     }
 
@@ -273,15 +179,6 @@ impl<'run> ToolContext<'run> {
         }
     }
 
-    pub fn processes(&self) -> ToolProcessControl<'run> {
-        ToolProcessControl {
-            session_id: self.session_id.clone(),
-            host: Arc::clone(&self.host),
-            tool_effect_metadata: self.tool_effect_metadata.clone(),
-            effect_controller: self.effect_controller.clone_scoped(),
-        }
-    }
-
     pub async fn direct_completion(
         &self,
         mut request: crate::DirectRequest,
@@ -304,6 +201,33 @@ impl<'run> ToolContext<'run> {
 
     pub fn async_process_id(&self) -> Option<&str> {
         self.async_process_id.as_deref()
+    }
+
+    pub async fn emit_process_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        self.emit_process_event_request(crate::ProcessEventAppendRequest::new(event_type, payload))
+            .await
+    }
+
+    pub async fn emit_process_event_request(
+        &self,
+        request: crate::ProcessEventAppendRequest,
+    ) -> Result<crate::ProcessEvent, PluginError> {
+        let Some(process) = self.process_events.as_ref() else {
+            return Err(PluginError::Session(
+                "process event emission is unavailable outside a durable process".to_string(),
+            ));
+        };
+        process
+            .registry
+            .append_event(
+                &process.process_id,
+                request.with_optional_wake_target_scope_key(process.wake_target_scope_key.clone()),
+            )
+            .await
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
@@ -351,6 +275,28 @@ impl<'run> ToolContext<'run> {
         self
     }
 
+    pub(crate) fn with_cancellation_token(
+        mut self,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub(crate) fn with_process_events(
+        mut self,
+        process_id: impl Into<String>,
+        registry: Arc<dyn crate::ProcessRegistry>,
+        wake_target_scope_key: Option<String>,
+    ) -> Self {
+        self.process_events = Some(ToolProcessEventContext {
+            process_id: process_id.into(),
+            registry,
+            wake_target_scope_key,
+        });
+        self
+    }
+
     pub(crate) fn with_retry_context(
         mut self,
         tool_name: &str,
@@ -386,7 +332,6 @@ impl<'run> ToolContext<'run> {
     pub fn __for_testing(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
-        turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
         tool_call_id: Option<String>,
@@ -394,12 +339,8 @@ impl<'run> ToolContext<'run> {
         ToolContext::new(
             session_id,
             host,
-            turn_context,
             attachment_store,
             direct_completions,
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
-            )),
             tool_call_id,
         )
     }

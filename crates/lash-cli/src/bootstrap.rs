@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::config::LashConfig;
+use crate::prompt_context_plugin::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash::advanced::ExecutionMode;
-use lash::plugins::{
-    BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginFactory,
-};
+use lash::persistence::FileAttachmentStore;
+use lash::plugins::PluginFactory;
 use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection,
@@ -16,12 +17,11 @@ use lash::tools::{
     ToolManifest, ToolProvider, ToolResult,
 };
 use lash::tracing::TraceLevel;
-use lash::{PluginStack, SessionSpec};
-use lash_core::{FileAttachmentStore, LocalProcessRegistry, PromptLayer, SessionPolicy, ToolState};
+use lash::{ModelSpec, PluginStack, SessionSpec};
+use lash_core::{PromptLayer, SessionPolicy, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
-use crate::prompt_context_plugin::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash_provider_openai::{OpenAiCompatibleProvider, OpenAiProvider};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use lash_subagents::{SubagentsPluginFactory, default_registry};
@@ -31,6 +31,7 @@ use serde_json::Value as JsonValue;
 use crate::autonomous::{AutonomousPersistenceContext, run_autonomous};
 use crate::instructions::{FsInstructionSource, InstructionLoaderConfig};
 use crate::interactive::run_app;
+use crate::prompt_context_plugin::InstructionSource;
 use crate::prompt_tool::{CliPromptBridge, cli_ask_plugin_factory};
 use crate::session_bootstrap::{CliSessionOpener, SessionBootstrapSource};
 use crate::{Args, SkillCatalog, setup};
@@ -40,7 +41,6 @@ use crate::{
     parse_model_selection, parse_standard_context_approach, resolve_model_selection,
     resolve_model_variant, validate_model_selection,
 };
-use crate::prompt_context_plugin::InstructionSource;
 
 const CLI_AUTONOMOUS_INTRO: &str = "You are an autonomous AI coding assistant running without a human in the loop.\nComplete the task end-to-end without asking for user input.\nIf the task is incomplete and concrete next actions are available, continue executing them instead of stopping to summarize incompletion.";
 const CLI_AUTONOMOUS_EXECUTION: &str = "- No user is available during this run. Default to acting without asking. Ask only when progress is blocked and user intervention is strictly required; otherwise make the best reasonable decision from local context and continue.\n- Do not stop merely to report that work remains. If concrete actions are still available, keep executing them.\n- Only summarize remaining work when you are blocked, need a decision, or have exhausted feasible actions for this turn.\n- Do not claim completion unless you have actually verified the required end state.";
@@ -54,12 +54,30 @@ fn openai_shortcut_provider(api_key: String, base_url: &str) -> ProviderHandle {
     }
 }
 
+fn resolve_agent_model_specs(
+    provider: &ProviderHandle,
+    model_catalog: &crate::model_catalog::CachedModelCatalog,
+    agent_models: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ModelSpec>, String> {
+    agent_models
+        .iter()
+        .map(|(capability, configured_model)| {
+            let selection = parse_model_selection(configured_model)?;
+            validate_model_selection(provider, &selection)?;
+            let resolved = resolve_model_selection(provider, &selection, model_catalog)?;
+            let variant = resolve_model_variant(provider, &selection.model, None)?;
+            let model_spec = resolved.into_model_spec(variant)?;
+            Ok((capability.clone(), model_spec))
+        })
+        .collect()
+}
+
 struct PluginFactorySurfaceInput<'a> {
     autonomous: bool,
     tavily_key: String,
     instruction_source: Arc<dyn InstructionSource>,
     session_policy: SessionPolicy,
-    lash_config: &'a LashConfig,
+    agent_model_specs: &'a BTreeMap<String, ModelSpec>,
     host_docs_dir: Option<std::path::PathBuf>,
     prompt_bridge: CliPromptBridge,
 }
@@ -70,11 +88,11 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         tavily_key,
         instruction_source,
         session_policy,
-        lash_config,
+        agent_model_specs,
         host_docs_dir,
         prompt_bridge,
     } = input;
-    let capability_registry = Arc::new(default_registry(&lash_config.agent_models));
+    let capability_registry = Arc::new(default_registry(agent_model_specs));
 
     let runtime_options = StandardToolStackOptions {
         standard_context_approach: session_policy.standard_context_approach.clone(),
@@ -108,8 +126,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
-    plugin_stack.push(Arc::new(BuiltinMonitorToolPluginFactory::new()));
     plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     plugin_stack.push(Arc::new(
         SubagentsPluginFactory::new(capability_registry).with_session_spec(SessionSpec::inherit()),
@@ -381,7 +397,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     };
     let model_catalog = models_dev_catalog().map_err(anyhow::Error::msg)?;
     if let Err(err) = model_catalog
-        .refresh_if_stale(lash_core::model_info::DEFAULT_REFRESH_INTERVAL)
+        .refresh_if_stale(crate::model_catalog::DEFAULT_REFRESH_INTERVAL)
         .await
     {
         eprintln!("warning: failed to refresh models.dev catalog: {err}");
@@ -390,11 +406,16 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let configured_model_default = lash_config
         .model_default(active_provider.kind())
         .filter(|selection| !selection.model.trim().is_empty());
-    let requested_model = args
+    let requested_model = match args
         .model
         .clone()
         .or_else(|| configured_model_default.map(|selection| selection.model.clone()))
-        .unwrap_or_else(|| active_provider.default_model().to_string());
+    {
+        Some(model) => model,
+        None => crate::provider_metadata::default_model_for_provider(active_provider.kind())
+            .map_err(anyhow::Error::msg)?
+            .to_string(),
+    };
     let selection = parse_model_selection(&requested_model).map_err(anyhow::Error::msg)?;
     validate_model_selection(&active_provider, &selection).map_err(anyhow::Error::msg)?;
     let resolved_model_spec =
@@ -412,6 +433,16 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     });
     let model_variant = resolve_model_variant(&active_provider, &model, requested_variant)
         .map_err(anyhow::Error::msg)?;
+    let model_spec = resolved_model_spec
+        .clone()
+        .into_model_spec(model_variant.clone())
+        .map_err(anyhow::Error::msg)?;
+    let agent_model_specs = resolve_agent_model_specs(
+        &active_provider,
+        model_catalog.as_ref(),
+        &lash_config.agent_models,
+    )
+    .map_err(anyhow::Error::msg)?;
     if args.resume.is_none()
         && args.print_prompt.is_none()
         && (args.model.is_some() || args.variant.is_some())
@@ -531,10 +562,8 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         }));
     let prompt_layer = cli_prompt_config(autonomous, &execution_mode);
     let session_policy = SessionPolicy {
-        model: model.clone(),
+        model: model_spec,
         provider: active_provider.clone(),
-        model_variant,
-        max_context_tokens: Some(resolved_model_spec.context_window() as usize),
         session_id: run_session_id.clone(),
         autonomous,
         execution_mode: execution_mode.clone(),
@@ -549,7 +578,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         tavily_key,
         instruction_source: Arc::clone(&instruction_source),
         session_policy: session_policy.clone(),
-        lash_config: &lash_config,
+        agent_model_specs: &agent_model_specs,
         host_docs_dir: host_docs.as_ref().map(|docs| docs.dir().to_path_buf()),
         prompt_bridge: prompt_bridge.clone(),
     });
@@ -568,7 +597,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
             info_text(
                 &active_provider,
                 &model,
-                session_policy.model_variant.as_deref(),
+                session_policy.model.variant.as_deref(),
                 &execution_mode,
                 session_policy.standard_context_approach.as_ref(),
                 Some(resolved_model_spec.context_window()),
@@ -581,13 +610,19 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    std::fs::create_dir_all(crate::paths::lash_home())?;
     let runtime_factory = CliSessionOpener::new(
         plugin_stack.clone(),
         prompt_layer,
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
         trace_path,
         trace_level,
-        Arc::new(LocalProcessRegistry::default()),
+        Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(
+                &crate::paths::lash_home().join("processes.db"),
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ),
     );
     let opened_session = runtime_factory
         .open(
@@ -605,7 +640,7 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let toolset_hash =
         hash12(&serde_json::to_vec(&active_tool_definitions).unwrap_or_else(|_| b"[]".to_vec()));
     let initial_policy = session.policy_snapshot();
-    let initial_model_variant = initial_policy.model_variant.clone();
+    let initial_model_variant = initial_policy.model.variant.clone();
     let store = opened_session.bootstrap.store();
     let session_name = opened_session.bootstrap.session_name();
     let mut logger = opened_session.logger;
@@ -715,7 +750,7 @@ mod tests {
     fn plugin_factory_ids_for_autonomous(autonomous: bool) -> Vec<&'static str> {
         let provider =
             ProviderHandle::new(OpenAiCompatibleProvider::new("test", "").into_components());
-        let lash_config = LashConfig::new(&provider);
+        let agent_model_specs = BTreeMap::new();
         plugin_factories_for_surface(PluginFactorySurfaceInput {
             autonomous,
             tavily_key: String::new(),
@@ -724,7 +759,7 @@ mod tests {
                 provider,
                 ..Default::default()
             },
-            lash_config: &lash_config,
+            agent_model_specs: &agent_model_specs,
             host_docs_dir: (!autonomous)
                 .then(|| std::path::PathBuf::from("/tmp/lash-home/docs/lash-cli")),
             prompt_bridge: CliPromptBridge::default(),

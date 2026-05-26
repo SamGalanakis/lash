@@ -1,0 +1,128 @@
+use std::num::NonZeroUsize;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSpec {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub limits: ModelLimits,
+}
+
+impl ModelSpec {
+    pub fn new(id: impl Into<String>, context_window_tokens: NonZeroUsize) -> Self {
+        Self {
+            id: id.into(),
+            variant: None,
+            limits: ModelLimits {
+                context_window_tokens,
+                input_token_capacity: None,
+                output_token_capacity: None,
+            },
+        }
+    }
+
+    pub fn with_limits(
+        id: impl Into<String>,
+        variant: Option<String>,
+        limits: ModelLimits,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            variant,
+            limits,
+        }
+    }
+
+    pub fn with_variant(mut self, variant: Option<String>) -> Self {
+        self.variant = variant;
+        self
+    }
+
+    pub fn from_token_limits(
+        id: impl Into<String>,
+        variant: Option<String>,
+        context_window_tokens: usize,
+        input_token_capacity: Option<usize>,
+        output_token_capacity: Option<usize>,
+    ) -> Result<Self, String> {
+        Ok(Self::with_limits(
+            id,
+            variant,
+            ModelLimits::from_token_limits(
+                context_window_tokens,
+                input_token_capacity,
+                output_token_capacity,
+            )?,
+        ))
+    }
+
+    pub fn context_window_tokens(&self) -> usize {
+        self.limits.context_window_tokens.get()
+    }
+}
+
+impl Default for ModelSpec {
+    fn default() -> Self {
+        Self::new(
+            String::new(),
+            NonZeroUsize::new(1).expect("one is non-zero"),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLimits {
+    pub context_window_tokens: NonZeroUsize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_token_capacity: Option<NonZeroUsize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_capacity: Option<NonZeroUsize>,
+}
+
+impl ModelLimits {
+    pub fn from_token_limits(
+        context_window_tokens: usize,
+        input_token_capacity: Option<usize>,
+        output_token_capacity: Option<usize>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            context_window_tokens: nonzero_token_limit(
+                "context_window_tokens",
+                context_window_tokens,
+            )?,
+            input_token_capacity: optional_nonzero_token_limit(
+                "input_token_capacity",
+                input_token_capacity,
+            )?,
+            output_token_capacity: optional_nonzero_token_limit(
+                "output_token_capacity",
+                output_token_capacity,
+            )?,
+        })
+    }
+}
+
+impl Default for ModelLimits {
+    fn default() -> Self {
+        Self {
+            context_window_tokens: NonZeroUsize::new(1).expect("one is non-zero"),
+            input_token_capacity: None,
+            output_token_capacity: None,
+        }
+    }
+}
+
+fn nonzero_token_limit(name: &str, value: usize) -> Result<NonZeroUsize, String> {
+    NonZeroUsize::new(value).ok_or_else(|| format!("{name} must be greater than zero"))
+}
+
+fn optional_nonzero_token_limit(
+    name: &str,
+    value: Option<usize>,
+) -> Result<Option<NonZeroUsize>, String> {
+    value
+        .map(|value| nonzero_token_limit(name, value))
+        .transpose()
+}

@@ -63,6 +63,7 @@ pub(crate) fn llm_rerank_request(
         attachments: Vec::new(),
         output: DirectOutputSpec::JsonSchema(schema),
         stream_events: None,
+        generation: lash_core::GenerationOptions::default(),
         session_id: None,
         originating_tool_call_id: None,
         idempotency_key: None,

@@ -100,16 +100,16 @@ impl RuntimeEffectEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEffectCommand {
     LlmCall {
-        request: LlmRequestSpec,
+        request: Box<LlmRequestSpec>,
     },
     DirectCompletion {
-        request: DirectRequestSpec,
-        normalized_request: LlmRequestSpec,
+        request: Box<DirectRequestSpec>,
+        normalized_request: Box<LlmRequestSpec>,
         model: String,
         usage_source: String,
     },
     DirectLlmCompletion {
-        request: LlmRequestSpec,
+        request: Box<LlmRequestSpec>,
         usage_source: String,
     },
     ToolCall {
@@ -156,8 +156,11 @@ pub enum ProcessCommand {
         registration: ProcessRegistration,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant: Option<ProcessStartGrant>,
-        #[serde(default, skip_serializing_if = "ProcessExecutionContext::is_empty")]
-        execution_context: ProcessExecutionContext,
+        #[serde(
+            default,
+            skip_serializing_if = "boxed_process_execution_context_is_empty"
+        )]
+        execution_context: Box<ProcessExecutionContext>,
     },
     List {
         session_id: String,
@@ -175,6 +178,13 @@ pub enum ProcessCommand {
         reason: Option<String>,
     },
 }
+
+fn boxed_process_execution_context_is_empty(context: &ProcessExecutionContext) -> bool {
+    context.is_empty()
+}
+
+type CheckpointMessageDeltas = (Vec<PluginMessage>, Vec<PluginMessage>);
+type CheckpointOutcome = Result<CheckpointMessageDeltas, RuntimeEffectControllerError>;
 
 impl ProcessCommand {
     pub fn effect_id(&self) -> String {
@@ -278,6 +288,8 @@ pub struct LlmRequestSpec {
     pub tools: Vec<LlmToolSpec>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: Option<String>,
+    #[serde(default)]
+    pub generation: crate::GenerationOptions,
     pub session_id: Option<String>,
     pub output_spec: Option<LlmOutputSpec>,
 }
@@ -294,6 +306,7 @@ impl LlmRequestSpec {
             tools: request.tools.iter().cloned().collect(),
             tool_choice: request.tool_choice.clone(),
             model_variant: request.model_variant.clone(),
+            generation: request.generation.clone(),
             session_id: request.session_id.clone(),
             output_spec: request.output_spec.clone(),
         })
@@ -315,6 +328,7 @@ impl LlmRequestSpec {
             tools: Arc::new(self.tools),
             tool_choice: self.tool_choice,
             model_variant: self.model_variant,
+            generation: self.generation,
             session_id: self.session_id,
             output_spec: self.output_spec,
             stream_events,
@@ -329,6 +343,8 @@ impl LlmRequestSpec {
 pub struct DirectRequestSpec {
     pub model: String,
     pub model_variant: Option<String>,
+    #[serde(default)]
+    pub generation: crate::GenerationOptions,
     pub messages: Vec<DirectMessage>,
     pub attachments: Vec<LlmAttachmentSpec>,
     pub output: DirectOutputSpec,
@@ -345,6 +361,7 @@ impl DirectRequestSpec {
         Ok(Self {
             model: request.model.clone(),
             model_variant: request.model_variant.clone(),
+            generation: request.generation.clone(),
             messages: request.messages.clone(),
             attachments: attachment_specs_from_attachments(&request.attachments, attachment_store)?,
             output: request.output.clone(),
@@ -358,6 +375,7 @@ impl DirectRequestSpec {
         DirectRequest {
             model: self.model,
             model_variant: self.model_variant,
+            generation: self.generation,
             messages: self.messages,
             attachments: self
                 .attachments
@@ -493,12 +511,7 @@ impl RuntimeEffectOutcome {
         }
     }
 
-    pub fn into_checkpoint(
-        self,
-    ) -> Result<
-        Result<(Vec<PluginMessage>, Vec<PluginMessage>), RuntimeEffectControllerError>,
-        RuntimeEffectControllerError,
-    > {
+    pub(crate) fn into_checkpoint(self) -> Result<CheckpointOutcome, RuntimeEffectControllerError> {
         match self {
             Self::Checkpoint { result } => Ok(result),
             other => Err(RuntimeEffectControllerError::wrong_outcome(

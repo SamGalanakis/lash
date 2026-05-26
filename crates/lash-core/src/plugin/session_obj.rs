@@ -133,26 +133,8 @@ pub struct PluginSession {
     pub(super) tool_surface_overlay: ToolSurfaceContribution,
     pub(super) tool_access: SessionToolAccess,
     pub(super) subagent: Option<SubagentSessionContext>,
-    pub(super) prompt_contributors: Vec<RegisteredHook<PromptContributor>>,
-    pub(super) tool_surface_contributors: Vec<RegisteredHook<ToolSurfaceContributor>>,
-    pub(super) tool_discovery_contributors: Vec<RegisteredHook<ToolDiscoveryContributor>>,
-    pub(super) before_turn_hooks: Vec<RegisteredHook<BeforeTurnHook>>,
-    pub(super) before_tool_call_hooks: Vec<RegisteredHook<BeforeToolCallHook>>,
-    pub(super) after_tool_call_hooks: Vec<RegisteredHook<AfterToolCallHook>>,
-    pub(super) after_turn_hooks: Vec<RegisteredHook<AfterTurnHook>>,
-    pub(super) checkpoint_hooks: Vec<RegisteredHook<CheckpointHook>>,
-    pub(super) assistant_stream_hooks: Vec<RegisteredHook<AssistantStreamHook>>,
-    pub(super) assistant_response_hooks: Vec<RegisteredHook<AssistantResponseHook>>,
-    pub(super) tool_result_projector: Option<RegisteredExclusiveHook<ToolResultProjector>>,
-    pub(super) runtime_event_hooks: Vec<PluginLifecycleEventHook>,
-    pub(super) session_config_mutators: Vec<SessionConfigMutator>,
-    pub(super) plugin_actions: BTreeMap<String, RegisteredPluginAction>,
-    pub(super) monitor_specs: Vec<PluginOwned<crate::MonitorSpec>>,
-    pub(super) turn_context_transforms: Vec<Arc<dyn TurnContextTransform>>,
-    pub(super) history_rewriters: Vec<Arc<dyn HistoryRewriter>>,
-    pub(super) mode_session: Arc<dyn ModeSessionPlugin>,
-    pub(super) mode_native_tools: Vec<Arc<dyn ModeNativeToolsPlugin>>,
-    pub(super) mode_protocol_driver: Option<Arc<dyn ModeProtocolDriverPlugin>>,
+    pub(super) lashlang_abilities: lashlang::LashlangAbilities,
+    pub(super) contributions: PluginContributions,
 }
 impl PluginSession {
     pub fn session_id(&self) -> &str {
@@ -171,6 +153,10 @@ impl PluginSession {
         self.subagent.as_ref()
     }
 
+    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        self.lashlang_abilities
+    }
+
     pub fn host(&self) -> &PluginHost {
         &self.host
     }
@@ -184,15 +170,21 @@ impl PluginSession {
     }
 
     pub(crate) fn mode_session(&self) -> &Arc<dyn ModeSessionPlugin> {
-        &self.mode_session
+        &self
+            .contributions
+            .mode_session
+            .as_ref()
+            .expect("plugin session must have a mode session")
+            .hook
     }
 
     pub(crate) fn mode_native_tools(&self) -> &[Arc<dyn ModeNativeToolsPlugin>] {
-        &self.mode_native_tools
+        &self.contributions.mode_native_tools
     }
 
     pub(crate) fn mode_native_tool_manifests(&self) -> Vec<ToolManifest> {
-        self.mode_native_tools
+        self.contributions
+            .mode_native_tools
             .iter()
             .flat_map(|provider| provider.tool_manifests())
             .collect()
@@ -202,7 +194,10 @@ impl PluginSession {
     /// claimed the singleton slot. When `None`, callers fall back to
     /// `lash_sansio::build_mode_preamble` (hardcoded Standard/RLM).
     pub fn mode_protocol_driver(&self) -> Option<Arc<dyn ModeProtocolDriverPlugin>> {
-        self.mode_protocol_driver.clone()
+        self.contributions
+            .mode_protocol_driver
+            .as_ref()
+            .map(|entry| Arc::clone(&entry.hook))
     }
 
     pub fn tool_surface(
@@ -212,7 +207,7 @@ impl PluginSession {
     ) -> Result<Arc<crate::ToolSurface>, PluginError> {
         let mut tools = self.tools.tool_manifests();
         let contract_provider = Arc::clone(&self.tools);
-        let native_contract_providers = self.mode_native_tools.to_vec();
+        let native_contract_providers = self.contributions.mode_native_tools.to_vec();
         let resolve_contract: lash_sansio::ToolContractResolver = Arc::new(move |name: &str| {
             contract_provider.resolve_contract(name).or_else(|| {
                 native_contract_providers
@@ -231,6 +226,7 @@ impl PluginSession {
             resolve_contract: Some(Arc::clone(&resolve_contract)),
             tool_access: self.tool_access.clone(),
             subagent: self.subagent.clone(),
+            lashlang_abilities: self.lashlang_abilities,
         })?))
     }
 
@@ -243,7 +239,7 @@ impl PluginSession {
         let mut catalog =
             crate::tool_registry::project_tool_catalog(surface.searchable_tools_iter().cloned());
         let contributions = collect_owned_sync(
-            &self.tool_discovery_contributors,
+            &self.contributions.tool_discovery_contributors,
             ToolDiscoveryContext {
                 session_id: session_id.to_string(),
                 mode,
@@ -267,7 +263,7 @@ impl PluginSession {
         ctx: ToolSurfaceContext,
     ) -> Result<crate::ToolSurface, PluginError> {
         let mut contributions = collect_owned_sync(
-            &self.tool_surface_contributors,
+            &self.contributions.tool_surface_contributors,
             ToolSurfaceContext {
                 session_id: ctx.session_id.clone(),
                 mode: ctx.mode.clone(),
@@ -275,6 +271,7 @@ impl PluginSession {
                 resolve_contract: ctx.resolve_contract.clone(),
                 tool_access: ctx.tool_access.clone(),
                 subagent: ctx.subagent.clone(),
+                lashlang_abilities: ctx.lashlang_abilities,
             },
             |hook, ctx| hook(ctx),
         )?
@@ -327,18 +324,15 @@ impl PluginSession {
     }
 
     pub fn plugin_actions(&self) -> Vec<PluginActionDef> {
-        self.plugin_actions
+        self.contributions
+            .plugin_actions
             .values()
             .map(|op| op.def.clone())
             .collect()
     }
 
-    pub fn monitor_specs(&self) -> &[PluginOwned<crate::MonitorSpec>] {
-        self.monitor_specs.as_slice()
-    }
-
     pub fn has_assistant_stream_hooks(&self) -> bool {
-        !self.assistant_stream_hooks.is_empty()
+        !self.contributions.assistant_stream_hooks.is_empty()
     }
 
     /// Chain registered turn-context transforms, piping each one's output
@@ -349,7 +343,7 @@ impl PluginSession {
         input: crate::session_model::context::PreparedContext,
     ) -> Result<crate::session_model::context::PreparedContext, HistoryError> {
         let mut current = input;
-        for transform in &self.turn_context_transforms {
+        for (_, transform) in &self.contributions.turn_context_transforms {
             current = transform.transform(ctx, current).await?;
         }
         Ok(current)
@@ -363,7 +357,7 @@ impl PluginSession {
         input: HistoryState,
     ) -> Result<HistoryState, HistoryError> {
         let mut current = input;
-        for rewriter in &self.history_rewriters {
+        for (_, rewriter) in &self.contributions.history_rewriters {
             if !rewriter.accepts(&ctx.trigger) {
                 continue;
             }
@@ -376,7 +370,10 @@ impl PluginSession {
         &self,
         ctx: PromptHookContext,
     ) -> Result<Vec<PromptContribution>, PluginError> {
-        let mut out = collect_owned_async(&self.prompt_contributors, ctx, |hook, ctx| hook(ctx))
+        let mut out =
+            collect_owned_async(&self.contributions.prompt_contributors, ctx, |hook, ctx| {
+                hook(ctx)
+            })
             .await?
             .into_iter()
             .map(|owned| owned.value)
@@ -558,35 +555,54 @@ impl PluginSession {
         &self,
         ctx: TurnHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.before_turn_hooks, ctx, |hook, ctx| hook(ctx)).await
+        collect_owned_async(&self.contributions.before_turn_hooks, ctx, |hook, ctx| {
+            hook(ctx)
+        })
+        .await
     }
 
     pub async fn before_tool_call(
         &self,
         ctx: ToolCallHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.before_tool_call_hooks, ctx, |hook, ctx| hook(ctx)).await
+        collect_owned_async(
+            &self.contributions.before_tool_call_hooks,
+            ctx,
+            |hook, ctx| hook(ctx),
+        )
+        .await
     }
 
     pub async fn after_tool_call(
         &self,
         ctx: ToolResultHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.after_tool_call_hooks, ctx, |hook, ctx| hook(ctx)).await
+        collect_owned_async(
+            &self.contributions.after_tool_call_hooks,
+            ctx,
+            |hook, ctx| hook(ctx),
+        )
+        .await
     }
 
     pub async fn after_turn(
         &self,
         ctx: TurnResultHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.after_turn_hooks, ctx, |hook, ctx| hook(ctx)).await
+        collect_owned_async(&self.contributions.after_turn_hooks, ctx, |hook, ctx| {
+            hook(ctx)
+        })
+        .await
     }
 
     pub async fn at_checkpoint(
         &self,
         ctx: CheckpointHookContext,
     ) -> Result<Vec<PluginOwned<PluginDirective>>, PluginError> {
-        collect_owned_async(&self.checkpoint_hooks, ctx, |hook, ctx| hook(ctx)).await
+        collect_owned_async(&self.contributions.checkpoint_hooks, ctx, |hook, ctx| {
+            hook(ctx)
+        })
+        .await
     }
 
     pub async fn transform_assistant_stream(
@@ -596,7 +612,7 @@ impl PluginSession {
     ) -> Result<Vec<PluginOwned<AssistantStreamTransform>>, PluginError> {
         let mut current = chunk;
         let mut transforms = Vec::new();
-        for registered in &self.assistant_stream_hooks {
+        for registered in &self.contributions.assistant_stream_hooks {
             let transform = (registered.hook)(AssistantStreamHookContext {
                 session_id: session_id.to_string(),
                 chunk: current.clone(),
@@ -618,7 +634,7 @@ impl PluginSession {
     ) -> Result<Vec<PluginOwned<AssistantResponseTransform>>, PluginError> {
         let mut current = response;
         let mut transforms = Vec::new();
-        for registered in &self.assistant_response_hooks {
+        for registered in &self.contributions.assistant_response_hooks {
             let transform = (registered.hook)(AssistantResponseHookContext {
                 session_id: session_id.to_string(),
                 response: current.clone(),
@@ -637,7 +653,7 @@ impl PluginSession {
         &self,
         ctx: ToolResultProjectionContext,
     ) -> Result<crate::ModelToolReturn, PluginError> {
-        let Some(projector) = &self.tool_result_projector else {
+        let Some(projector) = &self.contributions.tool_result_projector else {
             return Ok(crate::ModelToolReturn::from_output(
                 ctx.call_id.clone(),
                 ctx.tool_name.clone(),
@@ -649,7 +665,7 @@ impl PluginSession {
 
     pub async fn emit_runtime_event(&self, event: PluginLifecycleEvent) {
         let mut tasks = JoinSet::new();
-        for hook in &self.runtime_event_hooks {
+        for hook in &self.contributions.runtime_event_hooks {
             let hook = Arc::clone(hook);
             let event = event.clone();
             tasks.spawn(async move { hook(event).await });
@@ -665,7 +681,7 @@ impl PluginSession {
     }
 
     pub fn has_runtime_event_hooks(&self) -> bool {
-        !self.runtime_event_hooks.is_empty()
+        !self.contributions.runtime_event_hooks.is_empty()
     }
 
     pub async fn mutate_session_config(
@@ -673,7 +689,7 @@ impl PluginSession {
         ctx: SessionConfigChangedContext,
         mut policy: SessionPolicy,
     ) -> SessionPolicy {
-        for hook in &self.session_config_mutators {
+        for hook in &self.contributions.session_config_mutators {
             match hook(ctx.clone(), policy.clone()).await {
                 Ok(next_policy) => policy = next_policy,
                 Err(err) => tracing::warn!("plugin config mutator failed: {err}"),
@@ -688,7 +704,7 @@ impl PluginSession {
         host: Arc<dyn RuntimeSessionHost>,
     ) -> Result<TurnFinalization, PluginError> {
         let session_id = turn.state.session_id.clone();
-        let directives = if self.after_turn_hooks.is_empty() {
+        let directives = if self.contributions.after_turn_hooks.is_empty() {
             Vec::new()
         } else {
             self.after_turn(TurnResultHookContext {
@@ -904,8 +920,9 @@ impl PluginSession {
         session_id: Option<String>,
         default_to_current_session: bool,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
     ) -> Result<ToolResult, PluginActionInvokeError> {
-        let Some(op) = self.plugin_actions.get(name).cloned() else {
+        let Some(op) = self.contributions.plugin_actions.get(name).cloned() else {
             return Err(PluginActionInvokeError::Unknown(name.to_string()));
         };
 
@@ -931,6 +948,7 @@ impl PluginSession {
             PluginActionContext {
                 session_id: effective_session,
                 host,
+                processes,
             },
             args,
         )
@@ -943,11 +961,19 @@ impl PluginSession {
         session_id: Option<String>,
         default_to_current_session: bool,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
     ) -> Result<Op::Output, PluginError> {
         let args = serde_json::to_value(args)
             .map_err(|err| PluginError::Invoke(format!("invalid {} args: {err}", Op::NAME)))?;
         let result = self
-            .invoke_plugin_action(Op::NAME, args, session_id, default_to_current_session, host)
+            .invoke_plugin_action(
+                Op::NAME,
+                args,
+                session_id,
+                default_to_current_session,
+                host,
+                processes,
+            )
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))?;
         if !result.is_success() {

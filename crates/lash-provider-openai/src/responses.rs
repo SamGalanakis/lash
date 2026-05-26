@@ -350,13 +350,6 @@ impl OpenAiCompatibleProvider {
         !Self::local_style_base_url(base_url)
     }
 
-    pub(crate) fn output_token_cap(&self) -> u64 {
-        self.options
-            .max_output_tokens
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
-    }
-
     pub(crate) fn build_responses_request_body(
         &self,
         req: &LlmRequest,
@@ -369,13 +362,19 @@ impl OpenAiCompatibleProvider {
         )?;
         let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
+        let policy = resolve_generation_policy(
+            &req.generation,
+            &self.options,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            (),
+        );
         let mut body = json!({
             "model": req.model,
             "instructions": instructions,
             "input": input,
             "tools": tools,
             "stream": stream,
-            "max_output_tokens": self.output_token_cap(),
+            "max_output_tokens": policy.max_output_tokens,
         });
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
@@ -387,14 +386,13 @@ impl OpenAiCompatibleProvider {
             body["text"] = json!({"verbosity": "medium"});
         }
         if let Some(variant) = req.model_variant.as_deref()
-            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                OpenAiDirectModelPolicy.request_variant_config(&req.model, variant)
+            && let Some(effort) = OpenAiDirectModelPolicy.reasoning_effort(&req.model, variant)
             && effort != "none"
         {
             let mut reasoning = json!({
                 "effort": clamp_reasoning_effort(&req.model, &effort),
             });
-            if self.options.thinking.expose {
+            if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
             }
             body["reasoning"] = reasoning;
@@ -421,12 +419,12 @@ impl OpenAiCompatibleProvider {
             }
             body["text"]["format"] = format;
         }
-        if self.options.cache_retention != CacheRetention::None
+        if policy.cache_retention != CacheRetention::None
             && let Some(session_id) = req.session_id.as_deref()
         {
             body["prompt_cache_key"] = json!(session_id);
         }
-        if self.options.cache_retention == CacheRetention::Long
+        if policy.cache_retention == CacheRetention::Long
             && Self::supports_openai_request_fields(&self.base_url)
         {
             body["prompt_cache_retention"] = json!("24h");

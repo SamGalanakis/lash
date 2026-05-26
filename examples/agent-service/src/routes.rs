@@ -25,6 +25,8 @@ use crate::state::AgentServiceDurability;
 use crate::state::{AppError, AppResult, AppStateData};
 use crate::ui::INDEX_HTML;
 
+const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 200_000;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateChatRequest {
     title: Option<String>,
@@ -201,6 +203,7 @@ pub(crate) async fn send_message(
     }
 
     let session = state.open_session(&chat_id).await?;
+    let turn_model = model_spec_for_chat_selection(&model_selection)?;
     let (tx, rx) = mpsc::channel::<StreamItem>(64);
     let run_state = state.clone();
     tokio::spawn(async move {
@@ -218,7 +221,7 @@ pub(crate) async fn send_message(
         );
         let turn = session
             .turn(TurnInput::text(text))
-            .model(model_selection.model, model_selection.model_variant)
+            .model(turn_model)
             .require_submit();
         let turn = match turn {
             Ok(turn) => turn.collect_with(&ui_events).await,
@@ -587,6 +590,19 @@ fn normalize_optional_model_selection(
         model: model.to_string(),
         model_variant: normalize_model_variant(model_variant),
     }))
+}
+
+pub(crate) fn model_spec_for_chat_selection(
+    selection: &ChatModelSelection,
+) -> AppResult<lash::ModelSpec> {
+    lash::ModelSpec::from_token_limits(
+        selection.model.clone(),
+        selection.model_variant.clone(),
+        DEFAULT_CONTEXT_WINDOW_TOKENS,
+        None,
+        None,
+    )
+    .map_err(AppError::bad_request)
 }
 
 fn normalize_model_variant(model_variant: Option<&str>) -> Option<String> {

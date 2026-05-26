@@ -168,16 +168,8 @@ impl ProviderHandle {
         self.components.state.kind()
     }
 
-    pub fn default_model(&self) -> &str {
-        self.components.model_policy.default_model()
-    }
-
     pub fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         self.components.model_policy.supported_variants(model)
-    }
-
-    pub fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        self.components.model_policy.default_model_variant(model)
     }
 
     pub fn validate_variant(&self, model: &str, variant: &str) -> Result<(), String> {
@@ -199,28 +191,6 @@ impl ProviderHandle {
             self.kind(),
             variants.join(", ")
         ))
-    }
-
-    pub fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
-        self.components
-            .model_policy
-            .request_variant_config(model, variant)
-    }
-
-    pub fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        self.components.model_policy.default_agent_model(tier)
-    }
-
-    pub fn resolve_model(&self, model: &str) -> String {
-        self.components.model_policy.resolve_model(model)
-    }
-
-    pub fn context_lookup_model(&self, model: &str) -> String {
-        self.components.model_policy.context_lookup_model(model)
     }
 
     pub fn input_usage_excludes_cached_tokens(&self) -> bool {
@@ -306,30 +276,6 @@ impl ProviderHandle {
         }
         Ok(())
     }
-
-    /// Resolve a model against an explicit catalog supplied by the host.
-    pub fn resolve_model_spec(
-        &self,
-        model: &str,
-        catalog: &ModelCatalog,
-    ) -> Result<ResolvedModelSpec, String> {
-        self.validate_model_name(model)?;
-        let configured_model = model.trim();
-        let catalog_model_id = self.context_lookup_model(configured_model);
-        let Some(info) = catalog.get(&catalog_model_id).cloned() else {
-            return Err(format!(
-                "model `{}` has no context-window entry in the supplied model catalog for {}. Provide an explicit model spec or choose a cataloged model.",
-                configured_model,
-                self.kind(),
-            ));
-        };
-        Ok(ResolvedModelSpec {
-            configured_model: configured_model.to_string(),
-            resolved_model: self.resolve_model(configured_model),
-            catalog_model_id,
-            info,
-        })
-    }
 }
 
 impl std::fmt::Debug for ProviderHandle {
@@ -387,7 +333,7 @@ pub struct UnconfiguredProvider {
 
 impl UnconfiguredProvider {
     fn into_components(self) -> ProviderComponents {
-        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new("")))
+        ProviderComponents::shared(self, Arc::new(StaticModelPolicy::new()))
     }
 }
 

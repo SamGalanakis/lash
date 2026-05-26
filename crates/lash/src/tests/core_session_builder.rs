@@ -34,8 +34,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let core = LashCore::standard()
         .provider(recording_prompt_provider(Arc::clone(&seen)))
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .prompt_contribution(PromptContribution::guidance("Core", "core guidance"))
         .build()?;
     let session = core
@@ -84,8 +83,7 @@ async fn prompt_layers_apply_across_core_session_turn_and_mutation_scopes() -> R
 async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Result<()> {
     let core = LashCore::standard()
         .provider(text_provider("core-provider", "core-model", "core"))
-        .model("core-model", None)
-        .max_context_tokens(200_000)
+        .model(model_spec("core-model", None, 200_000))
         .build()
         .expect("standard core");
     let session = core
@@ -120,7 +118,7 @@ async fn provider_overrides_apply_at_core_session_turn_and_config_scopes() -> Re
                 "updated-model",
                 "updated",
             )),
-            model: Some(ModelSelection::new("updated-model", None)),
+            model: Some(model_spec("updated-model", None, 200_000)),
             ..SessionConfigPatch::default()
         })
         .await?;
@@ -141,7 +139,11 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             "core",
             Arc::clone(&seen),
         ))
-        .max_context_tokens(200_000)
+        .model(model_spec(
+            "core-model",
+            Some("core-variant".to_string()),
+            200_000,
+        ))
         .build()
         .expect("standard core");
     let session = core
@@ -177,7 +179,11 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
             "manual",
             Arc::clone(&seen),
         ))
-        .model("manual-model", Some("manual-variant".to_string()))
+        .model(model_spec(
+            "manual-model",
+            Some("manual-variant".to_string()),
+            200_000,
+        ))
         .run()
         .await?;
     session
@@ -199,19 +205,13 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
     assert_eq!(
         *seen.lock().expect("seen requests"),
         vec![
-            (
-                "session-model".to_string(),
-                Some("session-variant".to_string())
-            ),
-            ("turn-model".to_string(), Some("turn-variant".to_string())),
+            ("core-model".to_string(), Some("core-variant".to_string())),
+            ("core-model".to_string(), Some("core-variant".to_string())),
             (
                 "manual-model".to_string(),
                 Some("manual-variant".to_string())
             ),
-            (
-                "updated-model".to_string(),
-                Some("updated-variant".to_string())
-            ),
+            ("core-model".to_string(), Some("core-variant".to_string())),
         ]
     );
     Ok(())
@@ -221,8 +221,7 @@ async fn provider_only_overrides_use_provider_default_model_and_variant() -> Res
 async fn rlm_core_opens_rlm_session_and_rejects_standard_session() -> Result<()> {
     let core = LashCore::rlm()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
 
     let rlm = core.session("rlm").open().await?;
@@ -242,8 +241,7 @@ async fn rlm_projection_errors_surface_from_mode_extensions() -> Result<()> {
 
     let core = LashCore::rlm()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
     let session = core.session("rlm").open().await?;
     session
@@ -280,8 +278,7 @@ async fn explicit_dual_mode_install_allows_standard_parent_and_rlm_child() -> Re
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::standard())
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .build()?;
 
     let parent = core.session("main").standard().open().await?;
@@ -310,8 +307,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
         session_id: "persisted".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -324,8 +320,7 @@ async fn store_factory_reopens_persisted_session_state() -> Result<()> {
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
         .build()?;
 
@@ -342,8 +337,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
         session_id: "active-path".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -364,8 +358,7 @@ async fn active_path_residency_opens_with_active_path_scope() -> Result<()> {
     let store = Arc::new(SnapshotStore::with_state(state));
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
             store: store.clone(),
         }))
@@ -390,8 +383,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
         session_id: "keep-all".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -404,8 +396,7 @@ async fn keep_all_residency_opens_with_full_graph_scope() -> Result<()> {
     let store = Arc::new(SnapshotStore::with_state(state));
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
             store: store.clone(),
         }))
@@ -423,8 +414,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
         session_id: "actual-session".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -433,8 +423,7 @@ async fn store_session_id_mismatch_is_rejected() -> Result<()> {
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::with_state(state));
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory { store }))
         .build()?;
 
@@ -459,8 +448,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
         session_id: "manual-state".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -473,8 +461,7 @@ async fn open_with_state_uses_manual_state_and_persists_tool_state() -> Result<(
     let store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .tools(Arc::new(AppTools))
         .build()?;
 
@@ -516,8 +503,7 @@ async fn core_store_factory_is_used_for_managed_child_sessions() -> Result<()> {
     let factory = Arc::new(RecordingStoreFactory::default());
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(factory.clone())
         .build()?;
     let session = core.session("root-with-child-store").open().await?;
@@ -561,8 +547,7 @@ async fn reused_root_store_factory_reports_child_store_guidance() -> Result<()> 
     });
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
             store: reused_store,
         }))
@@ -605,8 +590,7 @@ async fn explicit_root_store_keeps_configured_child_store_factory() -> Result<()
     let explicit_store: Arc<dyn lash_core::RuntimePersistence> = Arc::new(SnapshotStore::default());
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(factory.clone())
         .build()?;
     let session = core
@@ -650,8 +634,7 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
         session_id: "store-precedence".to_string(),
         policy: lash_core::SessionPolicy {
             provider: mock_provider(),
-            model: "mock-model".to_string(),
-            max_context_tokens: Some(200_000),
+            model: mock_model_spec(),
             execution_mode: lash_core::ExecutionMode::standard(),
             ..Default::default()
         },
@@ -672,8 +655,7 @@ async fn explicit_session_store_takes_precedence_over_core_store_factory() -> Re
         Arc::new(SnapshotStore::with_state(factory_state));
     let core = LashCore::standard()
         .provider(mock_provider())
-        .model("mock-model", None)
-        .max_context_tokens(200_000)
+        .model(mock_model_spec())
         .store_factory(Arc::new(ReusableStoreFactory {
             store: factory_store,
         }))

@@ -14,8 +14,8 @@ keywords = ["lash", "agent", "tools", "patch", "llm"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.8", default-features = false }
-lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.8" }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
+lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.9" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 

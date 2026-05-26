@@ -23,6 +23,7 @@ pub struct ToolDispatchContext<'run> {
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
@@ -33,6 +34,14 @@ pub struct ToolDispatchContext<'run> {
     pub turn_context: crate::TurnContext,
 }
 
+impl<'run> ToolDispatchContext<'run> {
+    pub fn process_scope(&self) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
+            .with_effect_metadata(self.tool_effect_metadata.clone())
+            .with_effect_controller(self.effect_controller.as_controller())
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolDispatchOutcome {
     pub record: ToolCallRecord,
@@ -40,7 +49,11 @@ pub(crate) struct ToolDispatchOutcome {
 
 pub(crate) enum ToolPreparationOutcome {
     Prepared(PreparedToolCall),
-    Completed(ToolDispatchOutcome),
+    Completed(Box<ToolDispatchOutcome>),
+}
+
+fn completed_preparation(outcome: ToolDispatchOutcome) -> ToolPreparationOutcome {
+    ToolPreparationOutcome::Completed(Box::new(outcome))
 }
 
 #[derive(Clone)]
@@ -65,10 +78,8 @@ pub(crate) async fn dispatch_tool_call(
     let tool_context = ToolContext::new(
         context.session_id.clone(),
         Arc::clone(&context.host),
-        context.turn_context.clone(),
         Arc::clone(&context.attachment_store),
         context.direct_completions.clone(),
-        context.effect_controller.clone_scoped(),
         None,
     );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
@@ -107,7 +118,7 @@ pub(crate) async fn dispatch_tool_call_with_execution_context<'run>(
             )
             .await
         }
-        ToolPreparationOutcome::Completed(outcome) => outcome,
+        ToolPreparationOutcome::Completed(outcome) => *outcome,
     }
 }
 
@@ -118,7 +129,7 @@ pub(crate) async fn prepare_tool_call_with_context(
 ) -> ToolPreparationOutcome {
     let tool_name = pending.tool_name.clone();
     let Some(manifest) = resolve_callable_manifest(context, &tool_name) else {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             pending.args,
             runtime_failure(
@@ -146,7 +157,7 @@ pub(crate) async fn prepare_tool_call_with_context(
     {
         Ok(directives) => directives,
         Err(err) => {
-            return ToolPreparationOutcome::Completed(outcome(
+            return completed_preparation(outcome(
                 tool_name,
                 args,
                 runtime_failure(
@@ -216,7 +227,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         }
     }
     if let Some(result) = short_circuit {
-        return ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0));
+        return completed_preparation(outcome(tool_name, args, result, 0));
     }
 
     let contract = context
@@ -226,7 +237,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         .find_map(|provider| provider.resolve_contract(&tool_name))
         .or_else(|| context.tools.resolve_contract(&tool_name));
     let Some(contract) = contract else {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             args,
             runtime_failure(
@@ -238,7 +249,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         ));
     };
     if let Err(err) = validate_tool_input(&contract, &args) {
-        return ToolPreparationOutcome::Completed(outcome(
+        return completed_preparation(outcome(
             tool_name,
             args,
             runtime_failure(ToolFailureClass::InvalidRequest, "invalid_tool_args", err),
@@ -270,7 +281,7 @@ pub(crate) async fn prepare_tool_call_with_context(
         .await
     {
         Ok(prepared) => ToolPreparationOutcome::Prepared(prepared),
-        Err(result) => ToolPreparationOutcome::Completed(outcome(tool_name, args, result, 0)),
+        Err(result) => completed_preparation(outcome(tool_name, args, result, 0)),
     }
 }
 
@@ -1098,6 +1109,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1136,6 +1148,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1182,6 +1195,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1332,6 +1346,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1359,6 +1374,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1412,6 +1428,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1677,10 +1694,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1720,10 +1735,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1812,10 +1825,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
         let outcome = dispatch_tool_call_with_execution_context(
@@ -2051,6 +2062,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -2196,6 +2208,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -2327,6 +2340,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),

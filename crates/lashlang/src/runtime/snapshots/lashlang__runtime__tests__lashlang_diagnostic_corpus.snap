@@ -1,5 +1,6 @@
 ---
 source: crates/lashlang/src/runtime/tests.rs
+assertion_line: 312
 expression: "cases.join(\"\\n\\n---\\n\\n\")"
 ---
 parse_unsupported_while
@@ -37,12 +38,11 @@ break
 
 ---
 
-parse_missing_type_keyword
-expected type expression (type literals must start with `Type`, e.g. `Type { ok: bool }`), found `{`
---> line 1, column 26
-Payload = Type { nested: { ok: bool } }
-                         ^
-hint: write nested object types as `Type { field: type }`
+parse_duplicate_type_field
+expected unique field name, found duplicate field `ok`
+--> line 1, column 38
+Payload = Type { nested: { ok: bool, ok: str } }
+                                     ^
 
 ---
 
@@ -63,12 +63,11 @@ hint: remove `?` and inspect `.ok` or `.error` when you need to handle failures
 
 ---
 
-runtime_failed_tool_unwrap
-`?` unwrapped failed tool result: boom
+runtime_failed_resource_operation_unwrap
+`?` unwrapped failed resource operation: boom
 --> line 1, column 1
-submit (call err {})?
+submit (await TOOL.default.err({})?)
 ^
-hint: remove `?` and inspect `.ok` or `.error` when you need to handle failures
 
 ---
 

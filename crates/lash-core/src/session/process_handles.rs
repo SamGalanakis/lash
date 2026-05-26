@@ -4,8 +4,7 @@ use super::execution_context::ModeExecutionContext;
 use super::tool_execution::ModeToolReply;
 use crate::tool_dispatch::ToolPreparationOutcome;
 use crate::{
-    ProcessExecutionContext, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
-    ToolCallOutput, ToolCallRecord,
+    ProcessHandleDescriptor, ProcessInput, ProcessRegistration, ToolCallOutput, ToolCallRecord,
 };
 
 const PROCESS_HANDLE_KIND: &str = "process";
@@ -14,6 +13,13 @@ impl ModeExecutionContext<'_> {
     pub(super) fn process_handle_value(id: &str, tool_name: &str) -> serde_json::Value {
         let _ = tool_name;
         crate::lashlang_bridge::process_handle_json(id)
+    }
+
+    pub(super) fn process_status_value(status: &crate::ProcessRecord) -> serde_json::Value {
+        json!({
+            "process_id": status.id,
+            "terminal": terminal_status_label(status.terminal.as_ref()),
+        })
     }
 
     pub(super) fn parse_process_handle(
@@ -65,20 +71,19 @@ impl ModeExecutionContext<'_> {
                 call: prepared_call.clone(),
             },
         );
-        let execution_context = ProcessExecutionContext::default()
-            .with_tool_effect_metadata(self.effect_metadata.clone())
-            .with_wake_session_id(self.session_id.clone());
-
         if let Err(err) = self
             .dispatch
-            .host
-            .start_process(
-                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
+            .processes
+            .start(
+                &self.session_id,
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_wake_session_id(self.session_id.clone())
                     .with_descriptor(ProcessHandleDescriptor::new(
                         Some("tool"),
                         Some(tool_name.clone()),
-                    ))
-                    .with_scope(self.process_request_scope(self.effect_metadata.clone())),
+                    )),
+                self.process_scope(self.effect_metadata.clone()),
             )
             .await
         {
@@ -96,76 +101,125 @@ impl ModeExecutionContext<'_> {
         ModeToolReply::success(handle_value).with_record(record)
     }
 
-    pub(super) async fn await_process_handle(&self, handle: serde_json::Value) -> ModeToolReply {
-        let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
-            Ok(parsed) => parsed,
-            Err(err) => return ModeToolReply::error(json!(err)),
+    fn recorded_process_reply(
+        call_id: String,
+        tool: impl Into<String>,
+        args: serde_json::Value,
+        output: ToolCallOutput,
+        started: std::time::Instant,
+    ) -> ModeToolReply {
+        let record = ToolCallRecord {
+            call_id: Some(call_id),
+            tool: tool.into(),
+            args,
+            output: output.clone(),
+            duration_ms: started.elapsed().as_millis() as u64,
         };
-        if let Err(err) = self
-            .dispatch
-            .host
-            .validate_process_handles_visible(&self.session_id, std::slice::from_ref(&handle_id))
-            .await
-        {
-            return ModeToolReply::error(json!(err.to_string()));
-        }
-        let output = if let Some(cancellation) = self.cancellation_token.clone() {
-            tokio::select! {
-                result = self.dispatch.host.await_process(
-                    crate::ProcessAwaitRequest::new(&handle_id)
-                        .with_scope(self.process_request_scope(self.effect_metadata.clone())),
-                ) => result,
-                _ = cancellation.cancelled() => {
-                    let _ = self.dispatch.host.cancel_process(
-                        crate::ProcessCancelRequest::new(&self.session_id, &handle_id)
-                            .with_scope(self.process_request_scope(self.effect_metadata.clone())),
-                    ).await;
-                    self.dispatch.host.await_process(
-                        crate::ProcessAwaitRequest::new(&handle_id)
-                            .with_scope(self.process_request_scope(self.effect_metadata.clone())),
-                    ).await
-                }
-            }
-        } else {
-            self.dispatch
-                .host
-                .await_process(
-                    crate::ProcessAwaitRequest::new(&handle_id)
-                        .with_scope(self.process_request_scope(self.effect_metadata.clone())),
-                )
-                .await
-        };
-        match output {
-            Ok(output) => ModeToolReply::from_output(output.into_tool_output()),
-            Err(err) => ModeToolReply::error(json!(err.to_string())),
-        }
+        ModeToolReply::from_output(output).with_record(record)
     }
 
-    pub(super) async fn cancel_process_handle(&self, handle: serde_json::Value) -> ModeToolReply {
+    fn recorded_process_error(
+        call_id: String,
+        tool: &'static str,
+        args: serde_json::Value,
+        message: impl Into<String>,
+        started: std::time::Instant,
+    ) -> ModeToolReply {
+        let output = ModeToolReply::error(json!(message.into())).output;
+        Self::recorded_process_reply(call_id, tool, args, output, started)
+    }
+
+    pub(super) async fn await_process_handle(
+        &self,
+        call_id: String,
+        handle: serde_json::Value,
+    ) -> ModeToolReply {
+        let started = std::time::Instant::now();
+        let args = json!({ "handle": handle.clone() });
         let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
             Ok(parsed) => parsed,
-            Err(err) => return ModeToolReply::error(json!(err)),
+            Err(err) => {
+                return Self::recorded_process_error(call_id, "await_process", args, err, started);
+            }
         };
         if let Err(err) = self
             .dispatch
-            .host
-            .validate_process_handles_visible(&self.session_id, std::slice::from_ref(&handle_id))
+            .processes
+            .validate_visible(&self.session_id, std::slice::from_ref(&handle_id))
             .await
         {
-            return ModeToolReply::error(json!(err.to_string()));
+            return Self::recorded_process_error(
+                call_id,
+                "await_process",
+                args,
+                err.to_string(),
+                started,
+            );
         }
-        match self
+        let output = self
+            .await_process_with_cancellation(
+                &handle_id,
+                self.effect_metadata.clone(),
+                self.cancellation_token.clone(),
+            )
+            .await;
+        let output = match output {
+            Ok(output) => output.into_tool_output(),
+            Err(err) => ModeToolReply::error(json!(err.to_string())).output,
+        };
+        Self::recorded_process_reply(call_id, "await_process", args, output, started)
+    }
+
+    pub(super) async fn cancel_process_handle(
+        &self,
+        call_id: String,
+        handle: serde_json::Value,
+    ) -> ModeToolReply {
+        let started = std::time::Instant::now();
+        let args = json!({ "handle": handle.clone() });
+        let (handle_id, _hinted_tool_name) = match Self::parse_process_handle(&handle) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return Self::recorded_process_error(call_id, "cancel_process", args, err, started);
+            }
+        };
+        if let Err(err) = self
             .dispatch
-            .host
-            .cancel_process(
-                crate::ProcessCancelRequest::new(&self.session_id, &handle_id)
-                    .with_scope(self.process_request_scope(self.effect_metadata.clone())),
+            .processes
+            .validate_visible(&self.session_id, std::slice::from_ref(&handle_id))
+            .await
+        {
+            return Self::recorded_process_error(
+                call_id,
+                "cancel_process",
+                args,
+                err.to_string(),
+                started,
+            );
+        }
+        let output = match self
+            .dispatch
+            .processes
+            .cancel(
+                &self.session_id,
+                &handle_id,
+                self.process_scope(self.effect_metadata.clone()),
             )
             .await
         {
-            Ok(status) => ModeToolReply::success(Self::process_status_value(&status)),
-            Err(err) => ModeToolReply::error(json!(err.to_string())),
-        }
+            Ok(status) => ToolCallOutput::success(Self::process_status_value(&status)),
+            Err(err) => ModeToolReply::error(json!(err.to_string())).output,
+        };
+        Self::recorded_process_reply(call_id, "cancel_process", args, output, started)
+    }
+}
+
+fn terminal_status_label(terminal: Option<&crate::ProcessTerminalSemantics>) -> &'static str {
+    match terminal.map(|terminal| terminal.state) {
+        None => "running",
+        Some(crate::ProcessTerminalState::Completed) => "completed",
+        Some(crate::ProcessTerminalState::Failed) => "failed",
+        Some(crate::ProcessTerminalState::Cancelled) => "cancelled",
     }
 }
 
@@ -256,6 +310,7 @@ mod tests {
             tools,
             surface,
             host: host.clone(),
+            processes: host.clone(),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -273,6 +328,7 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
+            Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -312,9 +368,14 @@ mod tests {
             serde_json::json!({ "prepared": true })
         );
 
-        let awaited = context.await_process_handle(handle.to_json_value()).await;
+        let awaited = context
+            .await_process_handle("await-async-call-1".to_string(), handle.to_json_value())
+            .await;
 
         assert!(awaited.output.is_success());
+        let record = awaited.record.expect("await record");
+        assert_eq!(record.call_id.as_deref(), Some("await-async-call-1"));
+        assert_eq!(record.tool, "await_process");
     }
 
     #[tokio::test]
@@ -345,7 +406,8 @@ mod tests {
             plugins,
             tools: provider,
             surface,
-            host,
+            host: host.clone(),
+            processes: host,
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -363,6 +425,7 @@ mod tests {
             "session".to_string(),
             ExecutionMode::standard(),
             dispatch,
+            Default::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             Arc::new(crate::ChronologicalProjection::default()),
             None,
@@ -373,10 +436,28 @@ mod tests {
             "id": "hidden-process"
         });
 
-        let awaited = context.await_process_handle(handle.clone()).await;
-        let cancelled = context.cancel_process_handle(handle).await;
+        let awaited = context
+            .await_process_handle("await-hidden-process".to_string(), handle.clone())
+            .await;
+        let cancelled = context
+            .cancel_process_handle("cancel-hidden-process".to_string(), handle)
+            .await;
 
         assert!(!awaited.output.is_success());
         assert!(!cancelled.output.is_success());
+        assert_eq!(
+            awaited
+                .record
+                .as_ref()
+                .and_then(|record| record.call_id.as_deref()),
+            Some("await-hidden-process")
+        );
+        assert_eq!(
+            cancelled
+                .record
+                .as_ref()
+                .and_then(|record| record.call_id.as_deref()),
+            Some("cancel-hidden-process")
+        );
     }
 }

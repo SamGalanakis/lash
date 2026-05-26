@@ -11,8 +11,8 @@ impl OpenAiCompatibleProvider {
         base_url_is_openrouter(&self.base_url) && Self::model_is_anthropic_claude(&req.model)
     }
 
-    fn chat_cache_control_value(&self) -> Option<Value> {
-        match self.options.cache_retention {
+    fn chat_cache_control_value(cache_retention: CacheRetention) -> Option<Value> {
+        match cache_retention {
             CacheRetention::None => None,
             CacheRetention::Short => Some(json!({ "type": "ephemeral" })),
             CacheRetention::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
@@ -224,6 +224,7 @@ impl OpenAiCompatibleProvider {
     fn apply_anthropic_cache_control(
         &self,
         req: &LlmRequest,
+        cache_retention: CacheRetention,
         messages: &mut [Value],
         tools: &mut [Value],
     ) {
@@ -231,7 +232,7 @@ impl OpenAiCompatibleProvider {
             Self::strip_internal_cache_markers(messages);
             return;
         }
-        let Some(cache_control) = self.chat_cache_control_value() else {
+        let Some(cache_control) = Self::chat_cache_control_value(cache_retention) else {
             Self::strip_internal_cache_markers(messages);
             return;
         };
@@ -285,12 +286,18 @@ impl OpenAiCompatibleProvider {
         )?;
         let mut messages = Self::build_chat_messages(req);
         let mut tools = Self::build_chat_tools(req)?;
-        self.apply_anthropic_cache_control(req, &mut messages, &mut tools);
+        let policy = resolve_generation_policy(
+            &req.generation,
+            &self.options,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            (),
+        );
+        self.apply_anthropic_cache_control(req, policy.cache_retention, &mut messages, &mut tools);
         let mut body = json!({
             "model": req.model,
             "messages": messages,
             "stream": stream,
-            "max_tokens": self.output_token_cap(),
+            "max_tokens": policy.max_output_tokens,
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
@@ -301,9 +308,8 @@ impl OpenAiCompatibleProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
         if let Some(variant) = req.model_variant.as_deref()
-            && let Some(VariantRequestConfig::ReasoningEffort(effort)) =
-                OpenAiModelPolicy::new(self.base_url.clone())
-                    .request_variant_config(&req.model, variant)
+            && let Some(effort) =
+                OpenAiModelPolicy::new(self.base_url.clone()).reasoning_effort(&req.model, variant)
             && effort != "none"
         {
             body["reasoning"] = json!({

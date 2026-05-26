@@ -64,20 +64,26 @@ Background tasks are scheduled through the first-party
 use std::sync::Arc;
 
 use lash_restate::{
-    LashProcessWorkflow, LashProcessWorkflowImpl, RestateProcessRunner,
+    LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner,
 };
 use restate_sdk::prelude::Endpoint;
 
-fn endpoint<R>(runner: Arc<R>) -> restate_sdk::endpoint::Endpoint
-where
-    R: RestateProcessRunner,
+fn endpoint(
+    worker: lash_core::DurableProcessWorker,
+    registry: Arc<dyn lash_core::ProcessRegistry>,
+) -> restate_sdk::endpoint::Endpoint
 {
+    let runner = Arc::new(RestateCoreProcessRunner::new(worker));
     Endpoint::builder()
-        .bind(LashProcessWorkflowImpl::new(runner).serve())
+        .bind(LashProcessWorkflowImpl::new(runner, registry).serve())
         .build()
 }
 ```
 
 The controller submits workflow `run` with workflow key
 `ProcessRegistration.id` and sends cancellation to the workflow's shared
-`cancel` handler.
+`cancel` handler. The workflow runner should be built from the host's
+deployment config: plugin factories, runtime core config, session-store
+factory, process registry, attachment store, provider policy, and host profile.
+Process rows carry the process input plus structured creator scope and host
+profile only; workers do not parse grant keys to recover the creator session.

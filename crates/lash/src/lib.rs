@@ -17,10 +17,12 @@ mod tests;
 pub mod turn;
 pub mod usage;
 
-pub use crate::control::{AdvancedToolsControl, Handoffs, PluginActions, Processes, ToolsControl};
+pub use crate::control::{
+    AdvancedToolsControl, Handoffs, PluginActions, ProcessControl, ToolsControl,
+};
 pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
-pub use crate::mode::{ModeId, ModePreset, ModelSelection};
+pub use crate::mode::{ModeId, ModePreset};
 pub use crate::plugin_binding::PluginBinding;
 pub use crate::session::{
     LashSession, ObservableSession, QueueInputBuilder, SessionBuilder, SessionConfigPatch,
@@ -30,17 +32,17 @@ pub use crate::turn::{
     TurnStream, message_role, message_text,
 };
 pub use lash_core::{
-    InputItem, PluginStack, SessionSpec, TurnActivity, TurnActivityId, TurnActivitySink, TurnEvent,
-    TurnInput,
+    InputItem, ModelLimits, ModelSpec, PluginStack, SessionSpec, TurnActivity, TurnActivityId,
+    TurnActivitySink, TurnEvent, TurnInput,
 };
 
 pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, FollowedTurnResult, Handoffs,
-        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ObservableSession,
-        PluginActions, PluginBinding, PluginStack, Processes, Result, ResumeTurnBuilder,
-        SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder, TurnEvent, TurnInput,
-        TurnOutput, TurnResult, TurnStream,
+        InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec,
+        ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl, Result,
+        ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder,
+        TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
     pub use lash_core::TurnActivitySink;
 }
@@ -48,13 +50,11 @@ pub mod prelude {
 pub mod tools {
     pub use crate::ToolState;
     pub use lash_core::{
-        MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState, MonitorSnapshot, MonitorSpec,
-        MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, PreparedToolCall,
-        RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs, ToolActivation,
-        ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCall,
-        ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
-        ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
-        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolSourceHandle,
+        PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
+        ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
+        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolSourceHandle,
     };
 }
 
@@ -71,11 +71,11 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, FileAttachmentStore, GcReport, GraphCommitDelta,
-        HydratedSessionCheckpoint, ModeEvent, PersistedSessionConfig, PersistedSessionRead,
-        RuntimeSessionState, PersistedTurnState, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-        RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
-        RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
+        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState,
+        RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+        RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+        RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState, RuntimeTurnCheckpoint,
         RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
         SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
         SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
@@ -83,6 +83,7 @@ pub mod persistence {
         load_persisted_session_state, load_persisted_session_state_active_path,
         runtime_turn_checkpoint_hash,
     };
+    pub use lash_local_store::FileAttachmentStore;
 }
 
 pub mod plugins {
@@ -96,11 +97,14 @@ pub mod plugins {
         ToolResultHookContext,
     };
     pub use lash_core::{
-        BuiltinMonitorToolPluginFactory, BuiltinProcessControlsPluginFactory, PluginError,
-        PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
+        PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
         PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
-        SessionPlugin, ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
-        ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext, TurnResultHookContext,
+        SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext,
+        TurnResultHookContext,
+    };
+    pub use lash_plugin_tool_output_budget::{
+        ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+        tool_output_budget_stack as runtime_plugin_stack,
     };
 }
 
@@ -119,19 +123,19 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, DirectCompletionClient, DirectRequestSpec, EffectInvocationMetadata,
-        EffectOrigin, EmbeddedRuntimeHost, EventSink, ExecutionMode, InlineRuntimeEffectController,
-        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry,
-        ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink, NoopTurnActivitySink,
-        PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, Residency, RewriteTrigger,
-        RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
-        RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-        RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
-        RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,
-        RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent, SessionHandle,
-        SessionPolicy, SessionStateEnvelope, StandardContextApproach, TerminationPolicy,
-        TurnContext, TurnFinish, TurnOutcome, TurnStop,
+        AssembledTurn, DirectCompletionClient, DirectRequestSpec, DurableProcessWorker,
+        DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost,
+        EventSink, ExecutionMode, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
+        LlmRequestSpec, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
+        NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, ProcessCreatorScope,
+        ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord,
+        ProcessRegistry, Residency, RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand,
+        RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+        RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+        RuntimeEnvironment, RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode,
+        RuntimeHandle, RuntimeObservation, RuntimeTurnCheckpoint, RuntimeTurnLease, SessionEvent,
+        SessionHandle, SessionPolicy, SessionStateEnvelope, StandardContextApproach,
+        TerminationPolicy, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     };
 }
 
@@ -158,16 +162,11 @@ pub mod provider {
         ProviderRetryPolicy, ProviderTimeoutPolicy,
     };
     pub use lash_core::{
-        AgentModelSelection, LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle,
-        ProviderModelPolicy, ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState,
-        ProviderThinkingPolicy, ProviderTransport, RequestTimeout, StaticModelPolicy,
-        VariantRequestConfig, build_provider, provider_factory, register_provider_factory,
+        LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
+        ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState, ProviderThinkingPolicy,
+        ProviderTransport, RequestTimeout, StaticModelPolicy, build_provider, provider_factory,
+        register_provider_factory,
     };
-}
-
-pub mod model_info {
-    pub use lash_core::model_info::bundled_models_dev_snapshot;
-    pub use lash_core::{ModelCatalog, ModelInfo, ResolvedModelSpec};
 }
 
 pub type ToolState = lash_core::ToolState;

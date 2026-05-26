@@ -6,8 +6,10 @@ async fn main() -> lash::Result<()> {
         .install_mode(ModePreset::standard())
         .install_mode(ModePreset::rlm())
         .default_mode(ModeId::standard())
-        .model("example-model", None)
-        .max_context_tokens(200_000)
+        .model(
+            lash::ModelSpec::from_token_limits("example-model", None, 200_000, None, None)
+                .expect("valid model spec"),
+        )
         .build()?;
 
     let parent = core.session("main").standard().open().await?;

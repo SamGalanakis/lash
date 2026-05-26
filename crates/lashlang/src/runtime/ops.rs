@@ -911,11 +911,13 @@ pub(crate) fn coerce_string(value: &Value) -> Result<Cow<'_, str>, RuntimeError>
         Value::Null => Ok(Cow::Borrowed("null")),
         Value::Bool(value) => Ok(Cow::Owned(value.to_string())),
         Value::Number(value) => Ok(Cow::Owned(value.to_string())),
-        Value::Image(_) | Value::List(_) | Value::Record(_) | Value::Projected(_) => {
-            Err(RuntimeError::TypeError {
-                message: format!("expected text, got {}", value_type_name(value)),
-            })
-        }
+        Value::Image(_)
+        | Value::Resource(_)
+        | Value::List(_)
+        | Value::Record(_)
+        | Value::Projected(_) => Err(RuntimeError::TypeError {
+            message: format!("expected text, got {}", value_type_name(value)),
+        }),
     }
 }
 
@@ -1013,7 +1015,7 @@ pub(crate) fn is_truthy(value: &Value) -> bool {
         Value::Bool(value) => *value,
         Value::Number(value) => *value != 0.0 && !value.is_nan(),
         Value::String(value) => !value.is_empty(),
-        Value::Image(_) | Value::List(_) | Value::Record(_) => true,
+        Value::Image(_) | Value::Resource(_) | Value::List(_) | Value::Record(_) => true,
         Value::Projected(value) => futures_executor::block_on(value.truthy()),
     }
 }
@@ -1064,6 +1066,7 @@ pub(crate) fn value_type_name(value: &Value) -> &str {
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::Image(_) => "image",
+        Value::Resource(_) => "resource",
         Value::List(_) => "list",
         Value::Record(_) => "record",
         Value::Projected(value) => value.value_type_name(),
@@ -1075,9 +1078,12 @@ pub(crate) fn value_contains_projected(value: &Value) -> bool {
         Value::Projected(_) => true,
         Value::List(values) => values.iter().any(value_contains_projected),
         Value::Record(record) => record.values().any(value_contains_projected),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Image(_) => {
-            false
-        }
+        Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Image(_)
+        | Value::Resource(_) => false,
     }
 }
 

@@ -51,10 +51,11 @@
 //! Restate's Rust SDK requires journaled closures to be awaited immediately and
 //! not to call the Restate context from inside the closure. This adapter follows
 //! that rule: every Lash effect is wrapped as one immediately awaited
-//! `ctx.run(...).name(envelope.metadata.idempotency_key)` call, and
-//! sleep commands map to Restate's durable timer. Lash's own runtime journal
-//! stores the same completed effect outcome by idempotency key and envelope
-//! hash before the restored `TurnMachine` consumes it.
+//! `ctx.run(...).name(envelope.metadata.idempotency_key)` call, sleep commands
+//! map to Restate's durable timer, and process commands call Restate workflow
+//! scheduling directly through idempotent registry/workflow operations. Lash's
+//! own runtime journal stores the same completed effect outcome by idempotency
+//! key and envelope hash before the restored `TurnMachine` consumes it.
 
 use std::fmt;
 use std::future::Future;
@@ -64,11 +65,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    EffectInvocationMetadata, PluginError, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    DurableProcessWorker, EffectInvocationMetadata, PluginError, ProcessAwaitOutput,
+    ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -129,6 +131,47 @@ pub trait RestateProcessRunner: Send + Sync + 'static {
     ) -> Result<(), PluginError>;
 }
 
+#[derive(Clone)]
+pub struct RestateCoreProcessRunner {
+    worker: DurableProcessWorker,
+}
+
+impl RestateCoreProcessRunner {
+    pub fn new(worker: DurableProcessWorker) -> Self {
+        Self { worker }
+    }
+
+    pub fn worker(&self) -> &DurableProcessWorker {
+        &self.worker
+    }
+}
+
+#[async_trait::async_trait]
+impl RestateProcessRunner for RestateCoreProcessRunner {
+    async fn run_process(
+        &self,
+        registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
+        self.worker
+            .run_process(
+                registration,
+                execution_context,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+    }
+
+    async fn request_process_cancel(
+        &self,
+        request: RestateProcessCancelRequest,
+    ) -> Result<(), PluginError> {
+        self.worker
+            .request_process_cancel(&request.process_id, request.reason)
+            .await
+    }
+}
+
 #[restate_sdk::workflow]
 pub trait LashProcessWorkflow {
     async fn run(
@@ -148,11 +191,12 @@ pub struct RestateProcessWorkflowInput {
 
 pub struct LashProcessWorkflowImpl<R> {
     runner: Arc<R>,
+    registry: Arc<dyn ProcessRegistry>,
 }
 
 impl<R> LashProcessWorkflowImpl<R> {
-    pub fn new(runner: Arc<R>) -> Self {
-        Self { runner }
+    pub fn new(runner: Arc<R>, registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self { runner, registry }
     }
 }
 
@@ -165,15 +209,45 @@ where
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
     ) -> Result<ProcessAwaitOutput, PluginError> {
-        self.runner
+        let process_id = registration.id.clone();
+        let output = self
+            .runner
             .run_process(registration, execution_context)
-            .await
+            .await;
+        match output {
+            Ok(output) => {
+                self.registry
+                    .complete_process(&process_id, output.clone())
+                    .await?;
+                Ok(output)
+            }
+            Err(err) => {
+                let output = ProcessAwaitOutput::Failure {
+                    class: lash_core::ToolFailureClass::Execution,
+                    code: "restate_process_runner_failed".to_string(),
+                    message: err.to_string(),
+                    raw: None,
+                    control: None,
+                };
+                let _ = self.registry.complete_process(&process_id, output).await;
+                Err(err)
+            }
+        }
     }
 
     async fn cancel_registration(
         &self,
         request: RestateProcessCancelRequest,
     ) -> Result<(), PluginError> {
+        self.registry
+            .append_event(
+                &request.process_id,
+                lash_core::ProcessEventAppendRequest::cancel_requested(
+                    &request.process_id,
+                    request.reason.clone(),
+                ),
+            )
+            .await?;
         self.runner.request_process_cancel(request).await
     }
 }
@@ -470,28 +544,15 @@ where
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        if let RuntimeEffectCommand::Process { command } = envelope.command.clone() {
-            let current_hash = envelope.stable_hash()?;
-            let metadata = envelope.metadata.clone();
-            let journal_hash = current_hash.clone();
-            let context = &self.context;
-            let journaled = self
-                .journal_effect(metadata, async move {
-                    let outcome = execute_restate_process_command(context, command, local_executor)
-                        .await
-                        .map(|result| RuntimeEffectOutcome::Process { result });
-                    JournaledRuntimeEffect {
-                        envelope_hash: journal_hash,
-                        outcome,
-                    }
-                })
-                .await
-                .map_err(|err| {
-                    RuntimeEffectControllerError::new("restate_effect_controller", err.to_string())
-                })?;
-            return validate_journaled_effect_hash(journaled, &current_hash)?;
-        }
         match restate_effect_execution(&envelope.command) {
+            RestateEffectExecution::DirectProcess => {
+                let RuntimeEffectCommand::Process { command } = envelope.command else {
+                    unreachable!("direct process execution is only selected for process effects");
+                };
+                execute_restate_process_command(&self.context, command, local_executor)
+                    .await
+                    .map(|result| RuntimeEffectOutcome::Process { result })
+            }
             RestateEffectExecution::Timer => {
                 let RuntimeEffectCommand::Sleep { duration_ms } = &envelope.command else {
                     unreachable!("timer execution is only selected for sleep effects");
@@ -547,9 +608,14 @@ where
             grant,
             execution_context,
         } => {
-            let record =
-                schedule_restate_process(registry, registration, grant, execution_context, context)
-                    .await?;
+            let record = schedule_restate_process(
+                registry,
+                registration,
+                grant,
+                *execution_context,
+                context,
+            )
+            .await?;
             Ok(ProcessEffectOutcome::Start { record })
         }
         ProcessCommand::List { session_id } => {
@@ -575,6 +641,15 @@ where
                 .get_process(&process_id)
                 .await
                 .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+            registry
+                .append_event(
+                    &process_id,
+                    lash_core::ProcessEventAppendRequest::cancel_requested(
+                        &process_id,
+                        reason.clone(),
+                    ),
+                )
+                .await?;
             context
                 .request_process_workflow_cancel(RestateProcessCancelRequest { process_id, reason })
                 .await
@@ -597,11 +672,14 @@ where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
     let process_id = registration.id.clone();
-    registry.register_process(registration.clone()).await?;
+    let record = registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
             .grant_handle(&grant.session_id, &process_id, grant.descriptor)
             .await?;
+    }
+    if record.external_ref.is_some() {
+        return Ok(record);
     }
     let invocation_id = context
         .start_process_workflow(registration, execution_context)
@@ -623,18 +701,19 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RestateEffectExecution {
+    DirectProcess,
     Timer,
     JournaledRun,
 }
 
 fn restate_effect_execution(command: &RuntimeEffectCommand) -> RestateEffectExecution {
     match command {
+        RuntimeEffectCommand::Process { .. } => RestateEffectExecution::DirectProcess,
         RuntimeEffectCommand::Sleep { .. } => RestateEffectExecution::Timer,
         RuntimeEffectCommand::LlmCall { .. }
         | RuntimeEffectCommand::DirectCompletion { .. }
         | RuntimeEffectCommand::DirectLlmCompletion { .. }
         | RuntimeEffectCommand::ToolCall { .. }
-        | RuntimeEffectCommand::Process { .. }
         | RuntimeEffectCommand::ExecCode { .. }
         | RuntimeEffectCommand::Checkpoint { .. }
         | RuntimeEffectCommand::SyncExecutionSurface { .. } => RestateEffectExecution::JournaledRun,
@@ -744,6 +823,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: Default::default(),
             model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
             session_id: Some("session".to_string()),
             output_spec: None,
         }
@@ -753,6 +833,7 @@ mod tests {
         lash_core::DirectRequestSpec {
             model: "model".to_string(),
             model_variant: None,
+            generation: lash_core::GenerationOptions::default(),
             messages: Vec::new(),
             attachments: Vec::new(),
             output: Default::default(),
@@ -779,6 +860,10 @@ mod tests {
                 metadata: serde_json::Value::Null,
             },
         )
+    }
+
+    fn process_registry() -> Arc<dyn ProcessRegistry> {
+        Arc::new(lash_sqlite_store::SqliteProcessRegistry::memory().expect("sqlite registry"))
     }
 
     const RESTATE_INVOCATION_CONTENT_TYPE: &str = "application/vnd.restate.invocation.v6";
@@ -882,14 +967,14 @@ mod tests {
             ),
             (
                 RuntimeEffectCommand::LlmCall {
-                    request: llm_spec(),
+                    request: Box::new(llm_spec()),
                 },
                 RestateEffectExecution::JournaledRun,
             ),
             (
                 RuntimeEffectCommand::DirectCompletion {
-                    request: direct_spec(),
-                    normalized_request: llm_spec(),
+                    request: Box::new(direct_spec()),
+                    normalized_request: Box::new(llm_spec()),
                     model: "model".to_string(),
                     usage_source: "test".to_string(),
                 },
@@ -897,7 +982,7 @@ mod tests {
             ),
             (
                 RuntimeEffectCommand::DirectLlmCompletion {
-                    request: llm_spec(),
+                    request: Box::new(llm_spec()),
                     usage_source: "test".to_string(),
                 },
                 RestateEffectExecution::JournaledRun,
@@ -1106,7 +1191,7 @@ mod tests {
     async fn restate_controller_schedules_process_workflow_without_running_executor() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registry = process_registry();
         let registration = external_registration("task-1");
         let outcome = host
             .execute_effect(
@@ -1122,7 +1207,7 @@ mod tests {
                                     Some("task"),
                                 ),
                             }),
-                            execution_context: ProcessExecutionContext::default(),
+                            execution_context: Box::new(ProcessExecutionContext::default()),
                         },
                     },
                 ),
@@ -1183,27 +1268,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["task-1"]
         );
+        assert!(
+            context.runs.lock().expect("runs lock").is_empty(),
+            "process workflow scheduling must not call Restate context from inside ctx.run"
+        );
     }
 
     #[tokio::test]
-    async fn restate_controller_schedules_lashlang_block_with_serializable_input() {
+    async fn restate_controller_schedules_lashlang_process_with_serializable_input() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
-        let program = serde_json::json!({ "statements": [] });
-        let mut input = serde_json::Map::new();
-        input.insert("root".to_string(), serde_json::json!("."));
+        let registry = process_registry();
+        let module = lashlang::parse("process scan(root: str) { finish root }")
+            .expect("lashlang process module");
+        let catalog = lashlang::ResourceCatalog::new();
+        let linked_module = lashlang::LinkedModule::link(
+            module.clone(),
+            lashlang::LashlangSurface::new(catalog, lashlang::LashlangAbilities::all()),
+        )
+        .expect("link lashlang module");
+        let module_version = linked_module.module_version.clone();
+        let mut args = serde_json::Map::new();
+        args.insert("root".to_string(), serde_json::json!("."));
         let registration = ProcessRegistration::new(
-            "block-1",
-            ProcessInput::LashlangBlock {
-                program: program.clone(),
-                input: input.clone(),
-                tool_bindings: vec![lash_core::LashlangProcessToolBinding {
-                    name: "echo".to_string(),
-                    tool_id: lash_core::ToolId::new("tool:echo"),
-                }],
-                timeout_ms: Some(5000),
-                display_name: Some("scan".to_string()),
+            "process-1",
+            ProcessInput::LashlangProcess {
+                module_version,
+                linked_module: linked_module.clone(),
+                process_name: "scan".to_string(),
+                args: args.clone(),
             },
         )
         .with_extra_event_types(lash_core::lashlang_process_event_types());
@@ -1211,13 +1304,14 @@ mod tests {
         let outcome = host
             .execute_effect(
                 RuntimeEffectEnvelope::new(
-                    effect_metadata(RuntimeEffectKind::Process, "lashlang-block-start"),
+                    effect_metadata(RuntimeEffectKind::Process, "lashlang-process-start"),
                     RuntimeEffectCommand::Process {
                         command: ProcessCommand::Start {
                             registration,
                             grant: None,
-                            execution_context: ProcessExecutionContext::default()
-                                .with_wake_session_id("session"),
+                            execution_context: Box::new(
+                                ProcessExecutionContext::default().with_wake_session_id("session"),
+                            ),
                         },
                     },
                 ),
@@ -1241,7 +1335,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .get_process("block-1")
+                .get_process("process-1")
                 .await
                 .expect("registered process")
                 .external_ref
@@ -1251,24 +1345,18 @@ mod tests {
         );
         let started = context.started.lock().expect("started lock");
         assert_eq!(started.len(), 1);
-        let ProcessInput::LashlangBlock {
-            program: sent_program,
-            input: sent_input,
-            tool_bindings,
-            timeout_ms,
-            display_name,
+        let ProcessInput::LashlangProcess {
+            linked_module: sent_module,
+            process_name,
+            args: sent_args,
+            ..
         } = started[0].input.as_ref()
         else {
-            panic!("expected lashlang block input");
+            panic!("expected lashlang process input");
         };
-        assert_eq!(sent_program, &program);
-        assert_eq!(sent_input, &input);
-        assert_eq!(
-            tool_bindings[0].tool_id,
-            lash_core::ToolId::new("tool:echo")
-        );
-        assert_eq!(*timeout_ms, Some(5000));
-        assert_eq!(display_name.as_deref(), Some("scan"));
+        assert_eq!(sent_module, &linked_module);
+        assert_eq!(process_name, "scan");
+        assert_eq!(sent_args, &args);
         assert_eq!(
             context
                 .started_execution_contexts
@@ -1285,7 +1373,7 @@ mod tests {
     async fn restate_controller_lists_and_transfers_grants_through_process_effects() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registry = process_registry();
         registry
             .register_process(external_registration("task-list"))
             .await
@@ -1362,7 +1450,7 @@ mod tests {
     async fn restate_controller_cancel_requests_call_workflow_cancel() {
         let context = Arc::new(RecordingContext::default());
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let registry = process_registry();
         let registration = external_registration("task-cancel");
         registry
             .register_process(registration)
@@ -1452,12 +1540,12 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         let runner = Arc::new(RecordingRunner::default());
+        let registry = process_registry();
         let endpoint = Endpoint::builder()
-            .bind(LashProcessWorkflowImpl::new(runner.clone()).serve())
+            .bind(LashProcessWorkflowImpl::new(runner.clone(), registry.clone()).serve())
             .build();
         let context = Arc::new(RecordingContext::with_endpoint(endpoint));
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
         let registration = external_registration("task-smoke");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_session_id("wake-smoke")
@@ -1480,7 +1568,7 @@ mod tests {
                                     Some("task-smoke"),
                                 ),
                             }),
-                            execution_context,
+                            execution_context: Box::new(execution_context),
                         },
                     },
                 ),
@@ -1583,6 +1671,251 @@ mod tests {
         );
     }
 
+    struct RecoveryProcessTool;
+
+    impl RecoveryProcessTool {
+        fn definition() -> lash_core::ToolDefinition {
+            lash_core::ToolDefinition::raw(
+                "tool:recovery_echo",
+                "recovery_echo",
+                "Echo a line and emit a durable process wake.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "line": { "type": "string" } },
+                    "required": ["line"],
+                    "additionalProperties": false
+                }),
+                serde_json::json!({ "type": "object" }),
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl lash_core::ToolProvider for RecoveryProcessTool {
+        fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+            vec![Self::definition().manifest()]
+        }
+
+        fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+            (name == "recovery_echo").then(|| Arc::new(Self::definition().contract()))
+        }
+
+        async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+            let line = call
+                .args
+                .get("line")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let event = lash_core::ProcessEventAppendRequest::new(
+                "process.wake",
+                serde_json::json!({ "message": line, "wake_input": line }),
+            )
+            .with_idempotency_key(format!("process.wake:{line}"));
+            if let Err(err) = call.context.emit_process_event_request(event).await {
+                return lash_core::ToolResult::err_fmt(err);
+            }
+            lash_core::ToolResult::ok(serde_json::json!({ "echo": line }))
+        }
+    }
+
+    fn recovery_worker(
+        registry: Arc<dyn ProcessRegistry>,
+        store_factory: Arc<dyn lash_core::SessionStoreFactory>,
+    ) -> DurableProcessWorker {
+        let tools: Arc<dyn lash_core::ToolProvider> = Arc::new(RecoveryProcessTool);
+        let plugin_host = lash_core::PluginHost::new(vec![
+            Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory::new())
+                as Arc<dyn lash_core::PluginFactory>,
+            Arc::new(lash_core::plugin::StaticPluginFactory::new(
+                "recovery-tool",
+                lash_core::PluginSpec::new().with_tool_provider(tools),
+            )),
+        ]);
+        DurableProcessWorker::new(
+            lash_core::DurableProcessWorkerConfig::new(
+                Arc::new(plugin_host),
+                lash_core::RuntimeCoreConfig::default().with_host_profile_id("recovery-host"),
+                store_factory,
+                registry,
+            )
+            .with_session_policy(lash_core::SessionPolicy {
+                execution_mode: lash_core::ExecutionMode::standard(),
+                provider: lash_core::ProviderHandle::default(),
+                model: lash_core::ModelSpec::from_token_limits(
+                    "mock-model",
+                    None,
+                    200_000,
+                    None,
+                    None,
+                )
+                .expect("model spec"),
+                ..lash_core::SessionPolicy::default()
+            }),
+        )
+    }
+
+    fn process_wake_event_type() -> lash_core::ProcessEventType {
+        lash_core::ProcessEventType {
+            name: "process.wake".to_string(),
+            payload_schema: lash_core::LashSchema::any(),
+            semantics: lash_core::ProcessEventSemanticsSpec {
+                wake: Some(lash_core::ProcessWakeSpec {
+                    when: Some(lash_core::ProcessValueSelector::Present(
+                        "/wake_input".to_string(),
+                    )),
+                    input: lash_core::ProcessValueSelector::Pointer("/wake_input".to_string()),
+                    dedupe_key: lash_core::ProcessWakeDedupeKey::Selector(
+                        lash_core::ProcessValueSelector::Pointer("/message".to_string()),
+                    ),
+                }),
+                ..lash_core::ProcessEventSemanticsSpec::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let process_db = temp.path().join("processes.db");
+        let store_factory = Arc::new(lash_sqlite_store::SqliteSessionStoreFactory::new(
+            temp.path().join("sessions"),
+        )) as Arc<dyn lash_core::SessionStoreFactory>;
+        let registry_a = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("open registry"),
+        ) as Arc<dyn ProcessRegistry>;
+        let worker_a = recovery_worker(Arc::clone(&registry_a), Arc::clone(&store_factory));
+        let endpoint_a = Endpoint::builder()
+            .bind(
+                LashProcessWorkflowImpl::new(
+                    Arc::new(RestateCoreProcessRunner::new(worker_a)),
+                    Arc::clone(&registry_a),
+                )
+                .serve(),
+            )
+            .build();
+        let context_a = Arc::new(RecordingContext::with_endpoint(endpoint_a));
+        let host_a = RestateRuntimeEffectController::new(context_a);
+        let creator_scope = lash_core::ProcessCreatorScope::new("recovery-runtime", "root");
+        let scope_key = creator_scope.scope_key();
+        let registration = ProcessRegistration::new(
+            "recover-tool",
+            ProcessInput::ToolCall {
+                call: lash_core::PreparedToolCall {
+                    call_id: "recover-call".to_string(),
+                    tool_name: "recovery_echo".to_string(),
+                    args: serde_json::json!({ "line": "wake-after-rebuild" }),
+                    replay: None,
+                    prepared_payload: serde_json::Value::Null,
+                },
+            },
+        )
+        .with_provenance(creator_scope, "recovery-host")
+        .with_extra_event_types([process_wake_event_type()]);
+
+        host_a
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "recovery-start"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Start {
+                            registration,
+                            grant: Some(lash_core::ProcessStartGrant {
+                                session_id: scope_key.clone(),
+                                descriptor: lash_core::ProcessHandleDescriptor::new(
+                                    Some("tool"),
+                                    Some("recover-tool"),
+                                ),
+                            }),
+                            execution_context: Box::new(
+                                ProcessExecutionContext::default()
+                                    .with_wake_session_id("root")
+                                    .with_wake_target_scope_key(scope_key.clone()),
+                            ),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_a)),
+            )
+            .await
+            .expect("schedule and run process through Restate endpoint");
+        drop(host_a);
+        drop(registry_a);
+
+        let registry_b = Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_db).expect("reopen registry"),
+        ) as Arc<dyn ProcessRegistry>;
+        let grants = registry_b
+            .list_handle_grants(&scope_key)
+            .await
+            .expect("list reopened grants");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].0.process_id, "recover-tool");
+        assert_eq!(
+            registry_b
+                .await_process("recover-tool")
+                .await
+                .expect("await recovered terminal process"),
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({ "echo": "wake-after-rebuild" }),
+                control: None,
+            }
+        );
+        let wakes = registry_b
+            .drain_wake_inputs(&scope_key, 10)
+            .await
+            .expect("drain reopened wakes");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].input, "wake-after-rebuild");
+        registry_b
+            .ack_wake_input(&wakes[0].wake_id)
+            .await
+            .expect("ack wake");
+        assert!(
+            registry_b
+                .drain_wake_inputs(&scope_key, 10)
+                .await
+                .expect("drain after ack")
+                .is_empty()
+        );
+
+        let worker_b = recovery_worker(Arc::clone(&registry_b), store_factory);
+        let endpoint_b = Endpoint::builder()
+            .bind(
+                LashProcessWorkflowImpl::new(
+                    Arc::new(RestateCoreProcessRunner::new(worker_b)),
+                    Arc::clone(&registry_b),
+                )
+                .serve(),
+            )
+            .build();
+        let context_b = Arc::new(RecordingContext::with_endpoint(endpoint_b));
+        let host_b = RestateRuntimeEffectController::new(context_b);
+        host_b
+            .execute_effect(
+                RuntimeEffectEnvelope::new(
+                    effect_metadata(RuntimeEffectKind::Process, "recovery-cancel"),
+                    RuntimeEffectCommand::Process {
+                        command: ProcessCommand::Cancel {
+                            process_id: "recover-tool".to_string(),
+                            reason: Some("post-rebuild cancel probe".to_string()),
+                        },
+                    },
+                ),
+                RuntimeEffectLocalExecutor::process_control(Arc::clone(&registry_b)),
+            )
+            .await
+            .expect("cancel through reopened process workflow");
+        assert!(
+            registry_b
+                .events_after("recover-tool", 0)
+                .await
+                .expect("events after cancel")
+                .iter()
+                .any(|event| event.event_type == "process.cancel_requested")
+        );
+    }
+
     fn discover_service<S: Discoverable>(_: &S) -> restate_sdk::discovery::Service {
         S::discover()
     }
@@ -1590,7 +1923,8 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         let runner = Arc::new(RecordingRunner::default());
-        let service = LashProcessWorkflowImpl::new(runner).serve();
+        let registry = process_registry();
+        let service = LashProcessWorkflowImpl::new(runner, registry).serve();
         let discovery = discover_service(&service);
         let endpoint = Endpoint::builder().bind(service).build();
 
@@ -1666,8 +2000,13 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_impl_runs_and_cancels_through_runner() {
         let runner = Arc::new(RecordingRunner::default());
-        let workflow = LashProcessWorkflowImpl::new(runner.clone());
+        let registry = process_registry();
+        let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
         let registration = external_registration("task-workflow");
+        registry
+            .register_process(registration.clone())
+            .await
+            .expect("register workflow process");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_session_id("wake-session")
             .with_tool_effect_metadata(Some(effect_metadata(

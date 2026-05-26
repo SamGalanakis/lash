@@ -1396,8 +1396,8 @@ async fn exec_and_execution_surface_effects_cross_controller_once() {
     let policy = SessionPolicy {
         execution_mode: mode.clone(),
         provider: mock_provider(Vec::new()).into_handle(),
-        model: "mock-model".to_string(),
-        max_context_tokens: Some(200_000),
+        model: crate::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+            .expect("valid model spec"),
         ..SessionPolicy::default()
     };
     let plugin_session = crate::PluginHost::new(vec![Arc::new(EffectControllerTestModeFactory)])
@@ -1461,7 +1461,9 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
     let host = EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
             .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_jsonl_path(Some(trace_path.clone())),
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
+                trace_path.clone(),
+            )))),
     );
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
@@ -1580,7 +1582,9 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
     let host = EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
             .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_jsonl_path(Some(trace_path.clone())),
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
+                trace_path.clone(),
+            )))),
     );
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
@@ -1609,6 +1613,7 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
         session_id: None,
         output_spec: None,
         stream_events: None,
+        generation: crate::GenerationOptions::default(),
         provider_trace: None,
     };
     let completion = direct
@@ -1655,6 +1660,7 @@ async fn direct_llm_completion_envelope_stores_attachment_refs_not_bytes() {
         session_id: None,
         output_spec: None,
         stream_events: None,
+        generation: crate::GenerationOptions::default(),
         provider_trace: None,
     };
 

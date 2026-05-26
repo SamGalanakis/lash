@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::{
     ProjectedValue, Record, SnapshotJson, Value, image_from_json_map, record_with_capacity,
+    resource_from_json_map,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -107,6 +108,7 @@ fn snapshot_value_from_json(value: serde_json::Value) -> Value {
             }
             image_from_json_map(&map)
                 .map(Value::Image)
+                .or_else(|| resource_from_json_map(&map).map(Value::Resource))
                 .unwrap_or_else(|| Value::Record(Arc::new(snapshot_record_from_json(map))))
         }
     }

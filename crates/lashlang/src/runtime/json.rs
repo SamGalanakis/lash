@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use super::value_contains_projected;
-use super::{ImageValue, ProjectedFuture, Value};
+use super::{ImageValue, ProjectedFuture, ResourceHandle, Value};
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq};
 use std::fmt::Write as _;
@@ -42,6 +42,7 @@ pub(crate) fn to_json_async<'a>(value: &'a Value) -> ProjectedFuture<'a, serde_j
                 .unwrap_or(serde_json::Value::Null),
             Value::String(value) => serde_json::Value::String(value.to_string()),
             Value::Image(image) => image_to_json(image),
+            Value::Resource(handle) => resource_to_json(handle),
             Value::List(values) => {
                 let mut out = Vec::with_capacity(values.len());
                 for value in values.iter() {
@@ -80,6 +81,7 @@ pub(crate) fn to_json_direct(value: &Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         Value::String(value) => serde_json::Value::String(value.to_string()),
         Value::Image(image) => image_to_json(image),
+        Value::Resource(handle) => resource_to_json(handle),
         Value::List(values) => {
             serde_json::Value::Array(values.iter().map(to_json_direct).collect())
         }
@@ -154,6 +156,7 @@ where
         },
         Value::String(value) => serializer.serialize_str(value),
         Value::Image(image) => serialize_image(image, serializer),
+        Value::Resource(handle) => serialize_resource(handle, serializer),
         Value::List(values) => {
             let mut sequence = serializer.serialize_seq(Some(values.len()))?;
             for value in values.iter() {
@@ -238,7 +241,7 @@ pub(crate) fn append_runtime_json_async<'a>(
             Value::String(value) => output.push_str(
                 &serde_json::to_string(value).expect("string json serialization should succeed"),
             ),
-            Value::Image(_) => append_direct_json(output, value),
+            Value::Image(_) | Value::Resource(_) => append_direct_json(output, value),
             Value::List(values) => {
                 output.push('[');
                 for (index, value) in values.iter().enumerate() {
@@ -320,6 +323,7 @@ pub fn from_json(value: serde_json::Value) -> Value {
         }
         serde_json::Value::Object(map) => image_from_json_map(&map)
             .map(Value::Image)
+            .or_else(|| resource_from_json_map(&map).map(Value::Resource))
             .unwrap_or_else(|| {
                 Value::Record(Arc::new(
                     map.into_iter()
@@ -328,6 +332,38 @@ pub fn from_json(value: serde_json::Value) -> Value {
                 ))
             }),
     }
+}
+
+fn serialize_resource<S>(handle: &ResourceHandle, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut map = serializer.serialize_map(Some(3))?;
+    map.serialize_entry("__resource__", &true)?;
+    map.serialize_entry("type", &handle.resource_type)?;
+    map.serialize_entry("alias", &handle.alias)?;
+    map.end()
+}
+
+#[cfg(test)]
+fn resource_to_json(handle: &ResourceHandle) -> serde_json::Value {
+    serde_json::json!({
+        "__resource__": true,
+        "type": handle.resource_type,
+        "alias": handle.alias,
+    })
+}
+
+pub(crate) fn resource_from_json_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ResourceHandle> {
+    if map.get("__resource__")?.as_bool()? != true {
+        return None;
+    }
+    Some(ResourceHandle::new(
+        map.get("type")?.as_str()?.to_string(),
+        map.get("alias")?.as_str()?.to_string(),
+    ))
 }
 
 pub(crate) fn image_from_json_map(

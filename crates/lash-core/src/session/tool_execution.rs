@@ -1,6 +1,7 @@
 use super::execution_context::ModeExecutionContext;
 use crate::tool_dispatch::{
-    ToolDispatchOutcome, ToolPreparationOutcome, prepare_tool_call_with_context,
+    ToolDispatchOutcome, ToolPreparationOutcome,
+    dispatch_prepared_tool_call_with_execution_context, prepare_tool_call_with_context,
     schedule_tool_batch,
 };
 use crate::{
@@ -64,14 +65,6 @@ impl ModeToolReply {
     }
 }
 
-fn process_tool_failure(code: &str, message: String) -> ToolCallOutput {
-    ToolCallOutput::failure(ToolFailure::runtime(
-        ToolFailureClass::Internal,
-        code.to_string(),
-        message,
-    ))
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct CompletedModeToolCall {
     pub index: usize,
@@ -79,7 +72,30 @@ pub(crate) struct CompletedModeToolCall {
     pub record: ToolCallRecord,
 }
 
+#[derive(Clone)]
+pub(crate) struct PreparedToolRun {
+    pub prepared: crate::PreparedToolCall,
+    pub index: usize,
+    pub effect_metadata: Option<crate::EffectInvocationMetadata>,
+    pub activity_id: TurnActivityId,
+}
+
 impl ModeExecutionContext<'_> {
+    fn prepared_tool_run(
+        &self,
+        prepared: crate::PreparedToolCall,
+        index: usize,
+        effect_metadata: Option<crate::EffectInvocationMetadata>,
+    ) -> PreparedToolRun {
+        let activity_id = TurnActivityId::new(format!("tool:{}", prepared.call_id));
+        PreparedToolRun {
+            prepared,
+            index,
+            effect_metadata,
+            activity_id,
+        }
+    }
+
     pub(crate) async fn execute_tool_call(
         &self,
         call_id: String,
@@ -121,67 +137,29 @@ impl ModeExecutionContext<'_> {
         let mut outcome =
             match prepare_tool_call_with_context(&dispatch, pending, Some(call_id.clone())).await {
                 ToolPreparationOutcome::Prepared(prepared) => {
-                    self.execute_prepared_tool_process(prepared, effect_metadata)
-                        .await
+                    let tool_context = crate::ToolContext::new(
+                        self.session_id.clone(),
+                        std::sync::Arc::clone(&dispatch.host),
+                        std::sync::Arc::clone(&dispatch.attachment_store),
+                        dispatch.direct_completions.clone(),
+                        Some(call_id.clone()),
+                    )
+                    .with_cancellation_token(self.cancellation_token.clone())
+                    .with_tool_effect_metadata(effect_metadata.clone());
+                    dispatch_prepared_tool_call_with_execution_context(
+                        &dispatch,
+                        prepared,
+                        None,
+                        tool_context,
+                    )
+                    .await
                 }
-                ToolPreparationOutcome::Completed(outcome) => outcome,
+                ToolPreparationOutcome::Completed(outcome) => *outcome,
             };
         outcome.record.call_id = Some(call_id.clone());
 
-        let output = outcome.record.output.clone();
-        let model_return = match self
-            .dispatch
-            .plugins
-            .project_tool_result(crate::plugin::ToolResultProjectionContext {
-                session_id: self.dispatch.session_id.clone(),
-                tool_name: outcome.record.tool.clone(),
-                args: outcome.record.args.clone(),
-                output: output.clone(),
-                duration_ms: outcome.record.duration_ms,
-                call_id: call_id.clone(),
-            })
+        self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
             .await
-        {
-            Ok(projected) => projected,
-            Err(err) => ModelToolReturn::text(
-                call_id.clone(),
-                outcome.record.tool.clone(),
-                err.to_string(),
-            ),
-        };
-        tokio::task::yield_now().await;
-        self.emit_turn_activity(
-            tool_correlation_id,
-            TurnEvent::ToolCallCompleted {
-                call_id: Some(call_id.clone()),
-                name: outcome.record.tool.clone(),
-                args: outcome.record.args.clone(),
-                output: output.clone(),
-                duration_ms: outcome.record.duration_ms,
-            },
-        )
-        .await;
-
-        let record = ToolCallRecord {
-            call_id: Some(call_id.clone()),
-            tool: outcome.record.tool.clone(),
-            args: outcome.record.args.clone(),
-            output: output.clone(),
-            duration_ms: outcome.record.duration_ms,
-        };
-        CompletedModeToolCall {
-            index,
-            completed: crate::sansio::CompletedToolCall {
-                call_id,
-                tool_name: outcome.record.tool,
-                args: outcome.record.args,
-                output,
-                model_return,
-                duration_ms: outcome.record.duration_ms,
-                replay,
-            },
-            record,
-        }
     }
 
     pub(crate) async fn prepare_tool_call(
@@ -212,6 +190,9 @@ impl ModeExecutionContext<'_> {
         let name = prepared.tool_name.clone();
         let args = prepared.args.clone();
         let replay = prepared.replay.clone();
+        let effect_metadata = effect_metadata.or_else(|| self.effect_metadata.clone());
+        let run = self.prepared_tool_run(prepared, index, effect_metadata);
+        let prepared = run.prepared.clone();
         let _ = self
             .dispatch
             .event_tx
@@ -221,7 +202,7 @@ impl ModeExecutionContext<'_> {
                 args: args.clone(),
             })
             .await;
-        let tool_correlation_id = TurnActivityId::new(format!("tool:{call_id}"));
+        let tool_correlation_id = run.activity_id.clone();
         self.emit_turn_activity(
             tool_correlation_id.clone(),
             TurnEvent::ToolCallStarted {
@@ -232,95 +213,57 @@ impl ModeExecutionContext<'_> {
         )
         .await;
 
-        let effect_metadata = effect_metadata.or_else(|| self.effect_metadata.clone());
-        let mut outcome = self
-            .execute_prepared_tool_process(prepared, effect_metadata)
-            .await;
+        let tool_context = crate::ToolContext::new(
+            self.session_id.clone(),
+            std::sync::Arc::clone(&self.dispatch.host),
+            std::sync::Arc::clone(&self.dispatch.attachment_store),
+            self.dispatch.direct_completions.clone(),
+            Some(call_id.clone()),
+        )
+        .with_cancellation_token(self.cancellation_token.clone())
+        .with_tool_effect_metadata(run.effect_metadata.clone());
+        let mut outcome = dispatch_prepared_tool_call_with_execution_context(
+            self.dispatch.as_ref(),
+            prepared,
+            None,
+            tool_context,
+        )
+        .await;
         outcome.record.call_id = Some(call_id.clone());
         tokio::task::yield_now().await;
 
-        self.complete_tool_call(index, call_id, replay, outcome, tool_correlation_id)
+        self.complete_tool_call(run.index, call_id, replay, outcome, tool_correlation_id)
             .await
     }
 
-    async fn execute_prepared_tool_process(
-        &self,
-        prepared: crate::PreparedToolCall,
-        effect_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> ToolDispatchOutcome {
-        let started = std::time::Instant::now();
-        let process_id = prepared.call_id.clone();
-        let tool_name = prepared.tool_name.clone();
-        let args = prepared.args.clone();
-        let registration = crate::ProcessRegistration::new(
-            process_id.clone(),
-            crate::ProcessInput::ToolCall { call: prepared },
-        );
-        let execution_context = crate::ProcessExecutionContext::default()
-            .with_tool_effect_metadata(effect_metadata.clone())
-            .with_wake_session_id(self.dispatch.session_id.clone());
-        let output = match self
-            .dispatch
-            .host
-            .start_process(
-                crate::ProcessStartRequest::new(
-                    &self.dispatch.session_id,
-                    registration,
-                    execution_context,
-                )
-                .with_scope(self.process_request_scope(effect_metadata.clone())),
-            )
-            .await
-        {
-            Ok(record) => match self
-                .await_foreground_tool_process(&record.id, effect_metadata)
-                .await
-            {
-                Ok(output) => output.into_tool_output(),
-                Err(err) => process_tool_failure("process_tool_await_failed", err.to_string()),
-            },
-            Err(err) => process_tool_failure("process_tool_start_failed", err.to_string()),
-        };
-        ToolDispatchOutcome {
-            record: ToolCallRecord {
-                call_id: Some(process_id),
-                tool: tool_name,
-                args,
-                output,
-                duration_ms: started.elapsed().as_millis() as u64,
-            },
-        }
-    }
-
-    async fn await_foreground_tool_process(
+    pub(super) async fn await_process_with_cancellation(
         &self,
         process_id: &str,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        if let Some(cancellation) = self.cancellation_token.clone() {
+        if let Some(cancellation) = cancellation {
             tokio::select! {
-                result = self.dispatch.host.await_process(
-                    crate::ProcessAwaitRequest::new(process_id)
-                        .with_scope(self.process_request_scope(effect_metadata.clone())),
+                result = self.dispatch.processes.await_process(
+                    process_id,
+                    self.process_scope(effect_metadata.clone()),
                 ) => result,
                 _ = cancellation.cancelled() => {
-                    let _ = self.dispatch.host.cancel_process(
-                        crate::ProcessCancelRequest::new(&self.dispatch.session_id, process_id)
-                            .with_scope(self.process_request_scope(effect_metadata.clone())),
+                    let _ = self.dispatch.processes.cancel(
+                        &self.dispatch.session_id,
+                        process_id,
+                        self.process_scope(effect_metadata.clone()),
                     ).await;
-                    self.dispatch.host.await_process(
-                        crate::ProcessAwaitRequest::new(process_id)
-                            .with_scope(self.process_request_scope(effect_metadata)),
+                    self.dispatch.processes.await_process(
+                        process_id,
+                        self.process_scope(effect_metadata),
                     ).await
                 }
             }
         } else {
             self.dispatch
-                .host
-                .await_process(
-                    crate::ProcessAwaitRequest::new(process_id)
-                        .with_scope(self.process_request_scope(effect_metadata)),
-                )
+                .processes
+                .await_process(process_id, self.process_scope(effect_metadata))
                 .await
         }
     }
@@ -399,13 +342,6 @@ impl ModeExecutionContext<'_> {
         args: serde_json::Value,
         index: usize,
     ) -> ModeToolReply {
-        if name == "list_process_handles" {
-            let live_processes = self.live_processes().await;
-            return self.list_process_handles(live_processes);
-        }
-        if name == "monitor" {
-            return self.start_monitor_handle_call(call_id, args, index).await;
-        }
         let executed = self
             .execute_tool_call(call_id, name, args, index, None, None)
             .await;
@@ -433,25 +369,22 @@ impl ModeExecutionContext<'_> {
         name: String,
         args: serde_json::Value,
     ) -> ModeToolReply {
-        if name == "monitor" {
-            return self.start_monitor_handle_call(call_id, args, 0).await;
-        }
         self.start_tool_process(call_id, name, args).await
     }
 
     pub async fn await_tool_handle(
         &self,
-        _call_id: String,
+        call_id: String,
         handle: serde_json::Value,
     ) -> ModeToolReply {
-        self.await_process_handle(handle).await
+        self.await_process_handle(call_id, handle).await
     }
 
     pub async fn cancel_tool_handle(
         &self,
-        _call_id: String,
+        call_id: String,
         handle: serde_json::Value,
     ) -> ModeToolReply {
-        self.cancel_process_handle(handle).await
+        self.cancel_process_handle(call_id, handle).await
     }
 }

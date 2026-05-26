@@ -71,129 +71,6 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         self.managed.inject_turn_input(session_id, input).await
     }
 
-    async fn start_process(
-        &self,
-        request: crate::ProcessStartRequest<'_>,
-    ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        self.processes
-            .start_process(
-                &self.current,
-                &self.managed,
-                Arc::new(self.clone()),
-                request,
-            )
-            .await
-    }
-
-    async fn await_process(
-        &self,
-        request: crate::ProcessAwaitRequest<'_>,
-    ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        self.processes.await_process(&self.current, request).await
-    }
-
-    async fn list_process_handles(
-        &self,
-        request: crate::ProcessListRequest<'_>,
-    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
-        self.processes
-            .list_process_handles(&self.current, request)
-            .await
-    }
-
-    async fn cancel_process(
-        &self,
-        request: crate::ProcessCancelRequest<'_>,
-    ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        self.processes
-            .cancel_process(
-                &self.current,
-                &self.managed,
-                Arc::new(self.clone()),
-                request,
-            )
-            .await
-    }
-
-    async fn cancel_all_processes(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
-        self.processes
-            .cancel_all_processes(
-                &self.current,
-                &self.managed,
-                Arc::new(self.clone()),
-                session_id,
-            )
-            .await
-    }
-
-    async fn validate_process_handles_visible(
-        &self,
-        session_id: &str,
-        handle_ids: &[String],
-    ) -> Result<(), crate::PluginError> {
-        self.processes
-            .validate_process_handles_visible(&self.current, &self.managed, session_id, handle_ids)
-            .await
-    }
-
-    async fn transfer_process_handles(
-        &self,
-        request: crate::ProcessTransferRequest<'_>,
-    ) -> Result<(), crate::PluginError> {
-        self.processes
-            .transfer_process_handles(&self.current, &self.managed, request)
-            .await
-    }
-
-    async fn cancel_unreferenced_process_handles(
-        &self,
-        request: crate::ProcessCleanupRequest<'_>,
-    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
-        self.processes
-            .cancel_unreferenced_process_handles(
-                &self.current,
-                &self.managed,
-                Arc::new(self.clone()),
-                request,
-            )
-            .await
-    }
-    async fn monitor_snapshot(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.processes
-            .monitor_snapshot(&self.current, Arc::new(self.clone()), session_id)
-            .await
-    }
-
-    async fn start_monitor(
-        &self,
-        session_id: &str,
-        spec: crate::MonitorSpec,
-    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.processes
-            .start_monitor(&self.current, Arc::new(self.clone()), session_id, spec)
-            .await
-    }
-
-    async fn stop_monitor(
-        &self,
-        session_id: &str,
-        monitor_id: &str,
-    ) -> Result<crate::MonitorSnapshot, crate::PluginError> {
-        self.processes
-            .stop_monitor(
-                &self.current,
-                Arc::new(self.clone()),
-                session_id,
-                monitor_id,
-            )
-            .await
-    }
     async fn append_session_nodes(
         &self,
         session_id: &str,
@@ -215,5 +92,129 @@ impl crate::plugin::RuntimeSessionHost for RuntimeSessionManager {
         event: lash_trace::TraceEvent,
     ) -> Result<(), crate::PluginError> {
         self.current.emit_trace_event(context, event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ProcessService for RuntimeSessionManager {
+    async fn start(
+        &self,
+        session_id: &str,
+        registration: crate::ProcessRegistration,
+        options: crate::ProcessStartOptions,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .start_process(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                registration,
+                options,
+                scope,
+            )
+            .await
+    }
+
+    async fn await_process(
+        &self,
+        process_id: &str,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
+        self.processes
+            .await_process(&self.current, process_id, scope)
+            .await
+    }
+
+    async fn list_visible(
+        &self,
+        session_id: &str,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
+        self.processes
+            .list_process_handles(&self.current, session_id, scope)
+            .await
+    }
+
+    async fn validate_visible(
+        &self,
+        session_id: &str,
+        handle_ids: &[String],
+    ) -> Result<(), crate::PluginError> {
+        self.processes
+            .validate_process_handles_visible(&self.current, &self.managed, session_id, handle_ids)
+            .await
+    }
+
+    async fn cancel(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessRecord, crate::PluginError> {
+        self.processes
+            .cancel_process(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                process_id,
+                scope,
+            )
+            .await
+    }
+
+    async fn cancel_all(
+        &self,
+        session_id: &str,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .cancel_all_processes(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                scope,
+            )
+            .await
+    }
+
+    async fn transfer(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<(), crate::PluginError> {
+        self.processes
+            .transfer_process_handles(
+                &self.current,
+                &self.managed,
+                from_session_id,
+                to_session_id,
+                process_ids,
+                scope,
+            )
+            .await
+    }
+
+    async fn cancel_unreferenced(
+        &self,
+        session_id: &str,
+        keep_process_ids: Vec<String>,
+        scope: crate::ProcessOpScope<'_>,
+    ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
+        self.processes
+            .cancel_unreferenced_process_handles(
+                &self.current,
+                &self.managed,
+                Arc::new(self.clone()),
+                session_id,
+                keep_process_ids,
+                scope,
+            )
+            .await
     }
 }

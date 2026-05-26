@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use lash_core::{ExecutionMode, ProviderHandle, SessionPolicy, SessionSpec};
+use lash_core::{ExecutionMode, ModelSpec, SessionPolicy, SessionSpec};
 
 pub const DEFAULT_EXPLORE_EXECUTION_MODE: &str = "rlm";
 
@@ -67,14 +67,14 @@ pub enum TierExecutionMode {
 /// registered through [`default_registry`].
 pub struct TierCapability {
     name: String,
-    model: Option<String>,
+    model: Option<ModelSpec>,
     execution_mode: TierExecutionMode,
 }
 
 impl TierCapability {
     pub fn new(
         name: impl Into<String>,
-        model: Option<String>,
+        model: Option<ModelSpec>,
         execution_mode: TierExecutionMode,
     ) -> Self {
         Self {
@@ -91,8 +91,8 @@ impl Capability for TierCapability {
     }
 
     fn resolve(&self, ctx: &CapabilityContext<'_>) -> SessionSpec {
-        let (model, variant) = pick_tier_model(self, ctx.parent_policy);
-        let mut spec = SessionSpec::inherit().model(model, variant);
+        let model = pick_tier_model(self, ctx.parent_policy);
+        let mut spec = SessionSpec::inherit().model(model);
         if let TierExecutionMode::Explicit(mode) = &self.execution_mode {
             spec = spec.mode(mode.clone());
         };
@@ -100,28 +100,11 @@ impl Capability for TierCapability {
     }
 }
 
-fn pick_tier_model(tier: &TierCapability, policy: &SessionPolicy) -> (String, Option<String>) {
+fn pick_tier_model(tier: &TierCapability, policy: &SessionPolicy) -> ModelSpec {
     if let Some(model) = &tier.model {
-        let variant = preferred_variant(&policy.provider, model, tier.name());
-        return (model.clone(), variant);
+        return model.clone();
     }
-    if let Some(selection) = policy.provider.default_agent_model(tier.name()) {
-        return (selection.model, selection.variant);
-    }
-    let model = policy.model.clone();
-    let variant = policy
-        .provider
-        .default_model_variant(&model)
-        .map(str::to_string)
-        .or_else(|| policy.model_variant.clone());
-    (model, variant)
-}
-
-fn preferred_variant(provider: &ProviderHandle, model: &str, tier_name: &str) -> Option<String> {
-    if provider.supported_variants(model).contains(&tier_name) {
-        return Some(tier_name.to_string());
-    }
-    provider.default_model_variant(model).map(str::to_string)
+    policy.model.clone()
 }
 
 /// Registry of named capabilities. Order is preserved so that the JSON
@@ -186,7 +169,7 @@ impl CapabilityRegistry {
 /// edits, recursion, anything the parent can do, in a fresh window.
 /// Interactive-only tools (`ask`, `showcase`, `plan_exit`) are stripped from every subagent surface regardless of
 /// capability — see `subagent_surface_contribution`.
-pub fn default_registry(tier_models: &BTreeMap<String, String>) -> CapabilityRegistry {
+pub fn default_registry(tier_models: &BTreeMap<String, ModelSpec>) -> CapabilityRegistry {
     let model_for = |name: &str| tier_models.get(name).cloned();
     let mut registry = CapabilityRegistry::new();
     registry.add(Arc::new(TierCapability::new(

@@ -1,3 +1,4 @@
+use crate::LinkedModule;
 use crate::ast::Program;
 
 use super::{ExecutionScratch, ProfileReport, ProjectedBindings, Record, RuntimeFailure, Value};
@@ -7,16 +8,18 @@ use thiserror::Error;
 
 #[derive(Clone, Debug)]
 pub enum AbilityOp {
-    CallTool { name: String, args: Record },
-    StartToolCall { name: String, args: Record },
+    ResourceOperation(ResourceOperation),
     Await(Value),
     Cancel(Value),
     Print(Value),
     Submit(Value),
     Finish(Value),
     Fail(Value),
-    StartProcess(ProcessBlockStart),
-    ProcessEvent(ProcessBlockEvent),
+    StartProcess(ProcessStart),
+    ProcessEvent(ProcessEvent),
+    ProcessSleep(ProcessSleep),
+    WaitSignal,
+    SignalRun(ProcessSignal),
 }
 
 #[derive(Clone, Debug)]
@@ -35,24 +38,48 @@ impl AbilityResult {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProcessBlockStart {
-    pub program: Program,
-    pub tool_names: Vec<String>,
-    pub name: Option<Value>,
-    pub timeout_ms: Option<Value>,
-    pub input: Option<Value>,
+pub struct ProcessStart {
+    pub module: Program,
+    pub linked_module: Option<LinkedModule>,
+    pub process: String,
+    pub args: Record,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResourceOperation {
+    pub receiver: Value,
+    pub operation: String,
+    pub args: Vec<Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessBlockEventKind {
+pub enum ProcessEventKind {
     Yield,
     Wake,
 }
 
 #[derive(Clone, Debug)]
-pub struct ProcessBlockEvent {
-    pub kind: ProcessBlockEventKind,
+pub struct ProcessEvent {
+    pub kind: ProcessEventKind,
     pub value: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessSleepKind {
+    For,
+    Until,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessSleep {
+    pub kind: ProcessSleepKind,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessSignal {
+    pub run: Value,
+    pub payload: Value,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -26,7 +26,7 @@ use control::{VmMode, VmStep};
 use effects::VmEffect;
 use lowered_loop::range_has_next;
 
-use super::host::{ExecutionMode, ProcessBlockEventKind};
+use super::host::{ExecutionMode, ProcessEventKind, ProcessSleepKind};
 use super::record::{Record, record_with_capacity};
 use super::schema::{
     ValidationPlan, compile_schema_value, execute_validate_builtin, execute_validation_plan,
@@ -572,12 +572,44 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::Submit)));
             }
+            Instruction::ProcessSleepFor => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
+                }
+                return Ok(Some(VmStep::Effect(VmEffect::ProcessSleep(
+                    ProcessSleepKind::For,
+                ))));
+            }
+            Instruction::ProcessSleepUntil => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
+                }
+                return Ok(Some(VmStep::Effect(VmEffect::ProcessSleep(
+                    ProcessSleepKind::Until,
+                ))));
+            }
+            Instruction::ProcessWaitSignal => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess {
+                        keyword: "wait signal",
+                    });
+                }
+                return Ok(Some(VmStep::Effect(VmEffect::WaitSignal)));
+            }
+            Instruction::ProcessSignalRun => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess {
+                        keyword: "signal run",
+                    });
+                }
+                return Ok(Some(VmStep::Effect(VmEffect::SignalRun)));
+            }
             Instruction::ProcessYield => {
                 if self.mode != VmMode::Process {
                     return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "yield" });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessBlockEventKind::Yield,
+                    ProcessEventKind::Yield,
                 ))));
             }
             Instruction::ProcessWake => {
@@ -585,7 +617,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "wake" });
                 }
                 return Ok(Some(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessBlockEventKind::Wake,
+                    ProcessEventKind::Wake,
                 ))));
             }
             Instruction::ProcessFinish => {
@@ -1017,30 +1049,52 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     self.ip = target;
                 }
             }
-            Instruction::CallTool { name, keys } => {
-                return Ok(VmStep::Effect(VmEffect::CallTool { name, keys }));
+            Instruction::ResourceCall { operation, argc } => {
+                return Ok(VmStep::Effect(VmEffect::ResourceCall { operation, argc }));
             }
-            Instruction::CallToolUnwrap { name, keys } => {
-                return Ok(VmStep::Effect(VmEffect::CallToolUnwrap { name, keys }));
-            }
-            Instruction::StartCallTool { name, keys } => {
-                return Ok(VmStep::Effect(VmEffect::StartCallTool { name, keys }));
-            }
-            Instruction::StartProcess {
-                block,
-                has_name,
-                has_timeout_ms,
-                has_input,
-            } => {
-                return Ok(VmStep::Effect(VmEffect::StartProcess {
-                    block,
-                    has_name,
-                    has_timeout_ms,
-                    has_input,
+            Instruction::ResourceCallUnwrap { operation, argc } => {
+                return Ok(VmStep::Effect(VmEffect::ResourceCallUnwrap {
+                    operation,
+                    argc,
                 }));
+            }
+            Instruction::StartProcess { process, keys } => {
+                return Ok(VmStep::Effect(VmEffect::StartProcess { process, keys }));
             }
             Instruction::AwaitHandle => {
                 return Ok(VmStep::Effect(VmEffect::AwaitHandle));
+            }
+            Instruction::ProcessSleepFor => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
+                }
+                return Ok(VmStep::Effect(VmEffect::ProcessSleep(
+                    ProcessSleepKind::For,
+                )));
+            }
+            Instruction::ProcessSleepUntil => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "sleep" });
+                }
+                return Ok(VmStep::Effect(VmEffect::ProcessSleep(
+                    ProcessSleepKind::Until,
+                )));
+            }
+            Instruction::ProcessWaitSignal => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess {
+                        keyword: "wait signal",
+                    });
+                }
+                return Ok(VmStep::Effect(VmEffect::WaitSignal));
+            }
+            Instruction::ProcessSignalRun => {
+                if self.mode != VmMode::Process {
+                    return Err(RuntimeError::ProcessControlOutsideProcess {
+                        keyword: "signal run",
+                    });
+                }
+                return Ok(VmStep::Effect(VmEffect::SignalRun));
             }
             Instruction::AwaitHandleUnwrap => {
                 return Ok(VmStep::Effect(VmEffect::AwaitHandleUnwrap));
@@ -1206,7 +1260,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "yield" });
                 }
                 return Ok(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessBlockEventKind::Yield,
+                    ProcessEventKind::Yield,
                 )));
             }
             Instruction::ProcessWake => {
@@ -1214,7 +1268,7 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
                     return Err(RuntimeError::ProcessControlOutsideProcess { keyword: "wake" });
                 }
                 return Ok(VmStep::Effect(VmEffect::ProcessEvent(
-                    ProcessBlockEventKind::Wake,
+                    ProcessEventKind::Wake,
                 )));
             }
             Instruction::ProcessFinish => {
@@ -1454,6 +1508,13 @@ impl<'a, H: ExecutionHost> Vm<'a, H> {
             record.insert_symbolized(name_entry.symbol, name_entry.text.clone(), value);
         }
         Ok(record)
+    }
+
+    fn drain_receiver_call(&mut self, argc: usize) -> Result<(Value, Vec<Value>), RuntimeError> {
+        let start = self.stack_drain_start(argc + 1)?;
+        let mut values = self.stack.drain(start..).collect::<Vec<_>>();
+        let receiver = values.remove(0);
+        Ok((receiver, values))
     }
 
     fn pop_n(&mut self, len: usize) -> Result<Vec<Value>, RuntimeError> {

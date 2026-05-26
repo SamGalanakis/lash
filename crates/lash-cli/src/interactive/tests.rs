@@ -7,9 +7,12 @@ use crate::ui_action::{UiAction, UiActionContext, UiActionOutcome, apply_ui_acti
 use lash::{TurnActivity, TurnActivityId, TurnActivitySink};
 use lash_core::SessionPolicy;
 
-async fn monitor_test_session() -> lash::LashSession {
+async fn process_test_session() -> lash::LashSession {
     lash::LashCore::standard()
-        .max_context_tokens(200_000)
+        .model(
+            lash::ModelSpec::from_token_limits("mock-model", None, 200_000, None, None)
+                .expect("valid model spec"),
+        )
         .build()
         .expect("core")
         .session("test-session-id")
@@ -193,42 +196,42 @@ fn manual_interrupt_prefers_queued_followup_over_interrupted_reprojection() {
 }
 
 #[tokio::test]
-async fn pending_monitor_wakes_inject_as_hidden_system_messages() {
+async fn pending_process_wakes_inject_as_hidden_system_messages() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let session = monitor_test_session().await;
-    app.queue_monitor_wake("Monitor event \"build\": done".into());
+    let session = process_test_session().await;
+    app.queue_process_wake("Process wake \"build\": done".into());
 
-    let injected = enqueue_pending_monitor_wakes(&mut app, &session)
+    let injected = enqueue_pending_process_wakes(&mut app, &session)
         .await
         .expect("inject wakes");
     assert_eq!(injected, 1);
-    assert!(!app.has_pending_monitor_wakes());
+    assert!(!app.has_pending_process_wakes());
 
-    app.recycle_unaccepted_monitor_wakes();
+    app.recycle_unaccepted_process_wakes();
     assert_eq!(
-        app.take_pending_monitor_wakes(),
-        vec!["Monitor event \"build\": done".to_string()]
+        app.take_pending_process_wakes(),
+        vec!["Process wake \"build\": done".to_string()]
     );
 }
 
 #[tokio::test]
-async fn accepted_monitor_wake_is_not_requeued_after_bridge_delivery() {
+async fn accepted_process_wake_is_not_requeued_after_bridge_delivery() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    let session = monitor_test_session().await;
-    app.queue_monitor_wake("Monitor event \"build\": done".into());
+    let session = process_test_session().await;
+    app.queue_process_wake("Process wake \"build\": done".into());
 
-    let injected = enqueue_pending_monitor_wakes(&mut app, &session)
+    let injected = enqueue_pending_process_wakes(&mut app, &session)
         .await
         .expect("inject wakes");
     assert_eq!(injected, 1);
-    let messages = vec![super::helpers::monitor_wake_message(
-        "Monitor event \"build\": done",
+    let messages = vec![super::helpers::process_wake_message(
+        "Process wake \"build\": done",
     )];
 
-    app.acknowledge_monitor_wakes(&messages);
-    app.recycle_unaccepted_monitor_wakes();
+    app.acknowledge_process_wakes(&messages);
+    app.recycle_unaccepted_process_wakes();
 
-    assert!(app.take_pending_monitor_wakes().is_empty());
+    assert!(app.take_pending_process_wakes().is_empty());
 }
 
 #[test]
@@ -280,13 +283,14 @@ fn copy_shortcut_accepts_plain_ctrl_c_for_selected_text_precedence() {
 }
 
 #[test]
-fn cleared_session_state_preserves_max_context_tokens() {
+fn cleared_session_state_preserves_model_spec() {
     let state = cleared_session_state(SessionPolicy {
-        max_context_tokens: Some(123_456),
+        model: lash_core::ModelSpec::from_token_limits("mock-model", None, 123_456, None, None)
+            .expect("valid model spec"),
         ..SessionPolicy::default()
     });
 
-    assert_eq!(state.policy.max_context_tokens, Some(123_456));
+    assert_eq!(state.policy.model.context_window_tokens(), 123_456);
 }
 
 #[test]

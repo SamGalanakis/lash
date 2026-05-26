@@ -7,7 +7,7 @@ use super::*;
 #[derive(Clone)]
 pub struct PluginHost {
     factories: Arc<Vec<Arc<dyn PluginFactory>>>,
-    processes_available: bool,
+    lashlang_abilities: lashlang::LashlangAbilities,
     sessions: Arc<StdMutex<BTreeMap<String, Weak<PluginSession>>>>,
 }
 
@@ -43,27 +43,26 @@ impl PluginHost {
         all_factories.extend(factories);
         Self {
             factories: Arc::new(all_factories),
-            processes_available: false,
+            lashlang_abilities: lashlang::LashlangAbilities::default(),
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    pub fn with_processes(mut self) -> Self {
-        self.processes_available = true;
-        self
-    }
-
-    pub fn with_processes_available(mut self, available: bool) -> Self {
-        self.processes_available = available;
+    pub fn with_lashlang_abilities(mut self, abilities: lashlang::LashlangAbilities) -> Self {
+        self.lashlang_abilities = abilities;
         self
     }
 
     pub fn isolated_registry(&self) -> Self {
         Self {
             factories: Arc::clone(&self.factories),
-            processes_available: self.processes_available,
+            lashlang_abilities: self.lashlang_abilities,
             sessions: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn lashlang_abilities(&self) -> lashlang::LashlangAbilities {
+        self.lashlang_abilities
     }
 
     pub fn factories(&self) -> &[Arc<dyn PluginFactory>] {
@@ -227,7 +226,7 @@ impl PluginHost {
             standard_context_approach: standard_context_approach.clone(),
             tool_access: authority.tool_access.clone(),
             subagent: authority.subagent.clone(),
-            processes_available: self.processes_available,
+            lashlang_abilities: self.lashlang_abilities,
             parent_session_id,
         };
         let session_id = ctx.session_id.clone();
@@ -240,23 +239,15 @@ impl PluginHost {
             reg.registering_plugin_id = None;
             plugins.push(plugin);
         }
-        let mode_session = reg
-            .mode_session
-            .take()
-            .ok_or_else(|| {
-                PluginError::Registration(format!(
-                    "missing mode session capability for {:?}",
-                    execution_mode
-                ))
-            })?
-            .hook;
-        let mode_native_tools = reg
-            .mode_native_tools
-            .into_iter()
-            .map(|entry| entry.hook)
-            .collect::<Vec<_>>();
-        let mode_protocol_driver = reg.mode_protocol_driver.take().map(|entry| entry.hook);
-        for provider in &mode_native_tools {
+        let mut contributions = reg.contributions;
+        let mode_session = contributions.mode_session.take().ok_or_else(|| {
+            PluginError::Registration(format!(
+                "missing mode session capability for {:?}",
+                execution_mode
+            ))
+        })?;
+        let mode_protocol_driver = contributions.mode_protocol_driver.take();
+        for provider in &contributions.mode_native_tools {
             for manifest in provider.tool_manifests() {
                 if !reg.tool_names.insert(manifest.name.clone()) {
                     return Err(PluginError::Registration(format!(
@@ -266,9 +257,18 @@ impl PluginHost {
                 }
             }
         }
-        let base_tools: Arc<dyn ToolProvider> = Arc::new(
-            crate::tool_provider::CompositeToolProvider::from_providers(reg.tool_providers.clone()),
-        );
+        contributions.mode_session = Some(mode_session);
+        contributions.mode_protocol_driver = mode_protocol_driver;
+        contributions
+            .turn_context_transforms
+            .sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        contributions
+            .history_rewriters
+            .sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let base_tools: Arc<dyn ToolProvider> =
+            Arc::new(crate::tool_provider::CompositeToolProvider::from_providers(
+                contributions.tool_providers.clone(),
+            ));
         let registry = match tool_snapshot {
             Some(snapshot) => Arc::new(
                 crate::ToolRegistry::from_tool_provider(base_tools)
@@ -298,34 +298,8 @@ impl PluginHost {
             tool_surface_overlay,
             tool_access: authority.tool_access,
             subagent: authority.subagent,
-            prompt_contributors: reg.prompt_contributors,
-            tool_surface_contributors: reg.tool_surface_contributors,
-            tool_discovery_contributors: reg.tool_discovery_contributors,
-            before_turn_hooks: reg.before_turn_hooks,
-            before_tool_call_hooks: reg.before_tool_call_hooks,
-            after_tool_call_hooks: reg.after_tool_call_hooks,
-            after_turn_hooks: reg.after_turn_hooks,
-            checkpoint_hooks: reg.checkpoint_hooks,
-            assistant_stream_hooks: reg.assistant_stream_hooks,
-            assistant_response_hooks: reg.assistant_response_hooks,
-            tool_result_projector: reg.tool_result_projector,
-            runtime_event_hooks: reg.runtime_event_hooks,
-            session_config_mutators: reg.session_config_mutators,
-            plugin_actions: reg.plugin_actions,
-            monitor_specs: reg.monitor_specs,
-            turn_context_transforms: {
-                let mut list = reg.turn_context_transforms;
-                list.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-                list.into_iter().map(|(_, t)| t).collect()
-            },
-            history_rewriters: {
-                let mut list = reg.history_rewriters;
-                list.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-                list.into_iter().map(|(_, r)| r).collect()
-            },
-            mode_session,
-            mode_native_tools,
-            mode_protocol_driver,
+            lashlang_abilities: self.lashlang_abilities,
+            contributions,
         });
         self.register_session(&session_id, &session)?;
         let ready = SessionReadyContext {
@@ -353,7 +327,14 @@ impl PluginHost {
             None,
         )?;
         session
-            .invoke_plugin_action(name, args, None, false, Arc::new(NoopSessionManager))
+            .invoke_plugin_action(
+                name,
+                args,
+                None,
+                false,
+                Arc::new(NoopSessionManager),
+                Arc::new(crate::UnavailableProcessService),
+            )
             .await
             .map_err(|err| PluginError::Invoke(err.to_string()))
     }
@@ -413,17 +394,18 @@ impl PluginHost {
         name: &str,
         args: serde_json::Value,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
     ) -> Result<ToolResult, PluginActionInvokeError> {
         let session = self.session(session_id)?;
         session
-            .invoke_plugin_action(name, args, Some(session_id.to_string()), false, host)
+            .invoke_plugin_action(
+                name,
+                args,
+                Some(session_id.to_string()),
+                false,
+                host,
+                processes,
+            )
             .await
-    }
-
-    pub fn monitor_specs_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<crate::PluginOwned<crate::MonitorSpec>>, PluginActionInvokeError> {
-        Ok(self.session(session_id)?.monitor_specs().to_vec())
     }
 }

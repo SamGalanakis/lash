@@ -22,7 +22,6 @@
 //!   their constructors, so the host can share one pool across every
 //!   materialized provider.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use lash_trace::{TraceContext, TraceLevel, TraceSink};
@@ -57,8 +56,8 @@ pub enum Residency {
 ///
 /// Cloning is cheap — every field is either `Arc`-wrapped or small.
 /// Default values build an embedded runtime without process lifecycle
-/// support. Hosts that want monitors, async handles, subagents, or
-/// process controls must provide a process registry explicitly.
+/// support. Hosts that want long-running tools, async handles, subagents,
+/// or process controls must provide a process registry explicitly.
 #[derive(Clone, Default)]
 pub struct RuntimeEnvironment {
     // Shared plugin infrastructure. Created once; every session's
@@ -124,7 +123,13 @@ impl RuntimeEnvironmentBuilder {
     pub fn with_process_registry(mut self, process_registry: Arc<dyn ProcessRegistry>) -> Self {
         self.env.process_registry = Some(process_registry);
         if let Some(host) = self.env.plugin_host.take() {
-            self.env.plugin_host = Some(Arc::new(host.as_ref().clone().with_processes()));
+            let abilities = super::builder::lashlang_abilities_for_process_registry(
+                host.lashlang_abilities(),
+                true,
+            );
+            self.env.plugin_host = Some(Arc::new(
+                host.as_ref().clone().with_lashlang_abilities(abilities),
+            ));
         }
         self
     }
@@ -173,11 +178,6 @@ impl RuntimeEnvironmentBuilder {
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
         self.env.core = self.env.core.with_prompt_layer(prompt);
-        self
-    }
-
-    pub fn with_trace_jsonl_path(mut self, path: Option<PathBuf>) -> Self {
-        self.env.core = self.env.core.with_trace_jsonl_path(path);
         self
     }
 
@@ -232,9 +232,9 @@ mod tests {
         let env = RuntimeEnvironment::builder()
             .with_attachment_store(Arc::clone(&attachment_store))
             .with_prompt_template(crate::default_prompt_template())
-            .with_trace_jsonl_path(Some(
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
                 std::env::temp_dir().join("lash-runtime-environment-builder-test.jsonl"),
-            ))
+            ))))
             .with_trace_level(TraceLevel::Extended)
             .with_trace_context(trace_context.clone())
             .with_termination(termination.clone())

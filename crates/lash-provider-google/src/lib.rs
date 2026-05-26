@@ -16,14 +16,20 @@ use lash_core::llm::types::{
     ProviderReasoningReplay, ProviderReplayMeta,
 };
 use lash_core::provider::{
-    AgentModelSelection, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
-    ProviderState, ProviderTransport, VariantRequestConfig,
+    ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions, ProviderState,
+    ProviderTransport, resolve_generation_policy,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
-    send_request,
+    build_http_client, header_pairs, read_response_text, request_body_snapshot,
+    response_start_timeout, send_request,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GoogleThinkingConfig {
+    Level { level: String },
+    Budget { budget_tokens: i32 },
+}
 
 pub mod oauth;
 
@@ -722,7 +728,7 @@ impl GoogleOAuthProvider {
                 status
             ))
             .with_status(status)
-            .with_headers(&headers)
+            .with_headers(header_pairs(&headers))
             .with_raw(body)
             .retryable(status == 429 || status >= 500));
         }
@@ -772,7 +778,7 @@ impl GoogleOAuthProvider {
                 status
             ))
             .with_status(status)
-            .with_headers(&headers)
+            .with_headers(header_pairs(&headers))
             .with_raw(body)
             .retryable(status == 429 || status >= 500));
         }
@@ -859,11 +865,12 @@ impl GoogleOAuthProvider {
         contents: Vec<Value>,
         project_id: Option<&str>,
     ) -> Value {
-        let max_output_tokens = provider
-            .options
-            .max_output_tokens
-            .filter(|v| *v > 0)
-            .unwrap_or(32_768);
+        let thinking_config = req
+            .model_variant
+            .as_deref()
+            .and_then(|variant| GoogleModelPolicy.thinking_config(&req.model, variant));
+        let policy =
+            resolve_generation_policy(&req.generation, &provider.options, 32_768, thinking_config);
         let mut request = json!({
             "model": req.model,
             "user_prompt_id": uuid::Uuid::new_v4().to_string(),
@@ -871,7 +878,7 @@ impl GoogleOAuthProvider {
                 "contents": contents,
                 "generationConfig": {
                     "temperature": 0,
-                    "maxOutputTokens": max_output_tokens,
+                    "maxOutputTokens": policy.max_output_tokens,
                 }
             }
         });
@@ -881,29 +888,26 @@ impl GoogleOAuthProvider {
         if let Some(session_id) = req.session_id.as_deref() {
             request["request"]["sessionId"] = json!(session_id);
         }
-        if let Some(variant) = req.model_variant.as_deref()
-            && let Some(config) = GoogleModelPolicy.request_variant_config(&req.model, variant)
-        {
+        if let Some(config) = policy.thinking {
             match config {
-                VariantRequestConfig::GoogleThinkingLevel { level } => {
+                GoogleThinkingConfig::Level { level } => {
                     let mut thinking_config = json!({
                         "thinkingLevel": level,
                     });
-                    if provider.options.thinking.expose {
+                    if policy.expose_thinking {
                         thinking_config["includeThoughts"] = json!(true);
                     }
                     request["request"]["generationConfig"]["thinkingConfig"] = thinking_config;
                 }
-                VariantRequestConfig::GoogleThinkingBudget { budget_tokens } => {
+                GoogleThinkingConfig::Budget { budget_tokens } => {
                     let mut thinking_config = json!({
                         "thinkingBudget": budget_tokens,
                     });
-                    if provider.options.thinking.expose {
+                    if policy.expose_thinking {
                         thinking_config["includeThoughts"] = json!(true);
                     }
                     request["request"]["generationConfig"]["thinkingConfig"] = thinking_config;
                 }
-                _ => {}
             }
         }
         if !req.tools.is_empty() {
@@ -998,7 +1002,7 @@ impl GoogleOAuthProvider {
             let mut err =
                 LlmTransportError::new(format!("Cloud Code request failed with {}", status))
                     .with_status(status)
-                    .with_headers(&headers)
+                    .with_headers(header_pairs(&headers))
                     .with_raw(body)
                     .retryable(status == 429 || status >= 500);
             if let Some(request_body) = request_body {
@@ -1138,7 +1142,7 @@ impl GoogleOAuthProvider {
             let mut err =
                 LlmTransportError::new(format!("Cloud Code loadCodeAssist failed with {}", status))
                     .with_status(status)
-                    .with_headers(&headers)
+                    .with_headers(header_pairs(&headers))
                     .with_raw(body)
                     .retryable(status == 429 || status >= 500);
             if let Some(request_body) = request_body {
@@ -1211,10 +1215,6 @@ impl ProviderState for GoogleOAuthProvider {
 }
 
 impl ProviderModelPolicy for GoogleModelPolicy {
-    fn default_model(&self) -> &str {
-        "gemini-3.1-pro-preview"
-    }
-
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         let lower = model.to_ascii_lowercase();
         if lower.contains("gemini-2.5") {
@@ -1227,15 +1227,10 @@ impl ProviderModelPolicy for GoogleModelPolicy {
             &[]
         }
     }
+}
 
-    fn default_model_variant(&self, model: &str) -> Option<&'static str> {
-        if self.supported_variants(model).is_empty() {
-            return None;
-        }
-        Some("high")
-    }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
+impl GoogleModelPolicy {
+    fn thinking_config(&self, model: &str, variant: &str) -> Option<GoogleThinkingConfig> {
         if !self.supported_variants(model).contains(&variant) {
             return None;
         }
@@ -1246,37 +1241,11 @@ impl ProviderModelPolicy for GoogleModelPolicy {
                 "max" => 24_576,
                 _ => return None,
             };
-            Some(VariantRequestConfig::GoogleThinkingBudget { budget_tokens })
+            Some(GoogleThinkingConfig::Budget { budget_tokens })
         } else {
-            Some(VariantRequestConfig::GoogleThinkingLevel {
+            Some(GoogleThinkingConfig::Level {
                 level: variant.to_string(),
             })
-        }
-    }
-
-    fn default_agent_model(&self, tier: &str) -> Option<AgentModelSelection> {
-        match tier {
-            "low" => Some(AgentModelSelection {
-                model: "gemini-3-flash-preview".to_string(),
-                variant: Some("low".to_string()),
-            }),
-            "medium" | "high" => Some(AgentModelSelection {
-                model: "gemini-3.1-pro-preview".to_string(),
-                variant: Some(if tier == "medium" { "medium" } else { "high" }.to_string()),
-            }),
-            _ => None,
-        }
-    }
-
-    fn resolve_model(&self, model: &str) -> String {
-        model.strip_prefix("google/").unwrap_or(model).to_string()
-    }
-
-    fn context_lookup_model(&self, model: &str) -> String {
-        if model.contains('/') {
-            model.to_string()
-        } else {
-            format!("google/{model}")
         }
     }
 }
@@ -1392,6 +1361,7 @@ impl ProviderFactory for GoogleOAuthProviderFactory {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     use super::*;
@@ -1408,6 +1378,7 @@ mod tests {
             session_id: None,
             output_spec: None,
             stream_events: None::<LlmEventSender>,
+            generation: lash_core::GenerationOptions::default(),
             provider_trace: None,
         }
     }
@@ -1530,15 +1501,23 @@ mod tests {
     }
 
     #[test]
-    fn max_output_tokens_uses_shared_options() {
+    fn output_token_cap_maps_to_max_output_tokens() {
         let provider =
             GoogleOAuthProvider::new("access", "refresh", 0).with_options(ProviderOptions {
-                max_output_tokens: Some(4096),
+                max_output_tokens: Some(9999),
                 ..ProviderOptions::default()
             });
 
-        let body = GoogleOAuthProvider::build_request(&provider, &request(None), Vec::new(), None);
+        let mut req = request(None);
+        req.generation.output_token_cap = NonZeroUsize::new(4096);
+        let body = GoogleOAuthProvider::build_request(&provider, &req, Vec::new(), None);
 
         assert_eq!(body["request"]["generationConfig"]["maxOutputTokens"], 4096);
+        let provider_limited =
+            GoogleOAuthProvider::build_request(&provider, &request(None), Vec::new(), None);
+        assert_eq!(
+            provider_limited["request"]["generationConfig"]["maxOutputTokens"],
+            9999
+        );
     }
 }

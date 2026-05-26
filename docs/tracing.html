@@ -37,8 +37,7 @@ let trace_sink: Arc&lt;dyn TraceSink&gt; = Arc::new(JsonlTraceSink::new("./.lash
 
 let core = LashCore::builder()
     .provider(provider)
-    .model(model, None)
-    .max_context_tokens(200_000)
+    .model(lash::ModelSpec::from_token_limits(model.clone(), None, 200_000, None, None).expect("valid model metadata"))
     .trace_sink(Some(trace_sink))
     .trace_level(TraceLevel::Extended)
     .build()?;</code></pre>

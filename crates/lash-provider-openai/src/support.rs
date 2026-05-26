@@ -14,13 +14,13 @@ pub(crate) use lash_core::llm::types::{
     LlmToolChoice, LlmUsage, ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 pub(crate) use lash_core::provider::{
-    AgentModelSelection, CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy,
-    ProviderOptions, ProviderState, ProviderTransport, VariantRequestConfig,
+    CacheRetention, ProviderComponents, ProviderFactory, ProviderModelPolicy, ProviderOptions,
+    ProviderState, ProviderTransport, resolve_generation_policy,
 };
 pub(crate) use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 pub(crate) use lash_llm_transport::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot_bytes, response_start_timeout,
-    send_request,
+    build_http_client, header_pairs, read_response_text, request_body_snapshot_bytes,
+    response_start_timeout, send_request,
 };
 pub(crate) use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,

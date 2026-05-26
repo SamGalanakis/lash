@@ -8,7 +8,6 @@ use crate::tool_dispatch::ToolDispatchContext;
 use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, ToolProvider};
 
 mod execution_context;
-mod process_handle_tools;
 pub(crate) mod process_handles;
 mod tool_execution;
 
@@ -297,11 +296,16 @@ impl Session {
                 resolve_contract: Some(Arc::clone(&resolve_contract)),
                 tool_access: self.plugins().tool_access().clone(),
                 subagent: self.plugins().subagent_context().cloned(),
+                lashlang_abilities: self.plugins().lashlang_abilities(),
             },
         )?);
         let input = crate::ModeBuildInput {
             mode: mode.clone(),
             tool_surface: Arc::clone(&surface),
+            lashlang_surface: execution_context::lashlang_surface_from_tool_surface(
+                &surface,
+                self.plugins().lashlang_abilities(),
+            ),
             extra_prompt_contributions: self.mode_extra_prompt_contributions(&mode),
         };
         let driver = self.plugins().mode_protocol_driver().unwrap_or_else(|| {
@@ -386,6 +390,7 @@ impl Session {
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         direct_completions: crate::DirectCompletionClient<'run>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
@@ -398,6 +403,7 @@ impl Session {
             tools: self.tools(),
             surface: self.tool_surface(session_id, self.execution_mode.clone())?,
             host,
+            processes,
             effect_controller,
             direct_completions: direct_completions.clone(),
             tool_effect_metadata: None,
@@ -411,6 +417,7 @@ impl Session {
             session_id.to_string(),
             self.execution_mode.clone(),
             dispatch,
+            self.plugins().lashlang_abilities(),
             Arc::clone(&self.services.attachment_store),
             chronological_projection,
             mode_extension,
