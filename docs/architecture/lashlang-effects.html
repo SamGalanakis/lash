@@ -19,7 +19,7 @@
 <body class="docs-page">
 <section class="opener">
     <h1 class="opener__title">lashlang<span class="slash">/</span>effects</h1>
-    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, resource operations, process handles, async fanout, builtins, and type literals.</p>
+    <p class="opener__lede">How Lashlang programs reach the outside: host-projected bindings, resource operations, process handles, triggers and schedules, async fanout, builtins, and type literals.</p>
   </section>
 
   <main class="body" id="content">
@@ -105,6 +105,29 @@ if !results.a.ok {
 submit {
   a: results.a.value,
   b: results.b.ok ? results.b.value : null
+}</code></pre>
+        </div>
+
+        <div class="section" id="triggers-and-schedules">
+          <div class="section-header">
+            <h2>Triggers And Schedules</h2>
+            <p>A module can also declare background entry points that activate without a foreground block. A <code>trigger</code> fires its body in response to a host resource event, bound as <code>on RESOURCE.event as name</code>; the bound name carries the event payload. A <code>schedule</code> runs its body on a cron cadence declared with <code>cron("…")</code> (with an optional <code>tz:</code>), and its bound name carries the tick payload. Both bodies typically <code>start</code> a process so the work itself is durable. As with every ability, triggers and schedules are advertised only when the linked <code>LashlangSurface</code> enables them. Trigger and cron-schedule <em>activation</em> is not wired yet — these declarations currently stop at parse/link/compile validation, so they are useful today for shaping and validating a workflow's static graph.</p>
+          </div>
+          <pre><code>type EmailInput = { source: "gmail" | "manual", message_id: string? }
+
+process triage(gmail: GMAIL, input: EmailInput) -> null {
+  msg = await gmail.get_message(input.message_id)?
+  finish msg
+}
+
+// Fire whenever the host emits a new-message event on the bound resource.
+trigger personal_mail on GMAIL.personal.new_message as event {
+  start triage(gmail: GMAIL.personal, input: { source: "gmail", message_id: event.message_id })
+}
+
+// Or run on a cron cadence; the bound `tick` carries the activation payload.
+schedule daily every cron("0 8 * * *", tz: "UTC") as tick {
+  start triage(gmail: GMAIL.personal, input: { source: "manual", message_id: tick.id })
 }</code></pre>
         </div>
 
