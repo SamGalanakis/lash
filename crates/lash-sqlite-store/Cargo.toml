@@ -22,8 +22,10 @@ rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 lash-sansio = { path = "../lash-sansio", version = "=0.1.0-alpha.9" }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

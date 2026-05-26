@@ -119,13 +119,13 @@ pub mod advanced {
     // preloaded state, event capture, plugin-stack presets, and graph seeding.
     // Do not expose runtime bridge internals here to fill that gap.
     pub use lash_core::{
-        AssembledTurn, DirectCompletionClient, DirectRequestSpec, EffectInvocationMetadata,
-        EffectOrigin, EmbeddedRuntimeHost, EventSink, ExecutionMode, InlineRuntimeEffectController,
-        LashRuntime, LlmAttachmentSpec, LlmRequestSpec, LocalProcessRegistry,
-        ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink, NoopTurnActivitySink,
-        PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor, ProcessHandleGrant,
-        ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, Residency, RewriteTrigger,
-        RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
+        AssembledTurn, DirectCompletionClient, DirectRequestSpec, DurableProcessWorker,
+        DurableProcessWorkerConfig, EffectInvocationMetadata, EffectOrigin, EmbeddedRuntimeHost,
+        EventSink, ExecutionMode, InlineRuntimeEffectController, LashRuntime, LlmAttachmentSpec,
+        LlmRequestSpec, ModeSessionExtensionHandle, ModeTurnOptions, NoopEventSink,
+        NoopTurnActivitySink, PersistentRuntimeServices, PluginMessage, ProcessHandleDescriptor,
+        ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistry, Residency,
+        RewriteTrigger, RuntimeCoreConfig, RuntimeEffectCommand, RuntimeEffectController,
         RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
         RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeEnvironment,
         RuntimeEnvironmentBuilder, RuntimeError, RuntimeErrorCode, RuntimeHandle,

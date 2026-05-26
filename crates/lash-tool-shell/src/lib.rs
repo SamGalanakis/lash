@@ -1344,6 +1344,7 @@ impl StandardShell {
         let mut timeout = deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
         let mut timed_out = false;
         let mut cancelled = false;
+        let mut line_sequence = 0u64;
 
         while !stdout_done || !stderr_done {
             let cancel_future = async {
@@ -1364,7 +1365,8 @@ impl StandardShell {
                 line = stdout_lines.next_line(), if !stdout_done => {
                     match line {
                         Ok(Some(line)) => {
-                            if let Err(err) = emit_monitor_line_event(context, params, line, true).await {
+                            line_sequence = line_sequence.saturating_add(1);
+                            if let Err(err) = emit_monitor_line_event(context, params, line, true, line_sequence).await {
                                 return monitor_failure("monitor_event_failed", err.to_string());
                             }
                         }
@@ -1375,7 +1377,8 @@ impl StandardShell {
                 line = stderr_lines.next_line(), if !stderr_done => {
                     match line {
                         Ok(Some(line)) => {
-                            if let Err(err) = emit_monitor_line_event(context, params, line, false).await {
+                            line_sequence = line_sequence.saturating_add(1);
+                            if let Err(err) = emit_monitor_line_event(context, params, line, false, line_sequence).await {
                                 return monitor_failure("monitor_event_failed", err.to_string());
                             }
                         }
@@ -1830,6 +1833,7 @@ async fn emit_monitor_line_event(
     params: &MonitorCommandParams,
     line: String,
     from_stdout: bool,
+    line_sequence: u64,
 ) -> Result<(), PluginError> {
     let message = line.trim().to_string();
     if message.is_empty() {
@@ -1838,7 +1842,6 @@ async fn emit_monitor_line_event(
     let mut payload = json!({
         "line": message,
         "stream": if from_stdout { "stdout" } else { "stderr" },
-        "timestamp": chrono::Utc::now().to_rfc3339(),
     });
     if from_stdout && params.wake_policy != MonitorWakePolicy::Notify {
         payload["wake_input"] = json!(format!(
@@ -1847,8 +1850,14 @@ async fn emit_monitor_line_event(
             payload["line"].as_str().unwrap_or_default()
         ));
     }
+    let idempotency_key = context
+        .async_process_id()
+        .map(|process_id| format!("monitor.line:{process_id}:{line_sequence}"));
     context
-        .emit_process_event("monitor.line", payload)
+        .emit_process_event_request(
+            lash_core::ProcessEventAppendRequest::new("monitor.line", payload)
+                .with_optional_idempotency_key(idempotency_key),
+        )
         .await
         .map(|_| ())
 }

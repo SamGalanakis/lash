@@ -13,8 +13,7 @@ use clap::Parser;
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, ExecutionMode, LocalProcessRegistry, ModeTurnOptions, TurnContext, TurnFinish,
-        TurnOutcome, TurnStop,
+        EventSink, ExecutionMode, ModeTurnOptions, TurnContext, TurnFinish, TurnOutcome, TurnStop,
     },
     plugins::{PluginSpec, StaticPluginFactory},
     prompt::{
@@ -34,7 +33,7 @@ use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::{RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt};
 use lash_provider_openai::OPENROUTER_BASE_URL;
 use lash_rlm_types::RlmTermination;
-use lash_sqlite_store::Store;
+use lash_sqlite_store::{SqliteProcessRegistry, Store};
 use lash_subagents::{CapabilityRegistry, StaticCapability, SubagentsPluginFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -646,7 +645,7 @@ async fn run_problem(
         .max_turns(args.max_turns)
         .prompt_template(frontier_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(SqliteProcessRegistry::memory()?))
         .plugins(build_plugin_stack(execution_mode.clone(), args))
         .build()?;
     let session = core

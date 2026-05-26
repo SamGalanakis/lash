@@ -64,11 +64,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lash_core::{
-    EffectInvocationMetadata, PluginError, ProcessAwaitOutput, ProcessCommand,
-    ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef, ProcessRecord,
-    ProcessRegistration, ProcessRegistry, RuntimeEffectCommand, RuntimeEffectController,
-    RuntimeEffectControllerError, RuntimeEffectControllerScope, RuntimeEffectEnvelope,
-    RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
+    DurableProcessWorker, EffectInvocationMetadata, PluginError, ProcessAwaitOutput,
+    ProcessCommand, ProcessEffectOutcome, ProcessExecutionContext, ProcessExternalRef,
+    ProcessRecord, ProcessRegistration, ProcessRegistry, RuntimeEffectCommand,
+    RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectControllerScope,
+    RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
+    RuntimeError,
 };
 use restate_sdk::context::{
     Context as RestateContext, ObjectContext, RunRetryPolicy, SharedObjectContext,
@@ -129,6 +130,47 @@ pub trait RestateProcessRunner: Send + Sync + 'static {
     ) -> Result<(), PluginError>;
 }
 
+#[derive(Clone)]
+pub struct RestateCoreProcessRunner {
+    worker: DurableProcessWorker,
+}
+
+impl RestateCoreProcessRunner {
+    pub fn new(worker: DurableProcessWorker) -> Self {
+        Self { worker }
+    }
+
+    pub fn worker(&self) -> &DurableProcessWorker {
+        &self.worker
+    }
+}
+
+#[async_trait::async_trait]
+impl RestateProcessRunner for RestateCoreProcessRunner {
+    async fn run_process(
+        &self,
+        registration: ProcessRegistration,
+        execution_context: ProcessExecutionContext,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
+        self.worker
+            .run_process(
+                registration,
+                execution_context,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+    }
+
+    async fn request_process_cancel(
+        &self,
+        request: RestateProcessCancelRequest,
+    ) -> Result<(), PluginError> {
+        self.worker
+            .request_process_cancel(&request.process_id, request.reason)
+            .await
+    }
+}
+
 #[restate_sdk::workflow]
 pub trait LashProcessWorkflow {
     async fn run(
@@ -148,11 +190,12 @@ pub struct RestateProcessWorkflowInput {
 
 pub struct LashProcessWorkflowImpl<R> {
     runner: Arc<R>,
+    registry: Arc<dyn ProcessRegistry>,
 }
 
 impl<R> LashProcessWorkflowImpl<R> {
-    pub fn new(runner: Arc<R>) -> Self {
-        Self { runner }
+    pub fn new(runner: Arc<R>, registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self { runner, registry }
     }
 }
 
@@ -165,15 +208,45 @@ where
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
     ) -> Result<ProcessAwaitOutput, PluginError> {
-        self.runner
+        let process_id = registration.id.clone();
+        let output = self
+            .runner
             .run_process(registration, execution_context)
-            .await
+            .await;
+        match output {
+            Ok(output) => {
+                self.registry
+                    .complete_process(&process_id, output.clone())
+                    .await?;
+                Ok(output)
+            }
+            Err(err) => {
+                let output = ProcessAwaitOutput::Failure {
+                    class: lash_core::ToolFailureClass::Execution,
+                    code: "restate_process_runner_failed".to_string(),
+                    message: err.to_string(),
+                    raw: None,
+                    control: None,
+                };
+                let _ = self.registry.complete_process(&process_id, output).await;
+                Err(err)
+            }
+        }
     }
 
     async fn cancel_registration(
         &self,
         request: RestateProcessCancelRequest,
     ) -> Result<(), PluginError> {
+        self.registry
+            .append_event(
+                &request.process_id,
+                lash_core::ProcessEventAppendRequest::cancel_requested(
+                    &request.process_id,
+                    request.reason.clone(),
+                ),
+            )
+            .await?;
         self.runner.request_process_cancel(request).await
     }
 }
@@ -580,6 +653,15 @@ where
                 .get_process(&process_id)
                 .await
                 .ok_or_else(|| PluginError::Session(format!("unknown process `{process_id}`")))?;
+            registry
+                .append_event(
+                    &process_id,
+                    lash_core::ProcessEventAppendRequest::cancel_requested(
+                        &process_id,
+                        reason.clone(),
+                    ),
+                )
+                .await?;
             context
                 .request_process_workflow_cancel(RestateProcessCancelRequest { process_id, reason })
                 .await
@@ -602,11 +684,14 @@ where
     C: RestateControllerContext<'ctx> + ?Sized,
 {
     let process_id = registration.id.clone();
-    registry.register_process(registration.clone()).await?;
+    let record = registry.register_process(registration.clone()).await?;
     if let Some(grant) = grant {
         registry
             .grant_handle(&grant.session_id, &process_id, grant.descriptor)
             .await?;
+    }
+    if record.external_ref.is_some() {
+        return Ok(record);
     }
     let invocation_id = context
         .start_process_workflow(registration, execution_context)
@@ -1458,12 +1543,12 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
         let runner = Arc::new(RecordingRunner::default());
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
         let endpoint = Endpoint::builder()
-            .bind(LashProcessWorkflowImpl::new(runner.clone()).serve())
+            .bind(LashProcessWorkflowImpl::new(runner.clone(), registry.clone()).serve())
             .build();
         let context = Arc::new(RecordingContext::with_endpoint(endpoint));
         let host = RestateRuntimeEffectController::new(context.clone());
-        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
         let registration = external_registration("task-smoke");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_session_id("wake-smoke")
@@ -1596,7 +1681,8 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_binds_to_restate_endpoint_and_discovers_handlers() {
         let runner = Arc::new(RecordingRunner::default());
-        let service = LashProcessWorkflowImpl::new(runner).serve();
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let service = LashProcessWorkflowImpl::new(runner, registry).serve();
         let discovery = discover_service(&service);
         let endpoint = Endpoint::builder().bind(service).build();
 
@@ -1672,8 +1758,13 @@ mod tests {
     #[tokio::test]
     async fn process_workflow_impl_runs_and_cancels_through_runner() {
         let runner = Arc::new(RecordingRunner::default());
-        let workflow = LashProcessWorkflowImpl::new(runner.clone());
+        let registry = Arc::new(lash_core::LocalProcessRegistry::default());
+        let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
         let registration = external_registration("task-workflow");
+        registry
+            .register_process(registration.clone())
+            .await
+            .expect("register workflow process");
         let execution_context = ProcessExecutionContext::default()
             .with_wake_session_id("wake-session")
             .with_tool_effect_metadata(Some(effect_metadata(

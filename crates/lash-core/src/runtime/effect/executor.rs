@@ -539,12 +539,16 @@ impl InlineRuntimeEffectController {
         execution_context: crate::ProcessExecutionContext,
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<ProcessRecord, PluginError> {
+        let already_registered = registry.get_process(&registration.id).await.is_some();
         let registration_for_record = registration.clone();
         let record = registry.register_process(registration_for_record).await?;
         if let Some(grant) = grant {
             registry
                 .grant_handle(&grant.session_id, &registration.id, grant.descriptor)
                 .await?;
+        }
+        if already_registered {
+            return Ok(record);
         }
         let process_id = registration.id.clone();
         let cancellation = CancellationToken::new();
@@ -589,7 +593,12 @@ impl InlineRuntimeEffectController {
         process_id: &str,
         reason: Option<String>,
     ) -> Result<ProcessRecord, PluginError> {
-        let _ = reason;
+        registry
+            .append_event(
+                process_id,
+                crate::ProcessEventAppendRequest::cancel_requested(process_id, reason.clone()),
+            )
+            .await?;
         let record = registry
             .get_process(process_id)
             .await

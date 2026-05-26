@@ -16,8 +16,7 @@ use dataset::{LongMemEvalQuestion, load_questions};
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, LocalProcessRegistry, SessionEvent, StandardContextApproach, TurnFinish,
-        TurnOutcome, TurnStop,
+        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
     plugins::{PluginSpec, StaticPluginFactory},
@@ -30,7 +29,7 @@ use lash_mode_rlm::RlmTurnInputExt;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
 use lash_provider_openai::OPENROUTER_BASE_URL;
-use lash_sqlite_store::Store;
+use lash_sqlite_store::{SqliteProcessRegistry, Store};
 use lash_subagents::SubagentsPluginFactory;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -608,7 +607,7 @@ async fn run_question(
         .model(model_spec.clone())
         .trace_jsonl_path(Some(trace_path.clone()))
         .prompt_template(prompt_template(args.prompt_profile, args.session_tools))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(SqliteProcessRegistry::memory()?))
         .plugins(build_plugin_stack(
             standard_context_approach.cloned(),
             args.session_tools,

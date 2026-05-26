@@ -90,11 +90,10 @@ impl RuntimeSessionManager {
         }
 
         let host = LashlangProcessHost {
-            manager: self.clone(),
             ctx,
             registry: Arc::clone(&registry),
             process_id: registration.id.clone(),
-            wake_session_id: execution_context.wake_session_id,
+            wake_target_scope_key: execution_context.wake_target_scope_key,
             cancellation: cancellation.clone(),
             sleep_sequence: AtomicU64::new(0),
             signal_sequence: tokio::sync::Mutex::new(0),
@@ -117,11 +116,10 @@ impl RuntimeSessionManager {
 }
 
 struct LashlangProcessHost<'run> {
-    manager: RuntimeSessionManager,
     ctx: crate::ModeExecutionContext<'run>,
     registry: Arc<dyn crate::ProcessRegistry>,
     process_id: String,
-    wake_session_id: Option<String>,
+    wake_target_scope_key: Option<String>,
     cancellation: tokio_util::sync::CancellationToken,
     sleep_sequence: AtomicU64,
     signal_sequence: tokio::sync::Mutex<u64>,
@@ -238,42 +236,17 @@ impl LashlangProcessHost<'_> {
             ::lashlang::ProcessEventKind::Yield => "process.yield",
             ::lashlang::ProcessEventKind::Wake => "process.wake",
         };
-        let event = self
-            .registry
+        self.registry
             .append_event(
                 &self.process_id,
-                event_type.to_string(),
-                crate::lashlang_bridge::process_event_payload(&event.value)?,
+                crate::ProcessEventAppendRequest::new(
+                    event_type,
+                    crate::lashlang_bridge::process_event_payload(&event.value)?,
+                )
+                .with_optional_wake_target_scope_key(self.wake_target_scope_key.clone()),
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
-        if let Some(wake) = event.semantics.wake.as_ref()
-            && self
-                .manager
-                .managed
-                .inject_turn_input(
-                    self.wake_session_id
-                        .as_deref()
-                        .unwrap_or_else(|| self.ctx.session_id()),
-                    crate::InjectedTurnInput {
-                        id: Some(format!(
-                            "process:{}:wake:{}",
-                            self.process_id, event.sequence
-                        )),
-                        message: crate::PluginMessage::text(
-                            crate::MessageRole::System,
-                            wake.input.clone(),
-                        ),
-                    },
-                )
-                .await
-                .is_ok()
-        {
-            self.registry
-                .ack_wake(&self.process_id, event.sequence)
-                .await
-                .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;
-        }
         Ok(())
     }
 
@@ -320,11 +293,13 @@ impl LashlangProcessHost<'_> {
         self.registry
             .append_event(
                 &target,
-                "process.signal".to_string(),
-                serde_json::json!({
-                    "payload": payload,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                }),
+                crate::ProcessEventAppendRequest::new(
+                    "process.signal",
+                    serde_json::json!({
+                        "payload": payload,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    }),
+                ),
             )
             .await
             .map_err(|err| ::lashlang::ExecutionHostError::new(err.to_string()))?;

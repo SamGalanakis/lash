@@ -18,10 +18,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
 http = "1"
 http-body-util = "0.1"
-lashlang = { path = "../lashlang", version = "=0.1.0-alpha.8" }
+lashlang = { path = "../lashlang", version = "=0.1.0-alpha.9" }

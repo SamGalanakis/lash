@@ -9,6 +9,7 @@ mod io;
 mod lifecycle;
 mod observation;
 mod process;
+mod process_worker;
 mod session_api;
 mod session_manager;
 mod session_ops;
@@ -87,14 +88,18 @@ use io::normalize_input_items;
 pub use observation::{RuntimeHandle, RuntimeObservation};
 pub use process::{
     LocalProcessRegistry, ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest,
-    ProcessCleanupRequest, ProcessEvent, ProcessEventSemantics, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessExecutionContext, ProcessExternalRef, ProcessHandleDescriptor,
-    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput, ProcessListRequest,
-    ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRequestScope, ProcessStartGrant,
-    ProcessStartRequest, ProcessTerminalSemantics, ProcessTerminalSpec, ProcessTerminalState,
-    ProcessTransferRequest, ProcessValueSelector, ProcessWake, ProcessWakeDedupeKey,
-    ProcessWakeSpec, lashlang_process_event_types,
+    ProcessCleanupRequest, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
+    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
+    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
+    ProcessListRequest, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRequestScope,
+    ProcessStartGrant, ProcessStartRequest, ProcessTerminalSemantics, ProcessTerminalSpec,
+    ProcessTerminalState, ProcessTransferRequest, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, current_epoch_ms,
+    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
+    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
+    require_event_idempotency, system_time_from_epoch_ms,
 };
+pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
 pub use state::{PersistedSessionSnapshot, RuntimeSessionState, SessionStateEnvelope};
 use state::{

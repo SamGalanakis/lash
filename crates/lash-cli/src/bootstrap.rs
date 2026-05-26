@@ -17,7 +17,7 @@ use lash::tools::{
 };
 use lash::tracing::TraceLevel;
 use lash::{ModelSpec, PluginStack, SessionSpec};
-use lash_core::{FileAttachmentStore, LocalProcessRegistry, PromptLayer, SessionPolicy, ToolState};
+use lash_core::{FileAttachmentStore, PromptLayer, SessionPolicy, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -610,13 +610,19 @@ pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    std::fs::create_dir_all(crate::paths::lash_home())?;
     let runtime_factory = CliSessionOpener::new(
         plugin_stack.clone(),
         prompt_layer,
         Arc::new(FileAttachmentStore::new(crate::paths::attachments_dir())),
         trace_path,
         trace_level,
-        Arc::new(LocalProcessRegistry::default()),
+        Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::open(
+                &crate::paths::lash_home().join("processes.db"),
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ),
     );
     let opened_session = runtime_factory
         .open(

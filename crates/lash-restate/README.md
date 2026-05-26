@@ -64,16 +64,18 @@ Background tasks are scheduled through the first-party
 use std::sync::Arc;
 
 use lash_restate::{
-    LashProcessWorkflow, LashProcessWorkflowImpl, RestateProcessRunner,
+    LashProcessWorkflow, LashProcessWorkflowImpl, RestateCoreProcessRunner,
 };
 use restate_sdk::prelude::Endpoint;
 
-fn endpoint<R>(runner: Arc<R>) -> restate_sdk::endpoint::Endpoint
-where
-    R: RestateProcessRunner,
+fn endpoint(
+    worker: lash_core::DurableProcessWorker,
+    registry: Arc<dyn lash_core::ProcessRegistry>,
+) -> restate_sdk::endpoint::Endpoint
 {
+    let runner = Arc::new(RestateCoreProcessRunner::new(worker));
     Endpoint::builder()
-        .bind(LashProcessWorkflowImpl::new(runner).serve())
+        .bind(LashProcessWorkflowImpl::new(runner, registry).serve())
         .build()
 }
 ```

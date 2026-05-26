@@ -11,6 +11,7 @@ use super::{
 /// Required host configuration for all runtimes.
 #[derive(Clone)]
 pub struct RuntimeCoreConfig {
+    pub host_profile_id: String,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub prompt: crate::PromptLayer,
     pub trace_sink: Option<Arc<dyn TraceSink>>,
@@ -23,6 +24,7 @@ pub struct RuntimeCoreConfig {
 impl Default for RuntimeCoreConfig {
     fn default() -> Self {
         Self {
+            host_profile_id: "default".to_string(),
             attachment_store: Arc::new(crate::InMemoryAttachmentStore::new()),
             prompt: crate::PromptLayer::new(),
             trace_sink: None,
@@ -40,6 +42,11 @@ impl RuntimeCoreConfig {
         attachment_store: Arc<dyn crate::AttachmentStore>,
     ) -> Self {
         self.attachment_store = attachment_store;
+        self
+    }
+
+    pub fn with_host_profile_id(mut self, host_profile_id: impl Into<String>) -> Self {
+        self.host_profile_id = host_profile_id.into();
         self
     }
 

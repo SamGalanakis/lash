@@ -55,13 +55,17 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use lash_core::{
     AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, BlobRef, GcReport,
-    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead,
-    RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
-    RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
-    RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint, RuntimeTurnLease,
-    SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta, SessionPickerInfo,
-    SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory, StoreError, VacuumReport,
-    ensure_supported_schema_version,
+    GraphCommitDelta, HydratedSessionCheckpoint, PersistedSessionRead, ProcessAwaitOutput,
+    ProcessEvent, ProcessEventAppendRequest, ProcessExternalRef, ProcessHandleDescriptor,
+    ProcessHandleGrant, ProcessHandleGrantEntry, ProcessRecord, ProcessRegistration,
+    ProcessRegistry, ProcessWakeDelivery, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
+    RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
+    RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeTurnCheckpoint,
+    RuntimeTurnLease, SessionCheckpoint, SessionHead, SessionHeadMeta, SessionMeta,
+    SessionPickerInfo, SessionReadScope, SessionStoreCreateRequest, SessionStoreFactory,
+    StoreError, VacuumReport, ensure_supported_schema_version, materialize_process_event_semantics,
+    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
+    require_event_idempotency, system_time_from_epoch_ms,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -73,8 +77,49 @@ pub struct Store {
     commit_count: AtomicU64,
 }
 
+/// SQLite-backed process registry for one configured runtime deployment.
+///
+/// This is intentionally separate from [`Store`]: session databases persist
+/// one conversation, while this registry persists background process state and
+/// handle visibility across all sessions in the same host profile.
+pub struct SqliteProcessRegistry {
+    conn: Mutex<Connection>,
+    notify: tokio::sync::Notify,
+}
+
 fn sqlite_error(err: rusqlite::Error) -> StoreError {
     StoreError::Backend(err.to_string())
+}
+
+fn process_sqlite_error(err: rusqlite::Error) -> lash_core::PluginError {
+    lash_core::PluginError::Session(err.to_string())
+}
+
+fn process_decode_error(err: serde_json::Error) -> lash_core::PluginError {
+    lash_core::PluginError::Session(format!("failed to decode process registry row: {err}"))
+}
+
+fn process_encode_json<T: serde::Serialize>(value: &T) -> Result<String, lash_core::PluginError> {
+    serde_json::to_string(value).map_err(|err| {
+        lash_core::PluginError::Session(format!("failed to encode process row: {err}"))
+    })
+}
+
+fn ensure_process_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if user_version == PROCESS_SCHEMA_VERSION {
+        conn.execute_batch(PROCESS_SCHEMA)?;
+        return Ok(());
+    }
+    if user_version == 0 && !has_user_schema_objects(conn)? {
+        conn.execute_batch(PROCESS_SCHEMA)?;
+        conn.pragma_update(None, "user_version", PROCESS_SCHEMA_VERSION)?;
+        return Ok(());
+    }
+    Err(rusqlite::Error::InvalidParameterName(
+        "Unsupported lash process registry schema. Delete the runtime process registry database and start fresh."
+            .to_string(),
+    ))
 }
 
 /// Canonical SQLite schema for a lash session database.
@@ -173,6 +218,63 @@ const SCHEMA_VERSION: i32 = 1;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
+
+const PROCESS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS processes (
+    process_id            TEXT PRIMARY KEY,
+    registration_hash     TEXT NOT NULL,
+    created_by_scope_key  TEXT NOT NULL,
+    host_profile_id       TEXT NOT NULL,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    record_json           TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS process_events (
+    process_id        TEXT NOT NULL,
+    sequence          INTEGER NOT NULL,
+    event_type        TEXT NOT NULL,
+    payload_hash      TEXT NOT NULL,
+    idempotency_key   TEXT,
+    occurred_at_ms    INTEGER NOT NULL,
+    event_json        TEXT NOT NULL,
+    PRIMARY KEY (process_id, sequence),
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_process_events_key
+    ON process_events(process_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS process_handle_grants (
+    session_id       TEXT NOT NULL,
+    process_id       TEXT NOT NULL,
+    descriptor_json  TEXT NOT NULL,
+    PRIMARY KEY (session_id, process_id),
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_handle_grants_process
+    ON process_handle_grants(process_id);
+
+CREATE TABLE IF NOT EXISTS process_wake_inbox (
+    wake_id           TEXT PRIMARY KEY,
+    target_scope_key  TEXT NOT NULL,
+    process_id        TEXT NOT NULL,
+    sequence          INTEGER NOT NULL,
+    dedupe_key        TEXT NOT NULL,
+    input             TEXT NOT NULL,
+    created_at_ms     INTEGER NOT NULL,
+    acknowledged_at_ms INTEGER,
+    UNIQUE (target_scope_key, dedupe_key),
+    FOREIGN KEY (process_id) REFERENCES processes(process_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_wake_inbox_target
+    ON process_wake_inbox(target_scope_key, acknowledged_at_ms, created_at_ms);
+";
+
+const PROCESS_SCHEMA_VERSION: i32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoreBacking {
@@ -635,6 +737,614 @@ fn merge_token_ledger_entries(
         }
     }
     merged
+}
+
+impl SqliteProcessRegistry {
+    pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        apply_pragmas(&conn, StoreBacking::File)?;
+        ensure_process_schema(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub fn memory() -> rusqlite::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        apply_pragmas(&conn, StoreBacking::Memory)?;
+        ensure_process_schema(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn load_process_conn(
+        conn: &Connection,
+        process_id: &str,
+    ) -> Result<Option<ProcessRecord>, lash_core::PluginError> {
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT record_json FROM processes WHERE process_id = ?1",
+                params![process_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(process_sqlite_error)?;
+        json.map(|json| serde_json::from_str(&json).map_err(process_decode_error))
+            .transpose()
+    }
+
+    fn save_process_conn(
+        conn: &Connection,
+        record: &ProcessRecord,
+    ) -> Result<(), lash_core::PluginError> {
+        conn.execute(
+            "UPDATE processes
+             SET updated_at_ms = ?2, record_json = ?3
+             WHERE process_id = ?1",
+            params![
+                &record.id,
+                record.updated_at_ms as i64,
+                process_encode_json(record)?
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
+
+    fn load_event_by_key_conn(
+        conn: &Connection,
+        process_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<(String, ProcessEvent)>, lash_core::PluginError> {
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT payload_hash, event_json
+                 FROM process_events
+                 WHERE process_id = ?1 AND idempotency_key = ?2",
+                params![process_id, idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(process_sqlite_error)?;
+        row.map(|(hash, json)| {
+            serde_json::from_str(&json)
+                .map(|event| (hash, event))
+                .map_err(process_decode_error)
+        })
+        .transpose()
+    }
+
+    fn insert_wake_conn(
+        conn: &Connection,
+        delivery: ProcessWakeDelivery,
+    ) -> Result<(), lash_core::PluginError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO process_wake_inbox (
+                wake_id, target_scope_key, process_id, sequence, dedupe_key, input, created_at_ms
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                delivery.wake_id,
+                delivery.target_scope_key,
+                delivery.process_id,
+                delivery.sequence as i64,
+                delivery.dedupe_key,
+                delivery.input,
+                delivery.created_at_ms as i64,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ProcessRegistry for SqliteProcessRegistry {
+    async fn register_process(
+        &self,
+        registration: ProcessRegistration,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let (registration, registration_hash) = prepare_process_registration(registration)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        if let Some(existing) = Self::load_process_conn(&tx, &registration.id)? {
+            if existing.registration_hash == registration_hash {
+                return Ok(existing);
+            }
+            return Err(lash_core::PluginError::Session(format!(
+                "process `{}` registration hash conflict: existing {}, new {}",
+                registration.id, existing.registration_hash, registration_hash
+            )));
+        }
+        let now = current_epoch_ms();
+        let record =
+            ProcessRecord::from_prepared_registration(registration, registration_hash, now);
+        tx.execute(
+            "INSERT INTO processes (
+                process_id, registration_hash, created_by_scope_key, host_profile_id,
+                created_at_ms, updated_at_ms, record_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &record.id,
+                &record.registration_hash,
+                &record.created_by_scope_key,
+                &record.host_profile_id,
+                record.created_at_ms as i64,
+                record.updated_at_ms as i64,
+                process_encode_json(&record)?,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        tx.commit().map_err(process_sqlite_error)?;
+        Ok(record)
+    }
+
+    async fn set_external_ref(
+        &self,
+        process_id: &str,
+        external_ref: ProcessExternalRef,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        let mut record = Self::load_process_conn(&tx, process_id)?.ok_or_else(|| {
+            lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
+        })?;
+        record.external_ref = Some(external_ref);
+        record.updated_at_ms = current_epoch_ms();
+        Self::save_process_conn(&tx, &record)?;
+        tx.commit().map_err(process_sqlite_error)?;
+        Ok(record)
+    }
+
+    async fn grant_handle(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        descriptor: ProcessHandleDescriptor,
+    ) -> Result<ProcessHandleGrant, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        if Self::load_process_conn(&conn, process_id)?.is_none() {
+            return Err(lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        conn.execute(
+            "INSERT INTO process_handle_grants (session_id, process_id, descriptor_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, process_id) DO UPDATE SET
+                descriptor_json = excluded.descriptor_json",
+            params![session_id, process_id, process_encode_json(&descriptor)?],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(ProcessHandleGrant {
+            session_id: session_id.to_string(),
+            process_id: process_id.to_string(),
+            descriptor,
+        })
+    }
+
+    async fn revoke_handle(
+        &self,
+        session_id: &str,
+        process_id: &str,
+    ) -> Result<(), lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM process_handle_grants WHERE session_id = ?1 AND process_id = ?2",
+            params![session_id, process_id],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
+
+    async fn transfer_handle_grants(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: &[String],
+    ) -> Result<(), lash_core::PluginError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        for process_id in process_ids {
+            let descriptor_json: Option<String> = tx
+                .query_row(
+                    "SELECT descriptor_json
+                     FROM process_handle_grants
+                     WHERE session_id = ?1 AND process_id = ?2",
+                    params![from_session_id, process_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(process_sqlite_error)?;
+            let Some(descriptor_json) = descriptor_json else {
+                return Err(lash_core::PluginError::Session(format!(
+                    "process handle `{process_id}` is not granted to session `{from_session_id}`"
+                )));
+            };
+            tx.execute(
+                "DELETE FROM process_handle_grants
+                 WHERE session_id = ?1 AND process_id = ?2",
+                params![from_session_id, process_id],
+            )
+            .map_err(process_sqlite_error)?;
+            tx.execute(
+                "INSERT INTO process_handle_grants (session_id, process_id, descriptor_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id, process_id) DO UPDATE SET
+                    descriptor_json = excluded.descriptor_json",
+                params![to_session_id, process_id, descriptor_json],
+            )
+            .map_err(process_sqlite_error)?;
+        }
+        tx.commit().map_err(process_sqlite_error)?;
+        Ok(())
+    }
+
+    async fn list_handle_grants(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT g.process_id, g.descriptor_json, p.record_json
+                 FROM process_handle_grants g
+                 JOIN processes p ON p.process_id = g.process_id
+                 WHERE g.session_id = ?1
+                 ORDER BY g.process_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(process_sqlite_error)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (process_id, descriptor_json, record_json) = row.map_err(process_sqlite_error)?;
+            let descriptor: ProcessHandleDescriptor =
+                serde_json::from_str(&descriptor_json).map_err(process_decode_error)?;
+            let record: ProcessRecord =
+                serde_json::from_str(&record_json).map_err(process_decode_error)?;
+            entries.push((
+                ProcessHandleGrant {
+                    session_id: session_id.to_string(),
+                    process_id,
+                    descriptor,
+                },
+                record,
+            ));
+        }
+        Ok(entries)
+    }
+
+    async fn handle_grants_for_process(
+        &self,
+        process_id: &str,
+    ) -> Result<Vec<ProcessHandleGrant>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        if Self::load_process_conn(&conn, process_id)?.is_none() {
+            return Err(lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, descriptor_json
+                 FROM process_handle_grants
+                 WHERE process_id = ?1
+                 ORDER BY session_id ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![process_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(process_sqlite_error)?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (session_id, descriptor_json) = row.map_err(process_sqlite_error)?;
+            let descriptor: ProcessHandleDescriptor =
+                serde_json::from_str(&descriptor_json).map_err(process_decode_error)?;
+            grants.push(ProcessHandleGrant {
+                session_id,
+                process_id: process_id.to_string(),
+                descriptor,
+            });
+        }
+        Ok(grants)
+    }
+
+    async fn append_event(
+        &self,
+        process_id: &str,
+        request: ProcessEventAppendRequest,
+    ) -> Result<ProcessEvent, lash_core::PluginError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(process_sqlite_error)?;
+        let mut record = Self::load_process_conn(&tx, process_id)?.ok_or_else(|| {
+            lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
+        })?;
+        let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
+        if let Some(idempotency_key) = request.idempotency_key.as_deref()
+            && let Some((existing_hash, existing)) =
+                Self::load_event_by_key_conn(&tx, process_id, idempotency_key)?
+        {
+            if existing_hash == payload_hash {
+                return Ok(existing);
+            }
+            return Err(lash_core::PluginError::Session(format!(
+                "process `{process_id}` event idempotency key `{idempotency_key}` conflicts with an existing event"
+            )));
+        }
+        let declared = record
+            .event_types
+            .iter()
+            .find(|declared| declared.name == request.event_type)
+            .ok_or_else(|| {
+                lash_core::PluginError::Session(format!(
+                    "process `{process_id}` emitted undeclared event type `{}`",
+                    request.event_type
+                ))
+            })?;
+        require_event_idempotency(process_id, &request, &declared.semantics)?;
+        declared
+            .payload_schema
+            .validate(&request.payload)
+            .map_err(|err| {
+                lash_core::PluginError::Session(format!(
+                    "invalid `{}` payload: {err}",
+                    request.event_type
+                ))
+            })?;
+        let sequence = tx
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM process_events WHERE process_id = ?1",
+                params![process_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(process_sqlite_error)? as u64;
+        let semantics = materialize_process_event_semantics(
+            process_id,
+            sequence,
+            &request.payload,
+            &declared.semantics,
+        )?;
+        if semantics.terminal.is_some() && record.terminal.is_some() {
+            return Err(lash_core::PluginError::Session(format!(
+                "process `{process_id}` is already terminal"
+            )));
+        }
+        let occurred_at_ms = current_epoch_ms();
+        let event = ProcessEvent {
+            process_id: process_id.to_string(),
+            sequence,
+            event_type: request.event_type,
+            payload: request.payload,
+            idempotency_key: request.idempotency_key.clone(),
+            semantics: semantics.clone(),
+            occurred_at: system_time_from_epoch_ms(occurred_at_ms),
+        };
+        tx.execute(
+            "INSERT INTO process_events (
+                process_id, sequence, event_type, payload_hash, idempotency_key,
+                occurred_at_ms, event_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                process_id,
+                sequence as i64,
+                &event.event_type,
+                &payload_hash,
+                event.idempotency_key.as_deref(),
+                occurred_at_ms as i64,
+                process_encode_json(&event)?,
+            ],
+        )
+        .map_err(process_sqlite_error)?;
+        if let Some(terminal) = event.semantics.terminal.clone() {
+            record.terminal = Some(terminal);
+        }
+        record.updated_at_ms = occurred_at_ms;
+        Self::save_process_conn(&tx, &record)?;
+        if let Some(wake) = semantics.wake
+            && let Some(target_scope_key) = request.wake_target_scope_key
+        {
+            let delivery = process_wake_delivery(
+                target_scope_key,
+                process_id.to_string(),
+                sequence,
+                wake,
+                event.occurred_at,
+            )?;
+            Self::insert_wake_conn(&tx, delivery)?;
+        }
+        tx.commit().map_err(process_sqlite_error)?;
+        self.notify.notify_waiters();
+        Ok(event)
+    }
+
+    async fn events_after(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<ProcessEvent>, lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        if Self::load_process_conn(&conn, process_id)?.is_none() {
+            return Err(lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}`"
+            )));
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_json FROM process_events
+                 WHERE process_id = ?1 AND sequence > ?2
+                 ORDER BY sequence ASC",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![process_id, after_sequence as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(process_sqlite_error)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(
+                serde_json::from_str(&row.map_err(process_sqlite_error)?)
+                    .map_err(process_decode_error)?,
+            );
+        }
+        Ok(events)
+    }
+
+    async fn wake_events_after(
+        &self,
+        process_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<ProcessEvent>, lash_core::PluginError> {
+        Ok(self
+            .events_after(process_id, after_sequence)
+            .await?
+            .into_iter()
+            .filter(|event| event.semantics.wake.is_some())
+            .collect())
+    }
+
+    async fn wait_event_after(
+        &self,
+        process_id: &str,
+        event_type: &str,
+        after_sequence: u64,
+    ) -> Result<ProcessEvent, lash_core::PluginError> {
+        loop {
+            if let Some(event) = self
+                .events_after(process_id, after_sequence)
+                .await?
+                .into_iter()
+                .find(|event| event.event_type == event_type)
+            {
+                return Ok(event);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn await_process(
+        &self,
+        process_id: &str,
+    ) -> Result<ProcessAwaitOutput, lash_core::PluginError> {
+        loop {
+            let record = self.get_process(process_id).await.ok_or_else(|| {
+                lash_core::PluginError::Session(format!("unknown process `{process_id}`"))
+            })?;
+            if let Some(terminal) = record.terminal {
+                return Ok(terminal.await_output);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn complete_process(
+        &self,
+        process_id: &str,
+        await_output: ProcessAwaitOutput,
+    ) -> Result<ProcessRecord, lash_core::PluginError> {
+        let event_type = match await_output.terminal_state() {
+            lash_core::ProcessTerminalState::Completed => "process.completed",
+            lash_core::ProcessTerminalState::Failed => "process.failed",
+            lash_core::ProcessTerminalState::Cancelled => "process.cancelled",
+        };
+        self.append_event(
+            process_id,
+            ProcessEventAppendRequest::new(
+                event_type,
+                serde_json::json!({ "await_output": await_output }),
+            )
+            .with_idempotency_key(format!("process:{process_id}:terminal:{event_type}")),
+        )
+        .await?;
+        self.get_process(process_id).await.ok_or_else(|| {
+            lash_core::PluginError::Session(format!(
+                "unknown process `{process_id}` after terminal event"
+            ))
+        })
+    }
+
+    async fn get_process(&self, process_id: &str) -> Option<ProcessRecord> {
+        let conn = self.conn.lock().ok()?;
+        Self::load_process_conn(&conn, process_id).ok().flatten()
+    }
+
+    async fn drain_wake_inputs(
+        &self,
+        target_scope_key: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessWakeDelivery>, lash_core::PluginError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT wake_id, target_scope_key, process_id, sequence, dedupe_key, input, created_at_ms
+                 FROM process_wake_inbox
+                 WHERE target_scope_key = ?1 AND acknowledged_at_ms IS NULL
+                 ORDER BY created_at_ms ASC, wake_id ASC
+                 LIMIT ?2",
+            )
+            .map_err(process_sqlite_error)?;
+        let rows = stmt
+            .query_map(params![target_scope_key, limit as i64], |row| {
+                Ok(ProcessWakeDelivery {
+                    wake_id: row.get(0)?,
+                    target_scope_key: row.get(1)?,
+                    process_id: row.get(2)?,
+                    sequence: row.get::<_, i64>(3)? as u64,
+                    dedupe_key: row.get(4)?,
+                    input: row.get(5)?,
+                    created_at_ms: row.get::<_, i64>(6)? as u64,
+                })
+            })
+            .map_err(process_sqlite_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(process_sqlite_error)
+    }
+
+    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE process_wake_inbox
+             SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?2)
+             WHERE wake_id = ?1",
+            params![wake_id, current_epoch_ms() as i64],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
+
+    async fn ack_wake(
+        &self,
+        process_id: &str,
+        sequence: u64,
+    ) -> Result<(), lash_core::PluginError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE process_wake_inbox
+             SET acknowledged_at_ms = COALESCE(acknowledged_at_ms, ?3)
+             WHERE process_id = ?1 AND sequence = ?2",
+            params![process_id, sequence as i64, current_epoch_ms() as i64],
+        )
+        .map_err(process_sqlite_error)?;
+        Ok(())
+    }
 }
 
 impl Store {
@@ -2045,4 +2755,242 @@ fn unsupported_schema_message() -> String {
      older databases must be deleted before opening. Delete the session database \
      and start fresh."
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lash_core::{
+        ProcessEventSemanticsSpec, ProcessInput, ProcessTerminalState, ProcessValueSelector,
+        ProcessWakeDedupeKey, ProcessWakeSpec,
+    };
+
+    fn registration(id: &str) -> ProcessRegistration {
+        ProcessRegistration::new(
+            id,
+            ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .with_provenance("runtime:session", "test-host")
+    }
+
+    fn monitor_line_event_type() -> lash_core::ProcessEventType {
+        let mut properties = serde_json::Map::new();
+        properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
+        properties.insert(
+            "wake_input".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+        lash_core::ProcessEventType {
+            name: "monitor.line".to_string(),
+            payload_schema: lash_core::LashSchema::object(properties, vec!["line".to_string()]),
+            semantics: ProcessEventSemanticsSpec {
+                wake: Some(ProcessWakeSpec {
+                    when: Some(ProcessValueSelector::Present("/wake_input".to_string())),
+                    input: ProcessValueSelector::Pointer("/wake_input".to_string()),
+                    dedupe_key: ProcessWakeDedupeKey::Selector(ProcessValueSelector::Pointer(
+                        "/line".to_string(),
+                    )),
+                }),
+                ..ProcessEventSemanticsSpec::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_process_registry_persists_rows_after_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("processes.db");
+        {
+            let registry = SqliteProcessRegistry::open(&path).expect("open registry");
+            registry
+                .register_process(registration("proc-persist"))
+                .await
+                .expect("register");
+            registry
+                .grant_handle(
+                    "runtime:session",
+                    "proc-persist",
+                    ProcessHandleDescriptor::new(Some("tool"), Some("demo")),
+                )
+                .await
+                .expect("grant");
+            registry
+                .complete_process(
+                    "proc-persist",
+                    ProcessAwaitOutput::Success {
+                        value: serde_json::json!({"ok": true}),
+                        control: None,
+                    },
+                )
+                .await
+                .expect("complete");
+        }
+
+        let registry = SqliteProcessRegistry::open(&path).expect("reopen registry");
+        let record = registry
+            .get_process("proc-persist")
+            .await
+            .expect("persisted process");
+
+        assert_eq!(record.created_by_scope_key, "runtime:session");
+        assert_eq!(
+            registry
+                .await_process("proc-persist")
+                .await
+                .expect("await persisted"),
+            ProcessAwaitOutput::Success {
+                value: serde_json::json!({"ok": true}),
+                control: None,
+            }
+        );
+        assert_eq!(
+            registry
+                .list_handle_grants("runtime:session")
+                .await
+                .expect("grants")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_process_registration_is_idempotent_and_hash_conflicts_fail() {
+        let registry = SqliteProcessRegistry::memory().expect("registry");
+        let first = registry
+            .register_process(registration("proc-idempotent"))
+            .await
+            .expect("first register");
+        let second = registry
+            .register_process(registration("proc-idempotent"))
+            .await
+            .expect("replay register");
+
+        assert_eq!(first.registration_hash, second.registration_hash);
+        assert!(
+            registry
+                .register_process(
+                    registration("proc-idempotent")
+                        .with_extra_event_types([monitor_line_event_type()]),
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_process_keyed_events_and_wake_inbox_are_durable() {
+        let registry = SqliteProcessRegistry::memory().expect("registry");
+        registry
+            .register_process(
+                registration("proc-wake").with_extra_event_types([monitor_line_event_type()]),
+            )
+            .await
+            .expect("register");
+        let request = ProcessEventAppendRequest::new(
+            "monitor.line",
+            serde_json::json!({
+                "line": "deploy failed",
+                "wake_input": "Monitor event: deploy failed",
+            }),
+        )
+        .with_idempotency_key("line:deploy failed")
+        .with_wake_target_scope_key("runtime:session");
+
+        let first = registry
+            .append_event("proc-wake", request.clone())
+            .await
+            .expect("append");
+        let second = registry
+            .append_event("proc-wake", request)
+            .await
+            .expect("replay append");
+
+        assert_eq!(first.sequence, second.sequence);
+        assert!(
+            registry
+                .append_event(
+                    "proc-wake",
+                    ProcessEventAppendRequest::new(
+                        "monitor.line",
+                        serde_json::json!({
+                            "line": "other",
+                            "wake_input": "Monitor event: other",
+                        }),
+                    )
+                    .with_idempotency_key("line:deploy failed"),
+                )
+                .await
+                .is_err()
+        );
+
+        let wakes = registry
+            .drain_wake_inputs("runtime:session", 10)
+            .await
+            .expect("drain wakes");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].input, "Monitor event: deploy failed");
+        registry
+            .ack_wake_input(&wakes[0].wake_id)
+            .await
+            .expect("ack wake");
+        assert!(
+            registry
+                .drain_wake_inputs("runtime:session", 10)
+                .await
+                .expect("drain after ack")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_process_terminal_and_cancel_events_require_keys() {
+        let registry = SqliteProcessRegistry::memory().expect("registry");
+        registry
+            .register_process(registration("proc-terminal"))
+            .await
+            .expect("register");
+
+        assert!(
+            registry
+                .append_event(
+                    "proc-terminal",
+                    ProcessEventAppendRequest::new(
+                        "process.cancel_requested",
+                        serde_json::json!({"reason": "stop"}),
+                    ),
+                )
+                .await
+                .is_err()
+        );
+        registry
+            .append_event(
+                "proc-terminal",
+                ProcessEventAppendRequest::cancel_requested(
+                    "proc-terminal",
+                    Some("stop".to_string()),
+                ),
+            )
+            .await
+            .expect("cancel intent");
+        registry
+            .complete_process(
+                "proc-terminal",
+                ProcessAwaitOutput::Cancelled {
+                    message: "stopped".to_string(),
+                    raw: None,
+                    control: None,
+                },
+            )
+            .await
+            .expect("complete cancelled");
+        assert_eq!(
+            registry
+                .get_process("proc-terminal")
+                .await
+                .and_then(|record| record.terminal.map(|terminal| terminal.state)),
+            Some(ProcessTerminalState::Cancelled)
+        );
+    }
 }

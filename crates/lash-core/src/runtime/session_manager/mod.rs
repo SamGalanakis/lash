@@ -199,6 +199,14 @@ impl UsageCapability {
 }
 
 impl RuntimeSessionManager {
+    pub(in crate::runtime) fn process_scope_key(&self, session_id: &str) -> String {
+        self.processes.process_scope_key(session_id)
+    }
+
+    pub(in crate::runtime) fn process_registry(&self) -> Option<Arc<dyn crate::ProcessRegistry>> {
+        self.current.host.process_registry.clone()
+    }
+
     pub(super) fn direct_completion_client<'run>(
         self: &Arc<Self>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,

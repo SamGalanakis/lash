@@ -17,6 +17,22 @@ impl RuntimeTurnDriver<'_> {
             .turn_input_injection_bridge()
             .drain()
             .map_err(|err| RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err))?;
+        let durable_wakes = if let Some(registry) = self.session_manager.process_registry() {
+            let scope_key = self.session_manager.process_scope_key(&self.session_id);
+            registry
+                .drain_wake_inputs(&scope_key, 256)
+                .await
+                .map_err(|err| {
+                    RuntimeError::new(RuntimeErrorCode::TurnInputInjectionBridge, err.to_string())
+                })?
+        } else {
+            Vec::new()
+        };
+        let mut injected = injected;
+        injected.extend(durable_wakes.iter().map(|wake| crate::InjectedTurnInput {
+            id: Some(wake.wake_id.clone()),
+            message: crate::PluginMessage::text(crate::MessageRole::System, wake.input.clone()),
+        }));
         let injected_messages = injected
             .iter()
             .map(|item| item.message.clone())
@@ -50,6 +66,19 @@ impl RuntimeTurnDriver<'_> {
                 },
             )
             .await;
+            if let Some(registry) = self.session_manager.process_registry() {
+                for wake in durable_wakes {
+                    registry
+                        .ack_wake_input(&wake.wake_id)
+                        .await
+                        .map_err(|err| {
+                            RuntimeError::new(
+                                RuntimeErrorCode::TurnInputInjectionBridge,
+                                err.to_string(),
+                            )
+                        })?;
+                }
+            }
         }
         committed.extend(applied.messages);
         emit_session_events(event_tx, applied.events).await;

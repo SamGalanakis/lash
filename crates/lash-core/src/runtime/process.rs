@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -73,6 +73,8 @@ pub struct ProcessExecutionContext {
     pub tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target_scope_key: Option<String>,
 }
 
 impl ProcessExecutionContext {
@@ -89,8 +91,15 @@ impl ProcessExecutionContext {
         self
     }
 
+    pub fn with_wake_target_scope_key(mut self, scope_key: impl Into<String>) -> Self {
+        self.wake_target_scope_key = Some(scope_key.into());
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.tool_effect_metadata.is_none() && self.wake_session_id.is_none()
+        self.tool_effect_metadata.is_none()
+            && self.wake_session_id.is_none()
+            && self.wake_target_scope_key.is_none()
     }
 }
 
@@ -449,6 +458,10 @@ pub struct ProcessRegistration {
     pub input: Arc<ProcessInput>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
+    #[serde(default)]
+    pub created_by_scope_key: String,
+    #[serde(default)]
+    pub host_profile_id: String,
 }
 
 impl Clone for ProcessRegistration {
@@ -457,6 +470,8 @@ impl Clone for ProcessRegistration {
             id: self.id.clone(),
             input: Arc::clone(&self.input),
             event_types: self.event_types.clone(),
+            created_by_scope_key: self.created_by_scope_key.clone(),
+            host_profile_id: self.host_profile_id.clone(),
         }
     }
 }
@@ -467,7 +482,19 @@ impl ProcessRegistration {
             id: id.into(),
             input: Arc::new(input),
             event_types: default_process_event_types(),
+            created_by_scope_key: String::new(),
+            host_profile_id: String::new(),
         }
+    }
+
+    pub fn with_provenance(
+        mut self,
+        created_by_scope_key: impl Into<String>,
+        host_profile_id: impl Into<String>,
+    ) -> Self {
+        self.created_by_scope_key = created_by_scope_key.into();
+        self.host_profile_id = host_profile_id.into();
+        self
     }
 
     pub fn with_event_types(
@@ -519,9 +546,18 @@ pub fn lashlang_process_event_types() -> Vec<ProcessEventType> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcessRecord {
     pub id: ProcessId,
+    pub registration_hash: String,
     pub input: Arc<ProcessInput>,
     #[serde(default)]
     pub event_types: Vec<ProcessEventType>,
+    #[serde(default)]
+    pub created_by_scope_key: String,
+    #[serde(default)]
+    pub host_profile_id: String,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<ProcessExternalRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -529,11 +565,29 @@ pub struct ProcessRecord {
 }
 
 impl ProcessRecord {
-    pub fn from_registration(registration: ProcessRegistration) -> Self {
+    pub fn from_registration(mut registration: ProcessRegistration) -> Self {
+        ensure_core_event_types(&mut registration);
+        validate_process_registration(&registration)
+            .expect("process registration should be valid before record construction");
+        let registration_hash = process_registration_hash(&registration)
+            .expect("process registration should hash before record construction");
+        Self::from_prepared_registration(registration, registration_hash, current_epoch_ms())
+    }
+
+    pub fn from_prepared_registration(
+        registration: ProcessRegistration,
+        registration_hash: String,
+        now_ms: u64,
+    ) -> Self {
         Self {
             id: registration.id,
+            registration_hash,
             input: registration.input,
             event_types: registration.event_types,
+            created_by_scope_key: registration.created_by_scope_key,
+            host_profile_id: registration.host_profile_id,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
             external_ref: None,
             terminal: None,
         }
@@ -559,8 +613,73 @@ pub struct ProcessEvent {
     pub sequence: u64,
     pub event_type: String,
     pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub semantics: ProcessEventSemantics,
     pub occurred_at: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessEventAppendRequest {
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_target_scope_key: Option<String>,
+}
+
+impl ProcessEventAppendRequest {
+    pub fn new(event_type: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            event_type: event_type.into(),
+            payload,
+            idempotency_key: None,
+            wake_target_scope_key: None,
+        }
+    }
+
+    pub fn with_idempotency_key(mut self, idempotency_key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(idempotency_key.into());
+        self
+    }
+
+    pub fn with_optional_idempotency_key(mut self, idempotency_key: Option<String>) -> Self {
+        self.idempotency_key = idempotency_key;
+        self
+    }
+
+    pub fn with_wake_target_scope_key(mut self, scope_key: impl Into<String>) -> Self {
+        self.wake_target_scope_key = Some(scope_key.into());
+        self
+    }
+
+    pub fn with_optional_wake_target_scope_key(mut self, scope_key: Option<String>) -> Self {
+        self.wake_target_scope_key = scope_key;
+        self
+    }
+
+    pub fn cancel_requested(process_id: &str, reason: Option<String>) -> Self {
+        let payload = serde_json::json!({
+            "reason": reason,
+        });
+        let idempotency_key = process_event_payload_hash("process.cancel_requested", &payload)
+            .unwrap_or_else(|_| format!("process:{process_id}:cancel_requested"));
+        Self::new("process.cancel_requested", payload).with_idempotency_key(format!(
+            "process:{process_id}:cancel_requested:{idempotency_key}"
+        ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessWakeDelivery {
+    pub wake_id: String,
+    pub target_scope_key: String,
+    pub process_id: ProcessId,
+    pub sequence: u64,
+    pub dedupe_key: String,
+    pub input: String,
+    pub created_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,8 +757,7 @@ pub trait ProcessRegistry: Send + Sync {
     async fn append_event(
         &self,
         process_id: &str,
-        event_type: String,
-        payload: serde_json::Value,
+        request: ProcessEventAppendRequest,
     ) -> Result<ProcessEvent, PluginError>;
 
     async fn events_after(
@@ -671,6 +789,14 @@ pub trait ProcessRegistry: Send + Sync {
 
     async fn get_process(&self, process_id: &str) -> Option<ProcessRecord>;
 
+    async fn drain_wake_inputs(
+        &self,
+        target_scope_key: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessWakeDelivery>, PluginError>;
+
+    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), PluginError>;
+
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError>;
 }
 
@@ -678,6 +804,7 @@ pub trait ProcessRegistry: Send + Sync {
 pub struct LocalProcessRegistry {
     managed: Arc<Mutex<ManagedProcessMap>>,
     grants: Arc<Mutex<ManagedGrantMap>>,
+    wake_inbox: Arc<Mutex<ManagedWakeInbox>>,
 }
 
 impl Default for LocalProcessRegistry {
@@ -685,16 +812,24 @@ impl Default for LocalProcessRegistry {
         Self {
             managed: Arc::new(Mutex::new(HashMap::new())),
             grants: Arc::new(Mutex::new(HashMap::new())),
+            wake_inbox: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 type ManagedProcessMap = HashMap<String, ManagedProcessRecord>;
 type ManagedGrantMap = HashMap<String, HashMap<String, ProcessHandleGrant>>;
+type ManagedWakeInbox = HashMap<String, ManagedWakeDelivery>;
+
+struct ManagedWakeDelivery {
+    delivery: ProcessWakeDelivery,
+    acked: bool,
+}
 
 struct ManagedProcessRecord {
     record: ProcessRecord,
     events: Vec<ProcessEvent>,
+    keyed_events: HashMap<String, (String, ProcessEvent)>,
     acked_wakes: HashSet<u64>,
     notify: Arc<tokio::sync::Notify>,
 }
@@ -706,20 +841,29 @@ impl LocalProcessRegistry {
     ) -> Result<ProcessRecord, PluginError> {
         ensure_core_event_types(&mut registration);
         validate_process_registration(&registration)?;
+        let registration_hash = process_registration_hash(&registration)?;
         let mut managed = self.managed.lock().await;
-        if managed.contains_key(&registration.id) {
+        if let Some(existing) = managed.get(&registration.id) {
+            if existing.record.registration_hash == registration_hash {
+                return Ok(existing.record.clone());
+            }
             return Err(PluginError::Session(format!(
-                "process `{}` is already registered",
-                registration.id
+                "process `{}` registration hash conflict: existing {}, new {}",
+                registration.id, existing.record.registration_hash, registration_hash
             )));
         }
         let id = registration.id.clone();
-        let record = ProcessRecord::from_registration(registration);
+        let record = ProcessRecord::from_prepared_registration(
+            registration,
+            registration_hash,
+            current_epoch_ms(),
+        );
         managed.insert(
             id.clone(),
             ManagedProcessRecord {
                 record: record.clone(),
                 events: Vec::new(),
+                keyed_events: HashMap::new(),
                 acked_wakes: HashSet::new(),
                 notify: Arc::new(tokio::sync::Notify::new()),
             },
@@ -749,6 +893,7 @@ impl ProcessRegistry for LocalProcessRegistry {
             )));
         };
         record.record.external_ref = Some(external_ref);
+        record.record.updated_at_ms = current_epoch_ms();
         Ok(record.record.clone())
     }
 
@@ -857,8 +1002,7 @@ impl ProcessRegistry for LocalProcessRegistry {
     async fn append_event(
         &self,
         process_id: &str,
-        event_type: String,
-        payload: serde_json::Value,
+        request: ProcessEventAppendRequest,
     ) -> Result<ProcessEvent, PluginError> {
         let mut managed = self.managed.lock().await;
         let Some(record) = managed.get_mut(process_id) else {
@@ -866,34 +1010,85 @@ impl ProcessRegistry for LocalProcessRegistry {
                 "unknown process `{process_id}`"
             )));
         };
+        let payload_hash = process_event_payload_hash(&request.event_type, &request.payload)?;
+        if let Some(idempotency_key) = request.idempotency_key.as_deref()
+            && let Some((existing_hash, existing)) = record.keyed_events.get(idempotency_key)
+        {
+            if existing_hash == &payload_hash {
+                return Ok(existing.clone());
+            }
+            return Err(PluginError::Session(format!(
+                "process `{process_id}` event idempotency key `{idempotency_key}` conflicts with an existing event"
+            )));
+        }
         let declared = record
             .record
             .event_types
             .iter()
-            .find(|declared| declared.name == event_type)
+            .find(|declared| declared.name == request.event_type)
             .ok_or_else(|| {
                 PluginError::Session(format!(
-                    "process `{process_id}` emitted undeclared event type `{event_type}`"
+                    "process `{process_id}` emitted undeclared event type `{}`",
+                    request.event_type
                 ))
             })?;
-        declared.payload_schema.validate(&payload).map_err(|err| {
-            PluginError::Session(format!("invalid `{event_type}` payload: {err}"))
-        })?;
+        require_event_idempotency(process_id, &request, &declared.semantics)?;
+        declared
+            .payload_schema
+            .validate(&request.payload)
+            .map_err(|err| {
+                PluginError::Session(format!("invalid `{}` payload: {err}", request.event_type))
+            })?;
         let sequence = record.events.len() as u64 + 1;
-        let semantics =
-            materialize_event_semantics(process_id, sequence, &payload, &declared.semantics)?;
+        let semantics = materialize_event_semantics(
+            process_id,
+            sequence,
+            &request.payload,
+            &declared.semantics,
+        )?;
+        if semantics.terminal.is_some() && record.record.terminal.is_some() {
+            return Err(PluginError::Session(format!(
+                "process `{process_id}` is already terminal"
+            )));
+        }
         let event = ProcessEvent {
             process_id: process_id.to_string(),
             sequence,
-            event_type,
-            payload,
-            semantics,
+            event_type: request.event_type,
+            payload: request.payload,
+            idempotency_key: request.idempotency_key.clone(),
+            semantics: semantics.clone(),
             occurred_at: SystemTime::now(),
         };
         if let Some(terminal) = event.semantics.terminal.clone() {
             record.record.terminal = Some(terminal);
         }
+        record.record.updated_at_ms = current_epoch_ms();
         record.events.push(event.clone());
+        if let Some(idempotency_key) = request.idempotency_key {
+            record
+                .keyed_events
+                .insert(idempotency_key, (payload_hash, event.clone()));
+        }
+        if let Some(wake) = semantics.wake
+            && let Some(target_scope_key) = request.wake_target_scope_key
+        {
+            let delivery = process_wake_delivery(
+                target_scope_key,
+                process_id.to_string(),
+                sequence,
+                wake,
+                event.occurred_at,
+            )?;
+            self.wake_inbox
+                .lock()
+                .await
+                .entry(delivery.wake_id.clone())
+                .or_insert(ManagedWakeDelivery {
+                    delivery,
+                    acked: false,
+                });
+        }
         record.notify.notify_waiters();
         Ok(event)
     }
@@ -1000,8 +1195,11 @@ impl ProcessRegistry for LocalProcessRegistry {
         };
         self.append_event(
             process_id,
-            event_type.to_string(),
-            serde_json::json!({ "await_output": await_output }),
+            ProcessEventAppendRequest::new(
+                event_type,
+                serde_json::json!({ "await_output": await_output }),
+            )
+            .with_idempotency_key(format!("process:{process_id}:terminal:{event_type}")),
         )
         .await?;
         self.get_process(process_id).await.ok_or_else(|| {
@@ -1016,6 +1214,36 @@ impl ProcessRegistry for LocalProcessRegistry {
         managed.get(process_id).map(|record| record.record.clone())
     }
 
+    async fn drain_wake_inputs(
+        &self,
+        target_scope_key: &str,
+        limit: usize,
+    ) -> Result<Vec<ProcessWakeDelivery>, PluginError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let wake_inbox = self.wake_inbox.lock().await;
+        let mut entries = wake_inbox
+            .values()
+            .filter(|entry| !entry.acked && entry.delivery.target_scope_key == target_scope_key)
+            .map(|entry| entry.delivery.clone())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.wake_id.cmp(&right.wake_id))
+        });
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
+    async fn ack_wake_input(&self, wake_id: &str) -> Result<(), PluginError> {
+        if let Some(entry) = self.wake_inbox.lock().await.get_mut(wake_id) {
+            entry.acked = true;
+        }
+        Ok(())
+    }
+
     async fn ack_wake(&self, process_id: &str, sequence: u64) -> Result<(), PluginError> {
         let mut managed = self.managed.lock().await;
         let Some(record) = managed.get_mut(process_id) else {
@@ -1024,12 +1252,123 @@ impl ProcessRegistry for LocalProcessRegistry {
             )));
         };
         record.acked_wakes.insert(sequence);
+        let mut wake_inbox = self.wake_inbox.lock().await;
+        for entry in wake_inbox.values_mut() {
+            if entry.delivery.process_id == process_id && entry.delivery.sequence == sequence {
+                entry.acked = true;
+            }
+        }
         Ok(())
     }
 }
 
+pub fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub fn system_time_from_epoch_ms(epoch_ms: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(epoch_ms)
+}
+
+pub fn epoch_ms_from_system_time(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub fn prepare_process_registration(
+    mut registration: ProcessRegistration,
+) -> Result<(ProcessRegistration, String), PluginError> {
+    ensure_core_event_types(&mut registration);
+    validate_process_registration(&registration)?;
+    let registration_hash = process_registration_hash(&registration)?;
+    Ok((registration, registration_hash))
+}
+
+pub fn process_registration_hash(
+    registration: &ProcessRegistration,
+) -> Result<String, PluginError> {
+    crate::stable_hash::stable_json_sha256_hex(registration).map_err(|err| {
+        PluginError::Session(format!(
+            "failed to hash process `{}` registration: {err}",
+            registration.id
+        ))
+    })
+}
+
+pub fn process_event_payload_hash(
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<String, PluginError> {
+    crate::stable_hash::stable_json_sha256_hex(&(event_type, payload)).map_err(|err| {
+        PluginError::Session(format!(
+            "failed to hash `{event_type}` process event: {err}"
+        ))
+    })
+}
+
+pub fn materialize_process_event_semantics(
+    process_id: &str,
+    sequence: u64,
+    payload: &serde_json::Value,
+    spec: &ProcessEventSemanticsSpec,
+) -> Result<ProcessEventSemantics, PluginError> {
+    materialize_event_semantics(process_id, sequence, payload, spec)
+}
+
+pub fn require_event_idempotency(
+    process_id: &str,
+    request: &ProcessEventAppendRequest,
+    spec: &ProcessEventSemanticsSpec,
+) -> Result<(), PluginError> {
+    let requires_key =
+        spec.terminal.is_some() || request.event_type.as_str() == "process.cancel_requested";
+    if requires_key && request.idempotency_key.as_deref().is_none_or(str::is_empty) {
+        return Err(PluginError::Session(format!(
+            "process `{process_id}` event `{}` requires a deterministic idempotency key",
+            request.event_type
+        )));
+    }
+    Ok(())
+}
+
+pub fn process_wake_delivery(
+    target_scope_key: String,
+    process_id: ProcessId,
+    sequence: u64,
+    wake: ProcessWake,
+    occurred_at: SystemTime,
+) -> Result<ProcessWakeDelivery, PluginError> {
+    let wake_id = crate::stable_hash::stable_json_sha256_hex(&(
+        target_scope_key.as_str(),
+        wake.dedupe_key.as_str(),
+    ))
+    .map_err(|err| {
+        PluginError::Session(format!(
+            "failed to hash wake delivery for process `{process_id}`: {err}"
+        ))
+    })?;
+    Ok(ProcessWakeDelivery {
+        wake_id: format!("wake:{wake_id}"),
+        target_scope_key,
+        process_id,
+        sequence,
+        dedupe_key: wake.dedupe_key,
+        input: wake.input,
+        created_at_ms: epoch_ms_from_system_time(occurred_at),
+    })
+}
+
 fn default_process_event_types() -> Vec<ProcessEventType> {
     vec![
+        ProcessEventType {
+            name: "process.cancel_requested".to_string(),
+            payload_schema: crate::LashSchema::any(),
+            semantics: ProcessEventSemanticsSpec::default(),
+        },
         terminal_event_type("process.completed", ProcessTerminalState::Completed),
         terminal_event_type("process.failed", ProcessTerminalState::Failed),
         terminal_event_type("process.cancelled", ProcessTerminalState::Cancelled),
@@ -1327,11 +1666,14 @@ mod tests {
         let event = registry
             .append_event(
                 "proc-1",
-                "monitor.line".to_string(),
-                serde_json::json!({
-                    "line": "deploy failed",
-                    "wake_input": "Monitor event: deploy failed"
-                }),
+                ProcessEventAppendRequest::new(
+                    "monitor.line",
+                    serde_json::json!({
+                        "line": "deploy failed",
+                        "wake_input": "Monitor event: deploy failed"
+                    }),
+                )
+                .with_wake_target_scope_key("scope-1"),
             )
             .await
             .expect("append");
@@ -1368,8 +1710,10 @@ mod tests {
             registry
                 .append_event(
                     "proc-1",
-                    "monitor.line".to_string(),
-                    serde_json::json!({ "wake_input": "missing required line" }),
+                    ProcessEventAppendRequest::new(
+                        "monitor.line",
+                        serde_json::json!({ "wake_input": "missing required line" }),
+                    ),
                 )
                 .await
                 .is_err()

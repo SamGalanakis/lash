@@ -422,7 +422,10 @@ pub(crate) async fn build_runtime_with_store(
         .default_mode(mode_id.clone())
         .provider(provider)
         .model(benchmark_model_spec())
-        .process_registry(Arc::new(lash::advanced::LocalProcessRegistry::default()))
+        .process_registry(Arc::new(
+            lash_sqlite_store::SqliteProcessRegistry::memory()
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        ))
         .plugins(plugin_stack);
     if scenario.execution_mode() == lash_core::ExecutionMode::new("rlm") {
         builder = builder.max_turns(RUNTIME_PERF_MAX_TURNS);

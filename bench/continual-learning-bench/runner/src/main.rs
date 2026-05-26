@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
-    advanced::{EventSink, LocalProcessRegistry, TurnFinish, TurnOutcome, TurnStop},
+    advanced::{EventSink, TurnFinish, TurnOutcome, TurnStop},
     persistence::{
         ModeEvent, RuntimePersistence, RuntimeSessionState, load_persisted_session_state,
     },
@@ -24,7 +24,7 @@ use lash_harness_opt::clbench::CLBENCH_MEMORY_GUIDANCE;
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::RlmTurnInputExt;
 use lash_rlm_types::RlmModeEvent;
-use lash_sqlite_store::Store;
+use lash_sqlite_store::{SqliteProcessRegistry, Store};
 use lash_subagents::{CapabilityRegistry, StaticCapability, SubagentsPluginFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,7 +113,7 @@ async fn run_query(request: RunnerRequest) -> Result<RunnerResponse> {
             CLBENCH_MEMORY_GUIDANCE,
         ))
         .trace_jsonl_path(request.trace_path.clone())
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(SqliteProcessRegistry::memory()?))
         .plugins(build_plugin_stack())
         .build()?;
 
@@ -383,7 +383,9 @@ mod tests {
                 )
                 .expect("valid model spec"),
             )
-            .process_registry(Arc::new(LocalProcessRegistry::default()))
+            .process_registry(Arc::new(
+                SqliteProcessRegistry::memory().expect("process registry"),
+            ))
             .plugins(build_plugin_stack())
             .build()
             .expect("core");

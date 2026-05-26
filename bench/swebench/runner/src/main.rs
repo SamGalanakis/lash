@@ -16,8 +16,7 @@ use dataset::{SweBenchInstance, load_instances};
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
     advanced::{
-        EventSink, LocalProcessRegistry, SessionEvent, StandardContextApproach, TurnFinish,
-        TurnOutcome, TurnStop,
+        EventSink, SessionEvent, StandardContextApproach, TurnFinish, TurnOutcome, TurnStop,
     },
     persistence::RuntimePersistence,
     plugins::BuiltinProcessControlsPluginFactory,
@@ -26,7 +25,7 @@ use lash::{
 };
 use lash_cli::config::LashConfig;
 use lash_llm_tools::LlmToolsPluginFactory;
-use lash_sqlite_store::Store;
+use lash_sqlite_store::{SqliteProcessRegistry, Store};
 use lash_standard_plugins::{StandardToolStackOptions, standard_tool_stack};
 use lash_subagents::{
     CapabilityRegistry, SubagentsPluginFactory, TierCapability, TierExecutionMode,
@@ -631,7 +630,7 @@ async fn run_instance(
         .model(model_spec)
         .max_turns(args.max_turns)
         .trace_jsonl_path(Some(trace_path.clone()))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(SqliteProcessRegistry::memory()?))
         .plugins(build_plugin_stack(standard_context_approach.cloned()))
         .build()?;
     let session = core

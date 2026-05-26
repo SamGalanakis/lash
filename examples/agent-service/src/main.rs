@@ -6,7 +6,7 @@ use axum::Router;
 use axum::routing::get;
 use lash::{
     LashCore, ModeId, ModePreset,
-    advanced::{InlineRuntimeEffectController, LocalProcessRegistry},
+    advanced::InlineRuntimeEffectController,
     provider::{ProviderHandle, ProviderOptions, ProviderThinkingPolicy},
     tracing::{JsonlTraceSink, TraceLevel, TraceRecord, TraceSink, TraceSinkError},
 };
@@ -127,11 +127,15 @@ async fn main() -> anyhow_like::Result<()> {
             ],
         })))
         .trace_level(TraceLevel::Extended);
+    let process_registry = Arc::new(
+        lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            .map_err(|err| err.to_string())?,
+    );
     let core = match durability {
         AgentServiceDurability::Local => core_builder
             .advanced()
             .effect_controller(Arc::new(InlineRuntimeEffectController::default()))
-            .process_registry(Arc::new(LocalProcessRegistry::default()))
+            .process_registry(process_registry)
             .build()
             .map_err(|err| err.to_string())?,
         AgentServiceDurability::Restate => {
@@ -139,7 +143,7 @@ async fn main() -> anyhow_like::Result<()> {
             {
                 core_builder
                     .advanced()
-                    .process_registry(Arc::new(LocalProcessRegistry::default()))
+                    .process_registry(process_registry)
                     .build()
                     .map_err(|err| err.to_string())?
             }

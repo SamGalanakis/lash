@@ -323,9 +323,9 @@ mod restate_tests {
     use crate::board::BoardState;
     use crate::db::AppDb;
     use crate::state::AgentServiceDurability;
-    use lash::advanced::LocalProcessRegistry;
     use lash::{LashCore, ModeId, ModePreset};
     use lash_core::LlmOutputPart;
+    use lash_core::LocalProcessRegistry;
     use lash_core::llm::types::LlmResponse;
 
     fn runtime_error(code: RuntimeErrorCode) -> lash::EmbedError {

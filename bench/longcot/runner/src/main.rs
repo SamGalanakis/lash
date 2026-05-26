@@ -14,10 +14,7 @@ use clap::Parser;
 use dataset::{LongCoTQuestion, load_questions};
 use lash::{
     LashCore, ModeId, ModePreset, PluginStack, SessionSpec, TurnInput,
-    advanced::{
-        EventSink, ExecutionMode, LocalProcessRegistry, TurnContext, TurnFinish, TurnOutcome,
-        TurnStop,
-    },
+    advanced::{EventSink, ExecutionMode, TurnContext, TurnFinish, TurnOutcome, TurnStop},
     plugins::{PluginSpec, StaticPluginFactory},
     prompt::{
         PromptBuiltin, PromptSlot, PromptTemplate, PromptTemplateEntry, PromptTemplateSection,
@@ -35,7 +32,7 @@ use lash_export::{ExportFormat, export};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_mode_rlm::{RlmModePluginConfig, RlmPromptFeatures, RlmTurnInputExt};
 use lash_provider_openai::OPENROUTER_BASE_URL;
-use lash_sqlite_store::Store;
+use lash_sqlite_store::{SqliteProcessRegistry, Store};
 use lash_subagents::{CapabilityRegistry, StaticCapability, SubagentsPluginFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -611,7 +608,7 @@ async fn run_question(
         .max_turns(args.max_turns)
         .prompt_template(longcot_prompt_template())
         .trace_jsonl_path(Some(trace_path.clone()))
-        .process_registry(Arc::new(LocalProcessRegistry::default()))
+        .process_registry(Arc::new(SqliteProcessRegistry::memory()?))
         .plugins(build_plugin_stack())
         .build()?;
     let session = core

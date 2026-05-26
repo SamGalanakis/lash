@@ -8,7 +8,7 @@ impl RuntimeSessionManager {
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
-        wake_session_id: Option<String>,
+        wake_target_scope_key: Option<String>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> crate::ProcessAwaitOutput {
         let result = self
@@ -17,7 +17,7 @@ impl RuntimeSessionManager {
                 registry,
                 call,
                 tool_effect_metadata,
-                wake_session_id,
+                wake_target_scope_key,
                 cancellation,
             )
             .await;
@@ -39,7 +39,7 @@ impl RuntimeSessionManager {
         registry: Arc<dyn crate::ProcessRegistry>,
         call: crate::PreparedToolCall,
         tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
-        wake_session_id: Option<String>,
+        wake_target_scope_key: Option<String>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<crate::ToolCallOutput, crate::PluginError> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::SessionEvent>(64);
@@ -84,7 +84,7 @@ impl RuntimeSessionManager {
             Some(call.call_id.clone()),
         )
         .with_async_process(registration.id.clone(), cancellation)
-        .with_process_events(registration.id.clone(), registry, wake_session_id)
+        .with_process_events(registration.id.clone(), registry, wake_target_scope_key)
         .with_tool_effect_metadata(tool_effect_metadata);
         let outcome = crate::tool_dispatch::dispatch_prepared_tool_call_with_execution_context(
             &dispatch,

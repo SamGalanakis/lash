@@ -22,7 +22,7 @@ impl ProcessCapability {
             session_id,
             registration,
             descriptor,
-            execution_context,
+            mut execution_context,
             scope,
         } = request;
         self.ensure_known_process_session(current, managed, &session_id)
@@ -33,6 +33,19 @@ impl ProcessCapability {
             ));
         };
         self.mark_current_process_sync_needed(current, &session_id);
+        let creator_scope_key = self.process_scope_key(&session_id);
+        let registration = registration.with_provenance(
+            creator_scope_key.clone(),
+            current.host.core.host_profile_id.clone(),
+        );
+        if execution_context.wake_target_scope_key.is_none() {
+            let wake_scope_key = execution_context
+                .wake_session_id
+                .as_deref()
+                .map(|session_id| self.process_scope_key(session_id))
+                .unwrap_or_else(|| creator_scope_key.clone());
+            execution_context = execution_context.with_wake_target_scope_key(wake_scope_key);
+        }
         let outcome = self
             .execute_process_effect(
                 current,
@@ -40,7 +53,7 @@ impl ProcessCapability {
                 crate::ProcessCommand::Start {
                     registration,
                     grant: descriptor.map(|descriptor| crate::ProcessStartGrant {
-                        session_id: self.process_scope_key(&session_id),
+                        session_id: creator_scope_key,
                         descriptor,
                     }),
                     execution_context: Box::new(execution_context),

@@ -51,7 +51,7 @@ pub struct ToolContext<'run> {
 pub(crate) struct ToolProcessEventContext {
     process_id: String,
     registry: Arc<dyn crate::ProcessRegistry>,
-    wake_session_id: Option<String>,
+    wake_target_scope_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -320,43 +320,26 @@ impl<'run> ToolContext<'run> {
         event_type: impl Into<String>,
         payload: serde_json::Value,
     ) -> Result<crate::ProcessEvent, PluginError> {
+        self.emit_process_event_request(crate::ProcessEventAppendRequest::new(event_type, payload))
+            .await
+    }
+
+    pub async fn emit_process_event_request(
+        &self,
+        request: crate::ProcessEventAppendRequest,
+    ) -> Result<crate::ProcessEvent, PluginError> {
         let Some(process) = self.process_events.as_ref() else {
             return Err(PluginError::Session(
                 "process event emission is unavailable outside a durable process".to_string(),
             ));
         };
-        let event = process
+        process
             .registry
-            .append_event(&process.process_id, event_type.into(), payload)
-            .await?;
-        if let Some(wake) = event.semantics.wake.as_ref()
-            && self
-                .host
-                .inject_turn_input(
-                    process
-                        .wake_session_id
-                        .as_deref()
-                        .unwrap_or(&self.session_id),
-                    crate::InjectedTurnInput {
-                        id: Some(format!(
-                            "process:{}:wake:{}",
-                            process.process_id, event.sequence
-                        )),
-                        message: crate::PluginMessage::text(
-                            crate::MessageRole::System,
-                            wake.input.clone(),
-                        ),
-                    },
-                )
-                .await
-                .is_ok()
-        {
-            process
-                .registry
-                .ack_wake(&process.process_id, event.sequence)
-                .await?;
-        }
-        Ok(event)
+            .append_event(
+                &process.process_id,
+                request.with_optional_wake_target_scope_key(process.wake_target_scope_key.clone()),
+            )
+            .await
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
@@ -408,12 +391,12 @@ impl<'run> ToolContext<'run> {
         mut self,
         process_id: impl Into<String>,
         registry: Arc<dyn crate::ProcessRegistry>,
-        wake_session_id: Option<String>,
+        wake_target_scope_key: Option<String>,
     ) -> Self {
         self.process_events = Some(ToolProcessEventContext {
             process_id: process_id.into(),
             registry,
-            wake_session_id,
+            wake_target_scope_key,
         });
         self
     }

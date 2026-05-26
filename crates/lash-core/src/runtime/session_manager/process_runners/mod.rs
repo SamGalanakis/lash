@@ -10,7 +10,8 @@ mod tool;
 mod tests {
     use super::*;
     use crate::runtime::tests::helpers::{
-        mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
+        MockCall, mock_provider, runtime_with_plugins, runtime_with_plugins_and_tools,
+        standard_test_policy,
     };
     use std::sync::Arc;
 
@@ -144,8 +145,10 @@ mod tests {
         registry
             .append_event(
                 process_id,
-                "probe.event".to_string(),
-                serde_json::json!({ "marker": process_id }),
+                crate::ProcessEventAppendRequest::new(
+                    "probe.event",
+                    serde_json::json!({ "marker": process_id }),
+                ),
             )
             .await
             .expect("append probe event");
@@ -164,6 +167,42 @@ mod tests {
             )
             .await
             .expect("grant handle");
+    }
+
+    fn worker_registration(registration: crate::ProcessRegistration) -> crate::ProcessRegistration {
+        registration.with_provenance("worker-runtime:root", "worker-profile")
+    }
+
+    fn process_worker(
+        registry: Arc<dyn crate::ProcessRegistry>,
+        factory: Arc<dyn crate::SessionStoreFactory>,
+    ) -> crate::DurableProcessWorker {
+        let tools: Arc<dyn crate::ToolProvider> = Arc::new(ProcessEchoTool);
+        let plugin_host =
+            crate::PluginHost::new(vec![Arc::new(crate::plugin::StaticPluginFactory::new(
+                "worker-test-tools",
+                crate::PluginSpec::new().with_tool_provider(tools),
+            ))]);
+        crate::DurableProcessWorker::new(
+            crate::DurableProcessWorkerConfig::new(
+                Arc::new(plugin_host),
+                crate::RuntimeCoreConfig::default().with_host_profile_id("worker-profile"),
+                factory,
+                registry,
+            )
+            .with_session_policy(standard_test_policy()),
+        )
+    }
+
+    fn successful_text_response(text: &str) -> crate::LlmResponse {
+        crate::LlmResponse {
+            full_text: text.to_string(),
+            parts: vec![crate::LlmOutputPart::Text {
+                text: text.to_string(),
+                response_meta: None,
+            }],
+            ..crate::LlmResponse::default()
+        }
     }
 
     #[derive(Clone, Default)]
@@ -192,6 +231,138 @@ mod tests {
                 .execute_effect(envelope, local_executor)
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn durable_process_worker_rebuilds_context_for_tool_lashlang_and_session_turn() {
+        let registry = Arc::new(crate::LocalProcessRegistry::default());
+        let registry_dyn = Arc::clone(&registry) as Arc<dyn crate::ProcessRegistry>;
+        let factory =
+            Arc::new(crate::runtime::tests::helpers::RecordingSessionStoreFactory::default());
+        let factory_dyn = Arc::clone(&factory) as Arc<dyn crate::SessionStoreFactory>;
+        let worker = process_worker(Arc::clone(&registry_dyn), factory_dyn);
+
+        let tool_registration = worker_registration(crate::ProcessRegistration::new(
+            "worker-tool",
+            crate::ProcessInput::ToolCall {
+                call: crate::PreparedToolCall::from_parts(
+                    "tool-call-1",
+                    "process_echo",
+                    serde_json::json!({ "value": "tool" }),
+                    None,
+                    serde_json::Value::Null,
+                ),
+            },
+        ));
+        registry_dyn
+            .register_process(tool_registration.clone())
+            .await
+            .expect("register tool process");
+        let tool_output = worker
+            .run_process(
+                tool_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run tool process");
+        assert!(matches!(
+            tool_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "payload": "raw:tool" })
+        ));
+
+        let mut args = serde_json::Map::new();
+        args.insert("value".to_string(), serde_json::json!("linked"));
+        let lashlang_registration = worker_registration(lashlang_process_registration(
+            "worker-lashlang",
+            ::lashlang::parse(
+                r#"
+                process main(value: str) {
+                  finish { value: value }
+                }
+                "#,
+            )
+            .expect("process module"),
+            args,
+        ));
+        let crate::ProcessInput::LashlangProcess { linked_module, .. } =
+            lashlang_registration.input.as_ref()
+        else {
+            panic!("expected lashlang process input");
+        };
+        let relink_without_process_abilities = ::lashlang::LinkedModule::link(
+            linked_module.program.clone(),
+            ::lashlang::LashlangSurface::new(
+                linked_module.surface.resources.clone(),
+                ::lashlang::LashlangAbilities::default(),
+            ),
+        )
+        .expect_err("current worker host abilities should not be required to relink");
+        assert!(
+            relink_without_process_abilities
+                .to_string()
+                .contains("lashlang feature `processes` is disabled by this host"),
+            "{relink_without_process_abilities}"
+        );
+        registry_dyn
+            .register_process(lashlang_registration.clone())
+            .await
+            .expect("register lashlang process");
+        let lashlang_output = worker
+            .run_process(
+                lashlang_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run lashlang process");
+        assert!(matches!(
+            lashlang_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value == serde_json::json!({ "value": "linked" })
+        ));
+
+        let child_policy = crate::SessionPolicy {
+            provider: mock_provider(vec![MockCall {
+                stream_events: Vec::new(),
+                response: Ok(successful_text_response("child done")),
+            }])
+            .into_handle(),
+            ..standard_test_policy()
+        };
+        let session_registration = worker_registration(crate::ProcessRegistration::new(
+            "worker-session",
+            crate::ProcessInput::SessionTurn {
+                create_request: Box::new(crate::SessionCreateRequest::child(
+                    "root",
+                    crate::SessionStartPoint::Empty,
+                    child_policy,
+                    crate::ModeExtras::default(),
+                    "worker-test",
+                )),
+                turn_input: Box::new(crate::TurnInput::text("run child")),
+                output_contract: crate::ToolOutputContract::Static,
+            },
+        ));
+        registry_dyn
+            .register_process(session_registration.clone())
+            .await
+            .expect("register session process");
+        let session_output = worker
+            .run_process(
+                session_registration,
+                crate::ProcessExecutionContext::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("run session process");
+        assert!(matches!(
+            session_output,
+            crate::ProcessAwaitOutput::Success { value, .. }
+                if value.get("turn").is_some()
+                    && value.get("child_session_id").and_then(serde_json::Value::as_str).is_some()
+        ));
     }
 
     #[tokio::test]
@@ -294,33 +465,15 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.event_type == "process.wake"
             && event.payload["text"] == serde_json::json!("raw:seed")));
-        assert!(
-            registry
-                .wake_events_after("process-1", 0)
-                .await
-                .expect("wake events")
-                .is_empty()
-        );
-        let child_runtime = manager
-            .managed
-            .registry
-            .lock()
+        let wakes = registry
+            .drain_wake_inputs(
+                &manager.processes.process_scope_key(&wake_target.session_id),
+                10,
+            )
             .await
-            .get(&wake_target.session_id)
-            .cloned()
-            .expect("wake target runtime");
-        let injected = child_runtime
-            .runtime
-            .lock()
-            .await
-            .session
-            .as_ref()
-            .expect("wake target session")
-            .turn_input_injection_bridge()
-            .drain()
-            .expect("injected input");
-        assert_eq!(injected.len(), 1);
-        assert_eq!(injected[0].message.content, "raw:seed");
+            .expect("durable wakes");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].input, "raw:seed");
     }
 
     #[tokio::test]
@@ -696,10 +849,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![other_scope]
         );
-        assert_eq!(
-            process_event_projection(&registry, &process_ids).await,
-            events_before
-        );
+        let events_after = process_event_projection(&registry, &process_ids).await;
+        assert_eq!(events_after[0], events_before[0]);
+        assert_eq!(events_after[2], events_before[2]);
+        assert!(events_after[1].1.iter().any(|(_, event_type, payload)| {
+            event_type == "process.cancel_requested"
+                && payload["reason"] == serde_json::json!("requested by host")
+        }));
     }
 
     #[tokio::test]
