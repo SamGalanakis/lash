@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::monitor::{MonitorSnapshot, MonitorSpec};
 use crate::runtime::{AssembledTurn, RuntimeSessionState};
 use crate::{
     ExecutionMode, MessageRole, ModeTurnOptions, SessionPolicy, ToolAvailability, ToolDefinition,
@@ -18,7 +17,6 @@ mod error;
 mod history;
 mod hooks;
 mod mode;
-mod monitor;
 mod registrar;
 mod registry;
 pub mod runtime_host;
@@ -28,7 +26,6 @@ mod session_obj;
 mod session_types;
 mod snapshot;
 mod surface;
-mod tool_result_projection_builtin;
 
 pub(crate) use actions::RegisteredPluginAction;
 pub use actions::{
@@ -57,17 +54,12 @@ pub use mode::{
     ModeProtocolDriverPlugin, ModeRuntimeContext, ModeSessionContext, ModeSessionPlugin,
     StandardCreateExtras,
 };
-pub use monitor::{
-    MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorStartOp, MonitorStatusOp, MonitorStopOp,
-    OwnedMonitorSpec, RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs,
-};
 pub use registrar::{
-    HistoryRegistrations, ModeRegistrations, MonitorRegistrations, OutputRegistrations,
-    PluginActionRegistrations, PluginRegistrar, PromptRegistrations, SessionRegistrations,
-    SurfaceRegistrations, ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations,
-    TurnRegistrations,
+    HistoryRegistrations, ModeRegistrations, OutputRegistrations, PluginActionRegistrations,
+    PluginRegistrar, PromptRegistrations, SessionRegistrations, SurfaceRegistrations,
+    ToolCallRegistrations, ToolRegistrations, ToolResultRegistrations, TurnRegistrations,
 };
-pub(crate) use registrar::{RegisteredExclusiveHook, RegisteredHook};
+pub(crate) use registrar::{PluginContributions, RegisteredHook};
 pub use registry::{
     PluginFactory, PluginSessionContext, PluginSpec, PluginSpecBuilder, PluginSpecFactory,
     SessionPlugin, SessionReadyContext, StaticPluginFactory,
@@ -96,18 +88,12 @@ pub use surface::{
     TurnPreparation,
 };
 pub(crate) use surface::{emit_plugin_runtime_events, plugin_runtime_session_events};
-pub use tool_result_projection_builtin::{
-    DEFAULT_TOOL_OUTPUT_BUDGET_LIMIT_BYTES, DEFAULT_TOOL_OUTPUT_BUDGET_MAX_LINES,
-    ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
-    observation_projection_metadata, project_observation_text, truncate_observation_text,
-};
-
 pub(crate) fn builtin_plugin_factories() -> Vec<Arc<dyn PluginFactory>> {
     // Mode plugins (`lash-mode-standard`, `lash-mode-rlm`) must be
     // registered by the embedder before calling `PluginHost::build_session`.
     // lash's own test suite uses an in-tree fake (`testing::test_mode_factories()`)
     // to avoid a dev-dep cycle through the mode crates.
-    let factories: Vec<Arc<dyn PluginFactory>> = vec![Arc::new(monitor::MonitorPluginFactory)];
+    let factories: Vec<Arc<dyn PluginFactory>> = Vec::new();
     #[cfg(not(test))]
     return factories;
 
@@ -309,6 +295,7 @@ mod tests {
                 None,
                 true,
                 Arc::new(MockSessionManager::default()),
+                Arc::new(crate::UnavailableProcessService),
             )
             .await
             .expect("invoke");
@@ -349,6 +336,7 @@ mod tests {
                 None,
                 true,
                 Arc::new(MockSessionManager::default()),
+                Arc::new(crate::UnavailableProcessService),
             )
             .await
             .expect("typed invoke");
@@ -428,6 +416,7 @@ mod tests {
                 None,
                 true,
                 Arc::new(MockSessionManager::default()),
+                Arc::new(crate::UnavailableProcessService),
             )
             .await
             .expect_err("raw output shape should not match typed output");
@@ -445,6 +434,7 @@ mod tests {
                 "mock.echo",
                 json!({"ok":true}),
                 Arc::new(MockSessionManager::default()),
+                Arc::new(crate::UnavailableProcessService),
             )
             .await
             .expect("invoke");
@@ -483,6 +473,7 @@ mod tests {
                 "mock.echo",
                 json!({"ok":true}),
                 Arc::new(MockSessionManager::default()),
+                Arc::new(crate::UnavailableProcessService),
             )
             .await
             .expect("invoke");

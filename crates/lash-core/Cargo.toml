@@ -34,10 +34,8 @@ async-trait = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 thiserror = { workspace = true }
-tempfile = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "query", "stream", "rustls"] }
 tokio-util = { workspace = true, features = ["rt"] }
 sha2 = { workspace = true }
 chrono = { workspace = true }

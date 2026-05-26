@@ -4,9 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use lash_core::{
-    ExecRequest, ExecResponse, ModeExecutionContext, SessionError, ToolOutputBudgetConfig,
-};
+use lash_core::{ExecRequest, ExecResponse, ModeExecutionContext, SessionError};
+use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
 use lashlang::{ExecutionOutcome, ExecutionScratch, State as FlowState};
 use serde_json::json;
 

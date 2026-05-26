@@ -100,6 +100,7 @@ pub fn plugin_action_def<Op: PluginAction>() -> PluginActionDef {
 pub struct PluginActionContext {
     pub session_id: Option<String>,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub processes: Arc<dyn crate::ProcessService>,
 }
 
 #[derive(Clone)]

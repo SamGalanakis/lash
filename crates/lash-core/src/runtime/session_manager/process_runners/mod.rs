@@ -465,25 +465,21 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    registration,
-                    crate::ProcessExecutionContext::default()
-                        .with_wake_session_id(wake_target.session_id.clone()),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("block"),
-                )),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_wake_session_id(wake_target.session_id.clone())
+                    .with_descriptor(crate::ProcessHandleDescriptor::new(
+                        Some("lashlang"),
+                        Some("block"),
+                    )),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
         let output = manager
             .processes
-            .await_process(
-                &manager.current,
-                crate::ProcessAwaitRequest::new("process-1"),
-            )
+            .await_process(&manager.current, "process-1", crate::ProcessOpScope::new())
             .await
             .expect("await process");
 
@@ -571,15 +567,12 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    registration,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("snapshot-parent"),
-                )),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("snapshot-parent")),
+                ),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
@@ -587,7 +580,8 @@ mod tests {
             .processes
             .await_process(
                 &manager.current,
-                crate::ProcessAwaitRequest::new("snapshot-parent"),
+                "snapshot-parent",
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("await process");
@@ -632,15 +626,12 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    target,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("target"),
-                )),
+                "root",
+                target,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("target")),
+                ),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start target");
@@ -670,15 +661,12 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    signaler,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("signaler"),
-                )),
+                "root",
+                signaler,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("signaler")),
+                ),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start signaler");
@@ -687,7 +675,8 @@ mod tests {
             .processes
             .await_process(
                 &manager.current,
-                crate::ProcessAwaitRequest::new("signal-sender"),
+                "signal-sender",
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("await signaler");
@@ -700,7 +689,8 @@ mod tests {
             .processes
             .await_process(
                 &manager.current,
-                crate::ProcessAwaitRequest::new("signal-target"),
+                "signal-target",
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("await target");
@@ -747,15 +737,12 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessStartRequest::new(
-                    "root",
-                    registration,
-                    crate::ProcessExecutionContext::default(),
-                )
-                .with_descriptor(crate::ProcessHandleDescriptor::new(
-                    Some("lashlang"),
-                    Some("fail"),
-                )),
+                "root",
+                registration,
+                crate::ProcessStartOptions::new().with_descriptor(
+                    crate::ProcessHandleDescriptor::new(Some("lashlang"), Some("fail")),
+                ),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("start process");
@@ -763,7 +750,8 @@ mod tests {
             .processes
             .await_process(
                 &manager.current,
-                crate::ProcessAwaitRequest::new("process-fail"),
+                "process-fail",
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("await process");
@@ -854,7 +842,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", vec!["keep".to_string()]),
+                "root",
+                vec!["keep".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("cancel unreferenced handles");
@@ -926,7 +916,7 @@ mod tests {
             turn_checkpoint_hash: Some("0".repeat(64)),
         };
         let scoped_request = || {
-            crate::ProcessRequestScope::new()
+            crate::ProcessOpScope::new()
                 .with_effect_metadata(Some(metadata.clone()))
                 .with_effect_controller(&controller)
         };
@@ -940,12 +930,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new(
-                    "root",
-                    "successor",
-                    vec!["transfer-me".to_string()],
-                )
-                .with_scope(scoped_request()),
+                "root",
+                "successor",
+                vec!["transfer-me".to_string()],
+                scoped_request(),
             )
             .await
             .expect("transfer handles");
@@ -966,8 +954,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", Vec::<String>::new())
-                    .with_scope(scoped_request()),
+                "root",
+                Vec::<String>::new(),
+                scoped_request(),
             )
             .await
             .expect("cleanup handles");
@@ -995,7 +984,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new("root", "successor", Vec::<String>::new()),
+                "root",
+                "successor",
+                Vec::<String>::new(),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect("empty transfer remains a no-op");
@@ -1021,11 +1013,10 @@ mod tests {
             .transfer_process_handles(
                 &manager.current,
                 &manager.managed,
-                crate::ProcessTransferRequest::new(
-                    "root",
-                    "successor",
-                    vec!["missing".to_string()],
-                ),
+                "root",
+                "successor",
+                vec!["missing".to_string()],
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("transfer should fail");
@@ -1041,7 +1032,9 @@ mod tests {
                 &manager.current,
                 &manager.managed,
                 Arc::new(manager.clone()),
-                crate::ProcessCleanupRequest::new("root", Vec::<String>::new()),
+                "root",
+                Vec::<String>::new(),
+                crate::ProcessOpScope::new(),
             )
             .await
             .expect_err("cleanup should fail");

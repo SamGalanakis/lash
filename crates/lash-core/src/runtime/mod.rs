@@ -89,17 +89,16 @@ pub use observation::{RuntimeHandle, RuntimeObservation};
 #[cfg(any(test, feature = "testing"))]
 pub use process::TestLocalProcessRegistry;
 pub use process::{
-    ProcessAwaitOutput, ProcessAwaitRequest, ProcessCancelRequest, ProcessCleanupRequest,
-    ProcessCreatorScope, ProcessEvent, ProcessEventAppendRequest, ProcessEventSemantics,
-    ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry, ProcessId, ProcessInput,
-    ProcessListRequest, ProcessRecord, ProcessRegistration, ProcessRegistry, ProcessRequestScope,
-    ProcessStartGrant, ProcessStartRequest, ProcessTerminalSemantics, ProcessTerminalSpec,
-    ProcessTerminalState, ProcessTransferRequest, ProcessValueSelector, ProcessWake,
-    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, current_epoch_ms,
-    epoch_ms_from_system_time, lashlang_process_event_types, materialize_process_event_semantics,
-    prepare_process_registration, process_event_payload_hash, process_wake_delivery,
-    require_event_idempotency, system_time_from_epoch_ms,
+    ProcessAwaitOutput, ProcessCreatorScope, ProcessEvent, ProcessEventAppendRequest,
+    ProcessEventSemantics, ProcessEventSemanticsSpec, ProcessEventType, ProcessExecutionContext,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessHandleGrantEntry,
+    ProcessId, ProcessInput, ProcessOpScope, ProcessRecord, ProcessRegistration, ProcessRegistry,
+    ProcessService, ProcessStartGrant, ProcessStartOptions, ProcessTerminalSemantics,
+    ProcessTerminalSpec, ProcessTerminalState, ProcessValueSelector, ProcessWake,
+    ProcessWakeDedupeKey, ProcessWakeDelivery, ProcessWakeSpec, UnavailableProcessService,
+    current_epoch_ms, epoch_ms_from_system_time, lashlang_process_event_types,
+    materialize_process_event_semantics, prepare_process_registration, process_event_payload_hash,
+    process_wake_delivery, require_event_idempotency, system_time_from_epoch_ms,
 };
 pub use process_worker::{DurableProcessWorker, DurableProcessWorkerConfig};
 pub use session_manager::DirectCompletionClient;
@@ -753,15 +752,6 @@ pub trait SessionStoreFactory: Send + Sync {
         &self,
         request: &SessionStoreCreateRequest,
     ) -> Result<Arc<dyn crate::store::RuntimePersistence>, String>;
-}
-
-fn debug_rss_kb() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    status.lines().find_map(|line| {
-        let value = line.strip_prefix("VmRSS:")?.trim();
-        let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
-        Some(kb)
-    })
 }
 
 /// Generic runtime for CLI or programmatic embedding.

@@ -193,16 +193,6 @@ impl ProviderHandle {
         ))
     }
 
-    pub fn request_variant_config(
-        &self,
-        model: &str,
-        variant: &str,
-    ) -> Option<VariantRequestConfig> {
-        self.components
-            .model_policy
-            .request_variant_config(model, variant)
-    }
-
     pub fn input_usage_excludes_cached_tokens(&self) -> bool {
         self.components
             .model_policy

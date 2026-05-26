@@ -80,15 +80,15 @@ impl ProviderFailure {
         self
     }
 
-    pub fn with_headers(mut self, headers: &reqwest::header::HeaderMap) -> Self {
+    pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
         self.headers = headers
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_string(), value.to_string()))
-            })
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
             .collect();
         self.retry_after = retry_after_from_headers(&self.headers);
         self

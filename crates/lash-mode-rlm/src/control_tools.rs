@@ -338,7 +338,41 @@ mod tests {
                 .push(session_id.to_string());
             Ok(())
         }
-        async fn validate_process_handles_visible(
+    }
+
+    #[async_trait]
+    impl lash_core::ProcessService for BatonManager {
+        async fn start(
+            &self,
+            _session_id: &str,
+            _registration: lash_core::ProcessRegistration,
+            _options: lash_core::ProcessStartOptions,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessRecord, PluginError> {
+            Err(PluginError::Session(
+                "process starts are unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn await_process(
+            &self,
+            _process_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessAwaitOutput, PluginError> {
+            Err(PluginError::Session(
+                "process awaiting is unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn list_visible(
+            &self,
+            _session_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<Vec<lash_core::ProcessHandleGrantEntry>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_visible(
             &self,
             _session_id: &str,
             handle_ids: &[String],
@@ -350,26 +384,50 @@ mod tests {
             Ok(())
         }
 
-        async fn transfer_process_handles(
+        async fn cancel(
             &self,
-            request: lash_core::ProcessTransferRequest<'_>,
+            _session_id: &str,
+            _process_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<lash_core::ProcessRecord, PluginError> {
+            Err(PluginError::Session(
+                "process cancellation is unavailable in this test".to_string(),
+            ))
+        }
+
+        async fn cancel_all(
+            &self,
+            _session_id: &str,
+            _scope: lash_core::ProcessOpScope<'_>,
+        ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
+            Ok(Vec::new())
+        }
+
+        async fn transfer(
+            &self,
+            from_session_id: &str,
+            to_session_id: &str,
+            process_ids: Vec<String>,
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<(), PluginError> {
             self.transferred.lock().expect("transferred").push((
-                request.from_session_id,
-                request.to_session_id,
-                request.process_ids,
+                from_session_id.to_string(),
+                to_session_id.to_string(),
+                process_ids,
             ));
             Ok(())
         }
 
-        async fn cancel_unreferenced_process_handles(
+        async fn cancel_unreferenced(
             &self,
-            request: lash_core::ProcessCleanupRequest<'_>,
+            _session_id: &str,
+            keep_process_ids: Vec<String>,
+            _scope: lash_core::ProcessOpScope<'_>,
         ) -> Result<Vec<lash_core::ProcessRecord>, PluginError> {
             self.cleanup_keep
                 .lock()
                 .expect("cleanup keep")
-                .push(request.keep_process_ids);
+                .push(keep_process_ids);
             Ok(Vec::new())
         }
     }
@@ -419,7 +477,10 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host_and_processes(
+            manager.clone(),
+            manager.clone(),
+        );
 
         let args = json!({
             "task": "finish from here",
@@ -501,7 +562,10 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host_and_processes(
+            manager.clone(),
+            manager.clone(),
+        );
 
         let args = json!({
             "task": "finish from here",
@@ -560,7 +624,10 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host_and_processes(
+            manager.clone(),
+            manager.clone(),
+        );
 
         let result = provider
             .execute(ToolCall {
@@ -613,7 +680,10 @@ mod tests {
             ..BatonManager::default()
         });
         let provider = RlmControlToolsProvider;
-        let context = lash_core::testing::mock_tool_context_with_host(manager.clone());
+        let context = lash_core::testing::mock_tool_context_with_host_and_processes(
+            manager.clone(),
+            manager.clone(),
+        );
 
         let result = provider
             .execute(ToolCall {

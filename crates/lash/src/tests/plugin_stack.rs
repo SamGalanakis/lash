@@ -190,9 +190,9 @@ fn tool_completed_activity_is_canonical_while_model_observation_is_projected() -
                 .build()
                 .expect("test runtime")
                 .block_on(async {
-                    let projection = Arc::new(lash_core::ToolOutputBudgetPluginFactory::new(
-                        lash_core::ToolOutputBudgetConfig {
-                            mode: lash_core::ToolOutputBudgetMode::Bytes,
+                    let projection = Arc::new(crate::plugins::ToolOutputBudgetPluginFactory::new(
+                        crate::plugins::ToolOutputBudgetConfig {
+                            mode: crate::plugins::ToolOutputBudgetMode::Bytes,
                             limit: 12,
                             max_lines: 4,
                         },

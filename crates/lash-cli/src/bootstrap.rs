@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::config::LashConfig;
 use crate::prompt_context_plugin::{PromptContextPluginConfig, PromptContextPluginFactory};
 use lash::advanced::ExecutionMode;
-use lash::plugins::{BuiltinProcessControlsPluginFactory, PluginFactory};
+use lash::persistence::FileAttachmentStore;
+use lash::plugins::PluginFactory;
 use lash::prompt::{
     PromptBuiltin, PromptContribution, PromptSlot, PromptTemplate, PromptTemplateEntry,
     PromptTemplateSection,
@@ -17,7 +18,7 @@ use lash::tools::{
 };
 use lash::tracing::TraceLevel;
 use lash::{ModelSpec, PluginStack, SessionSpec};
-use lash_core::{FileAttachmentStore, PromptLayer, SessionPolicy, ToolState};
+use lash_core::{PromptLayer, SessionPolicy, ToolState};
 use lash_llm_tools::LlmToolsPluginFactory;
 use lash_plugin_mcp::McpPluginFactory;
 use lash_plugin_plan_mode::{PlanModePluginFactory, UpdatePlanPluginFactory};
@@ -125,7 +126,6 @@ fn plugin_factories_for_surface(input: PluginFactorySurfaceInput<'_>) -> PluginS
         plugin_stack.push(Arc::new(UpdatePlanPluginFactory));
     }
     plugin_stack.push(Arc::new(lash_autoresearch::AutoresearchPluginFactory));
-    plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
     plugin_stack.push(Arc::new(LlmToolsPluginFactory::default()));
     plugin_stack.push(Arc::new(
         SubagentsPluginFactory::new(capability_registry).with_session_spec(SessionSpec::inherit()),

@@ -1224,7 +1224,6 @@ impl LashRuntime {
         }
         self.mark_phase_end(RuntimeTurnPhase::EffectLoop);
         tracing::debug!(
-            rss_kb = debug_rss_kb(),
             new_message_count = new_messages.len(),
             tool_call_count = assembler.tool_calls.len(),
             "runtime post-run_task"

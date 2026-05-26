@@ -185,6 +185,13 @@ impl LashRuntime {
             .map(|manager| manager as Arc<dyn RuntimeSessionHost>)
     }
 
+    pub fn process_service(
+        &self,
+    ) -> Result<Arc<dyn crate::ProcessService>, PluginActionInvokeError> {
+        self.runtime_session_manager()
+            .map(|manager| manager as Arc<dyn crate::ProcessService>)
+    }
+
     /// The plugin session bound to the currently active runtime session, if any.
     pub fn plugin_session(&self) -> Option<Arc<crate::PluginSession>> {
         self.session.as_ref().map(|s| Arc::clone(s.plugins()))

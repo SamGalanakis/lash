@@ -18,18 +18,6 @@ impl Default for LlmTimeouts {
     }
 }
 
-/// Per-request tuning a provider produces for a model + variant. Each
-/// concrete provider crate interprets its own variant strings and emits
-/// the request-shaping parameters its wire protocol needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VariantRequestConfig {
-    ReasoningEffort(String),
-    GoogleThinkingLevel { level: String },
-    GoogleThinkingBudget { budget_tokens: i32 },
-    AnthropicAdaptiveThinking { effort: String },
-    AnthropicThinkingBudget { budget_tokens: i32 },
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestTimeout {
     Disabled,
@@ -161,6 +149,32 @@ pub struct ProviderThinkingPolicy {
 impl ProviderThinkingPolicy {
     pub fn is_default(&self) -> bool {
         !self.expose
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedGenerationPolicy<TThinking> {
+    pub max_output_tokens: u64,
+    pub cache_retention: CacheRetention,
+    pub expose_thinking: bool,
+    pub thinking: TThinking,
+}
+
+pub fn resolve_generation_policy<TThinking>(
+    generation: &crate::GenerationOptions,
+    options: &ProviderOptions,
+    provider_default_max_output_tokens: u64,
+    thinking: TThinking,
+) -> ResolvedGenerationPolicy<TThinking> {
+    let max_output_tokens = generation
+        .output_token_cap_u64()
+        .or(options.max_output_tokens)
+        .unwrap_or(provider_default_max_output_tokens);
+    ResolvedGenerationPolicy {
+        max_output_tokens,
+        cache_retention: options.cache_retention,
+        expose_thinking: options.thinking.expose,
+        thinking,
     }
 }
 

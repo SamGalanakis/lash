@@ -27,10 +27,4 @@ impl ProviderModelPolicy for StaticModelPolicy {
     fn supported_variants(&self, _model: &str) -> &'static [&'static str] {
         self.supported_variants
     }
-
-    fn request_variant_config(&self, _model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        self.supported_variants
-            .contains(&variant)
-            .then(|| VariantRequestConfig::ReasoningEffort(variant.to_string()))
-    }
 }

@@ -5,7 +5,7 @@ use lash::{
     advanced::{PluginMessage, StandardContextApproach, TurnOutcome},
     messages::MessageRole,
     persistence::SessionStateEnvelope,
-    plugins::{BuiltinProcessControlsPluginFactory, PluginSpec, StaticPluginFactory},
+    plugins::{PluginSpec, StaticPluginFactory},
     provider::{ProviderHandle, ProviderOptions, ProviderReliability},
 };
 use lash_core::SessionEventRecord;
@@ -403,7 +403,6 @@ pub(crate) async fn build_runtime_with_store(
         standard_context_approach: standard_context_approach.clone(),
         tavily_api_key: None,
     });
-    plugin_stack.push(Arc::new(BuiltinProcessControlsPluginFactory::new()));
     plugin_stack.push(Arc::new(StaticPluginFactory::new(
         "runtime_perf_tools",
         PluginSpec::new().with_tool_provider(Arc::new(BenchmarkEchoTool::default())),

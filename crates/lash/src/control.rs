@@ -284,9 +284,9 @@ impl SessionControl {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .cancel_process(lash_core::ProcessCancelRequest::new(session_id, process_id))
+        let processes = runtime.process_service()?;
+        processes
+            .cancel(&session_id, process_id, lash_core::ProcessOpScope::new())
             .await
             .map_err(Into::into)
     }
@@ -295,9 +295,9 @@ impl SessionControl {
         let writer = self.runtime.writer();
         let runtime = writer.lock().await;
         let session_id = runtime.session_id().to_string();
-        let manager = runtime.session_manager()?;
-        manager
-            .cancel_all_processes(&session_id)
+        let processes = runtime.process_service()?;
+        processes
+            .cancel_all(&session_id, lash_core::ProcessOpScope::new())
             .await
             .map_err(Into::into)
     }

@@ -8,7 +8,6 @@ use crate::tool_dispatch::ToolDispatchContext;
 use crate::{PromptContribution, RuntimeServices, SandboxMessage, SessionEvent, ToolProvider};
 
 mod execution_context;
-mod process_handle_tools;
 pub(crate) mod process_handles;
 mod tool_execution;
 
@@ -391,6 +390,7 @@ impl Session {
         &self,
         session_id: &str,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
         effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
         direct_completions: crate::DirectCompletionClient<'run>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
@@ -403,6 +403,7 @@ impl Session {
             tools: self.tools(),
             surface: self.tool_surface(session_id, self.execution_mode.clone())?,
             host,
+            processes,
             effect_controller,
             direct_completions: direct_completions.clone(),
             tool_effect_metadata: None,

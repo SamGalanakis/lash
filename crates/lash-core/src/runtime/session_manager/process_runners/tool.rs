@@ -63,6 +63,7 @@ impl RuntimeSessionManager {
                 self.current.policy.execution_mode.clone(),
             )?,
             host: Arc::clone(&host),
+            processes: Arc::new(self.clone()),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::clone(
                 &self.current.host.core.effect_controller,
             )),
@@ -77,6 +78,7 @@ impl RuntimeSessionManager {
         let tool_context = crate::ToolContext::new(
             self.current.session_id.clone(),
             host,
+            Arc::new(self.clone()),
             crate::TurnContext::default(),
             Arc::clone(&self.current.host.core.attachment_store),
             direct_completions,

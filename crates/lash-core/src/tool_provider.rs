@@ -29,6 +29,7 @@ pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<SandboxMessage>;
 pub struct ToolContext<'run> {
     pub(crate) session_id: String,
     pub(crate) host: Arc<dyn RuntimeSessionHost>,
+    pub(crate) processes: Arc<dyn crate::ProcessService>,
     pub(crate) cancellation_token: Option<tokio_util::sync::CancellationToken>,
     pub(crate) async_process_id: Option<String>,
     pub(crate) process_events: Option<ToolProcessEventContext>,
@@ -111,7 +112,7 @@ impl RuntimeSessionHost for ToolSessionControl {
 #[derive(Clone)]
 pub struct ToolProcessControl<'run> {
     session_id: String,
-    host: Arc<dyn RuntimeSessionHost>,
+    processes: Arc<dyn crate::ProcessService>,
     tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
     effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
 }
@@ -122,18 +123,14 @@ impl<'run> ToolProcessControl<'run> {
         registration: crate::ProcessRegistration,
         descriptor: Option<crate::ProcessHandleDescriptor>,
     ) -> Result<crate::ProcessRecord, PluginError> {
-        let execution_context = crate::ProcessExecutionContext::default()
-            .with_tool_effect_metadata(self.tool_effect_metadata.clone())
-            .with_wake_session_id(self.session_id.clone());
-        self.host
-            .start_process(
-                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
-                    .with_scope(
-                        crate::ProcessRequestScope::new()
-                            .with_effect_metadata(self.tool_effect_metadata.clone())
-                            .with_effect_controller(self.effect_controller.as_controller()),
-                    )
+        self.processes
+            .start(
+                &self.session_id,
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_wake_session_id(self.session_id.clone())
                     .with_optional_descriptor(descriptor),
+                self.process_scope(),
             )
             .await
     }
@@ -142,14 +139,8 @@ impl<'run> ToolProcessControl<'run> {
         &self,
         process_id: &str,
     ) -> Result<crate::ProcessAwaitOutput, PluginError> {
-        self.host
-            .await_process(
-                crate::ProcessAwaitRequest::new(process_id).with_scope(
-                    crate::ProcessRequestScope::new()
-                        .with_effect_metadata(self.tool_effect_metadata.clone())
-                        .with_effect_controller(self.effect_controller.as_controller()),
-                ),
-            )
+        self.processes
+            .await_process(process_id, self.process_scope())
             .await
     }
 
@@ -157,8 +148,8 @@ impl<'run> ToolProcessControl<'run> {
         &self,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
-        self.host
-            .validate_process_handles_visible(&self.session_id, handle_ids)
+        self.processes
+            .validate_visible(&self.session_id, handle_ids)
             .await
     }
 
@@ -167,18 +158,12 @@ impl<'run> ToolProcessControl<'run> {
         successor_session_id: &str,
         handle_ids: &[String],
     ) -> Result<(), PluginError> {
-        self.host
-            .transfer_process_handles(
-                crate::ProcessTransferRequest::new(
-                    &self.session_id,
-                    successor_session_id,
-                    handle_ids.to_vec(),
-                )
-                .with_scope(
-                    crate::ProcessRequestScope::new()
-                        .with_effect_metadata(self.tool_effect_metadata.clone())
-                        .with_effect_controller(self.effect_controller.as_controller()),
-                ),
+        self.processes
+            .transfer(
+                &self.session_id,
+                successor_session_id,
+                handle_ids.to_vec(),
+                self.process_scope(),
             )
             .await
     }
@@ -187,14 +172,11 @@ impl<'run> ToolProcessControl<'run> {
         &self,
         keep_handle_ids: &[String],
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        self.host
-            .cancel_unreferenced_process_handles(
-                crate::ProcessCleanupRequest::new(&self.session_id, keep_handle_ids.to_vec())
-                    .with_scope(
-                        crate::ProcessRequestScope::new()
-                            .with_effect_metadata(self.tool_effect_metadata.clone())
-                            .with_effect_controller(self.effect_controller.as_controller()),
-                    ),
+        self.processes
+            .cancel_unreferenced(
+                &self.session_id,
+                keep_handle_ids.to_vec(),
+                self.process_scope(),
             )
             .await
     }
@@ -203,7 +185,15 @@ impl<'run> ToolProcessControl<'run> {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        self.host.cancel_all_processes(session_id).await
+        self.processes
+            .cancel_all(session_id, self.process_scope())
+            .await
+    }
+
+    fn process_scope(&self) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
+            .with_effect_metadata(self.tool_effect_metadata.clone())
+            .with_effect_controller(self.effect_controller.as_controller())
     }
 }
 
@@ -211,6 +201,7 @@ impl<'run> ToolContext<'run> {
     pub(crate) fn new(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
         _turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'run>,
@@ -220,6 +211,7 @@ impl<'run> ToolContext<'run> {
         Self {
             session_id,
             host,
+            processes,
             cancellation_token: None,
             async_process_id: None,
             process_events: None,
@@ -285,7 +277,7 @@ impl<'run> ToolContext<'run> {
     pub fn processes(&self) -> ToolProcessControl<'run> {
         ToolProcessControl {
             session_id: self.session_id.clone(),
-            host: Arc::clone(&self.host),
+            processes: Arc::clone(&self.processes),
             tool_effect_metadata: self.tool_effect_metadata.clone(),
             effect_controller: self.effect_controller.clone_scoped(),
         }
@@ -436,6 +428,7 @@ impl<'run> ToolContext<'run> {
     pub fn __for_testing(
         session_id: String,
         host: Arc<dyn RuntimeSessionHost>,
+        processes: Arc<dyn crate::ProcessService>,
         turn_context: crate::TurnContext,
         attachment_store: Arc<dyn AttachmentStore>,
         direct_completions: crate::DirectCompletionClient<'static>,
@@ -444,6 +437,7 @@ impl<'run> ToolContext<'run> {
         ToolContext::new(
             session_id,
             host,
+            processes,
             turn_context,
             attachment_store,
             direct_completions,

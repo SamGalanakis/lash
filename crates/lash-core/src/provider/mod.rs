@@ -28,7 +28,7 @@ pub use options::{
     CacheRetention, DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts,
     ProviderOptions, ProviderRateLimitPolicy, ProviderReliability, ProviderReliabilityBuilder,
     ProviderRetryPolicy, ProviderThinkingPolicy, ProviderTimeoutPolicy, RequestTimeout,
-    VariantRequestConfig,
+    ResolvedGenerationPolicy, resolve_generation_policy,
 };
 pub use rate_limit::{ProviderRateLimitPermit, ProviderRateLimiter};
 pub use registry::{

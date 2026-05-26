@@ -48,13 +48,17 @@ pub mod prelude {
 pub mod tools {
     pub use crate::ToolState;
     pub use lash_core::{
-        MonitorEmptyArgs, MonitorRegisterSpecsOp, MonitorRunState, MonitorSnapshot, MonitorSpec,
-        MonitorStartOp, MonitorStatus, MonitorStatusOp, MonitorStopOp, PreparedToolCall,
-        RegisterSpecsArgs, StartMonitorArgs, StopMonitorArgs, ToolActivation,
-        ToolArgumentProjectionPolicy, ToolAvailability, ToolAvailabilityConfig, ToolCall,
-        ToolCallOutput, ToolCallRecord, ToolContext, ToolContract, ToolDefinition,
-        ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest, ToolOutputContract,
-        ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult, ToolSourceHandle,
+        PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
+        ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
+        ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProcessStartMode,
+        ToolProvider, ToolResult, ToolSourceHandle,
+    };
+    pub use lash_plugin_monitor::{
+        MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEmptyArgs, MonitorRegisterSpecsOp,
+        MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
+        MonitorStatusOp, MonitorStopOp, MonitorWakePolicy, OwnedMonitorSpec, RegisterSpecsArgs,
+        StartMonitorArgs, StopMonitorArgs,
     };
 }
 
@@ -71,18 +75,19 @@ pub mod direct {
 
 pub mod persistence {
     pub use lash_core::{
-        AttachmentStore, BlobRef, FileAttachmentStore, GcReport, GraphCommitDelta,
-        HydratedSessionCheckpoint, ModeEvent, PersistedSessionConfig, PersistedSessionRead,
-        PersistedTurnState, RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION,
-        RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION, RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit,
-        RuntimeCommitResult, RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState,
-        RuntimeTurnCheckpoint, RuntimeTurnCompletion, RuntimeTurnLease,
-        RuntimeTurnMachineConfigSnapshot, SessionCheckpoint, SessionEventRecord, SessionGraph,
-        SessionHead, SessionHeadMeta, SessionMeta, SessionNodeRecord, SessionReadScope,
-        SessionReadView, SessionStateEnvelope, SessionStoreCreateRequest, SessionStoreFactory,
-        StoreError, TokenLedgerEntry, VacuumReport, load_persisted_session_state,
-        load_persisted_session_state_active_path, runtime_turn_checkpoint_hash,
+        AttachmentStore, BlobRef, GcReport, GraphCommitDelta, HydratedSessionCheckpoint, ModeEvent,
+        PersistedSessionConfig, PersistedSessionRead, PersistedTurnState,
+        RUNTIME_EFFECT_JOURNAL_SCHEMA_VERSION, RUNTIME_TURN_CHECKPOINT_SCHEMA_VERSION,
+        RUNTIME_TURN_LEASE_SCHEMA_VERSION, RuntimeCommit, RuntimeCommitResult,
+        RuntimeEffectJournalRecord, RuntimePersistence, RuntimeSessionState, RuntimeTurnCheckpoint,
+        RuntimeTurnCompletion, RuntimeTurnLease, RuntimeTurnMachineConfigSnapshot,
+        SessionCheckpoint, SessionEventRecord, SessionGraph, SessionHead, SessionHeadMeta,
+        SessionMeta, SessionNodeRecord, SessionReadScope, SessionReadView, SessionStateEnvelope,
+        SessionStoreCreateRequest, SessionStoreFactory, StoreError, TokenLedgerEntry, VacuumReport,
+        load_persisted_session_state, load_persisted_session_state_active_path,
+        runtime_turn_checkpoint_hash,
     };
+    pub use lash_local_store::FileAttachmentStore;
 }
 
 pub mod plugins {
@@ -96,11 +101,14 @@ pub mod plugins {
         ToolResultHookContext,
     };
     pub use lash_core::{
-        BuiltinProcessControlsPluginFactory, PluginError, PluginFactory, PluginHost, PluginMessage,
-        PluginRegistrar, PluginRuntimeEvent, PluginSession, PluginSessionContext, PluginSpec,
-        PluginSpecFactory, PromptHookContext, SessionPlugin, ToolOutputBudgetConfig,
-        ToolOutputBudgetMode, ToolOutputBudgetPluginFactory, ToolSurfaceContribution,
-        ToolSurfaceOverride, TurnHookContext, TurnResultHookContext,
+        PluginError, PluginFactory, PluginHost, PluginMessage, PluginRegistrar, PluginRuntimeEvent,
+        PluginSession, PluginSessionContext, PluginSpec, PluginSpecFactory, PromptHookContext,
+        SessionPlugin, ToolSurfaceContribution, ToolSurfaceOverride, TurnHookContext,
+        TurnResultHookContext,
+    };
+    pub use lash_plugin_tool_output_budget::{
+        ToolOutputBudgetConfig, ToolOutputBudgetMode, ToolOutputBudgetPluginFactory,
+        tool_output_budget_stack as runtime_plugin_stack,
     };
 }
 
@@ -160,8 +168,8 @@ pub mod provider {
     pub use lash_core::{
         LlmTimeouts, ProviderComponents, ProviderFactory, ProviderHandle, ProviderModelPolicy,
         ProviderOptions, ProviderRegistry, ProviderSpec, ProviderState, ProviderThinkingPolicy,
-        ProviderTransport, RequestTimeout, StaticModelPolicy, VariantRequestConfig, build_provider,
-        provider_factory, register_provider_factory,
+        ProviderTransport, RequestTimeout, StaticModelPolicy, build_provider, provider_factory,
+        register_provider_factory,
     };
 }
 

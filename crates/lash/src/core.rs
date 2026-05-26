@@ -19,14 +19,14 @@ impl LashCore {
         Self::builder()
             .install_mode(ModePreset::standard())
             .default_mode(ModeId::standard())
-            .plugins(PluginStack::runtime())
+            .plugins(default_runtime_stack())
     }
 
     pub fn rlm() -> LashCoreBuilder {
         Self::builder()
             .install_mode(ModePreset::rlm())
             .default_mode(ModeId::rlm())
-            .plugins(PluginStack::runtime())
+            .plugins(default_runtime_stack())
     }
 
     pub fn session(&self, session_id: impl Into<String>) -> SessionBuilder {
@@ -70,6 +70,10 @@ impl LashCore {
         )
         .with_session_policy(self.policy.clone()))
     }
+}
+
+fn default_runtime_stack() -> PluginStack {
+    lash_plugin_tool_output_budget::tool_output_budget_stack()
 }
 
 #[derive(Default)]
@@ -211,7 +215,9 @@ impl LashCoreBuilder {
     }
 
     pub fn trace_jsonl_path(mut self, path: Option<std::path::PathBuf>) -> Self {
-        self.core = self.core.with_trace_jsonl_path(path);
+        self.core = self.core.with_trace_sink(path.map(|path| {
+            Arc::new(lash_trace::JsonlTraceSink::new(path)) as Arc<dyn lash_trace::TraceSink>
+        }));
         self
     }
 

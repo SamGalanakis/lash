@@ -1,7 +1,6 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use lash_trace::{JsonlTraceSink, TraceContext, TraceLevel, TraceSink};
+use lash_trace::{TraceContext, TraceLevel, TraceSink};
 
 use super::process::ProcessRegistry;
 use super::{
@@ -76,12 +75,6 @@ impl RuntimeCoreConfig {
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
         self.prompt = prompt;
-        self
-    }
-
-    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
-        self.trace_sink =
-            trace_path.map(|path| Arc::new(JsonlTraceSink::new(path)) as Arc<dyn TraceSink>);
         self
     }
 

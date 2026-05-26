@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lash::control::PluginAction;
-use lash::tools::{
+use lash::{PluginActions, TurnEvent};
+use lash_plugin_monitor::{
     MonitorEmptyArgs, MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
     MonitorStatusOp, MonitorStopOp, StartMonitorArgs, StopMonitorArgs,
 };
-use lash::{PluginActions, TurnEvent};
 use lash_tui::{Frame, InputEvent, KeyCode as InputKeyCode, Line, Style, TermCapabilities};
 
 pub use surface::{

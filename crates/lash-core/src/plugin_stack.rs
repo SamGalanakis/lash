@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{PluginFactory, ToolOutputBudgetPluginFactory};
+use crate::PluginFactory;
 
 #[derive(Clone, Default)]
 pub struct PluginStack {
@@ -10,12 +10,6 @@ pub struct PluginStack {
 impl PluginStack {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn runtime() -> Self {
-        let mut stack = Self::new();
-        stack.push(Arc::new(ToolOutputBudgetPluginFactory::default()));
-        stack
     }
 
     pub fn from_factories(factories: impl IntoIterator<Item = Arc<dyn PluginFactory>>) -> Self {

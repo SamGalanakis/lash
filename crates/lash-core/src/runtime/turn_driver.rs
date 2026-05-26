@@ -480,6 +480,7 @@ impl<'run> RuntimeTurnDriver<'run> {
             .mode_execution_context(
                 &self.session_id,
                 manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                manager.clone() as Arc<dyn crate::ProcessService>,
                 effect_controller,
                 direct_completions,
                 tool_event_tx.clone(),
@@ -1425,6 +1426,7 @@ impl<'run> RuntimeTurnDriver<'run> {
                     session_id: self.session_id.clone(),
                     host: self.session_manager.clone()
                         as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                    processes: self.session_manager.clone() as Arc<dyn crate::ProcessService>,
                     state: self.checkpoint_state_view(
                         machine.message_sequence(),
                         machine.mode_iteration(),

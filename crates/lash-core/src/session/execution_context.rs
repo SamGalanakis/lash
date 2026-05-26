@@ -47,11 +47,11 @@ pub struct ModeExecutionContext<'run> {
 }
 
 impl<'run> ModeExecutionContext<'run> {
-    pub(super) fn process_request_scope(
+    pub(super) fn process_scope(
         &self,
         effect_metadata: Option<crate::EffectInvocationMetadata>,
-    ) -> crate::ProcessRequestScope<'_> {
-        crate::ProcessRequestScope::new()
+    ) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
             .with_effect_metadata(effect_metadata)
             .with_effect_controller(self.dispatch.effect_controller.as_controller())
             .with_turn_lease(self.turn_lease.clone())
@@ -150,6 +150,10 @@ impl<'run> ModeExecutionContext<'run> {
         crate::tool_dispatch::resolve_tool_execution_mode(&self.dispatch, name)
     }
 
+    pub(crate) fn tool_process_start_mode(&self, name: &str) -> crate::ToolProcessStartMode {
+        crate::tool_dispatch::resolve_tool_process_start_mode(&self.dispatch, name)
+    }
+
     pub fn callable_tool_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
         crate::tool_dispatch::resolve_callable_manifest(&self.dispatch, name)
     }
@@ -217,22 +221,16 @@ impl<'run> ModeExecutionContext<'run> {
         label: Option<String>,
     ) -> crate::ModeToolReply {
         let process_id = registration.id.clone();
-        let execution_context = crate::ProcessExecutionContext::default()
-            .with_tool_effect_metadata(self.effect_metadata.clone())
-            .with_wake_session_id(self.session_id.clone());
         match self
             .dispatch
-            .host
-            .start_process(
-                crate::ProcessStartRequest::new(&self.session_id, registration, execution_context)
-                    .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label))
-                    .with_scope(
-                        crate::ProcessRequestScope::new()
-                            .with_effect_metadata(self.effect_metadata.clone())
-                            .with_effect_controller(
-                                self.dispatch.effect_controller.as_controller(),
-                            ),
-                    ),
+            .processes
+            .start(
+                &self.session_id,
+                registration,
+                crate::ProcessStartOptions::new()
+                    .with_wake_session_id(self.session_id.clone())
+                    .with_descriptor(crate::ProcessHandleDescriptor::new(Some("lashlang"), label)),
+                self.process_scope(self.effect_metadata.clone()),
             )
             .await
         {
@@ -352,6 +350,7 @@ mod tests {
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -408,6 +407,7 @@ mod tests {
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -482,6 +482,7 @@ mod tests {
                 std::collections::BTreeMap::new(),
             )),
             host: Arc::new(crate::testing::MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),

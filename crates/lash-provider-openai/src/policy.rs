@@ -11,6 +11,12 @@ impl OpenAiModelPolicy {
             base_url: base_url.into(),
         }
     }
+
+    pub(crate) fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
+        self.supported_variants(model)
+            .contains(&variant)
+            .then(|| variant.to_string())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +32,14 @@ pub(crate) fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
     effort.to_string()
 }
 
+impl OpenAiDirectModelPolicy {
+    pub(crate) fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
+        self.supported_variants(model)
+            .contains(&variant)
+            .then(|| clamp_reasoning_effort(model, variant))
+    }
+}
+
 impl ProviderModelPolicy for OpenAiModelPolicy {
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         if !base_url_is_openrouter(&self.base_url) {
@@ -38,13 +52,6 @@ impl ProviderModelPolicy for OpenAiModelPolicy {
             &[]
         }
     }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
-    }
 }
 
 impl ProviderModelPolicy for OpenAiDirectModelPolicy {
@@ -55,14 +62,5 @@ impl ProviderModelPolicy for OpenAiDirectModelPolicy {
         } else {
             &[]
         }
-    }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        Some(VariantRequestConfig::ReasoningEffort(
-            clamp_reasoning_effort(model, variant),
-        ))
     }
 }

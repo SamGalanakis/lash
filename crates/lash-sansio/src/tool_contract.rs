@@ -31,6 +31,25 @@ fn is_default_tool_execution_mode(mode: &ToolExecutionMode) -> bool {
     *mode == ToolExecutionMode::default()
 }
 
+/// Who owns the durable process started by `start <tool>(...)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProcessStartMode {
+    /// The runtime registers the tool call as a process and returns a handle.
+    #[default]
+    RuntimeManaged,
+    /// The tool itself starts and returns its process handle.
+    ToolManaged,
+}
+
+fn default_tool_process_start_mode() -> ToolProcessStartMode {
+    ToolProcessStartMode::default()
+}
+
+fn is_default_tool_process_start_mode(mode: &ToolProcessStartMode) -> bool {
+    *mode == ToolProcessStartMode::default()
+}
+
 /// Automatic retry policy for a tool's execution.
 ///
 /// This is intentionally separate from [`ToolExecutionMode`]: scheduling
@@ -408,6 +427,11 @@ pub struct ToolManifest {
     )]
     pub execution_mode: ToolExecutionMode,
     #[serde(
+        default = "default_tool_process_start_mode",
+        skip_serializing_if = "is_default_tool_process_start_mode"
+    )]
+    pub process_start_mode: ToolProcessStartMode,
+    #[serde(
         default = "default_tool_retry_policy",
         skip_serializing_if = "is_default_tool_retry_policy"
     )]
@@ -565,6 +589,11 @@ pub struct ToolDefinition {
         skip_serializing_if = "is_default_tool_execution_mode"
     )]
     pub execution_mode: ToolExecutionMode,
+    #[serde(
+        default = "default_tool_process_start_mode",
+        skip_serializing_if = "is_default_tool_process_start_mode"
+    )]
+    pub process_start_mode: ToolProcessStartMode,
     /// Whether this tool may be retried automatically after a failure that
     /// explicitly opts into safe retry.
     #[serde(
@@ -698,6 +727,7 @@ impl ToolDefinition {
             discovery: ToolDiscoveryMetadata::default(),
             argument_projection: ToolArgumentProjectionPolicy::default(),
             execution_mode: ToolExecutionMode::Parallel,
+            process_start_mode: ToolProcessStartMode::RuntimeManaged,
             retry_policy: ToolRetryPolicy::Never,
         };
         let contract = ToolContract {
@@ -791,6 +821,11 @@ impl ToolDefinition {
 
     pub fn with_execution_mode(mut self, execution_mode: ToolExecutionMode) -> Self {
         self.execution_mode = execution_mode;
+        self
+    }
+
+    pub fn with_process_start_mode(mut self, process_start_mode: ToolProcessStartMode) -> Self {
+        self.process_start_mode = process_start_mode;
         self
     }
 
@@ -899,6 +934,7 @@ impl ToolDefinition {
             discovery: self.discovery.clone(),
             argument_projection: self.argument_projection.clone(),
             execution_mode: self.execution_mode,
+            process_start_mode: self.process_start_mode,
             retry_policy: self.retry_policy,
         };
         manifest.compact_contract = Some(self.contract().compact_contract(&manifest));
@@ -933,6 +969,7 @@ impl ToolDefinition {
             discovery: manifest.discovery,
             argument_projection: manifest.argument_projection,
             execution_mode: manifest.execution_mode,
+            process_start_mode: manifest.process_start_mode,
             retry_policy: manifest.retry_policy,
         }
     }

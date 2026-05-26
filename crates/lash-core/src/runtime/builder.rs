@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::plugin::{PluginFactory, PluginHost, PluginSession};
@@ -155,11 +154,6 @@ impl EmbeddedRuntimeBuilder {
 
     pub fn with_prompt_layer(mut self, prompt: crate::PromptLayer) -> Self {
         self.core = self.core.with_prompt_layer(prompt);
-        self
-    }
-
-    pub fn with_trace_jsonl_path(mut self, trace_path: Option<PathBuf>) -> Self {
-        self.core = self.core.with_trace_jsonl_path(trace_path);
         self
     }
 

@@ -77,6 +77,7 @@ impl RuntimeTurnDriver<'_> {
         let context = match self.session.mode_execution_context(
             &self.session_id,
             manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+            manager.clone() as Arc<dyn crate::ProcessService>,
             effect_controller,
             direct_completions,
             tool_event_tx.clone(),

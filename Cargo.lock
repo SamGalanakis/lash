@@ -317,157 +317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bench-clbench-lash"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "dirs 6.0.0",
- "lash-cli",
- "lash-harness-opt",
- "lash-llm-tools",
- "lash-mode-rlm",
- "lash-providers-builtin",
- "lash-rlm-types",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-subagents",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "bench-frontier-cs"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs 6.0.0",
- "dotenvy",
- "lash-cli",
- "lash-core",
- "lash-export",
- "lash-llm-tools",
- "lash-mode-rlm",
- "lash-provider-openai",
- "lash-providers-builtin",
- "lash-rlm-types",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-subagents",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "bench-longcot"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs 6.0.0",
- "dotenvy",
- "lash-cli",
- "lash-core",
- "lash-export",
- "lash-llm-tools",
- "lash-mode-rlm",
- "lash-provider-openai",
- "lash-providers-builtin",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-subagents",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "bench-longmemeval-rlm"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dotenvy",
- "lash-llm-tools",
- "lash-mode-rlm",
- "lash-plugin-observational-memory",
- "lash-plugin-rolling-history",
- "lash-provider-openai",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-subagents",
- "regex",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "bench-oolong"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs 6.0.0",
- "dotenvy",
- "lash-cli",
- "lash-core",
- "lash-export",
- "lash-llm-tools",
- "lash-mode-rlm",
- "lash-provider-openai",
- "lash-providers-builtin",
- "lash-rlm-types",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-subagents",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "bench-swebench"
-version = "0.1.0-alpha.9"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "dirs 6.0.0",
- "dotenvy",
- "lash-cli",
- "lash-llm-tools",
- "lash-providers-builtin",
- "lash-runtime",
- "lash-sqlite-store",
- "lash-standard-plugins",
- "lash-subagents",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,12 +1081,6 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "downcast-rs"
@@ -2452,6 +2295,7 @@ dependencies = [
  "lash-plugin-mcp",
  "lash-plugin-observational-memory",
  "lash-plugin-plan-mode",
+ "lash-plugin-process-controls",
  "lash-provider-anthropic",
  "lash-provider-auth",
  "lash-provider-codex",
@@ -2495,12 +2339,10 @@ dependencies = [
  "lash-trace",
  "lashlang",
  "regex",
- "reqwest 0.13.3",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2582,6 +2424,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-local-store"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "lash-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lash-mode-rlm"
 version = "0.1.0-alpha.9"
 dependencies = [
@@ -2590,6 +2441,7 @@ dependencies = [
  "jsonschema",
  "lash-core",
  "lash-mode-standard",
+ "lash-plugin-tool-output-budget",
  "lash-rlm-types",
  "lash-sansio",
  "lashlang",
@@ -2606,6 +2458,8 @@ version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-plugin-monitor",
+ "lash-plugin-process-controls",
  "lash-sqlite-store",
  "lash-tool-shell",
  "serde_json",
@@ -2633,6 +2487,17 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "lash-plugin-monitor"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "async-trait",
+ "lash-core",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2665,11 +2530,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lash-plugin-process-controls"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "async-trait",
+ "lash-core",
+ "serde_json",
+]
+
+[[package]]
 name = "lash-plugin-rolling-history"
 version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-plugin-tool-output-budget",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -2687,6 +2562,16 @@ dependencies = [
  "serde_json",
  "strsim",
  "tokio",
+]
+
+[[package]]
+name = "lash-plugin-tool-output-budget"
+version = "0.1.0-alpha.9"
+dependencies = [
+ "lash-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2811,8 +2696,11 @@ version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
  "lash-core",
+ "lash-local-store",
  "lash-mode-rlm",
  "lash-mode-standard",
+ "lash-plugin-monitor",
+ "lash-plugin-tool-output-budget",
  "lash-rlm-types",
  "lash-trace",
  "serde",
@@ -2855,9 +2743,12 @@ name = "lash-standard-plugins"
 version = "0.1.0-alpha.9"
 dependencies = [
  "lash-core",
+ "lash-plugin-monitor",
  "lash-plugin-observational-memory",
+ "lash-plugin-process-controls",
  "lash-plugin-rolling-history",
  "lash-plugin-tool-discovery",
+ "lash-plugin-tool-output-budget",
  "lash-tool-apply-patch",
  "lash-tool-files",
  "lash-tool-search",
@@ -2926,8 +2817,8 @@ name = "lash-tool-shell"
 version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
- "chrono",
  "lash-core",
+ "lash-plugin-monitor",
  "lash-tool-support",
  "libc",
  "portable-pty",
@@ -2997,6 +2888,7 @@ name = "lash-tui-extensions"
 version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
+ "lash-plugin-monitor",
  "lash-plugin-plan-mode",
  "lash-runtime",
  "lash-tui",

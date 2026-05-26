@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use lash_core::plugin::project_observation_text;
 use lash_core::{
     AttachmentRef, ExecImage, ModeExecutionContext, ModeToolReply, TextProjectionMetadata,
-    ToolOutputBudgetConfig,
 };
+use lash_plugin_tool_output_budget::{ToolOutputBudgetConfig, project_observation_text};
 use lashlang::{
     AbilityOp, AbilityResult, ExecutionHost, ExecutionHostError, ProcessStart, ProjectedFuture,
     Record as FlowRecord, Value as FlowValue,

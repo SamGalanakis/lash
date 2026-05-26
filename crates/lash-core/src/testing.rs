@@ -13,28 +13,22 @@ use crate::llm::types::{LlmRequest, LlmResponse};
 use crate::plugin::{PluginError, SessionCreateRequest, SessionHandle, SessionSnapshot};
 use crate::provider::{
     ProviderComponents, ProviderHandle, ProviderModelPolicy, ProviderState, ProviderTransport,
-    VariantRequestConfig,
 };
 use crate::session_model::{ConversationRecord, SessionEventRecord};
 use crate::{
     AssembledTurn, AssistantOutput, ExecutionMode, ExecutionSummary, ModelSpec, OutputState,
     ProcessRegistry, ProviderOptions, RuntimeSessionState, SessionPolicy, SessionStateEnvelope,
-    TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop,
+    TokenUsage, TurnFinish, TurnInput, TurnOutcome, TurnStop, UnavailableProcessService,
 };
 
 type CompletionFuture =
     Pin<Box<dyn Future<Output = Result<LlmResponse, LlmTransportError>> + Send>>;
 type CompletionFn = dyn Fn(LlmRequest) -> CompletionFuture + Send + Sync;
 type SupportedVariantsFn = dyn Fn(&str) -> &'static [&'static str] + Send + Sync;
-type RequestVariantConfigFn = dyn Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync;
 type SerializeConfigFn = dyn Fn() -> serde_json::Value + Send + Sync;
 
 fn no_supported_variants(_model: &str) -> &'static [&'static str] {
     &[]
-}
-
-fn no_request_variant_config(_model: &str, _variant: &str) -> Option<VariantRequestConfig> {
-    None
 }
 
 fn empty_provider_config() -> serde_json::Value {
@@ -47,7 +41,6 @@ fn empty_provider_config() -> serde_json::Value {
 pub struct TestProvider {
     kind: &'static str,
     supported_variants: Arc<SupportedVariantsFn>,
-    request_variant_config: Arc<RequestVariantConfigFn>,
     requires_streaming: bool,
     options: ProviderOptions,
     serialize_config: Arc<SerializeConfigFn>,
@@ -91,7 +84,6 @@ impl TestProviderBuilder {
             provider: TestProvider {
                 kind: "test",
                 supported_variants: Arc::new(no_supported_variants),
-                request_variant_config: Arc::new(no_request_variant_config),
                 requires_streaming: false,
                 options: ProviderOptions::default(),
                 serialize_config: Arc::new(empty_provider_config),
@@ -116,14 +108,6 @@ impl TestProviderBuilder {
         F: Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
     {
         self.provider.supported_variants = Arc::new(supported_variants);
-        self
-    }
-
-    pub fn request_variant_config<F>(mut self, request_variant_config: F) -> Self
-    where
-        F: Fn(&str, &str) -> Option<VariantRequestConfig> + Send + Sync + 'static,
-    {
-        self.provider.request_variant_config = Arc::new(request_variant_config);
         self
     }
 
@@ -215,10 +199,6 @@ impl ProviderModelPolicy for TestProvider {
     fn supported_variants(&self, model: &str) -> &'static [&'static str] {
         (self.supported_variants)(model)
     }
-
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        (self.request_variant_config)(model, variant)
-    }
 }
 
 /// Build a `SessionPolicy` populated with the canonical stub provider
@@ -253,8 +233,9 @@ pub fn mock_tool_context() -> crate::ToolContext<'static> {
 pub fn mock_tool_context_with_host(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
 ) -> crate::ToolContext<'static> {
-    mock_tool_context_with_host_and_direct_completions(
+    mock_tool_context_with_host_processes_and_direct_completions(
         host,
+        Arc::new(UnavailableProcessService),
         crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
@@ -265,9 +246,35 @@ pub fn mock_tool_context_with_host_and_direct_completions(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
     direct_completions: crate::DirectCompletionClient<'static>,
 ) -> crate::ToolContext<'static> {
+    mock_tool_context_with_host_processes_and_direct_completions(
+        host,
+        Arc::new(UnavailableProcessService),
+        direct_completions,
+    )
+}
+
+pub fn mock_tool_context_with_host_and_processes(
+    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    processes: Arc<dyn crate::ProcessService>,
+) -> crate::ToolContext<'static> {
+    mock_tool_context_with_host_processes_and_direct_completions(
+        host,
+        processes,
+        crate::DirectCompletionClient::unavailable(
+            "direct completions are unavailable in this test context",
+        ),
+    )
+}
+
+fn mock_tool_context_with_host_processes_and_direct_completions(
+    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    processes: Arc<dyn crate::ProcessService>,
+    direct_completions: crate::DirectCompletionClient<'static>,
+) -> crate::ToolContext<'static> {
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
         host,
+        processes,
         crate::TurnContext::new(),
         Arc::new(crate::InMemoryAttachmentStore::new()),
         direct_completions,
@@ -331,6 +338,7 @@ pub fn mode_execution_context_with_lashlang_abilities(
             std::collections::BTreeMap::new(),
         )),
         host: Arc::new(MockSessionManager::default()),
+        processes: Arc::new(UnavailableProcessService),
         effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
             crate::InlineRuntimeEffectController::default(),
         )),
@@ -513,23 +521,22 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
     ) -> Result<AssembledTurn, PluginError> {
         Ok(self.turn.clone())
     }
+}
 
-    async fn start_process(
+#[async_trait::async_trait]
+impl crate::ProcessService for MockSessionManager {
+    async fn start(
         &self,
-        request: crate::ProcessStartRequest<'_>,
+        session_id: &str,
+        registration: crate::ProcessRegistration,
+        options: crate::ProcessStartOptions,
+        _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, PluginError> {
-        let crate::ProcessStartRequest {
-            session_id,
-            registration,
-            descriptor,
-            execution_context: _,
-            scope: _,
-        } = request;
         let id = registration.id.clone();
         self.process_registry.register_process(registration).await?;
-        if let Some(descriptor) = descriptor {
+        if let Some(descriptor) = options.descriptor {
             self.process_registry
-                .grant_handle(&session_id, &id, descriptor)
+                .grant_handle(session_id, &id, descriptor)
                 .await?;
         }
         self.process_registry
@@ -546,23 +553,21 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
 
     async fn await_process(
         &self,
-        request: crate::ProcessAwaitRequest<'_>,
+        process_id: &str,
+        _scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessAwaitOutput, PluginError> {
-        self.process_registry
-            .await_process(&request.process_id)
-            .await
+        self.process_registry.await_process(process_id).await
     }
 
-    async fn list_process_handles(
+    async fn list_visible(
         &self,
-        request: crate::ProcessListRequest<'_>,
+        session_id: &str,
+        _scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, PluginError> {
-        self.process_registry
-            .list_handle_grants(&request.session_id)
-            .await
+        self.process_registry.list_handle_grants(session_id).await
     }
 
-    async fn validate_process_handles_visible(
+    async fn validate_visible(
         &self,
         session_id: &str,
         handle_ids: &[String],
@@ -582,32 +587,63 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         Ok(())
     }
 
-    async fn transfer_process_handles(
+    async fn cancel(
         &self,
-        request: crate::ProcessTransferRequest<'_>,
-    ) -> Result<(), PluginError> {
-        self.process_registry
-            .transfer_handle_grants(
-                &request.from_session_id,
-                &request.to_session_id,
-                &request.process_ids,
+        _session_id: &str,
+        process_id: &str,
+        _scope: crate::ProcessOpScope<'_>,
+    ) -> Result<crate::ProcessRecord, PluginError> {
+        crate::InlineRuntimeEffectController::default()
+            .request_process_cancel(
+                self.process_registry.clone(),
+                process_id,
+                Some("requested by test".to_string()),
             )
             .await
     }
 
-    async fn cancel_unreferenced_process_handles(
+    async fn cancel_all(
         &self,
-        request: crate::ProcessCleanupRequest<'_>,
+        session_id: &str,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
-        let keep = request
-            .keep_process_ids
+        let entries = self.list_visible(session_id, scope.clone()).await?;
+        let mut cancelled = Vec::new();
+        for (grant, record) in entries {
+            if record.is_terminal() {
+                continue;
+            }
+            cancelled.push(
+                self.cancel(session_id, &grant.process_id, scope.clone())
+                    .await?,
+            );
+        }
+        Ok(cancelled)
+    }
+
+    async fn transfer(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        _scope: crate::ProcessOpScope<'_>,
+    ) -> Result<(), PluginError> {
+        self.process_registry
+            .transfer_handle_grants(from_session_id, to_session_id, &process_ids)
+            .await
+    }
+
+    async fn cancel_unreferenced(
+        &self,
+        session_id: &str,
+        keep_process_ids: Vec<String>,
+        _scope: crate::ProcessOpScope<'_>,
+    ) -> Result<Vec<crate::ProcessRecord>, PluginError> {
+        let keep = keep_process_ids
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        let grants = self
-            .process_registry
-            .list_handle_grants(&request.session_id)
-            .await?;
+        let grants = self.process_registry.list_handle_grants(session_id).await?;
         let mut cancelled = Vec::new();
 
         for (grant, record) in grants {
@@ -615,7 +651,7 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
                 continue;
             }
             self.process_registry
-                .revoke_handle(&request.session_id, &grant.process_id)
+                .revoke_handle(session_id, &grant.process_id)
                 .await?;
             if record.is_terminal()
                 || !self
@@ -638,19 +674,6 @@ impl crate::plugin::RuntimeSessionHost for MockSessionManager {
         }
 
         Ok(cancelled)
-    }
-
-    async fn cancel_process(
-        &self,
-        request: crate::ProcessCancelRequest<'_>,
-    ) -> Result<crate::ProcessRecord, PluginError> {
-        crate::InlineRuntimeEffectController::default()
-            .request_process_cancel(
-                self.process_registry.clone(),
-                &request.process_id,
-                Some("requested by test".to_string()),
-            )
-            .await
     }
 }
 // ─────────────────────────────────────────────────────────────────────
@@ -737,7 +760,6 @@ mod test_mode_fakes {
     /// `lash-mode-rlm` crates instead.
     pub fn test_mode_factories() -> Vec<Arc<dyn PluginFactory>> {
         vec![
-            Arc::new(crate::BuiltinProcessControlsPluginFactory::new()),
             Arc::new(TestModeFactory {
                 id: "mode_standard",
                 mode: ExecutionMode::standard(),

@@ -107,13 +107,13 @@ impl ProcessExecutionContext {
 }
 
 #[derive(Clone, Default)]
-pub struct ProcessRequestScope<'scope> {
+pub struct ProcessOpScope<'scope> {
     pub effect_metadata: Option<crate::EffectInvocationMetadata>,
     pub effect_controller: Option<&'scope dyn crate::RuntimeEffectController>,
     pub turn_lease: Option<crate::RuntimeTurnLease>,
 }
 
-impl<'scope> ProcessRequestScope<'scope> {
+impl<'scope> ProcessOpScope<'scope> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -140,27 +140,16 @@ impl<'scope> ProcessRequestScope<'scope> {
     }
 }
 
-pub struct ProcessStartRequest<'scope> {
-    pub session_id: String,
-    pub registration: ProcessRegistration,
+#[derive(Clone, Debug, Default)]
+pub struct ProcessStartOptions {
     pub descriptor: Option<ProcessHandleDescriptor>,
-    pub execution_context: ProcessExecutionContext,
-    pub scope: ProcessRequestScope<'scope>,
+    pub wake_session_id: Option<String>,
+    pub wake_target_scope_key: Option<String>,
 }
 
-impl<'scope> ProcessStartRequest<'scope> {
-    pub fn new(
-        session_id: impl Into<String>,
-        registration: ProcessRegistration,
-        execution_context: ProcessExecutionContext,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            registration,
-            descriptor: None,
-            execution_context,
-            scope: ProcessRequestScope::default(),
-        }
+impl ProcessStartOptions {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_descriptor(mut self, descriptor: ProcessHandleDescriptor) -> Self {
@@ -173,116 +162,182 @@ impl<'scope> ProcessStartRequest<'scope> {
         self
     }
 
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
+    pub fn with_wake_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.wake_session_id = Some(session_id.into());
         self
     }
-}
 
-pub struct ProcessAwaitRequest<'scope> {
-    pub process_id: String,
-    pub scope: ProcessRequestScope<'scope>,
-}
+    pub fn with_wake_target_scope_key(mut self, scope_key: impl Into<String>) -> Self {
+        self.wake_target_scope_key = Some(scope_key.into());
+        self
+    }
 
-impl<'scope> ProcessAwaitRequest<'scope> {
-    pub fn new(process_id: impl Into<String>) -> Self {
-        Self {
-            process_id: process_id.into(),
-            scope: ProcessRequestScope::default(),
+    pub fn execution_context(&self, scope: &ProcessOpScope<'_>) -> ProcessExecutionContext {
+        ProcessExecutionContext {
+            tool_effect_metadata: scope.effect_metadata.clone(),
+            wake_session_id: self.wake_session_id.clone(),
+            wake_target_scope_key: self.wake_target_scope_key.clone(),
         }
     }
+}
 
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
-        self
+#[async_trait::async_trait]
+pub trait ProcessService: Send + Sync {
+    async fn start(
+        &self,
+        session_id: &str,
+        registration: ProcessRegistration,
+        options: ProcessStartOptions,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    async fn await_process(
+        &self,
+        process_id: &str,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessAwaitOutput, PluginError>;
+
+    async fn list_visible(
+        &self,
+        session_id: &str,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError>;
+
+    async fn validate_visible(
+        &self,
+        session_id: &str,
+        process_ids: &[String],
+    ) -> Result<(), PluginError>;
+
+    async fn cancel(
+        &self,
+        session_id: &str,
+        process_id: &str,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessRecord, PluginError>;
+
+    async fn cancel_all(
+        &self,
+        session_id: &str,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessRecord>, PluginError>;
+
+    async fn transfer(
+        &self,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<(), PluginError>;
+
+    async fn cancel_unreferenced(
+        &self,
+        session_id: &str,
+        keep_process_ids: Vec<String>,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessRecord>, PluginError>;
+}
+
+pub struct UnavailableProcessService;
+
+#[async_trait::async_trait]
+impl ProcessService for UnavailableProcessService {
+    async fn start(
+        &self,
+        _session_id: &str,
+        _registration: ProcessRegistration,
+        _options: ProcessStartOptions,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessRecord, PluginError> {
+        Err(PluginError::Session(
+            "processes are unavailable in this runtime".to_string(),
+        ))
     }
-}
 
-pub struct ProcessListRequest<'scope> {
-    pub session_id: String,
-    pub scope: ProcessRequestScope<'scope>,
-}
+    async fn await_process(
+        &self,
+        _process_id: &str,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessAwaitOutput, PluginError> {
+        Err(PluginError::Session(
+            "process awaiting is unavailable in this runtime".to_string(),
+        ))
+    }
 
-impl<'scope> ProcessListRequest<'scope> {
-    pub fn new(session_id: impl Into<String>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            scope: ProcessRequestScope::default(),
+    async fn list_visible(
+        &self,
+        _session_id: &str,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessHandleGrantEntry>, PluginError> {
+        Err(PluginError::Session(
+            "process registry is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn validate_visible(
+        &self,
+        _session_id: &str,
+        _process_ids: &[String],
+    ) -> Result<(), PluginError> {
+        Err(PluginError::Session(
+            "process handle validation is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn cancel(
+        &self,
+        _session_id: &str,
+        _process_id: &str,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<ProcessRecord, PluginError> {
+        Err(PluginError::Session(
+            "process registry is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn cancel_all(
+        &self,
+        session_id: &str,
+        scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessRecord>, PluginError> {
+        let entries = self.list_visible(session_id, scope.clone()).await?;
+        let mut cancelled = Vec::new();
+        for (grant, record) in entries {
+            if record.is_terminal() {
+                continue;
+            }
+            cancelled.push(
+                self.cancel(session_id, &grant.process_id, scope.clone())
+                    .await?,
+            );
         }
+        Ok(cancelled)
     }
 
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
-        self
-    }
-}
-
-pub struct ProcessCancelRequest<'scope> {
-    pub session_id: String,
-    pub process_id: String,
-    pub scope: ProcessRequestScope<'scope>,
-}
-
-impl<'scope> ProcessCancelRequest<'scope> {
-    pub fn new(session_id: impl Into<String>, process_id: impl Into<String>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            process_id: process_id.into(),
-            scope: ProcessRequestScope::default(),
+    async fn transfer(
+        &self,
+        _from_session_id: &str,
+        _to_session_id: &str,
+        process_ids: Vec<String>,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<(), PluginError> {
+        if process_ids.is_empty() {
+            return Ok(());
         }
+        Err(PluginError::Session(
+            "process handle transfer is unavailable in this runtime".to_string(),
+        ))
     }
 
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
-        self
-    }
-}
-
-pub struct ProcessTransferRequest<'scope> {
-    pub from_session_id: String,
-    pub to_session_id: String,
-    pub process_ids: Vec<String>,
-    pub scope: ProcessRequestScope<'scope>,
-}
-
-impl<'scope> ProcessTransferRequest<'scope> {
-    pub fn new(
-        from_session_id: impl Into<String>,
-        to_session_id: impl Into<String>,
-        process_ids: impl Into<Vec<String>>,
-    ) -> Self {
-        Self {
-            from_session_id: from_session_id.into(),
-            to_session_id: to_session_id.into(),
-            process_ids: process_ids.into(),
-            scope: ProcessRequestScope::default(),
-        }
-    }
-
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
-        self
-    }
-}
-
-pub struct ProcessCleanupRequest<'scope> {
-    pub session_id: String,
-    pub keep_process_ids: Vec<String>,
-    pub scope: ProcessRequestScope<'scope>,
-}
-
-impl<'scope> ProcessCleanupRequest<'scope> {
-    pub fn new(session_id: impl Into<String>, keep_process_ids: impl Into<Vec<String>>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            keep_process_ids: keep_process_ids.into(),
-            scope: ProcessRequestScope::default(),
-        }
-    }
-
-    pub fn with_scope(mut self, scope: ProcessRequestScope<'scope>) -> Self {
-        self.scope = scope;
-        self
+    async fn cancel_unreferenced(
+        &self,
+        _session_id: &str,
+        _keep_process_ids: Vec<String>,
+        _scope: ProcessOpScope<'_>,
+    ) -> Result<Vec<ProcessRecord>, PluginError> {
+        Err(PluginError::Session(
+            "process handle cleanup is unavailable in this runtime".to_string(),
+        ))
     }
 }
 
@@ -1723,7 +1778,7 @@ mod tests {
             serde_json::json!({ "type": "string" }),
         );
         let event_type = ProcessEventType {
-            name: "monitor.line".to_string(),
+            name: "producer.line".to_string(),
             payload_schema: crate::LashSchema::object(properties, vec!["line".to_string()]),
             semantics: ProcessEventSemanticsSpec {
                 wake: Some(ProcessWakeSpec {
@@ -1743,10 +1798,10 @@ mod tests {
             .append_event(
                 "proc-1",
                 ProcessEventAppendRequest::new(
-                    "monitor.line",
+                    "producer.line",
                     serde_json::json!({
                         "line": "deploy failed",
-                        "wake_input": "Monitor event: deploy failed"
+                        "wake_input": "Process event: deploy failed"
                     }),
                 )
                 .with_wake_target_scope_key("scope-1"),
@@ -1761,7 +1816,7 @@ mod tests {
                 .wake
                 .as_ref()
                 .map(|wake| wake.input.as_str()),
-            Some("Monitor event: deploy failed")
+            Some("Process event: deploy failed")
         );
         assert_eq!(
             registry
@@ -1787,7 +1842,7 @@ mod tests {
                 .append_event(
                     "proc-1",
                     ProcessEventAppendRequest::new(
-                        "monitor.line",
+                        "producer.line",
                         serde_json::json!({ "wake_input": "missing required line" }),
                     ),
                 )
@@ -1894,7 +1949,7 @@ mod tests {
             .grant_handle(
                 "s2",
                 "proc-5",
-                ProcessHandleDescriptor::new(Some("monitor"), Some("demo")),
+                ProcessHandleDescriptor::new(Some("worker"), Some("demo")),
             )
             .await
             .expect("grant s2");

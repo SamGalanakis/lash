@@ -53,6 +53,7 @@ impl RuntimeSessionManager {
                 tools: self.current.plugins.tools(),
                 surface,
                 host: Arc::clone(&runtime_host),
+                processes: Arc::new(self.clone()),
                 effect_controller: crate::runtime::RuntimeEffectControllerHandle::shared(
                     Arc::clone(&self.current.host.core.effect_controller),
                 ),

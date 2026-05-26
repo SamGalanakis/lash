@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use lash::persistence::FileAttachmentStore;
 use lash::{InputItem, LashSession, TurnInput};
 use lash_core::session_model::{Part, PartKind, PruneState};
 use lash_core::{
-    AttachmentCreateMeta, AttachmentStore, FileAttachmentStore, ImageMediaType, MediaType, Message,
-    MessageRole, PluginMessage, ToolState,
+    AttachmentCreateMeta, AttachmentStore, ImageMediaType, MediaType, Message, MessageRole,
+    PluginMessage, ToolState,
 };
 
 use super::helpers::TurnActivityBridge;

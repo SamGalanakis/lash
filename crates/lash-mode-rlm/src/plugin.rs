@@ -11,10 +11,8 @@ use lash_core::plugin::{
     PluginDirective, PluginError, PluginFactory, PluginRegistrar, PluginSessionContext,
     SessionPlugin, ToolCallHookContext, TurnContextTransform, TurnTransformContext,
 };
-use lash_core::{
-    CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, ProcessCleanupRequest,
-    ProcessTransferRequest, SessionError, ToolOutputBudgetConfig,
-};
+use lash_core::{CheckpointKind, ExecutionMode, ModeBuildInput, ModePreamble, SessionError};
+use lash_plugin_tool_output_budget::ToolOutputBudgetConfig;
 use lash_rlm_types::{RlmCreateExtras, RlmGlobalsPatchPluginBody, RlmModeEvent};
 
 use crate::driver::{RlmProjectorConfig, SharedPromptUsage, build_rlm_preamble};
@@ -529,8 +527,8 @@ impl ModeSessionPlugin for RlmModeSession {
         let referenced_handles =
             crate::control_tools::collect_seed_process_handle_ids(args.get("seed"));
         let referenced_handles_vec = referenced_handles.into_iter().collect::<Vec<_>>();
-        ctx.host
-            .validate_process_handles_visible(&ctx.session_id, &referenced_handles_vec)
+        ctx.processes
+            .validate_visible(&ctx.session_id, &referenced_handles_vec)
             .await
             .map_err(|err| {
                 PluginError::Session(format!(
@@ -585,14 +583,12 @@ impl ModeSessionPlugin for RlmModeSession {
         .await
         .map_err(PluginError::Session)?;
         if let Err(err) = ctx
-            .host
-            .transfer_process_handles(
-                ProcessTransferRequest::new(
-                    &ctx.session_id,
-                    &session_id,
-                    referenced_handles_vec.clone(),
-                )
-                .with_scope(ctx.process_request_scope()),
+            .processes
+            .transfer(
+                &ctx.session_id,
+                &session_id,
+                referenced_handles_vec.clone(),
+                ctx.process_scope(),
             )
             .await
         {
@@ -602,10 +598,11 @@ impl ModeSessionPlugin for RlmModeSession {
             )));
         }
         if let Err(err) = ctx
-            .host
-            .cancel_unreferenced_process_handles(
-                ProcessCleanupRequest::new(&ctx.session_id, referenced_handles_vec.clone())
-                    .with_scope(ctx.process_request_scope()),
+            .processes
+            .cancel_unreferenced(
+                &ctx.session_id,
+                referenced_handles_vec.clone(),
+                ctx.process_scope(),
             )
             .await
         {

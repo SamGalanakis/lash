@@ -28,7 +28,6 @@ pub trait ProviderTransport: Send + Sync + std::fmt::Debug {
 
 pub trait ProviderModelPolicy: Send + Sync + std::fmt::Debug {
     fn supported_variants(&self, model: &str) -> &'static [&'static str];
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig>;
 
     fn input_usage_excludes_cached_tokens(&self) -> bool {
         false

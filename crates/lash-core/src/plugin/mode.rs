@@ -138,6 +138,7 @@ impl<'a> ModeSessionContext<'a> {
 pub struct ModeBeforeLlmCallContext<'run> {
     pub session_id: String,
     pub host: Arc<dyn crate::plugin::RuntimeSessionHost>,
+    pub processes: Arc<dyn crate::ProcessService>,
     pub state: SessionReadView,
     pub latest_prompt_usage: Option<PromptUsage>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
@@ -156,8 +157,8 @@ impl ModeBeforeLlmCallContext<'_> {
             .await
     }
 
-    pub fn process_request_scope(&self) -> crate::ProcessRequestScope<'_> {
-        crate::ProcessRequestScope::new()
+    pub fn process_scope(&self) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
             .with_effect_metadata(Some(self.process_effect_metadata.clone()))
             .with_effect_controller(self.effect_controller.as_controller())
     }

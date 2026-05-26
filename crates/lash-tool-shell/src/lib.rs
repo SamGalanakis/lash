@@ -21,11 +21,13 @@ use lash_core::plugin::{
     PluginError, PluginFactory, PluginSessionContext, PluginSpec, PluginSpecFactory, SessionPlugin,
 };
 use lash_core::{
-    MAX_MONITOR_TIMEOUT_MS, MonitorWakePolicy, PreparedToolCall, ProcessEventSemanticsSpec,
-    ProcessEventType, ProcessHandleDescriptor, ProcessInput, ProcessRegistration,
-    ProcessValueSelector, ProcessWakeDedupeKey, ProcessWakeSpec, ProgressSender,
-    PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract, ToolDefinition,
-    ToolExecutionMode, ToolFailure, ToolFailureClass, ToolManifest, ToolProvider, ToolResult,
+    ProgressSender, PromptContribution, SandboxMessage, SessionToolAccess, ToolCall, ToolContract,
+    ToolDefinition, ToolExecutionMode, ToolFailure, ToolFailureClass, ToolManifest,
+    ToolProcessStartMode, ToolProvider, ToolResult,
+};
+use lash_plugin_monitor::{
+    MAX_MONITOR_TIMEOUT_MS, MONITOR_LINE_EVENT, MonitorSpec, MonitorWakePolicy,
+    monitor_process_descriptor, monitor_process_registration,
 };
 
 use lash_tool_support::{object_schema, require_str};
@@ -1227,50 +1229,26 @@ impl StandardShell {
         params: &MonitorCommandParams,
         context: &lash_core::ToolContext<'_>,
     ) -> ToolResult {
-        let process_id = format!("monitor:{}", params.id);
-        let mut args = json!({
-            "id": params.id,
-            "command": params.command,
-            "description": params.description,
-            "persistent": params.persistent,
-            "timeout_ms": params.timeout_ms,
-            "wake_policy": params.wake_policy,
-        });
-        if let Some(cwd) = params.cwd.as_ref() {
-            args["cwd"] = json!(cwd);
-        }
-        if !params.env.is_empty() {
-            args["env"] = json!(params.env);
-        }
-
-        let registration = ProcessRegistration::new(
-            process_id.clone(),
-            ProcessInput::ToolCall {
-                call: PreparedToolCall::from_parts(
-                    process_id.clone(),
-                    "monitor",
-                    args,
-                    None,
-                    serde_json::Value::Null,
-                ),
-            },
-        )
-        .with_extra_event_types([monitor_line_event_type()]);
-        let descriptor =
-            ProcessHandleDescriptor::new(Some("monitor"), Some(params.description.clone()));
+        let spec = MonitorSpec {
+            id: params.id.clone(),
+            command: params.command.clone(),
+            cwd: params.cwd.clone(),
+            env: params.env.clone(),
+            persistent: params.persistent,
+            timeout_ms: params.timeout_ms,
+            wake_policy: params.wake_policy,
+            ..MonitorSpec::default()
+        };
+        let registration = monitor_process_registration(&spec, Some(&params.description));
+        let descriptor = monitor_process_descriptor(&spec);
         match context
             .processes()
             .start_process(registration, Some(descriptor))
             .await
         {
             Ok(record) => ToolResult::ok(json!({
-                "process_id": record.id,
-                "monitor_id": params.id,
-                "description": params.description,
-                "command": params.command,
-                "persistent": params.persistent,
-                "timeout_ms": params.timeout_ms,
-                "state": monitor_state_label(record.terminal.as_ref()),
+                "__handle__": "process",
+                "id": record.id,
             })),
             Err(err) => ToolResult::err_fmt(err.to_string()),
         }
@@ -1790,42 +1768,7 @@ pub fn monitor_tool_definition() -> ToolDefinition {
         r#"monitor(command="while true; do curl -sf http://localhost:3000/health && echo ready && break; sleep 2; done", description="local server ready", timeout_ms=300000)"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)
-}
-
-fn monitor_line_event_type() -> ProcessEventType {
-    let mut properties = serde_json::Map::new();
-    properties.insert("line".to_string(), json!({ "type": "string" }));
-    properties.insert("stream".to_string(), json!({ "type": "string" }));
-    properties.insert("timestamp".to_string(), json!({ "type": "string" }));
-    properties.insert("wake_input".to_string(), json!({ "type": "string" }));
-    ProcessEventType {
-        name: "monitor.line".to_string(),
-        payload_schema: lash_core::LashSchema::object(
-            properties,
-            vec![
-                "line".to_string(),
-                "stream".to_string(),
-                "timestamp".to_string(),
-            ],
-        ),
-        semantics: ProcessEventSemanticsSpec {
-            wake: Some(ProcessWakeSpec {
-                when: Some(ProcessValueSelector::Present("/wake_input".to_string())),
-                input: ProcessValueSelector::Pointer("/wake_input".to_string()),
-                dedupe_key: ProcessWakeDedupeKey::EventIdentity,
-            }),
-            ..ProcessEventSemanticsSpec::default()
-        },
-    }
-}
-
-fn monitor_state_label(terminal: Option<&lash_core::ProcessTerminalSemantics>) -> &'static str {
-    match terminal.map(|terminal| terminal.state) {
-        None => "running",
-        Some(lash_core::ProcessTerminalState::Completed) => "exited",
-        Some(lash_core::ProcessTerminalState::Failed) => "failed",
-        Some(lash_core::ProcessTerminalState::Cancelled) => "stopped",
-    }
+    .with_process_start_mode(ToolProcessStartMode::ToolManaged)
 }
 
 async fn emit_monitor_line_event(
@@ -1852,10 +1795,10 @@ async fn emit_monitor_line_event(
     }
     let idempotency_key = context
         .async_process_id()
-        .map(|process_id| format!("monitor.line:{process_id}:{line_sequence}"));
+        .map(|process_id| format!("{MONITOR_LINE_EVENT}:{process_id}:{line_sequence}"));
     context
         .emit_process_event_request(
-            lash_core::ProcessEventAppendRequest::new("monitor.line", payload)
+            lash_core::ProcessEventAppendRequest::new(MONITOR_LINE_EVENT, payload)
                 .with_optional_idempotency_key(idempotency_key),
         )
         .await
@@ -2282,7 +2225,10 @@ mod tests {
 
         let shell = test_shell();
         let host = Arc::new(lash_core::testing::MockSessionManager::default());
-        let context = lash_core::testing::mock_tool_context_with_host(host.clone());
+        let context = lash_core::testing::mock_tool_context_with_host_and_processes(
+            host.clone(),
+            host.clone() as Arc<dyn lash_core::ProcessService>,
+        );
         let args = json!({
             "command": "printf 'ready\\n'",
             "description": "readiness probe",
@@ -2300,7 +2246,8 @@ mod tests {
             .await;
 
         assert!(result.is_success(), "{}", result.value_for_projection());
-        let process_id = result.value_for_projection()["process_id"]
+        assert_eq!(result.value_for_projection()["__handle__"], "process");
+        let process_id = result.value_for_projection()["id"]
             .as_str()
             .expect("process id")
             .to_string();
@@ -2309,7 +2256,7 @@ mod tests {
             .get_process(&process_id)
             .await
             .expect("process record");
-        let ProcessInput::ToolCall { call } = record.input.as_ref() else {
+        let lash_core::ProcessInput::ToolCall { call } = record.input.as_ref() else {
             panic!("monitor should start as a tool-call process");
         };
         assert_eq!(call.tool_name, "monitor");
@@ -2318,7 +2265,15 @@ mod tests {
             record
                 .event_types
                 .iter()
-                .any(|event_type| event_type.name == "monitor.line")
+                .any(|event_type| event_type.name == MONITOR_LINE_EVENT)
+        );
+    }
+
+    #[test]
+    fn monitor_tool_declares_tool_managed_process_start() {
+        assert_eq!(
+            monitor_tool_definition().process_start_mode,
+            ToolProcessStartMode::ToolManaged
         );
     }
 

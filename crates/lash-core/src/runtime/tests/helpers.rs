@@ -676,7 +676,10 @@ pub(crate) fn test_host_config() -> EmbeddedRuntimeHost {
 }
 
 pub(crate) fn test_host_config_with_trace_path(path: PathBuf) -> EmbeddedRuntimeHost {
-    EmbeddedRuntimeHost::new(RuntimeCoreConfig::default().with_trace_jsonl_path(Some(path)))
+    EmbeddedRuntimeHost::new(
+        RuntimeCoreConfig::default()
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path)))),
+    )
 }
 
 pub(crate) fn test_host_config_with_trace_path_and_stream_events(
@@ -684,7 +687,7 @@ pub(crate) fn test_host_config_with_trace_path_and_stream_events(
 ) -> EmbeddedRuntimeHost {
     EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
-            .with_trace_jsonl_path(Some(path))
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(path))))
             .with_trace_level(lash_trace::TraceLevel::Extended),
     )
 }

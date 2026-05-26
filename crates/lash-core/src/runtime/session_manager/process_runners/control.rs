@@ -23,27 +23,24 @@ impl ProcessCapability {
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
         runner: Arc<dyn crate::runtime::effect::ProcessRunner>,
-        request: crate::ProcessStartRequest<'_>,
+        session_id: &str,
+        registration: crate::ProcessRegistration,
+        options: crate::ProcessStartOptions,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        let crate::ProcessStartRequest {
-            session_id,
-            registration,
-            descriptor,
-            mut execution_context,
-            scope,
-        } = request;
-        self.ensure_known_process_session(current, managed, &session_id)
+        self.ensure_known_process_session(current, managed, session_id)
             .await?;
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "processes are unavailable in this runtime".to_string(),
             ));
         };
-        self.mark_current_process_sync_needed(current, &session_id);
-        let creator_scope = self.process_scope(&session_id);
+        self.mark_current_process_sync_needed(current, session_id);
+        let creator_scope = self.process_scope(session_id);
         let creator_scope_key = creator_scope.scope_key();
         let registration =
             registration.with_provenance(creator_scope, current.host.core.host_profile_id.clone());
+        let mut execution_context = options.execution_context(&scope);
         if execution_context.wake_target_scope_key.is_none() {
             let wake_scope_key = execution_context
                 .wake_session_id
@@ -58,10 +55,12 @@ impl ProcessCapability {
                 Arc::clone(registry),
                 crate::ProcessCommand::Start {
                     registration,
-                    grant: descriptor.map(|descriptor| crate::ProcessStartGrant {
-                        session_id: creator_scope_key,
-                        descriptor,
-                    }),
+                    grant: options
+                        .descriptor
+                        .map(|descriptor| crate::ProcessStartGrant {
+                            session_id: creator_scope_key,
+                            descriptor,
+                        }),
                     execution_context: Box::new(execution_context),
                 },
                 Some(runner),
@@ -81,9 +80,9 @@ impl ProcessCapability {
     pub(in crate::runtime::session_manager) async fn await_process(
         &self,
         current: &CurrentSessionCapability,
-        request: crate::ProcessAwaitRequest<'_>,
+        process_id: &str,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessAwaitOutput, crate::PluginError> {
-        let crate::ProcessAwaitRequest { process_id, scope } = request;
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
@@ -113,9 +112,9 @@ impl ProcessCapability {
     pub(in crate::runtime::session_manager) async fn list_process_handles(
         &self,
         current: &CurrentSessionCapability,
-        request: crate::ProcessListRequest<'_>,
+        session_id: &str,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessHandleGrantEntry>, crate::PluginError> {
-        let crate::ProcessListRequest { session_id, scope } = request;
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
@@ -126,7 +125,7 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::List {
-                    session_id: self.process_scope_key(&session_id),
+                    session_id: self.process_scope_key(session_id),
                 },
                 None,
                 scope.effect_metadata,
@@ -147,19 +146,16 @@ impl ProcessCapability {
         current: &CurrentSessionCapability,
         managed: &ManagedSessionCapability,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-        request: crate::ProcessCancelRequest<'_>,
+        session_id: &str,
+        process_id: &str,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<crate::ProcessRecord, crate::PluginError> {
-        let crate::ProcessCancelRequest {
-            session_id,
-            process_id,
-            scope,
-        } = request;
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        if registry.get_process(&process_id).await.is_none() {
+        if registry.get_process(process_id).await.is_none() {
             return Err(crate::PluginError::Session(format!(
                 "unknown process `{process_id}`"
             )));
@@ -170,7 +166,7 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::Cancel {
-                    process_id,
+                    process_id: process_id.to_string(),
                     reason: Some("requested by host".to_string()),
                 },
                 None,
@@ -193,9 +189,10 @@ impl ProcessCapability {
         managed: &ManagedSessionCapability,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
         session_id: &str,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
         let tasks = self
-            .list_process_handles(current, crate::ProcessListRequest::new(session_id))
+            .list_process_handles(current, session_id, scope.clone())
             .await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -207,7 +204,9 @@ impl ProcessCapability {
                     current,
                     managed,
                     Arc::clone(&host),
-                    crate::ProcessCancelRequest::new(session_id, grant.process_id),
+                    session_id,
+                    &grant.process_id,
+                    scope.clone(),
                 )
                 .await?,
             );
@@ -248,14 +247,11 @@ impl ProcessCapability {
         &self,
         current: &CurrentSessionCapability,
         _managed: &ManagedSessionCapability,
-        request: crate::ProcessTransferRequest<'_>,
+        from_session_id: &str,
+        to_session_id: &str,
+        process_ids: Vec<String>,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<(), crate::PluginError> {
-        let crate::ProcessTransferRequest {
-            from_session_id,
-            to_session_id,
-            process_ids,
-            scope,
-        } = request;
         if process_ids.is_empty() {
             return Ok(());
         }
@@ -269,8 +265,8 @@ impl ProcessCapability {
                 current,
                 Arc::clone(registry),
                 crate::ProcessCommand::Transfer {
-                    from_session_id: self.process_scope_key(&from_session_id),
-                    to_session_id: self.process_scope_key(&to_session_id),
+                    from_session_id: self.process_scope_key(from_session_id),
+                    to_session_id: self.process_scope_key(to_session_id),
                     process_ids,
                 },
                 None,
@@ -292,20 +288,17 @@ impl ProcessCapability {
         current: &CurrentSessionCapability,
         _managed: &ManagedSessionCapability,
         host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-        request: crate::ProcessCleanupRequest<'_>,
+        session_id: &str,
+        keep_process_ids: Vec<String>,
+        scope: crate::ProcessOpScope<'_>,
     ) -> Result<Vec<crate::ProcessRecord>, crate::PluginError> {
-        let crate::ProcessCleanupRequest {
-            session_id,
-            keep_process_ids,
-            scope,
-        } = request;
         let keep = keep_process_ids.iter().cloned().collect::<HashSet<_>>();
         let Some(registry) = &current.host.process_registry else {
             return Err(crate::PluginError::Session(
                 "process registry is unavailable in this runtime".to_string(),
             ));
         };
-        let scope_key = self.process_scope_key(&session_id);
+        let scope_key = self.process_scope_key(session_id);
         let tasks = registry.list_handle_grants(&scope_key).await?;
         let mut cancelled = Vec::new();
         for (grant, record) in tasks {
@@ -330,8 +323,9 @@ impl ProcessCapability {
                     current,
                     _managed,
                     Arc::clone(&host),
-                    crate::ProcessCancelRequest::new(&session_id, grant.process_id)
-                        .with_scope(scope.clone()),
+                    session_id,
+                    &grant.process_id,
+                    scope.clone(),
                 )
                 .await?,
             );

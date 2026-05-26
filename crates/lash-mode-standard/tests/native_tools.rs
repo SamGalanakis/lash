@@ -12,7 +12,7 @@ fn tool_names(session: &lash_core::PluginSession) -> Vec<String> {
 }
 
 #[test]
-fn standard_mode_owns_batch_not_runtime_controls() {
+fn standard_mode_owns_batch_not_process_controls() {
     let session = PluginHost::new(vec![Arc::new(
         lash_mode_standard::BuiltinStandardModePluginFactory,
     )])
@@ -27,9 +27,10 @@ fn standard_mode_owns_batch_not_runtime_controls() {
 }
 
 #[test]
-fn runtime_controls_are_composed_with_standard_mode() {
+fn process_controls_are_composed_with_standard_mode() {
     let session = PluginHost::new(vec![
-        Arc::new(lash_core::BuiltinProcessControlsPluginFactory),
+        Arc::new(lash_plugin_process_controls::ProcessControlsPluginFactory::new()),
+        Arc::new(lash_plugin_monitor::MonitorPluginFactory),
         Arc::new(lash_tool_shell::StandardShellPluginFactory::new()),
         Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
     ])

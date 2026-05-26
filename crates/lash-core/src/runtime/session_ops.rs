@@ -221,7 +221,14 @@ impl LashRuntime {
         };
         session
             .plugins()
-            .invoke_plugin_action(name, args, session_id, true, manager)
+            .invoke_plugin_action(
+                name,
+                args,
+                session_id,
+                true,
+                manager.clone() as Arc<dyn crate::plugin::RuntimeSessionHost>,
+                manager as Arc<dyn crate::ProcessService>,
+            )
             .await
     }
 }

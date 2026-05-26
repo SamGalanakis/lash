@@ -28,6 +28,7 @@ lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-feature
 lash-runtime = { path = "../lash", version = "=0.1.0-alpha.9" }
 lash-plugin-mcp = { path = "../lash-plugin-mcp", version = "=0.1.0-alpha.9" }
 lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.9", optional = true }
+lash-plugin-process-controls = { path = "../lash-plugin-process-controls", version = "=0.1.0-alpha.9" }
 lash-sqlite-store = { path = "../lash-sqlite-store", version = "=0.1.0-alpha.9" }
 lash-llm-tools = { path = "../lash-llm-tools", version = "=0.1.0-alpha.9" }
 lash-standard-plugins = { path = "../lash-standard-plugins", version = "=0.1.0-alpha.9" }

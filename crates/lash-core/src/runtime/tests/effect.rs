@@ -1461,7 +1461,9 @@ async fn direct_completion_crosses_controller_and_records_usage_and_trace() {
     let host = EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
             .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_jsonl_path(Some(trace_path.clone())),
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
+                trace_path.clone(),
+            )))),
     );
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)
@@ -1580,7 +1582,9 @@ async fn direct_llm_completion_crosses_controller_and_records_usage_and_trace() 
     let host = EmbeddedRuntimeHost::new(
         RuntimeCoreConfig::default()
             .with_effect_controller(Arc::new(recorder.clone()))
-            .with_trace_jsonl_path(Some(trace_path.clone())),
+            .with_trace_sink(Some(Arc::new(lash_trace::JsonlTraceSink::new(
+                trace_path.clone(),
+            )))),
     );
     let runtime =
         runtime_with_plugins_and_tools_and_host(Vec::new(), Arc::new(EmptyTools), transport, host)

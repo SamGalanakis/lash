@@ -23,6 +23,7 @@ pub struct ToolDispatchContext<'run> {
     pub tools: Arc<dyn ToolProvider>,
     pub surface: Arc<ToolSurface>,
     pub host: Arc<dyn RuntimeSessionHost>,
+    pub processes: Arc<dyn crate::ProcessService>,
     pub(crate) effect_controller: crate::runtime::RuntimeEffectControllerHandle<'run>,
     pub(crate) direct_completions: crate::DirectCompletionClient<'run>,
     pub(crate) tool_effect_metadata: Option<crate::EffectInvocationMetadata>,
@@ -31,6 +32,14 @@ pub struct ToolDispatchContext<'run> {
     pub turn_injection_bridge: TurnInjectionBridge,
     pub attachment_store: Arc<dyn crate::AttachmentStore>,
     pub turn_context: crate::TurnContext,
+}
+
+impl<'run> ToolDispatchContext<'run> {
+    pub fn process_scope(&self) -> crate::ProcessOpScope<'_> {
+        crate::ProcessOpScope::new()
+            .with_effect_metadata(self.tool_effect_metadata.clone())
+            .with_effect_controller(self.effect_controller.as_controller())
+    }
 }
 
 #[derive(Clone)]
@@ -69,6 +78,7 @@ pub(crate) async fn dispatch_tool_call(
     let tool_context = ToolContext::new(
         context.session_id.clone(),
         Arc::clone(&context.host),
+        Arc::clone(&context.processes),
         context.turn_context.clone(),
         Arc::clone(&context.attachment_store),
         context.direct_completions.clone(),
@@ -511,6 +521,19 @@ pub(crate) fn resolve_tool_execution_mode(
         .iter()
         .find(|def| def.manifest.name == tool_name)
         .map(|def| def.manifest.execution_mode)
+        .unwrap_or_default()
+}
+
+pub(crate) fn resolve_tool_process_start_mode(
+    context: &ToolDispatchContext<'_>,
+    tool_name: &str,
+) -> crate::ToolProcessStartMode {
+    context
+        .surface
+        .tools
+        .iter()
+        .find(|def| def.manifest.name == tool_name)
+        .map(|def| def.manifest.process_start_mode)
         .unwrap_or_default()
 }
 
@@ -1102,6 +1125,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1140,6 +1164,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1186,6 +1211,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1336,6 +1362,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1363,6 +1390,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1416,6 +1444,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -1681,6 +1710,7 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
@@ -1724,6 +1754,7 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
@@ -1816,6 +1847,7 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
+            Arc::clone(&context.processes),
             context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
@@ -2055,6 +2087,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -2200,6 +2233,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),
@@ -2331,6 +2365,7 @@ mod tests {
             tools,
             surface,
             host: Arc::new(MockSessionManager::default()),
+            processes: Arc::new(crate::UnavailableProcessService),
             effect_controller: RuntimeEffectControllerHandle::shared(Arc::new(
                 crate::InlineRuntimeEffectController::default(),
             )),

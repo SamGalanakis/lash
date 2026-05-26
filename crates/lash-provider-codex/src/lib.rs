@@ -14,13 +14,14 @@ use lash_core::llm::types::{
     ProviderReplayMeta, ResponseTextMeta, ResponseTextPhase,
 };
 use lash_core::provider::{
-    ProviderComponents, ProviderFactory, ProviderFailureClassifier, ProviderModelPolicy,
-    ProviderOptions, ProviderReliability, ProviderState, ProviderTransport, VariantRequestConfig,
+    CacheRetention, ProviderComponents, ProviderFactory, ProviderFailureClassifier,
+    ProviderModelPolicy, ProviderOptions, ProviderReliability, ProviderState, ProviderTransport,
+    resolve_generation_policy,
 };
 use lash_llm_transport::streaming::{drive_sse_response, emit_stream_progress};
 use lash_llm_transport::timeouts::{
-    build_http_client, read_response_text, request_body_snapshot, response_start_timeout,
-    send_request,
+    build_http_client, header_pairs, read_response_text, request_body_snapshot,
+    response_start_timeout, send_request,
 };
 use lash_openai_schema::{
     OpenAiSchemaProfile, SchemaProjectionError, emit_provider_trace, model_id, project_schema,
@@ -34,6 +35,7 @@ const OPENAI_GPT5_XHIGH_VARIANTS: &[&str] = &["minimal", "low", "medium", "high"
 const OPENAI_GPT55_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_VARIANTS: &[&str] = &["low", "medium", "high"];
 const CODEX_XHIGH_VARIANTS: &[&str] = &["low", "medium", "high", "xhigh"];
+const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 
 fn has_xhigh_suffix(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
@@ -1143,11 +1145,22 @@ impl CodexProvider {
     ) -> Result<Value, LlmTransportError> {
         let tools = Self::build_tools(req)?;
         let (instructions, input) = Self::build_input(req);
+        let reasoning_effort = req
+            .model_variant
+            .as_deref()
+            .and_then(|variant| CodexModelPolicy.reasoning_effort(&req.model, variant));
+        let policy = resolve_generation_policy(
+            &req.generation,
+            &self.options,
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            reasoning_effort,
+        );
         let mut body = json!({
             "model": req.model,
             "instructions": instructions,
             "input": input,
             "tools": tools,
+            "max_output_tokens": policy.max_output_tokens,
             "parallel_tool_calls": !req.tools.is_empty(),
             "stream": stream,
             "store": false,
@@ -1166,16 +1179,18 @@ impl CodexProvider {
         if !req.tools.is_empty() {
             body["tool_choice"] = json!(Self::tool_choice_value(&req.tool_choice));
         }
-        if let Some(effort) = req.model_variant.as_deref() {
+        if let Some(effort) = policy.thinking {
             let mut reasoning = json!({
-                "effort": Self::clamp_reasoning_effort(&req.model, effort),
+                "effort": Self::clamp_reasoning_effort(&req.model, &effort),
             });
-            if self.options.thinking.expose {
+            if policy.expose_thinking {
                 reasoning["summary"] = json!("auto");
             }
             body["reasoning"] = reasoning;
         }
-        if let Some(session_id) = req.session_id.as_deref() {
+        if policy.cache_retention != CacheRetention::None
+            && let Some(session_id) = req.session_id.as_deref()
+        {
             body["prompt_cache_key"] = json!(session_id);
         }
         if let Some(output_spec) = &req.output_spec {
@@ -1813,12 +1828,13 @@ impl ProviderModelPolicy for CodexModelPolicy {
             OPENAI_GPT5_VARIANTS
         }
     }
+}
 
-    fn request_variant_config(&self, model: &str, variant: &str) -> Option<VariantRequestConfig> {
-        if !self.supported_variants(model).contains(&variant) {
-            return None;
-        }
-        Some(VariantRequestConfig::ReasoningEffort(variant.to_string()))
+impl CodexModelPolicy {
+    fn reasoning_effort(&self, model: &str, variant: &str) -> Option<String> {
+        self.supported_variants(model)
+            .contains(&variant)
+            .then(|| variant.to_string())
     }
 }
 
@@ -1896,7 +1912,7 @@ impl ProviderTransport for CodexProvider {
             let mut err = LlmTransportError::new(message)
                 .with_kind(ProviderFailureKind::Http)
                 .with_status(status.as_u16())
-                .with_headers(&headers)
+                .with_headers(header_pairs(&headers))
                 .with_raw(text)
                 .retryable(status.as_u16() == 429 || status.as_u16() >= 500);
             if let Some(request_body) = request_body.clone() {
@@ -2116,6 +2132,7 @@ mod tests {
     use super::*;
     use lash_core::llm::types::{LlmJsonSchema, LlmMessage, LlmToolSpec};
     use lash_core::provider::ProviderModelPolicy;
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
 
     fn process_event(state: &mut CodexStreamState, event: Value) {
@@ -2158,16 +2175,11 @@ mod tests {
             provider.supported_variants("gpt-5.5"),
             ["low", "medium", "high", "xhigh"]
         );
-        assert!(
-            provider
-                .request_variant_config("gpt-5.5", "xhigh")
-                .is_some()
+        assert_eq!(
+            provider.reasoning_effort("gpt-5.5", "xhigh").as_deref(),
+            Some("xhigh")
         );
-        assert!(
-            provider
-                .request_variant_config("gpt-5.5", "minimal")
-                .is_none()
-        );
+        assert_eq!(provider.reasoning_effort("gpt-5.5", "minimal"), None);
     }
 
     #[test]
@@ -2211,6 +2223,26 @@ mod tests {
             .build_request_body(&req, true)
             .unwrap();
         assert_eq!(exposed["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn codex_output_token_cap_prefers_request_then_provider() {
+        let provider = CodexProvider::new("access", "refresh", 0).with_options(ProviderOptions {
+            max_output_tokens: Some(9_999),
+            ..ProviderOptions::default()
+        });
+        let provider_limited = provider
+            .build_request_body(
+                &request(vec![LlmMessage::text(LlmRole::User, "hello")]),
+                false,
+            )
+            .unwrap();
+        assert_eq!(provider_limited["max_output_tokens"], 9_999);
+
+        let mut req = request(vec![LlmMessage::text(LlmRole::User, "hello")]);
+        req.generation.output_token_cap = NonZeroUsize::new(2_048);
+        let request_limited = provider.build_request_body(&req, false).unwrap();
+        assert_eq!(request_limited["max_output_tokens"], 2_048);
     }
 
     #[test]
