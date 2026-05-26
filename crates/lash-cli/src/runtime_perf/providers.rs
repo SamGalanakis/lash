@@ -811,6 +811,7 @@ fn empty_request() -> LlmRequest {
         attachments: Vec::new(),
         tools: std::sync::Arc::new(Vec::new()),
         tool_choice: Default::default(),
+        generation: Default::default(),
         model_variant: None,
         session_id: None,
         output_spec: None,
