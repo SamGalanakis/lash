@@ -32,7 +32,7 @@ use super::commands::{
     switch_to_session_identifier,
 };
 use super::helpers::{
-    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, monitor_wake_message,
+    TurnReplayPayload, is_copy_shortcut, key_chord_from_event, process_wake_message,
     queued_turn_edit_matches, record_queue_pending_steer, record_queue_turn,
     should_preserve_selection_for_key,
 };
@@ -252,11 +252,11 @@ pub(super) async fn activate_foreground_session_handoff(
     true
 }
 
-pub(super) async fn enqueue_pending_monitor_wakes(
+pub(super) async fn enqueue_pending_process_wakes(
     app: &mut App,
     session: &LashSession,
 ) -> Result<usize, String> {
-    let wakes = app.take_pending_monitor_wakes();
+    let wakes = app.take_pending_process_wakes();
     if wakes.is_empty() {
         return Ok(0);
     }
@@ -264,7 +264,7 @@ pub(super) async fn enqueue_pending_monitor_wakes(
         .iter()
         .map(|input| InjectedTurnInput {
             id: None,
-            message: monitor_wake_message(input),
+            message: process_wake_message(input),
         })
         .collect::<Vec<_>>();
     session
@@ -273,12 +273,12 @@ pub(super) async fn enqueue_pending_monitor_wakes(
         .inject_turn_inputs(messages)
         .await
         .map_err(|err| err.to_string())?;
-    app.mark_monitor_wakes_in_flight(&wakes);
+    app.mark_process_wakes_in_flight(&wakes);
     Ok(wakes.len())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn process_pending_monitor_wakes(
+pub(super) async fn process_pending_process_wakes(
     app: &mut App,
     ui_trace: &mut Option<UiTraceRecorder>,
     logger: &mut SessionLogger,
@@ -296,7 +296,7 @@ pub(super) async fn process_pending_monitor_wakes(
     let Some(session) = runtime.as_ref() else {
         return Ok(false);
     };
-    let injected = enqueue_pending_monitor_wakes(app, session).await?;
+    let injected = enqueue_pending_process_wakes(app, session).await?;
     if injected == 0 {
         return Ok(false);
     }

@@ -83,7 +83,7 @@ flowchart TD
                 <tr><td>Tool state</td><td>Read and mutate per-session dynamic tool availability without exposing the inner registry.</td></tr>
                 <tr><td>Session lifecycle and turns</td><td>Create, fork, continue, and stream managed sessions.</td></tr>
                 <tr><td>Session graph writes</td><td>Append plugin-authored nodes to a session graph through a guarded contract.</td></tr>
-                <tr><td>Tasks and monitors</td><td>Register processes, monitors, process handles, wakeups, and cancellation.</td></tr>
+                <tr><td>Processes</td><td>Register durable processes, process handles, wakeups, and cancellation.</td></tr>
                 <tr><td>Trace access</td><td>Expose trace sinks to hooks without exposing session internals. Human input is provided by host tools such as the CLI <code>ask</code> implementation, not by a runtime prompt event.</td></tr>
                 <tr><td>Direct completions</td><td>Run one-shot completions for helper tools such as <code>llm_query</code> and account for their usage.</td></tr>
               </tbody>
@@ -111,18 +111,17 @@ flowchart TD
         <div class="section">
           <div class="section-header">
             <h2>Tool Result Projection</h2>
-            <p>The built-in projector enforces budgeted views of tool output across three hook sites so the durable graph, the live model prompt, and rolled-up history each see consistent, bounded content.</p>
+            <p>A single exclusive projector runs once per completed tool call. The durable graph keeps the full <code>ToolCallOutput</code>; the projector derives the budgeted <code>ModelToolReturn</code> that the live model prompt and rolled-up history see.</p>
           </div>
           <div class="diagram">
-            <div class="diagram-title">Tool result projection hooks</div>
+            <div class="diagram-title">Tool result projection</div>
             <div class="mermaid">
 flowchart LR
-  Tools["Tool dispatch ToolCallOutput"] --> BeforeState["BeforeState projector"]
-  BeforeState --> Graph["SessionGraph storage"]
-  Tools --> BeforeModel["BeforeModel projector"]
-  BeforeModel --> Provider["next LlmRequest"]
-  Tools --> BeforeHistory["BeforeHistory projector"]
-  BeforeHistory --> History["chronological / rolling history"]
+  Tools["Tool dispatch ToolCallOutput"] --> Graph["SessionGraph storage<br/>(full ToolCallOutput)"]
+  Tools --> Projector["tool-result projector"]
+  Projector --> Model["ModelToolReturn<br/>(budgeted view)"]
+  Model --> Provider["next LlmRequest"]
+  Model --> History["chronological / rolling history"]
             </div>
           </div>
           <p>Defaults: <code>ToolOutputBudgetMode::Bytes</code> at 16 KiB and 400 lines, configurable via <code>ToolOutputBudgetConfig</code>. RLM piggybacks on the same projector for its <code>print</code> observations.</p>

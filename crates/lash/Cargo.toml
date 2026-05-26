@@ -25,7 +25,6 @@ lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9" }
 lash-mode-rlm = { path = "../lash-mode-rlm", version = "=0.1.0-alpha.9" }
 lash-mode-standard = { path = "../lash-mode-standard", version = "=0.1.0-alpha.9" }
 lash-local-store = { path = "../lash-local-store", version = "=0.1.0-alpha.9" }
-lash-plugin-monitor = { path = "../lash-plugin-monitor", version = "=0.1.0-alpha.9" }
 lash-plugin-tool-output-budget = { path = "../lash-plugin-tool-output-budget", version = "=0.1.0-alpha.9" }
 lash-rlm-types = { path = "../lash-rlm-types", version = "=0.1.0-alpha.9" }
 lash-trace = { path = "../lash-trace", version = "=0.1.0-alpha.9" }

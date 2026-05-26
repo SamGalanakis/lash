@@ -312,37 +312,37 @@ fn take_last_queued_turn_restores_explicit_queue_only() {
 }
 
 #[test]
-fn wake_session_effect_uses_hidden_monitor_queue() {
+fn wake_session_effect_uses_hidden_process_queue() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
 
     crate::apply_ui_host_effects(
         &mut app,
         vec![TuiHostEffect::WakeSession {
-            input: "Monitor event \"build\": done".into(),
+            input: "Process wake \"build\": done".into(),
         }],
     );
 
     assert!(!app.has_queued_messages());
     assert_eq!(
-        app.take_pending_monitor_wakes(),
-        vec!["Monitor event \"build\": done".to_string()]
+        app.take_pending_process_wakes(),
+        vec!["Process wake \"build\": done".to_string()]
     );
 }
 
 #[test]
-fn acknowledged_monitor_wakes_do_not_requeue() {
+fn acknowledged_process_wakes_do_not_requeue() {
     let mut app = App::new("test-model".into(), "test".into(), "test-session-id".into());
-    app.queue_monitor_wake("Monitor event \"build\": done".into());
-    let wakes = app.take_pending_monitor_wakes();
-    app.mark_monitor_wakes_in_flight(&wakes);
+    app.queue_process_wake("Process wake \"build\": done".into());
+    let wakes = app.take_pending_process_wakes();
+    app.mark_process_wakes_in_flight(&wakes);
 
-    app.acknowledge_monitor_wakes(&[PluginMessage::text(
+    app.acknowledge_process_wakes(&[PluginMessage::text(
         MessageRole::System,
-        "Monitor event \"build\": done",
+        "Process wake \"build\": done",
     )]);
-    app.recycle_unaccepted_monitor_wakes();
+    app.recycle_unaccepted_process_wakes();
 
-    assert!(app.take_pending_monitor_wakes().is_empty());
+    assert!(app.take_pending_process_wakes().is_empty());
 }
 
 #[test]

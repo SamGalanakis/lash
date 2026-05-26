@@ -368,8 +368,8 @@ impl LashSession {
         ToolsControl::new(self.control())
     }
 
-    pub fn processes(&self) -> Processes {
-        Processes::new(self.control())
+    pub fn process_control(&self) -> ProcessControl {
+        ProcessControl::new(self.control())
     }
 
     pub fn handoffs(&self) -> Handoffs {

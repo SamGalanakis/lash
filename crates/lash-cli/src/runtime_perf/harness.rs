@@ -129,7 +129,7 @@ impl BenchmarkRuntime {
         self.session
             .as_ref()
             .expect("benchmark session")
-            .processes()
+            .process_control()
             .await_all()
             .await?;
         Ok(())

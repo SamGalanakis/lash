@@ -621,7 +621,7 @@ async fn standard_provider_does_not_expose_subagent_tools() {
 }
 
 #[tokio::test]
-async fn rlm_provider_requires_process_support() {
+async fn rlm_provider_does_not_require_process_support() {
     let factory = SubagentsPluginFactory::new(Arc::new(default_registry(&BTreeMap::new())));
     let ctx = PluginSessionContext {
         session_id: "parent".to_string(),
@@ -633,15 +633,8 @@ async fn rlm_provider_requires_process_support() {
         parent_session_id: None,
     };
 
-    let err = match factory.build(&ctx) {
-        Ok(_) => panic!("rlm build should fail"),
-        Err(err) => err,
-    };
-    assert!(
-        err.to_string()
-            .contains("subagents require session process support"),
-        "{err}"
-    );
+    let plugin = factory.build(&ctx).expect("rlm plugin");
+    assert_eq!(plugin.id(), "subagents");
 }
 
 fn dummy_tool(name: &str) -> ToolDefinition {

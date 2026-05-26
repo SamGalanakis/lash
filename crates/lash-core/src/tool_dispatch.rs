@@ -78,11 +78,8 @@ pub(crate) async fn dispatch_tool_call(
     let tool_context = ToolContext::new(
         context.session_id.clone(),
         Arc::clone(&context.host),
-        Arc::clone(&context.processes),
-        context.turn_context.clone(),
         Arc::clone(&context.attachment_store),
         context.direct_completions.clone(),
-        context.effect_controller.clone_scoped(),
         None,
     );
     dispatch_tool_call_with_execution_context(context, tool_name, args, progress, tool_context)
@@ -521,19 +518,6 @@ pub(crate) fn resolve_tool_execution_mode(
         .iter()
         .find(|def| def.manifest.name == tool_name)
         .map(|def| def.manifest.execution_mode)
-        .unwrap_or_default()
-}
-
-pub(crate) fn resolve_tool_process_start_mode(
-    context: &ToolDispatchContext<'_>,
-    tool_name: &str,
-) -> crate::ToolProcessStartMode {
-    context
-        .surface
-        .tools
-        .iter()
-        .find(|def| def.manifest.name == tool_name)
-        .map(|def| def.manifest.process_start_mode)
         .unwrap_or_default()
 }
 
@@ -1710,11 +1694,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            Arc::clone(&context.processes),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1754,11 +1735,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            Arc::clone(&context.processes),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
 
@@ -1847,11 +1825,8 @@ mod tests {
         let tool_context = ToolContext::new(
             context.session_id.clone(),
             Arc::clone(&context.host),
-            Arc::clone(&context.processes),
-            context.turn_context.clone(),
             Arc::clone(&context.attachment_store),
             context.direct_completions.clone(),
-            context.effect_controller.clone_scoped(),
             Some("call-1".to_string()),
         );
         let outcome = dispatch_tool_call_with_execution_context(

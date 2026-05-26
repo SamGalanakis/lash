@@ -17,7 +17,9 @@ mod tests;
 pub mod turn;
 pub mod usage;
 
-pub use crate::control::{AdvancedToolsControl, Handoffs, PluginActions, Processes, ToolsControl};
+pub use crate::control::{
+    AdvancedToolsControl, Handoffs, PluginActions, ProcessControl, ToolsControl,
+};
 pub use crate::core::{AdvancedLashCoreBuilder, LashCore, LashCoreBuilder};
 pub use crate::error::{EmbedError, Result};
 pub use crate::mode::{ModeId, ModePreset};
@@ -38,7 +40,7 @@ pub mod prelude {
     pub use crate::{
         AdvancedLashCoreBuilder, AdvancedToolsControl, EmbedError, FollowedTurnResult, Handoffs,
         InputItem, LashCore, LashCoreBuilder, LashSession, ModeId, ModePreset, ModelSpec,
-        ObservableSession, PluginActions, PluginBinding, PluginStack, Processes, Result,
+        ObservableSession, PluginActions, PluginBinding, PluginStack, ProcessControl, Result,
         ResumeTurnBuilder, SessionBuilder, SessionSpec, ToolsControl, TurnActivity, TurnBuilder,
         TurnEvent, TurnInput, TurnOutput, TurnResult, TurnStream,
     };
@@ -51,14 +53,8 @@ pub mod tools {
         PreparedToolCall, ToolActivation, ToolArgumentProjectionPolicy, ToolAvailability,
         ToolAvailabilityConfig, ToolCall, ToolCallOutput, ToolCallRecord, ToolContext,
         ToolContract, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode, ToolManifest,
-        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProcessStartMode,
-        ToolProvider, ToolResult, ToolSourceHandle,
-    };
-    pub use lash_plugin_monitor::{
-        MAX_MONITOR_TIMEOUT_MS, MonitorArmOn, MonitorEmptyArgs, MonitorRegisterSpecsOp,
-        MonitorRunState, MonitorSnapshot, MonitorSpec, MonitorStartOp, MonitorStatus,
-        MonitorStatusOp, MonitorStopOp, MonitorWakePolicy, OwnedMonitorSpec, RegisterSpecsArgs,
-        StartMonitorArgs, StopMonitorArgs,
+        ToolOutputContract, ToolPrepareCall, ToolPrepareContext, ToolProvider, ToolResult,
+        ToolSourceHandle,
     };
 }
 

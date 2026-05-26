@@ -221,6 +221,22 @@ impl LashlangProcessHost<'_> {
         &self,
         start: ::lashlang::ProcessStart,
     ) -> Result<::lashlang::Value, ::lashlang::ExecutionHostError> {
+        if start.module.process(&start.process).is_none()
+            && let Some(manifest) = self.ctx.callable_tool_manifest(&start.process)
+        {
+            let payload = crate::lashlang_bridge::lashlang_value_to_json(
+                &::lashlang::Value::Record(Arc::new(start.args)),
+            )?;
+            let reply = self
+                .ctx
+                .start_tool_call(
+                    uuid::Uuid::new_v4().to_string(),
+                    manifest.name.clone(),
+                    payload,
+                )
+                .await;
+            return mode_reply_to_lashlang_value(reply);
+        }
         let (registration, label) = self
             .ctx
             .prepare_lashlang_process_start(start)

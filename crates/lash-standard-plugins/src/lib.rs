@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use lash_core::plugin::{PluginSpec, StaticPluginFactory};
 use lash_core::{PluginStack, StandardContextApproach, ToolProvider};
-use lash_plugin_monitor::MonitorPluginFactory;
 use lash_plugin_observational_memory::ObservationalMemoryPluginFactory;
 use lash_plugin_process_controls::ProcessControlsPluginFactory;
 use lash_plugin_rolling_history::RollingHistoryPluginFactory;
@@ -57,7 +56,6 @@ fn push_standard_context_tools(
 
 fn push_local_runtime_tools(stack: &mut PluginStack) {
     stack.push(Arc::new(ProcessControlsPluginFactory::new()));
-    stack.push(Arc::new(MonitorPluginFactory));
     stack.push(Arc::new(StandardShellPluginFactory::new()));
     stack.push(Arc::new(StaticPluginFactory::new(
         "apply_patch",

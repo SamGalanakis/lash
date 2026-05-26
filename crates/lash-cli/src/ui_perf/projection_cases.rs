@@ -210,14 +210,15 @@ fn live_activity_event(index: usize) -> TurnEvent {
             duration_ms: 22,
         },
         8 => TurnEvent::ToolCallCompleted {
-            call_id: Some(format!("monitor-{index}")),
-            name: "monitor".to_string(),
-            args: json!({ "command": "tail -f app.log", "description": "app log" }),
+            call_id: Some(format!("process-{index}")),
+            name: "list_process_handles".to_string(),
+            args: json!({}),
             output: ToolCallOutput::success(json!({
-                "process_id": "monitor:app-log",
-                "producer": "monitor",
-                "state": "running",
-                "description": "app log"
+                "processes": [{
+                    "process_id": "tool-call-app-log",
+                    "descriptor": { "kind": "tool", "label": "app_log" },
+                    "terminal": "running"
+                }]
             })),
             duration_ms: 2,
         },

@@ -20,7 +20,6 @@ semantic-tool-search = ["lash-plugin-tool-discovery/semantic-tool-search"]
 
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
-lash-plugin-monitor = { path = "../lash-plugin-monitor", version = "=0.1.0-alpha.9" }
 lash-plugin-observational-memory = { path = "../lash-plugin-observational-memory", version = "=0.1.0-alpha.9" }
 lash-plugin-process-controls = { path = "../lash-plugin-process-controls", version = "=0.1.0-alpha.9" }
 lash-plugin-rolling-history = { path = "../lash-plugin-rolling-history", version = "=0.1.0-alpha.9" }

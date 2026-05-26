@@ -149,8 +149,8 @@ impl SessionPlugin for RlmModePlugin {
             config: self.config.clone(),
             last_prompt_usage: Arc::clone(&self.last_prompt_usage),
         }))?;
-        reg.tools()
-            .provider(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
+        reg.mode()
+            .native_tools(Arc::new(crate::control_tools::RlmControlToolsProvider))?;
         reg.tool_calls().before(Arc::new(|ctx| {
             Box::pin(async move { normalize_projected_tool_args(ctx) })
         }));

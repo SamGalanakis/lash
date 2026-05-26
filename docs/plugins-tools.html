@@ -52,7 +52,7 @@
                 <tr><td><code>context.tool_catalog().await?</code></td><td>Read the current session's projected tool catalog for discovery/ranking tools.</td></tr>
                 <tr><td><code>context.set_tools_availability(...).await?</code></td><td>Promote, hide, or reset dynamic tool availability for the current session.</td></tr>
                 <tr><td><code>context.sessions()</code></td><td>Cloneable child-session control: <code>create_session</code>, <code>close_session</code>, and one-shot <code>start_turn</code>. Durable background work uses process handles granted to sessions, not child-turn handles.</td></tr>
-                <tr><td><code>context.processes()</code></td><td>Cloneable process registry control for tools that spawn long-lived work visible through process-handle surfaces.</td></tr>
+                <tr><td><code>context.emit_process_event(...)</code></td><td>Append typed process events from a tool that is already executing inside a durable process.</td></tr>
                 <tr><td><code>context.direct_completion(request, source).await?</code></td><td>Run a one-shot LLM request. Missing <code>session_id</code> and <code>originating_tool_call_id</code> are filled from the current tool call for tracing, usage attribution, and stable direct-effect keys; set <code>DirectRequest::idempotency_key</code> when one tool call issues multiple otherwise-identical direct requests.</td></tr>
               </tbody>
             </table>

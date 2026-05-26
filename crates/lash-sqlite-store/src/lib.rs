@@ -2778,22 +2778,25 @@ mod tests {
         )
     }
 
-    fn monitor_line_event_type() -> lash_core::ProcessEventType {
+    fn process_wake_event_type() -> lash_core::ProcessEventType {
         let mut properties = serde_json::Map::new();
-        properties.insert("line".to_string(), serde_json::json!({ "type": "string" }));
+        properties.insert(
+            "message".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
         properties.insert(
             "wake_input".to_string(),
             serde_json::json!({ "type": "string" }),
         );
         lash_core::ProcessEventType {
-            name: "monitor.line".to_string(),
-            payload_schema: lash_core::LashSchema::object(properties, vec!["line".to_string()]),
+            name: "process.wake".to_string(),
+            payload_schema: lash_core::LashSchema::object(properties, vec!["message".to_string()]),
             semantics: ProcessEventSemanticsSpec {
                 wake: Some(ProcessWakeSpec {
                     when: Some(ProcessValueSelector::Present("/wake_input".to_string())),
                     input: ProcessValueSelector::Pointer("/wake_input".to_string()),
                     dedupe_key: ProcessWakeDedupeKey::Selector(ProcessValueSelector::Pointer(
-                        "/line".to_string(),
+                        "/message".to_string(),
                     )),
                 }),
                 ..ProcessEventSemanticsSpec::default()
@@ -2882,7 +2885,7 @@ mod tests {
             registry
                 .register_process(
                     registration("proc-idempotent")
-                        .with_extra_event_types([monitor_line_event_type()]),
+                        .with_extra_event_types([process_wake_event_type()]),
                 )
                 .await
                 .is_err()
@@ -2894,18 +2897,18 @@ mod tests {
         let registry = SqliteProcessRegistry::memory().expect("registry");
         registry
             .register_process(
-                registration("proc-wake").with_extra_event_types([monitor_line_event_type()]),
+                registration("proc-wake").with_extra_event_types([process_wake_event_type()]),
             )
             .await
             .expect("register");
         let request = ProcessEventAppendRequest::new(
-            "monitor.line",
+            "process.wake",
             serde_json::json!({
-                "line": "deploy failed",
-                "wake_input": "Monitor event: deploy failed",
+                "message": "deploy failed",
+                "wake_input": "Process wake: deploy failed",
             }),
         )
-        .with_idempotency_key("line:deploy failed")
+        .with_idempotency_key("wake:deploy failed")
         .with_wake_target_scope_key("runtime:session");
 
         let first = registry
@@ -2923,13 +2926,13 @@ mod tests {
                 .append_event(
                     "proc-wake",
                     ProcessEventAppendRequest::new(
-                        "monitor.line",
+                        "process.wake",
                         serde_json::json!({
-                            "line": "other",
-                            "wake_input": "Monitor event: other",
+                            "message": "other",
+                            "wake_input": "Process wake: other",
                         }),
                     )
-                    .with_idempotency_key("line:deploy failed"),
+                    .with_idempotency_key("wake:deploy failed"),
                 )
                 .await
                 .is_err()
@@ -2940,7 +2943,7 @@ mod tests {
             .await
             .expect("drain wakes");
         assert_eq!(wakes.len(), 1);
-        assert_eq!(wakes[0].input, "Monitor event: deploy failed");
+        assert_eq!(wakes[0].input, "Process wake: deploy failed");
         registry
             .ack_wake_input(&wakes[0].wake_id)
             .await

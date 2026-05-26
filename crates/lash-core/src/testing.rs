@@ -233,9 +233,8 @@ pub fn mock_tool_context() -> crate::ToolContext<'static> {
 pub fn mock_tool_context_with_host(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
 ) -> crate::ToolContext<'static> {
-    mock_tool_context_with_host_processes_and_direct_completions(
+    mock_tool_context_with_host_and_direct_completions(
         host,
-        Arc::new(UnavailableProcessService),
         crate::DirectCompletionClient::unavailable(
             "direct completions are unavailable in this test context",
         ),
@@ -246,36 +245,9 @@ pub fn mock_tool_context_with_host_and_direct_completions(
     host: Arc<dyn crate::plugin::RuntimeSessionHost>,
     direct_completions: crate::DirectCompletionClient<'static>,
 ) -> crate::ToolContext<'static> {
-    mock_tool_context_with_host_processes_and_direct_completions(
-        host,
-        Arc::new(UnavailableProcessService),
-        direct_completions,
-    )
-}
-
-pub fn mock_tool_context_with_host_and_processes(
-    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-    processes: Arc<dyn crate::ProcessService>,
-) -> crate::ToolContext<'static> {
-    mock_tool_context_with_host_processes_and_direct_completions(
-        host,
-        processes,
-        crate::DirectCompletionClient::unavailable(
-            "direct completions are unavailable in this test context",
-        ),
-    )
-}
-
-fn mock_tool_context_with_host_processes_and_direct_completions(
-    host: Arc<dyn crate::plugin::RuntimeSessionHost>,
-    processes: Arc<dyn crate::ProcessService>,
-    direct_completions: crate::DirectCompletionClient<'static>,
-) -> crate::ToolContext<'static> {
     crate::tool_provider::ToolContext::__for_testing(
         "test-session".to_string(),
         host,
-        processes,
-        crate::TurnContext::new(),
         Arc::new(crate::InMemoryAttachmentStore::new()),
         direct_completions,
         None,

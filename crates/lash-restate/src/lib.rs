@@ -1708,10 +1708,10 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             let event = lash_core::ProcessEventAppendRequest::new(
-                "monitor.line",
-                serde_json::json!({ "line": line, "wake_input": line }),
+                "process.wake",
+                serde_json::json!({ "message": line, "wake_input": line }),
             )
-            .with_idempotency_key(format!("monitor.line:{line}"));
+            .with_idempotency_key(format!("process.wake:{line}"));
             if let Err(err) = call.context.emit_process_event_request(event).await {
                 return lash_core::ToolResult::err_fmt(err);
             }
@@ -1755,9 +1755,9 @@ mod tests {
         )
     }
 
-    fn monitor_line_event_type() -> lash_core::ProcessEventType {
+    fn process_wake_event_type() -> lash_core::ProcessEventType {
         lash_core::ProcessEventType {
-            name: "monitor.line".to_string(),
+            name: "process.wake".to_string(),
             payload_schema: lash_core::LashSchema::any(),
             semantics: lash_core::ProcessEventSemanticsSpec {
                 wake: Some(lash_core::ProcessWakeSpec {
@@ -1766,7 +1766,7 @@ mod tests {
                     )),
                     input: lash_core::ProcessValueSelector::Pointer("/wake_input".to_string()),
                     dedupe_key: lash_core::ProcessWakeDedupeKey::Selector(
-                        lash_core::ProcessValueSelector::Pointer("/line".to_string()),
+                        lash_core::ProcessValueSelector::Pointer("/message".to_string()),
                     ),
                 }),
                 ..lash_core::ProcessEventSemanticsSpec::default()
@@ -1811,7 +1811,7 @@ mod tests {
             },
         )
         .with_provenance(creator_scope, "recovery-host")
-        .with_extra_event_types([monitor_line_event_type()]);
+        .with_extra_event_types([process_wake_event_type()]);
 
         host_a
             .execute_effect(

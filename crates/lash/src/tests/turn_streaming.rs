@@ -1,5 +1,41 @@
 use super::*;
 
+struct BlockingAppTools {
+    entered_tx: StdMutex<Option<oneshot::Sender<()>>>,
+    release_rx: TokioMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl BlockingAppTools {
+    fn new(entered_tx: oneshot::Sender<()>, release_rx: oneshot::Receiver<()>) -> Self {
+        Self {
+            entered_tx: StdMutex::new(Some(entered_tx)),
+            release_rx: TokioMutex::new(Some(release_rx)),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for BlockingAppTools {
+    fn tool_manifests(&self) -> Vec<lash_core::ToolManifest> {
+        vec![app_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<lash_core::ToolContract>> {
+        (name == "app_lookup").then(|| Arc::new(app_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: lash_core::ToolCall<'_>) -> lash_core::ToolResult {
+        assert_eq!(call.name, "app_lookup");
+        if let Some(tx) = self.entered_tx.lock().expect("entered tx").take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.release_rx.lock().await.take() {
+            let _ = rx.await;
+        }
+        lash_core::ToolResult::ok(serde_json::json!({ "answer": "ready" }))
+    }
+}
+
 #[tokio::test]
 async fn turn_builder_into_stream_emits_activities_and_finishes() -> Result<()> {
     let core = standard_core();
@@ -512,6 +548,51 @@ async fn rlm_tool_calls_stream_from_live_exec_boundary() -> Result<()> {
         unreachable!();
     };
     assert_eq!(value, &serde_json::json!("done"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_control_lists_started_ordinary_tool_until_awaited() -> Result<()> {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = LashCore::rlm()
+        .provider(queued_text_provider(vec![
+            "```lashlang\nh = start app_lookup()\nvalue = await h\nsubmit value\n```",
+        ]))
+        .model(mock_model_spec())
+        .tools(Arc::new(BlockingAppTools::new(entered_tx, release_rx)))
+        .process_registry(Arc::new(TestLocalProcessRegistry::default()))
+        .build()?;
+    let session = core.session("rlm-process-control-tool").open().await?;
+    let turn_session = session.clone();
+    let turn =
+        tokio::spawn(async move { turn_session.turn(TurnInput::text("start tool")).run().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .expect("tool process should start")
+        .expect("tool provider entered");
+
+    let processes = session.process_control().list().await?;
+    let running_app_lookup = processes.iter().any(|(grant, record)| {
+        grant.descriptor.kind.as_deref() == Some("tool")
+            && grant.descriptor.label.as_deref() == Some("app_lookup")
+            && record.terminal.is_none()
+    });
+    assert!(
+        running_app_lookup,
+        "expected running app_lookup tool process, got {processes:?}"
+    );
+
+    release_tx.send(()).expect("release tool provider");
+    let result = turn.await.expect("turn task")?;
+    assert_eq!(
+        result.submitted_value(),
+        Some(&serde_json::json!({
+            "ok": true,
+            "value": { "answer": "ready" },
+        }))
+    );
     Ok(())
 }
 

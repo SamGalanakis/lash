@@ -2458,7 +2458,6 @@ version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-plugin-monitor",
  "lash-plugin-process-controls",
  "lash-sqlite-store",
  "lash-tool-shell",
@@ -2487,17 +2486,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "lash-plugin-monitor"
-version = "0.1.0-alpha.9"
-dependencies = [
- "async-trait",
- "lash-core",
- "schemars",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2699,7 +2687,6 @@ dependencies = [
  "lash-local-store",
  "lash-mode-rlm",
  "lash-mode-standard",
- "lash-plugin-monitor",
  "lash-plugin-tool-output-budget",
  "lash-rlm-types",
  "lash-trace",
@@ -2743,7 +2730,6 @@ name = "lash-standard-plugins"
 version = "0.1.0-alpha.9"
 dependencies = [
  "lash-core",
- "lash-plugin-monitor",
  "lash-plugin-observational-memory",
  "lash-plugin-process-controls",
  "lash-plugin-rolling-history",
@@ -2818,7 +2804,6 @@ version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
  "lash-core",
- "lash-plugin-monitor",
  "lash-tool-support",
  "libc",
  "portable-pty",
@@ -2888,7 +2873,6 @@ name = "lash-tui-extensions"
 version = "0.1.0-alpha.9"
 dependencies = [
  "async-trait",
- "lash-plugin-monitor",
  "lash-plugin-plan-mode",
  "lash-runtime",
  "lash-tui",

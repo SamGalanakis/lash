@@ -150,10 +150,6 @@ impl<'run> ModeExecutionContext<'run> {
         crate::tool_dispatch::resolve_tool_execution_mode(&self.dispatch, name)
     }
 
-    pub(crate) fn tool_process_start_mode(&self, name: &str) -> crate::ToolProcessStartMode {
-        crate::tool_dispatch::resolve_tool_process_start_mode(&self.dispatch, name)
-    }
-
     pub fn callable_tool_manifest(&self, name: &str) -> Option<crate::ToolManifest> {
         crate::tool_dispatch::resolve_callable_manifest(&self.dispatch, name)
     }

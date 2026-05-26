@@ -54,7 +54,7 @@ pub(crate) use self::runtime::{generate_session_name, notify_desktop};
 
 use self::input_handling::{
     activate_foreground_session_handoff, apply_terminal_action, handle_key_event,
-    handle_mouse_event, handle_surface_input, process_pending_monitor_wakes,
+    handle_mouse_event, handle_surface_input, process_pending_process_wakes,
 };
 
 // Items used only by tests via `use super::*;` in tests.rs.
@@ -65,7 +65,7 @@ use self::helpers::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-use self::input_handling::enqueue_pending_monitor_wakes;
+use self::input_handling::enqueue_pending_process_wakes;
 
 fn session_activity_is_current(
     stream_id: u64,
@@ -341,8 +341,8 @@ pub(crate) async fn run_app(
             active_stream_id,
         );
 
-        if app.has_pending_monitor_wakes() {
-            match process_pending_monitor_wakes(
+        if app.has_pending_process_wakes() {
+            match process_pending_process_wakes(
                 &mut app,
                 &mut ui_trace,
                 logger,
@@ -359,7 +359,7 @@ pub(crate) async fn run_app(
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(err) => {
-                    push_system_message(&mut app, format!("Failed to inject monitor wake: {err}"))
+                    push_system_message(&mut app, format!("Failed to inject process wake: {err}"))
                 }
             }
         }
@@ -417,7 +417,7 @@ pub(crate) async fn run_app(
                     {
                         let session_id = session_id.clone();
                         app.stop_turn();
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
                         if activate_foreground_session_handoff(
@@ -478,7 +478,7 @@ pub(crate) async fn run_app(
                         );
                     }
                     if done.stream_id != active_stream_id || pending_clear_after_return {
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         if let Some(rt) = runtime.as_mut() {
                             let preserved_policy = rt.policy_snapshot();
                             let _ = rt.control().state().reset().await;
@@ -588,7 +588,7 @@ pub(crate) async fn run_app(
                         app.invalidate_height_cache();
                         app.scroll_to_bottom();
                         promote_pending_steers_to_queue(&mut app, &mut ui_trace);
-                        app.recycle_unaccepted_monitor_wakes();
+                        app.recycle_unaccepted_process_wakes();
                         runtime_return_rx = None;
                         cancel_token = None;
                         dispatch_next_queued_turn(
@@ -623,7 +623,7 @@ pub(crate) async fn run_app(
                     }
 
                     app.finish_turn_from_read_view(&read_view);
-                    app.recycle_unaccepted_monitor_wakes();
+                    app.recycle_unaccepted_process_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -666,7 +666,7 @@ pub(crate) async fn run_app(
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     tracing::debug!("runtime return channel closed before delivering runtime");
                     app.stop_turn();
-                    app.recycle_unaccepted_monitor_wakes();
+                    app.recycle_unaccepted_process_wakes();
                     runtime_return_rx = None;
                     cancel_token = None;
                     log_runtime_handoff(
@@ -980,7 +980,7 @@ pub(crate) async fn run_app(
                         .iter()
                         .map(|input| input.message.clone())
                         .collect::<Vec<_>>();
-                    app.acknowledge_monitor_wakes(&messages);
+                    app.acknowledge_process_wakes(&messages);
                 }
                 app.handle_turn_activity(activity);
                 apply_ui_host_effects(&mut app, ui_effects);

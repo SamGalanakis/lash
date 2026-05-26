@@ -206,7 +206,6 @@ fn update_plan_definition() -&gt; ToolDefinition {
                 <tr><td><code>reg.tool_results()</code></td><td>Tool-output budgeting and projection. <strong>Exclusive</strong> — only one plugin can register a projector per session.</td></tr>
                 <tr><td><code>reg.session()</code></td><td>Runtime-event observers and config mutators.</td></tr>
                 <tr><td><code>reg.actions()</code></td><td>Typed or raw RPC-shaped entry points the host can invoke directly, without going through tool calls.</td></tr>
-                <tr><td><code>reg.monitors()</code></td><td>Monitor specs (long-running watches that the plugin maintains across turns).</td></tr>
                 <tr><td><code>reg.history()</code></td><td>History transforms and rewrites that run as part of compaction / rolling history.</td></tr>
                 <tr><td><code>reg.mode()</code></td><td>Mode-plugin capabilities. Most users don't touch this; modes are built into <code>lash-mode-standard</code> and <code>lash-mode-rlm</code>.</td></tr>
               </tbody>

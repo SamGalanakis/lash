@@ -560,13 +560,30 @@ impl<'module> Linker<'module> {
             }
             Expr::StartProcess(start) => {
                 self.ensure_feature(self.surface.abilities.processes, "processes", scope.span)?;
-                let process = self
-                    .program
-                    .process(start.process.as_str())
-                    .ok_or_else(|| LinkError::UnknownProcess {
+                let Some(process) = self.program.process(start.process.as_str()) else {
+                    if self
+                        .surface
+                        .resources
+                        .resolve_operation("TOOL", start.process.as_str())
+                        .is_some()
+                    {
+                        let mut seen = BTreeSet::new();
+                        for (arg, value) in &start.args {
+                            if !seen.insert(arg.to_string()) {
+                                return Err(LinkError::DuplicateProcessArgument {
+                                    arg: arg.to_string(),
+                                    span: scope.span,
+                                });
+                            }
+                            self.validate_expr(value, scope)?;
+                        }
+                        return Ok(Some(Binding::Value));
+                    }
+                    return Err(LinkError::UnknownProcess {
                         name: start.process.to_string(),
                         span: scope.span,
-                    })?;
+                    });
+                };
                 let mut seen = BTreeSet::new();
                 for (arg, value) in &start.args {
                     if !seen.insert(arg.to_string()) {

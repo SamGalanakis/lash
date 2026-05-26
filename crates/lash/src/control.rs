@@ -596,11 +596,11 @@ impl AdvancedToolsControl {
 }
 
 #[derive(Clone)]
-pub struct Processes {
+pub struct ProcessControl {
     control: SessionControl,
 }
 
-impl Processes {
+impl ProcessControl {
     pub(crate) fn new(control: SessionControl) -> Self {
         Self { control }
     }

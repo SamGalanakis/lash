@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lash_core::{
-    PreparedToolCall, ProcessRegistration, SessionSpec, SubagentSessionContext,
-    ToolArgumentProjectionPolicy, ToolCall, ToolContext, ToolContract, ToolDefinition,
-    ToolExecutionMode, ToolManifest, ToolPrepareCall, ToolProvider, ToolResult,
+    PreparedToolCall, SessionSpec, SubagentSessionContext, ToolArgumentProjectionPolicy, ToolCall,
+    ToolContext, ToolContract, ToolDefinition, ToolExecutionMode, ToolManifest, ToolPrepareCall,
+    ToolProvider, ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -111,55 +111,17 @@ async fn run_child_session(
         return Err("subagent spawning is unavailable in this session".to_string());
     }
 
-    let requested_child_session_id = create_request
-        .session_id
-        .clone()
-        .ok_or_else(|| "child session id is required".to_string())?;
-    let child_session_id = requested_child_session_id.clone();
-    let process_id = format!("subagent:{child_session_id}");
-    let registration_input = lash_core::ProcessInput::SessionTurn {
-        create_request: Box::new(create_request),
-        turn_input: Box::new(turn_input.clone()),
-        output_contract: lash_core::ToolOutputContract::from_input_schema("output", None),
-    };
-
-    if let Err(err) = context
-        .processes()
-        .start_process(
-            ProcessRegistration::new(process_id.clone(), registration_input),
-            Some(lash_core::ProcessHandleDescriptor::new(
-                Some("subagent"),
-                Some(child_session_id.clone()),
-            )),
-        )
+    let child = context
+        .sessions()
+        .create_session(create_request)
         .await
-    {
-        return Err(format!(
-            "failed to register subagent process for `{requested_child_session_id}`: {err}"
-        ));
-    }
-
-    let completion = context
-        .processes()
-        .await_process(&process_id)
+        .map_err(|err| format!("failed to create subagent session: {err}"))?;
+    let turn = context
+        .sessions()
+        .start_turn(&child.session_id, turn_input)
         .await
         .map_err(|err| format!("subagent failed while executing its task: {err}"))?;
-    completion_value(completion)
-}
-
-fn completion_value(output: lash_core::ProcessAwaitOutput) -> Result<Value, String> {
-    match output {
-        lash_core::ProcessAwaitOutput::Success { value, .. } => {
-            if let Some(turn_value) = value.get("turn") {
-                let turn = serde_json::from_value::<lash_core::AssembledTurn>(turn_value.clone())
-                    .map_err(|err| format!("invalid subagent turn output: {err}"))?;
-                return Ok(task_result_value(&turn));
-            }
-            Ok(value)
-        }
-        lash_core::ProcessAwaitOutput::Failure { message, .. } => Err(message),
-        lash_core::ProcessAwaitOutput::Cancelled { message, .. } => Err(message),
-    }
+    Ok(task_result_value(&turn))
 }
 
 #[async_trait]
@@ -247,7 +209,7 @@ fn spawn_agent_definition(capability_names: &[String], examples: Vec<String>) ->
     let cap_list = capability_list_for_description(capability_names);
     let capability_detail = capability_detail_for_tool_description(capability_names);
     let description = format!(
-        "Run a subagent and return its final result. Invoke it as `await TOOL.default.spawn_agent({{ ... }})?`. For fan-out, put the spawn operation inside a named `process` and start that process once per branch. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
+        "Run a subagent and return its final result. Invoke it as `await TOOL.default.spawn_agent({{ ... }})?`. For fan-out, use `start spawn_agent(...)` once per branch and then await the returned handles. {capability_detail} `output` defines the typed return shape. Available capabilities: {cap_list}. \
         \n\nThe child starts with **no** inherited state — globals, projected bindings, message history are all blank. Hand it specific data via `seed: {{ name: value, ... }}`. Each entry's kind is preserved automatically: if `value`'s lashlang source root is a host-projected binding (e.g. `seed: {{ problem: input.prompt }}`) the child receives `problem` as a read-only projected binding, identical to how it appeared on the parent. Otherwise it lands as a regular RLM global. Computed expressions default to global. Projected seed entries require an RLM child; passing one to a non-RLM capability is an error.\
         \n\nA child can fail terminally with `await TOOL.default.submit_error({{ reason: \"...\" }})?`; this tool returns an error with that reason."
     );

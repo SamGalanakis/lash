@@ -55,7 +55,7 @@
                 <tr><td><code>LashlangSurface</code>, <code>LashlangAbilities</code>, <code>LinkedModule</code></td><td><code>lashlang</code> + <code>lash-core</code></td><td>The linked host surface gates resource operations, process declarations/starts, process sleep/signals, triggers, and cron schedules. Disabled features parse but fail during linking before runtime side effects. Stored Lashlang process input carries the linked module snapshot so nested starts compile against the surface that originally linked the process.</td></tr>
                 <tr><td><code>RlmProjectedBindings</code>, <code>ProjectionRef</code>, <code>ProjectionResolver</code>, <code>ProjectionRegistry</code></td><td><code>crates/lash-mode-rlm/src/projected_bindings.rs</code></td><td>Public RLM projection API. Inline bindings carry JSON/lashlang values; lazy bindings carry stable refs that resolve to low-level projected values immediately before execution.</td></tr>
                 <tr><td><code>ProjectedBindings</code>, <code>ProjectedValue</code>, <code>ProjectedHostValue</code>, <code>ProjectedReadRequest</code>, <code>ProjectedReadResponse</code></td><td><code>crates/lashlang/src/runtime/value.rs</code></td><td>Low-level read-only Lashlang projection protocol. <code>ProjectedValue</code> can carry opaque projection-ref metadata for snapshot/seed rehydration; assignment over a projected name is rejected at runtime.</td></tr>
-                <tr><td><code>ToolResultProjectionHook</code>, <code>ToolOutputBudgetPluginFactory</code>, <code>ToolOutputBudgetConfig</code></td><td><code>crates/lash-core/src/plugin/tool_result_projection_builtin.rs</code></td><td>Three-stage tool-output budgeter — <code>BeforeState</code>, <code>BeforeModel</code>, <code>BeforeHistory</code> — with <code>ToolOutputBudgetMode::{Bytes, Tokens}</code> limits (defaults: 16 KiB, 400 lines).</td></tr>
+                <tr><td><code>ToolResultProjector</code>, <code>ToolOutputBudgetPluginFactory</code>, <code>ToolOutputBudgetConfig</code></td><td><code>crates/lash-plugin-tool-output-budget/src/lib.rs</code></td><td>Single exclusive tool-result projector (registered via <code>reg.tool_results().projector(...)</code>) that derives the budgeted model-facing <code>ModelToolReturn</code> from each completed call's full <code>ToolCallOutput</code>, with <code>ToolOutputBudgetMode::{Bytes, Tokens}</code> limits (defaults: 16 KiB, 400 lines).</td></tr>
                 <tr><td><code>ToolDiscoveryIndex</code>, <code>CatalogTool</code>, <code>llm_rerank_request</code></td><td><code>crates/lash-plugin-tool-discovery/src/*</code></td><td>Search/load tool discovery pipeline split across catalog, provider, ranking, rerank, and schema-index modules.</td></tr>
                 <tr><td><code>UiTimelineItem</code>, <code>ActivityBlock</code>, <code>TuiExtensions</code></td><td><code>lash-cli</code> / <code>lash-tui-extensions</code></td><td>CLI render projection, tool activity display, and host-provided surface slots.</td></tr>
               </tbody>
@@ -115,7 +115,7 @@ flowchart LR
             <li>
               <div>
                 <h3>Background work is handle-shaped.</h3>
-                <p>Monitors and started async tool calls, including <code>spawn_agent</code> fan-out, are rediscovered through <code>list_process_handles</code>.</p>
+                <p>Started tool calls, including <code>spawn_agent</code> fan-out, are rediscovered through <code>list_process_handles</code>.</p>
               </div>
             </li>
             <li>

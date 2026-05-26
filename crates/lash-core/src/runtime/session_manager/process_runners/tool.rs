@@ -78,11 +78,8 @@ impl RuntimeSessionManager {
         let tool_context = crate::ToolContext::new(
             self.current.session_id.clone(),
             host,
-            Arc::new(self.clone()),
-            crate::TurnContext::default(),
             Arc::clone(&self.current.host.core.attachment_store),
             direct_completions,
-            dispatch.effect_controller.clone_scoped(),
             Some(call.call_id.clone()),
         )
         .with_async_process(registration.id.clone(), cancellation)

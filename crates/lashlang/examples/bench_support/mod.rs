@@ -574,22 +574,21 @@ submit {
 first = start spawn_agent(task: "inspect auth", capability: "explore")
 second = start spawn_agent(task: "inspect api", capability: "explore")
 llm = start llm_query(prompt: "summarize benchmark", model: "gpt-5.4-mini")
-monitor = start monitor(command: "tail -f app.log", description: "app log", timeout_ms: 1000)
+probe = start echo(value: "app log")
 handles = await TOOL.default.list_process_handles({})?
 results = await {
   first: first,
   second: second,
   llm: llm,
-  monitor: monitor
+  probe: probe
 }
 cancel second
 submit {
   first: results.first.value.claim,
   second: results.second.value.claim,
   llm: results.llm.value.text,
-  monitor: results.monitor.value.description,
-  tools: len(keys(handles.tool)),
-  monitors: len(keys(handles.monitor))
+  probe: results.probe.value,
+  tools: len(keys(handles.tool))
 }
 "#
         }
@@ -1299,22 +1298,6 @@ fn bench_call(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
             );
             Ok(Value::Record(Arc::new(record)))
         }
-        "monitor" => {
-            let mut record = Record::default();
-            record.insert(
-                "process_id".to_string(),
-                Value::String("monitor:app-log".into()),
-            );
-            record.insert("producer".to_string(), Value::String("monitor".into()));
-            record.insert("state".to_string(), Value::String("running".into()));
-            record.insert(
-                "description".to_string(),
-                args.get("description")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String("monitor".into())),
-            );
-            Ok(Value::Record(Arc::new(record)))
-        }
         "list_process_handles" => Ok(process_handles_record()),
         "continue_as" => Ok(continue_as_record(args)),
         _ => Err(unknown_tool(name)),
@@ -1402,10 +1385,6 @@ fn process_handles_record() -> Value {
     tool.insert("spawn_two".to_string(), Value::Record(Arc::new(chunk_2)));
 
     let mut out = Record::default();
-    out.insert(
-        "monitor".to_string(),
-        Value::Record(Arc::new(Record::default())),
-    );
     out.insert("tool".to_string(), Value::Record(Arc::new(tool)));
     Value::Record(Arc::new(out))
 }
@@ -1426,7 +1405,7 @@ fn unknown_tool(name: &str) -> ExecutionHostError {
 impl BenchHost {
     fn task_handle(name: &str, args: &Record) -> Result<Value, ExecutionHostError> {
         match name {
-            "echo" | "llm_query" | "spawn_agent" | "monitor" | "continue_as" => {
+            "echo" | "llm_query" | "spawn_agent" | "continue_as" => {
                 let mut record = Record::default();
                 record.insert("__handle__".to_string(), Value::String("process".into()));
                 record.insert("tool".to_string(), Value::String(name.to_string().into()));

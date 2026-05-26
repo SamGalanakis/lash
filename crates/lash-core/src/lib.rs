@@ -60,13 +60,13 @@ pub use lash_sansio::{
     ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation,
     ToolContract, ToolControl, ToolDefinition, ToolDiscoveryMetadata, ToolExecutionMode,
     ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
-    ToolProcessStartMode, ToolRetryDisposition, ToolRetryPolicy, ToolSurface,
-    ToolSurfaceBuildInput, ToolSurfaceEntry, ToolSurfaceOverride, ToolValue, TurnFinish,
-    TurnLimitFinalMessage, TurnOutcome, TurnStop, append_assistant_text_part, build_prompt,
-    build_tool_surface, build_turn, default_execution_mode, default_prompt_template,
-    execution_mode_supported, head_tail_truncate, messages_are_prompt_resume_safe,
-    normalized_response_parts, prompt_template_fingerprint, prompt_text_fingerprint,
-    prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers, shared_parts,
+    ToolRetryDisposition, ToolRetryPolicy, ToolSurface, ToolSurfaceBuildInput, ToolSurfaceEntry,
+    ToolSurfaceOverride, ToolValue, TurnFinish, TurnLimitFinalMessage, TurnOutcome, TurnStop,
+    append_assistant_text_part, build_prompt, build_tool_surface, build_turn,
+    default_execution_mode, default_prompt_template, execution_mode_supported, head_tail_truncate,
+    messages_are_prompt_resume_safe, normalized_response_parts, prompt_template_fingerprint,
+    prompt_text_fingerprint, prompt_tool_names_fingerprint, reasoning_part, resolve_prompt_layers,
+    shared_parts,
 };
 pub use mode::ModeBuildInput;
 pub use standard_context_approach::{
@@ -231,5 +231,5 @@ pub use store::{
 };
 pub use tool_provider::{
     PreparedToolCall, ProgressSender, SandboxMessage, ToolCall, ToolContext, ToolPrepareCall,
-    ToolPrepareContext, ToolProcessControl, ToolProvider, ToolSessionControl, ToolSessionModel,
+    ToolPrepareContext, ToolProvider, ToolSessionControl, ToolSessionModel,
 };

@@ -151,7 +151,6 @@ impl MockHost {
             }
             "list_process_handles" => {
                 let mut out = Record::default();
-                out.insert("monitor".into(), Value::Record(Record::default().into()));
                 out.insert("tool".into(), Value::Record(Record::default().into()));
                 Ok(Value::Record(out.into()))
             }

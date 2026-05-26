@@ -62,7 +62,7 @@ sequenceDiagram
         Tools-->>EffectController: ToolResult converted to ToolCallOutput + ModelToolReturn
         EffectController-->>Runtime: CompletedToolCall
       end
-      Runtime->>Plugins: ToolResultProjection BeforeState/Model/History
+      Runtime->>Plugins: project_tool_result -> ModelToolReturn
       Runtime->>Machine: Response::ToolResults
     else ExecCode
       Runtime->>EffectController: exec_code(invocation, code)
@@ -103,15 +103,16 @@ flowchart LR
         <div class="section">
           <div class="section-header">
             <h2>Tool Result Projection</h2>
-            <p><code>ToolOutputBudgetPluginFactory</code> registers projectors at three hook sites so the same raw output can be persisted in full while the model and rolled-up history see budgeted views.</p>
+            <p><code>ToolOutputBudgetPluginFactory</code> registers a single exclusive tool-result projector. The full <code>ToolCallOutput</code> is persisted in the durable graph, while the projector derives the budgeted <code>ModelToolReturn</code> the model and rolled-up history see. Registering more than one projector is rejected at build time.</p>
           </div>
           <div class="table">
             <table>
-              <thead><tr><th>Hook</th><th>Effect</th></tr></thead>
+              <thead><tr><th>Payload</th><th>Projection</th></tr></thead>
               <tbody>
-                <tr><td><code>BeforeState</code></td><td>Last chance to shape a result before it is committed to the durable session graph; only string-typed JSON payloads are truncated, structured values pass through.</td></tr>
-                <tr><td><code>BeforeModel</code></td><td>Trims content right before it is shown to the LLM in the next request, including non-string payloads rendered for display.</td></tr>
-                <tr><td><code>BeforeHistory</code></td><td>Same string-only truncation as <code>BeforeState</code>, applied as the result rolls into compacted history projections.</td></tr>
+                <tr><td>String values</td><td>Truncated to the budget when over the byte/token limit or line count; the head/tail direction is chosen per tool.</td></tr>
+                <tr><td>Structured values</td><td>Rendered to text with their string leaves truncated recursively; non-string scalars and shape pass through.</td></tr>
+                <tr><td>Attachments</td><td>Passed through untouched as <code>ModelToolReturnPart::Attachment</code>.</td></tr>
+                <tr><td><code>batch</code> results</td><td>Each inner call's value is projected before the aggregate is rendered.</td></tr>
               </tbody>
             </table>
           </div>
@@ -150,7 +151,7 @@ flowchart LR
             <div class="mermaid">
 flowchart TD
   Host["Host application"] --> Runtime["LashRuntime"]
-  Runtime --> Surface["tools and mode controls<br/>llm_query, spawn_agent, continue_as, monitors"]
+  Runtime --> Surface["tools and mode controls<br/>llm_query, spawn_agent, continue_as, process controls"]
   Surface --> Submit["submit JSON schema validation"]
   Runtime --> Usage["SessionUsageReport<br/>ledger by source + model"]
   Usage --> Deltas["usage deltas<br/>host reports"]

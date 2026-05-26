@@ -340,8 +340,7 @@ expression: "serde_json::to_string_pretty(&outputs).expect(\"benchmark outputs s
   "tool_control_surface": {
     "first": "done:inspect auth",
     "llm": "benchmark summary",
-    "monitor": "app log",
-    "monitors": 0,
+    "probe": "app log",
     "second": "done:inspect api",
     "tools": 2
   },

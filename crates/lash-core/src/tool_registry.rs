@@ -1001,15 +1001,10 @@ mod tests {
         let context = crate::ToolContext::new(
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
-            Arc::new(crate::UnavailableProcessService),
-            crate::TurnContext::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
-            )),
             None,
         );
         let args = json!({});
@@ -1047,15 +1042,10 @@ mod tests {
         let context = crate::ToolContext::new(
             "registry-test".to_string(),
             Arc::new(crate::testing::MockSessionManager::default()),
-            Arc::new(crate::UnavailableProcessService),
-            crate::TurnContext::default(),
             Arc::new(crate::InMemoryAttachmentStore::new()),
             crate::DirectCompletionClient::unavailable(
                 "direct completions are unavailable in this test context",
             ),
-            crate::runtime::RuntimeEffectControllerHandle::shared(Arc::new(
-                crate::InlineRuntimeEffectController::default(),
-            )),
             None,
         );
         let args = json!({ "query": "hello" });

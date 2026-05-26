@@ -15,7 +15,6 @@ categories = ["asynchronous", "command-line-interface"]
 
 [dependencies]
 lash-core = { path = "../lash-core", version = "=0.1.0-alpha.9", default-features = false }
-lash-plugin-monitor = { path = "../lash-plugin-monitor", version = "=0.1.0-alpha.9" }
 lash-tool-support = { path = "../lash-tool-support", version = "=0.1.0-alpha.9" }
 async-trait = { workspace = true }
 libc = "0.2"

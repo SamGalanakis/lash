@@ -212,7 +212,7 @@ pub fn process_cancel_tool_definition() -> ToolDefinition {
         }),
     )
     .with_examples(vec![
-        r#"cancel_process(process_id="monitor:app-errors")"#.into(),
+        r#"cancel_process(process_id="tool:call-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
         r#"cancel_process(process_id="subagent:session-01JZK7G4QP9Q4J7W3Q2E1H6M9C")"#.into(),
     ])
     .with_execution_mode(ToolExecutionMode::Parallel)

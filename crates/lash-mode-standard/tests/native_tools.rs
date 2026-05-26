@@ -21,7 +21,6 @@ fn standard_mode_owns_batch_not_process_controls() {
 
     let names = tool_names(&session);
     assert!(names.contains(&"batch".to_string()));
-    assert!(!names.contains(&"monitor".to_string()));
     assert!(!names.contains(&"list_process_handles".to_string()));
     assert!(!names.contains(&"cancel_process".to_string()));
 }
@@ -30,7 +29,6 @@ fn standard_mode_owns_batch_not_process_controls() {
 fn process_controls_are_composed_with_standard_mode() {
     let session = PluginHost::new(vec![
         Arc::new(lash_plugin_process_controls::ProcessControlsPluginFactory::new()),
-        Arc::new(lash_plugin_monitor::MonitorPluginFactory),
         Arc::new(lash_tool_shell::StandardShellPluginFactory::new()),
         Arc::new(lash_mode_standard::BuiltinStandardModePluginFactory),
     ])
@@ -39,7 +37,6 @@ fn process_controls_are_composed_with_standard_mode() {
 
     let names = tool_names(&session);
     assert!(names.contains(&"batch".to_string()));
-    assert!(names.contains(&"monitor".to_string()));
     assert!(names.contains(&"list_process_handles".to_string()));
     assert!(names.contains(&"cancel_process".to_string()));
 }
