@@ -14,7 +14,7 @@ keywords = ["lash", "agent", "mcp", "plugin", "llm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.10", default-features = false }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", default-features = false }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 rmcp = { workspace = true, features = [
@@ -30,5 +30,5 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "process", "rt", "macros", "time"] }
 
 [dev-dependencies]
-lash-core = { path = "../lash-core", version = "=0.1.0-alpha.10", default-features = false, features = ["testing"] }
+lash-core = { path = "../lash-core", version = "=0.1.0-alpha.11", default-features = false, features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
